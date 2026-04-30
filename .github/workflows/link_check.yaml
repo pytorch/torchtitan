@@ -1,0 +1,56 @@
+name: Link Check
+
+on:
+  schedule:
+    # Run nightly at 07:00 UTC
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10']
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Update pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install Lychee (Latest Release)
+        run: |
+          # Query GitHub API for the latest release tag
+          LATEST_TAG=$(curl -s https://api.github.com/repos/lycheeverse/lychee/releases/latest | jq -r .tag_name)
+          echo "Installing Lychee version: $LATEST_TAG"
+
+          URL="https://github.com/lycheeverse/lychee/releases/download/${LATEST_TAG}/lychee-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Load the archive, extract into temp folder, move the binary, delete the rest
+          mkdir -p lychee_install
+          curl -sLO "$URL"
+          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install --strip-components=1
+          sudo mv lychee_install/lychee /usr/local/bin/
+          rm -rf lychee_install "lychee-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Verify installation
+          lychee --version
+
+      - name: Install pre-commit
+        run: |
+          python -m pip install -r requirements-dev.txt
+          pre-commit install-hooks
+
+      - name: Check links with Lychee
+        run: |
+          pre-commit run lychee-link-checker --all-files

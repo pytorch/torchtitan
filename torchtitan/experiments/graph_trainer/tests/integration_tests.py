@@ -320,6 +320,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
             skip_rocm_test=True,
         ),
+        # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
         OverrideDefinitions(
             [
                 [
@@ -391,23 +392,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
-                    "--compile.mode jit",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.expert_tensor_parallel_degree 2",
-                ],
-            ],
-            "JIT FSDP+TP+EP+ETP",
-            "jit_fsdp+tp+ep+etp",
-            ngpu=8,
-            disabled=_JIT_AOT_DISABLED,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode jit",
                     "--parallelism.data_parallel_shard_degree 4",
@@ -446,7 +430,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "AOT deepseek_v3 FSDP+TP+EP",
@@ -463,7 +446,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "AOT deepseek_v3 FSDP+TP+EP+FlexAttention",
@@ -488,7 +470,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "aot_fx_trace deepseek_v3 FSDP+TP+EP",
@@ -504,7 +485,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
@@ -521,7 +501,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+full_inductor",
@@ -557,7 +536,6 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "aot_fx_trace qwen3 MoE FSDP+TP+EP",
@@ -577,9 +555,36 @@ def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
     return _build_llama3_tests()
 
 
+def _build_async_tp_tests() -> list[OverrideDefinitions]:
+    """Async TP tests (require NVLink for symmetric memory)."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_8b",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.enable_async_tensor_parallel",
+                    "--training.local_batch_size 2",
+                    "--training.seq_len 512",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--hf_assets_path ./tests/assets/tokenizer",
+                ],
+            ],
+            # async_tp (micro_pipeline_tp) requires shard_dim >= 1024.
+            # 8B (dim=4096) with TP=2 gives shard=2048, above threshold.
+            "aot_fx_trace llama3 FSDP+TP+async_tp",
+            "aot_fx_trace_llama3_fsdp_tp_asynctp",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+    ]
+
+
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
-    """DeepSeek-v3 + Qwen3 tests (for H100 machines)."""
-    return _build_deepseek_v3_tests() + _build_qwen3_tests()
+    """DeepSeek-v3 + Qwen3 + async_tp tests (for H100 machines)."""
+    return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
 
 
 _TEST_SUITES_FUNCTION = {

@@ -40,5 +40,4 @@ class MeshAxisName(StrEnum):
     CP = "cp"
     PP = "pp"
     EP = "ep"
-    ETP = "etp"
     EFSDP = "efsdp"

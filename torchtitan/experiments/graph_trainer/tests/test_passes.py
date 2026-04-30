@@ -87,7 +87,6 @@ class TestReassignToPgPass(FSDPTest):
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=self.world_size,
         )
 
@@ -482,7 +481,6 @@ class TestBucketingPrefetchOrder(FSDPTest):
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=self.world_size,
         )
 
@@ -1303,6 +1301,107 @@ class TestAnnotateModuleFqns(TestCase):
         num_after = len(list(gm.graph.nodes))
 
         self.assertEqual(num_before, num_after)
+
+
+class TestNormalizeViewOpsAsReshape(TestCase):
+    def test_replaces_view_and_unsafe_view(self):
+        from torchtitan.experiments.graph_trainer.passes import (
+            normalize_view_ops_as_reshape,
+        )
+
+        aten = torch.ops.aten
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        g.output(
+            g.call_function(
+                aten._unsafe_view.default,
+                args=(
+                    g.call_function(aten.view.default, args=(x, [4, 4])),
+                    [2, 8],
+                ),
+            )
+        )
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        normalize_view_ops_as_reshape(gm)
+        for n in gm.graph.nodes:
+            self.assertNotIn(n.target, {aten.view.default, aten._unsafe_view.default})
+
+
+class TestAsyncTensorParallelPass(FSDPTest):
+    """Verify async_tensor_parallel_pass produces fused ops."""
+
+    @property
+    def world_size(self):
+        return 2
+
+    def test_ag_mm_becomes_fused_op(self):
+        from torch.distributed._symmetric_memory import _test_mode
+
+        from torchtitan.experiments.graph_trainer.passes import (
+            async_tensor_parallel_pass,
+        )
+
+        pg = torch.distributed.distributed_c10d._get_default_group().group_name
+        aten, c10d = torch.ops.aten, torch.ops._c10d_functional
+
+        # shard[2048,4096] -> all_gather -> wait -> mm(w[4096,1024])
+        g = torch.fx.Graph()
+        s, w = g.placeholder("shard"), g.placeholder("weight")
+        ag = g.call_function(c10d.all_gather_into_tensor.default, args=(s, 2, pg))
+        wait = g.call_function(c10d.wait_tensor.default, args=(ag,))
+        g.output(g.call_function(aten.mm.default, args=(wait, w)))
+
+        # Shapes: shard, weight, ag, wait, mm
+        shapes = [(2048, 4096), (4096, 1024), (4096, 4096), (4096, 4096), (4096, 1024)]
+        with torch._subclasses.FakeTensorMode():
+            for node, shape in zip(g.nodes, shapes):
+                node.meta["val"] = torch.randn(shape)
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        with _test_mode({pg}):
+            async_tensor_parallel_pass(gm, ())
+
+        fused = torch.ops.symm_mem.fused_all_gather_matmul.default
+        self.assertTrue(any(n.target == fused for n in gm.graph.nodes))
+
+    def test_mm_rs_becomes_fused_op(self):
+        from torch.distributed._symmetric_memory import _test_mode
+
+        from torchtitan.experiments.graph_trainer.passes import (
+            async_tensor_parallel_pass,
+        )
+
+        pg = torch.distributed.distributed_c10d._get_default_group().group_name
+        aten, c10d = torch.ops.aten, torch.ops._c10d_functional
+
+        # mm(input[4096,4096], w[4096,1024]) -> reduce_scatter -> wait
+        g = torch.fx.Graph()
+        x, w = g.placeholder("x"), g.placeholder("w")
+        mm = g.call_function(aten.mm.default, args=(x, w))
+        rs = g.call_function(
+            c10d.reduce_scatter_tensor.default,
+            args=(mm, "sum", 2, pg),
+        )
+        g.output(g.call_function(c10d.wait_tensor.default, args=(rs,)))
+
+        # Shapes: x, w, mm, rs, wait
+        shapes = [
+            (4096, 4096),
+            (4096, 1024),
+            (4096, 1024),
+            (2048, 1024),
+            (2048, 1024),
+        ]
+        with torch._subclasses.FakeTensorMode():
+            for node, shape in zip(g.nodes, shapes):
+                node.meta["val"] = torch.randn(shape)
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        with _test_mode({pg}):
+            async_tensor_parallel_pass(gm, ())
+
+        fused = torch.ops.symm_mem.fused_matmul_reduce_scatter.default
+        self.assertTrue(any(n.target == fused for n in gm.graph.nodes))
 
 
 if __name__ == "__main__":
