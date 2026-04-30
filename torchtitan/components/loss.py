@@ -305,45 +305,45 @@ class ChunkedCELoss(BaseLoss):
         # Split hidden states and labels into chunks along seq dim.
         # Use .contiguous() to break shared storage from torch.chunk().
         #
-        # When hidden_states is a Shard(1) DTensor, chunking the global view
-        # distributes whole chunks across ranks (e.g. with size=2, num_chunks=8:
+        # Chunking always operates on the *local* view of the tensors: when
+        # hidden_states is a Shard(1) DTensor, chunking the global view would
+        # distribute whole chunks across ranks (e.g. size=2, num_chunks=8:
         # chunks 0-3 land on rank 0, 4-7 on rank 1), leaving half the per-chunk
         # DTensors with local seq=0 and breaking GradAccumulator's slice writes.
-        # Chunk on the local tensor first and wrap each chunk back as a DTensor
-        # with the same placements -- every rank then holds every chunk at
-        # local size S_local / num_chunks.
-        if isinstance(hidden_states, DTensor) and any(
-            isinstance(p, Shard) and p.dim == 1 for p in hidden_states.placements
-        ):
-            assert isinstance(labels, DTensor)
-            h_mesh = hidden_states.device_mesh
-            h_placements = hidden_states.placements
-            local_h = hidden_states.to_local()
-            h_detached = (
-                DTensor.from_local(local_h, h_mesh, h_placements)
-                .detach()
-                .requires_grad_(requires_grad)
+        # ``local_map`` makes the chunking body plain-tensor code; under the
+        # non-DTensor (eager) path we just call it directly. ``detach`` +
+        # ``requires_grad_`` happens *after* the wrap so the resulting (DT)ensors
+        # are leaves and accumulate ``.grad`` for ``GradAccumulator``.
+        def chunk_fn(h, lbl):
+            h_chunks_local = tuple(
+                c.contiguous() for c in torch.chunk(h, num_chunks, dim=1)
             )
-            h_chunks = [
-                DTensor.from_local(c.contiguous(), h_mesh, h_placements)
-                .detach()
-                .requires_grad_(requires_grad)
-                for c in torch.chunk(local_h, num_chunks, dim=1)
-            ]
-            lbl_mesh = labels.device_mesh
-            lbl_placements = labels.placements
-            local_lbl = labels.to_local()
-            label_chunks: list = [
-                DTensor.from_local(c.contiguous(), lbl_mesh, lbl_placements)
-                for c in torch.chunk(local_lbl, num_chunks, dim=1)
-            ]
+            lbl_chunks_local = tuple(
+                c.contiguous() for c in torch.chunk(lbl, num_chunks, dim=1)
+            )
+            return (h, *h_chunks_local, *lbl_chunks_local)
+
+        if isinstance(hidden_states, DTensor):
+            from torch.distributed.tensor.experimental import local_map
+
+            p_h = hidden_states.placements
+            # Labels can be a plain tensor under non-full_dtensor TP; in that
+            # case pass it through unwrapped (None placements).
+            p_lbl = labels.placements if isinstance(labels, DTensor) else None
+            wrapped = local_map(
+                chunk_fn,
+                out_placements=(p_h,) * (1 + num_chunks) + (p_lbl,) * num_chunks,
+                in_placements=(p_h, p_lbl),
+                device_mesh=hidden_states.device_mesh,
+            )
+            out = wrapped(hidden_states, labels)
         else:
-            h_detached = hidden_states.detach().requires_grad_(requires_grad)
-            h_chunks = [
-                c.contiguous().detach().requires_grad_(requires_grad)
-                for c in torch.chunk(h_detached, num_chunks, dim=1)
-            ]
-            label_chunks = list(torch.chunk(labels, num_chunks, dim=1))
+            out = chunk_fn(hidden_states, labels)
+        h_detached = out[0].detach().requires_grad_(requires_grad)
+        h_chunks = [
+            c.detach().requires_grad_(requires_grad) for c in out[1 : 1 + num_chunks]
+        ]
+        label_chunks = list(out[1 + num_chunks :])
 
         grad_accumulator = GradAccumulator(
             h_detached,

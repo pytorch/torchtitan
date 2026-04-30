@@ -215,18 +215,8 @@ class ParallelDims:
         # Validate mesh sizes
         self._validate_meshes()
 
-        def _enabled_mesh(*candidates: str) -> DeviceMesh | None:
-            """Sub-mesh of the candidate axes that are enabled, in canonical order."""
-            axes = [
-                axis
-                for axis in candidates
-                if axis in self._single_axis_meshes
-                and self.get_optional_mesh(axis) is not None
-            ]
-            return self.get_optional_mesh(axes) if axes else None
-
-        dense_mesh = _enabled_mesh("dp_replicate", "dp_shard", "cp", "tp")
-        sparse_mesh = _enabled_mesh("dp_replicate", "efsdp", "ep", "etp")
+        dense_mesh = self.get_enabled_mesh(["dp_replicate", "dp_shard", "cp", "tp"])
+        sparse_mesh = self.get_enabled_mesh(["dp_replicate", "efsdp", "ep", "etp"])
         self._spmd_meshes = [m for m in (dense_mesh, sparse_mesh) if m is not None]
 
         logger.info(
@@ -358,37 +348,44 @@ class ParallelDims:
             self.build_mesh()
         return self._spmd_meshes
 
-    def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
-        """Return the mesh a ``Module`` should use for ``distribute_tensor``.
+    def get_enabled_mesh(self, axes: list[str]) -> DeviceMesh | None:
+        """Submesh of ``axes`` filtered to those actually enabled in this run.
 
-        TODO(fegin): This is a WORKAROUND to bridge ``full_dtensor`` and legacy
-        modes during the transition. Once all models support ``full_dtensor`` and
-        the legacy path is removed, this method goes away — callers should use
-        ``get_mesh(axes)`` directly.
-
-        - ``full_dtensor=True``: identical to ``get_mesh(axes)``.
-        - ``full_dtensor=False``: filters ``axes`` to ``{tp, ep, etp}`` first
-          (the axes that participate in ``distribute_tensor`` under the
-          legacy path; DP/CP are handled by FSDP / LocalMapConfig
-          out-of-band). Returns ``None`` if no in-band axis remains.
+        Unlike ``get_optional_mesh``, axes that don't exist as a single-axis
+        mesh in the current mode (e.g. ``dp_shard`` under non-full_dtensor)
+        or are disabled (size = 1) are silently dropped rather than causing
+        a ``None`` / ``ValueError``. Returns ``None`` only if no axis
+        remains after filtering. Order of the surviving axes follows the
+        input list.
         """
-        # Filter to enabled axes that exist in this mode. A config may
-        # declare axes that aren't active (e.g. dense config declares
-        # dp_replicate but the job sets it to 1) or that don't exist as a
-        # single-axis mesh under the current mode (e.g. dp_shard doesn't
-        # exist under non-full_dtensor; it's pre-flattened into fsdp).
+        if not self._single_axis_meshes:
+            self.build_mesh()
         axes = [
             axis
             for axis in axes
             if axis in self._single_axis_meshes
             and self.get_optional_mesh(axis) is not None
         ]
+        return self.get_optional_mesh(axes) if axes else None
+
+    def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
+        """Return the mesh a ``Module`` should use for ``distribute_tensor``.
+
+        TODO(fegin): This is a WORKAROUND to bridge ``full_dtensor`` and legacy
+        modes during the transition. Once all models support ``full_dtensor`` and
+        the legacy path is removed, this method goes away — callers should use
+        ``get_enabled_mesh(axes)`` directly.
+
+        - ``full_dtensor=True``: identical to ``get_enabled_mesh(axes)``.
+        - ``full_dtensor=False``: filters ``axes`` to ``{tp, ep, etp}`` first
+          (the axes that participate in ``distribute_tensor`` under the
+          legacy path; DP/CP are handled by FSDP / LocalMapConfig
+          out-of-band) before delegating to ``get_enabled_mesh``.
+        """
         if not self.full_dtensor:
             in_band = {"tp", "ep", "etp"}
             axes = [axis for axis in axes if axis in in_band]
-        if not axes:
-            return None
-        return self.get_optional_mesh(axes)
+        return self.get_enabled_mesh(axes)
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
