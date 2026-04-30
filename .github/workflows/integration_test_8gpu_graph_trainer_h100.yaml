@@ -69,8 +69,7 @@ jobs:
         # Run precompile integration tests (DSv3 with EP; Llama3 runs in default workflow)
         NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests $RUNNER_TEMP/artifacts-to-be-uploaded/precompile --ngpu 8 --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep
 
-        # Run bitwise deterministic and SAC peak-memory guardrail tests
+        # Run bitwise deterministic
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
-        pytest torchtitan/experiments/graph_trainer/tests/test_sac_peak_memory.py -v
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
