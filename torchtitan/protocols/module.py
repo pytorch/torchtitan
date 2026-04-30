@@ -261,8 +261,6 @@ class Module(nn.Module, Configurable):
             ``reshard inputs -> [optional local_map] fn -> reshard outputs``.
 
         fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
-
-        CP (applied before ``parallelize``) is captured inside ``local_map``.
         """
         if self._parallelized:
             raise ValueError(
@@ -304,10 +302,7 @@ class Module(nn.Module, Configurable):
         mesh_axis_names = mesh.mesh_dim_names
 
         # Under full_dtensor, the resolved mesh must be one of the known SPMD
-        # meshes so distribute_tensor reaches every SPMD peer rank. Axis order
-        # matters: get_module_mesh caches by tuple key, so a sharding_config
-        # that lists axes out of canonical SPMD order resolves to a different
-        # sub-mesh and falls out of this check.
+        # meshes (dense or sparse). Order matters, incorrect order will also raise.
         if parallel_dims.full_dtensor and mesh not in parallel_dims.spmd_meshes():
             raise ValueError(
                 f"{type(self).__name__}.sharding_config mesh "
@@ -320,12 +315,9 @@ class Module(nn.Module, Configurable):
         # must declare a placement for every mesh axis; ``resolve_placements``
         # raises otherwise.
         #
-        # An already-DTensor param/buffer indicates it was distributed by a
-        # sibling Module that shares the underlying tensor (e.g. weight tying:
-        # ``self.tok_embeddings.weight = self.output.weight``). Skip the
-        # re-distribute, but verify the existing placements match this sharding_config —
-        # a mismatch means tying wired together two modules with conflicting
-        # sharding configs, which would silently corrupt state.
+        # An already-DTensor param/buffer indicates it was distributed by another
+        # module (e.g., weight tying). Skip the re-distribute, but verify the
+        # existing placements match this sharding_config.
         for name, param in self.named_parameters(recurse=False):
             if name not in sharding_config.state_shardings:
                 continue
