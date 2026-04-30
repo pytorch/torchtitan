@@ -11,7 +11,7 @@ from typing import TypeAlias
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.tools.logging import logger
@@ -336,6 +336,7 @@ class ChunkedCELoss(BaseLoss):
                 in_placements=(p_h, p_lbl),
                 device_mesh=hidden_states.device_mesh,
             )
+            # pyrefly: ignore [bad-argument-count]
             out = wrapped(hidden_states, labels)
         else:
             out = chunk_fn(hidden_states, labels)
