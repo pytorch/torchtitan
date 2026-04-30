@@ -505,6 +505,21 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_hybridep",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+TP+HybridEP",
+            "aot_fx_trace_deepseek_v3_hybridep",
+            ngpu=4,
+        ),
     ]
 
 
