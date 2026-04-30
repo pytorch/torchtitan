@@ -58,6 +58,7 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
 
 def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
     return TransformersBackendConfig(
+        loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-30B-A3B",
         debug=DebugConfig(print_config=True),
