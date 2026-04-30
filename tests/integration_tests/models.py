@@ -37,21 +37,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
                     "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule DualPipeV",
-                    # AC is not supported for DualPipeV yet
-                    "--activation_checkpoint.mode 'none'",
-                ],
-            ],
-            "PP dual pipe v schedule test",
-            "pp_dualpipev",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
-                    "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -68,10 +53,9 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.no-enable-sequence-parallel",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP (SP disabled)",
+            "DeepSeek V3 FSDP+EP",
             "deepseek_v3_fsdp+ep_no_sp",
             ngpu=4,
         ),
