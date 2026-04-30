@@ -13,8 +13,12 @@ from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
-from torchtitan.config import CompileConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    data_parallel,
+    MixedPrecisionPolicy,
+)
 from torchtitan.tools.logging import logger
 
 _MODULE_FQN = "module_fqn"
@@ -23,6 +27,14 @@ _NOT_IN_LAYERS = -1
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
+
+
+def _is_recomputed_node(node: torch.fx.Node) -> bool:
+    # TODO: Workaround — recomputed nodes (from SAC) should carry
+    # autograd_backward=True but remat_using_tags_for_fwd_loss_bwd_graph
+    # copies metadata from the original forward node. Fix upstream to
+    # tag recomputed nodes with autograd_backward=True.
+    return node.name.endswith("_recomputed")
 
 
 def _get_layer_id(node: torch.fx.Node) -> int:
@@ -157,7 +169,7 @@ def get_default_transformer_block_buckets(
     return [
         "tok_embeddings",
         *[f"layers.{i}" for i in range(n_layers)],
-        ["norm", "output"],
+        ["norm", "lm_head"],
     ]
 
 
@@ -170,7 +182,7 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     # [TODO](ruisizhang123) add EP support for transformer block bucketing
     module_list = [
         model.tok_embeddings,
-        [model.norm, model.output],
+        [model.norm, model.lm_head],
     ]
     for layer_id, transformer_block in model.layers.items():
         module_list.append(transformer_block)
@@ -192,25 +204,69 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-def apply_graph_ac(
-    compile_config: CompileConfig,
-    ac_config: "ActivationCheckpointConfig",
-) -> None:
-    """Add apply_sac to compile joint passes for graph-based selective AC.
+def apply_simple_fsdp(
+    model: nn.Module,
+    *,
+    parallel_dims: ParallelDims,
+    training: TrainingConfig,
+) -> nn.Module:
+    """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
-    Must be called only when ac_config.mode != "none". Only "selective" mode
-    is supported; other modes raise ValueError.
+    For MoE-enabled models, ``moe.experts`` submodules are separately wrapped
+    on the EDP mesh when expert parallelism is enabled.
     """
-    if ac_config.mode != "selective":
-        raise ValueError(
-            f"graph_trainer only supports activation_checkpoint.mode 'selective' or "
-            f"'none', got {ac_config.mode!r}. Use 'selective' for graph-based SAC."
-        )
+    if parallel_dims.dp_replicate_enabled:
+        if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+            dp_mesh_dim_names = ["dp_replicate", "fsdp"]
+            dp_mode = "hybrid_shard"
+        else:
+            dp_mesh_dim_names = ["dp_replicate"]
+            dp_mode = "replicate"
+    else:
+        dp_mesh_dim_names = ["fsdp"]
+        dp_mode = "fully_shard"
 
-    joint_pass_names = getattr(compile_config, "joint_passes", [])
-    if "apply_sac" not in joint_pass_names:
-        compile_config.joint_passes = list(joint_pass_names) + ["apply_sac"]
-        logger.info(
-            "activation_checkpoint.mode is 'selective', added apply_sac to "
-            "compile.joint_passes"
+    dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+    )
+
+    if parallel_dims.ep_enabled and hasattr(model, "layers"):
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
         )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        assert edp_mesh is not None
+
+        for _, transformer_block in model.layers.items():
+            if not getattr(transformer_block, "moe_enabled", False):
+                continue
+            assert hasattr(transformer_block, "moe")
+            experts_shard_dim = 0
+            if (
+                edp_mesh["efsdp"].size() * parallel_dims.ep
+                > transformer_block.moe.experts.num_experts
+            ):
+                experts_shard_dim = 1
+
+            transformer_block.moe.experts = data_parallel(
+                transformer_block.moe.experts,
+                edp_mesh,
+                dp_mode,
+                mp_policy=mp_policy,
+                shard_dim=experts_shard_dim,
+            )
+
+    model = data_parallel(
+        model,
+        dp_mesh,
+        dp_mode,
+        mp_policy=mp_policy,
+    )
+    logger.info(
+        "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
+    )
+    return model

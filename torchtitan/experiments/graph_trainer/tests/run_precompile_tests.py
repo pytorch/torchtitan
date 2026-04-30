@@ -36,6 +36,7 @@ class PrecompileTestDefinition:
     test_descr: str
     test_name: str
     ngpu: int = 8
+    disabled: bool = False
 
 
 def _run_cmd(cmd):
@@ -55,7 +56,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 " --config graph_trainer_llama3_debugmodel"
                 " --compile.mode aot"
                 " --compile.passes full_inductor_compilation"
-                " --compile.joint_passes inductor_decomposition"
                 f" --compile.precompile_artifact_dir {full_inductor_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2"
@@ -65,7 +65,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 "--config graph_trainer_llama3_debugmodel",
                 "--compile.mode aot",
                 "--compile.passes full_inductor_compilation",
-                "--compile.joint_passes inductor_decomposition",
                 f"--compile.precompile_artifact_dir {full_inductor_precompile_dir}",
                 "--parallelism.data_parallel_shard_degree 4",
                 "--parallelism.tensor_parallel_degree 2",
@@ -158,6 +157,9 @@ def run_precompile_tests(args):
     ran_any = False
     for test in test_list:
         if args.test_name != "all" and test.test_name != args.test_name:
+            continue
+        if test.disabled:
+            logger.info(f"Skipping disabled test: {test.test_name}")
             continue
         if args.ngpu < test.ngpu:
             logger.info(

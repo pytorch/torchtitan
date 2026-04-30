@@ -4,29 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
-    apply_graph_ac,
+    apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
-from torchtitan.experiments.graph_trainer.simple_fsdp import (
-    data_parallel,
-    MixedPrecisionPolicy,
-)
-from torchtitan.models.llama3.parallelize import apply_tp
-from torchtitan.protocols.model_converter import ModelConvertersContainer
-from torchtitan.tools.logging import logger
 
 
 def annotate_llama(model: GraphTrainerLlama3Model) -> None:
@@ -44,7 +34,6 @@ def parallelize_llama(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -57,9 +46,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
-    #       `use_local_output=True` to use plain Tensors for legacy reasons.
-    #       Need to revisit this.
     assert (
         training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -70,61 +56,13 @@ def parallelize_llama(
     annotate_llama(model)
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
         tp_mesh = parallel_dims.get_mesh("tp")
-        apply_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-        )
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+        model.parallelize(tp_mesh)
 
-    if ac_config.mode != "none":
-        apply_graph_ac(compile_config, ac_config)
-
-    # apply data parallel
-    if (
-        parallel_dims.dp_replicate_enabled
-        or parallel_dims.dp_shard_enabled
-        or parallel_dims.cp_enabled
-    ):
-        if parallel_dims.dp_replicate_enabled:
-            if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
-                dp_mode = "hybrid_shard"
-            else:
-                dp_mesh_dim_names = ["dp_replicate"]
-                dp_mode = "replicate"
-        else:
-            dp_mesh_dim_names = ["fsdp"]
-            dp_mode = "fully_shard"
-
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        )
-
-        model = data_parallel(
-            model,
-            parallel_dims.get_mesh(dp_mesh_dim_names),
-            mode=dp_mode,
-            mp_policy=mp_policy,
-        )
-        logger.info(
-            "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
-        )
+    # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
+    # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
+    # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
+    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
 
     # Apply compilation based on mode
     model = apply_compile(

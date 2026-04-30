@@ -20,6 +20,7 @@ Usage (aot mode):
     python -m torchtitan.experiments.graph_trainer.precompile_main \
         --module graph_trainer.llama3 \
         --config graph_trainer_llama3_debugmodel \
+        --compile.mode aot \
         --compile.passes full_inductor_compilation \
         --compile.joint_passes inductor_decomposition \
         --compile.precompile_artifact_dir /tmp/precompile_artifacts
@@ -42,9 +43,7 @@ import torch.distributed as dist
 
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
-    apply_graph_ac,
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
@@ -65,6 +64,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -157,9 +157,6 @@ def _common_setup(config):
 
     # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
     # (returns model unchanged), so we pass the real compile_config.
-    # This lets side effects from parallelize_fn (e.g. apply_graph_ac
-    # adding "apply_sac" to joint_passes) be visible to
-    # compute_config_fingerprint later without needing a manual hack.
     # For aot, apply_compile would try to load a non-existent artifact,
     # so we suppress it with a copy that has enable=False. This
     # complexity goes away once we complete the migration to
@@ -173,7 +170,6 @@ def _common_setup(config):
         model,
         parallel_dims=parallel_dims,
         training=config.training,
-        model_converters=config.model_converters,
         parallelism=parallelism,
         compile_config=parallelize_compile_config,
         ac_config=config.activation_checkpoint,
@@ -226,12 +222,6 @@ def _precompile_aot(
             "serializable output "
             f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
-
-    # Augment compile_config with AC joint passes to match the training
-    # path, which calls apply_graph_ac during parallelization. Without
-    # this the SAC pass won't run and the config fingerprint will differ.
-    if config.activation_checkpoint.mode != "none":
-        apply_graph_ac(compile_config, config.activation_checkpoint)
 
     register_blockmask_pytree_node()
 
@@ -318,7 +308,7 @@ def _precompile_aot_fx_trace(
     )
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
-    loss_fn = model_spec.build_loss_fn(compile_config, parallel_dims=parallel_dims)
+    loss_fn = config.loss.build(compile_config=compile_config)
 
     fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
 
@@ -419,12 +409,29 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
+    from torchtitan.experiments.graph_trainer.bucketing import (
+        joint_transformer_block_bucketing_reordering_pass,
+    )
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,
     )
 
     passes = compile_time_passes(traced_result, config)
+
+    # TODO: Remove this filter once upstream manual_overlap_bucketing
+    # supports make_fx-traced graphs where collective group_name args
+    # are FX Node references instead of string literals. The bucketing
+    # and comm_analysis code crashes with
+    # "AttributeError: 'Node' object has no attribute 'size'" or
+    # "assert isinstance(group_name, str)".
+    passes = [
+        p
+        for p in passes
+        if getattr(p, "func", p)
+        is not joint_transformer_block_bucketing_reordering_pass
+    ]
+
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )
