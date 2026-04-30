@@ -104,6 +104,17 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_lora() -> Trainer.Config:
+    from torchtitan.components.lora import LoRAConverter
+
+    config = llama3_debugmodel()
+    lora_converter = LoRAConverter(
+        LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"])
+    )
+    lora_converter.convert(config.model_spec.model)
+    return config
+
+
 def llama3_debugmodel_ce_loss() -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
     from torchtitan.components.loss import CrossEntropyLoss
