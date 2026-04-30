@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -132,6 +133,15 @@ class GraphTrainer(Trainer):
             expected_fingerprint=config_fingerprint,
         )
 
+    def _get_extra_graph_passes(self, model: nn.Module) -> list[tuple]:
+        """Hook for subclasses to inject additional graph passes.
+
+        Returns a list of (pass_fn, insert_before) tuples. Each pass_fn is
+        inserted before insert_before in the pass list, or appended at the
+        end if insert_before is None.
+        """
+        return []
+
     def _make_fx_forward_backward_step(
         self,
         model: nn.Module,
@@ -163,6 +173,17 @@ class GraphTrainer(Trainer):
                     self._traced_step,
                     self.config,
                 )
+                for extra_pass, insert_before in self._get_extra_graph_passes(model):
+                    if insert_before is None:
+                        passes.append(extra_pass)
+                    else:
+                        new_passes = []
+                        for p in passes:
+                            _fn = p.func if isinstance(p, functools.partial) else p
+                            if _fn is insert_before:
+                                new_passes.append(extra_pass)
+                            new_passes.append(p)
+                        passes = new_passes
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
                     self._traced_step.example_inputs,
