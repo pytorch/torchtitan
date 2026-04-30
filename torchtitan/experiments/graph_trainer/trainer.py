@@ -10,6 +10,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -31,20 +32,53 @@ def make_fwd_bwd_step(loss_fn):
     """Return a plain function that traces the entire fwd+loss+bwd step.
 
     ``loss_fn`` is captured in the closure so it is not a graph input.
+
+    For :class:`ChunkedCELoss` the per-chunk forward and backward live in
+    ``ChunkedCELoss.compute_traceable_grads`` so the chunking + TP redistribute
+    are shared with the eager ``__call__`` path; this wrapper only handles
+    parameter partitioning, the decoder-only path's ``torch.autograd.grad``,
+    and reordering grads back into ``named_parameters`` order.
     """
 
     def fwd_bwd_step(
         model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
     ):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
-        loss = loss_fn(pred, labels) / global_valid_tokens
+        # remove_duplicate=False to preserve duplicate parameter entries from
+        # weight tying (e.g. shared embedding/output weights).
         params = [
             p
             for _, p in model.named_parameters(remove_duplicate=False)
             if p.requires_grad
         ]
-        grads = torch.autograd.grad(loss, params)
-        return [loss] + list(grads)
+
+        if isinstance(loss_fn, ChunkedCELoss):
+            lm_head_param_ids = {
+                id(p) for p in loss_fn.lm_head.parameters() if p.requires_grad
+            }
+            lm_head_params = [p for p in params if id(p) in lm_head_param_ids]
+            decoder_params = [p for p in params if id(p) not in lm_head_param_ids]
+
+            loss, lm_head_grads, decoder_grads = loss_fn.compute_traceable_grads(
+                pred,
+                labels,
+                global_valid_tokens,
+                lm_head_params=lm_head_params,
+                decoder_params=decoder_params,
+            )
+
+            # Reorder per-param grads to match the original named_parameters order.
+            grad_by_id: dict[int, torch.Tensor] = {}
+            for p, g in zip(decoder_params, decoder_grads):
+                grad_by_id[id(p)] = g
+            for p, g in zip(lm_head_params, lm_head_grads):
+                grad_by_id[id(p)] = g
+            grads = [grad_by_id[id(p)] for p in params]
+        else:
+            loss = loss_fn(pred, labels) / global_valid_tokens
+            grads = list(torch.autograd.grad(loss, params))
+
+        return [loss] + grads
 
     return fwd_bwd_step
 

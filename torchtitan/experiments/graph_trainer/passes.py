@@ -746,6 +746,13 @@ def apply_sac_pass(
 
         layer_id = _get_layer_id(node)
 
+        # AC only applies inside transformer layers, matching eager apply_ac
+        # which wraps TransformerBlock only. In particular with ChunkedCELoss
+        # we don't want to checkpoint the chunked region (lm_head + per-chunk
+        # ce_loss).
+        if layer_id == _NOT_IN_LAYERS:
+            continue
+
         # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
         # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
         # because the alternating heuristic is arbitrary.

@@ -45,17 +45,11 @@ def graph_trainer_qwen3_debugmodel_moe_ep() -> GraphTrainer.Config:
     return config
 
 
-# CrossEntropyLoss baselines for graph_trainer numerics tests. graph_trainer
-# doesn't yet support ChunkedCELoss, so to_graph_trainer_config swaps it for
-# CrossEntropyLoss; these wrappers apply the same swap to the eager baseline
-# so loss_compare runs apples-to-apples.
-# TODO: Remove once graph_trainer supports ChunkedCELoss.
-def qwen3_debugmodel_ce_loss() -> Trainer.Config:
-    config = qwen3_debugmodel()
-    config.loss = CrossEntropyLoss.Config()
-    return config
-
-
+# CrossEntropyLoss baseline for graph_trainer numerics tests on MoE
+# configs. graph_trainer falls back to CrossEntropyLoss for MoE models
+# (see to_graph_trainer_config), so this wrapper applies the same swap to
+# the eager baseline so loss_compare runs apples-to-apples.
+# TODO: Remove once chunked CE works for MoE under full inductor.
 def qwen3_moe_debug_ep_ce_loss() -> Trainer.Config:
     config = qwen3_moe_debug_ep()
     config.loss = CrossEntropyLoss.Config()
