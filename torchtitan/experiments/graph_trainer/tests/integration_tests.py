@@ -543,9 +543,50 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_graph_pp_tests() -> list[OverrideDefinitions]:
+    """Graph PP integration tests (require H100, 8 GPUs)."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "Graph PP DSv3 2PP x 2DP x 2EP (manual SPMD)",
+            "graph_pp_dsv3_manual_spmd",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.autoparallel_deepseek_v3",
+                    "--config graph_trainer_autoparallel_deepseek_v3_debugmodel",
+                    "--compile.mode aot",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "Graph PP DSv3 2PP x 2DP x 2EP (autoparallel)",
+            "graph_pp_dsv3_autoparallel",
+            ngpu=8,
+        ),
+    ]
+
+
 def build_graph_trainer_test_list() -> list[OverrideDefinitions]:
-    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3)."""
-    return _build_llama3_tests() + _build_deepseek_v3_tests() + _build_qwen3_tests()
+    """All graph_trainer integration tests (Llama3 + DeepSeek-v3 + Qwen3 + Graph PP)."""
+    return (
+        _build_llama3_tests()
+        + _build_deepseek_v3_tests()
+        + _build_qwen3_tests()
+        + _build_graph_pp_tests()
+    )
 
 
 def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
@@ -581,8 +622,8 @@ def _build_async_tp_tests() -> list[OverrideDefinitions]:
 
 
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
-    """DeepSeek-v3 + Qwen3 + async_tp tests (for H100 machines)."""
-    return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
+    """DeepSeek-v3 + Qwen3 + async_tp + Graph PP tests (for H100 machines)."""
+    return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests() + _build_graph_pp_tests()
 
 
 _TEST_SUITES_FUNCTION = {
