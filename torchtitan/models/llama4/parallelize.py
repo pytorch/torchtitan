@@ -261,7 +261,7 @@ def apply_fsdp(
                 # ep_degree > 1: per-param mesh
                 from torch.distributed.fsdp._fully_shard._fsdp_common import (
                     FSDPMeshInfo,
-                    ShardPlacementResult,
+                    ShardPlacementResult,  # pyrefly: ignore
                 )
 
                 assert edp_mesh is not None
