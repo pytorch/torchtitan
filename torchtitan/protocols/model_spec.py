@@ -5,8 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import TypeAlias
+from dataclasses import dataclass, field
+from typing import Any, TypeAlias
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
@@ -41,3 +41,7 @@ class ModelSpec:
     pipelining_fn: Callable | None
     post_optimizer_build_fn: Callable | None
     state_dict_adapter: type[BaseStateDictAdapter] | None
+    converters: list[Any] = field(default_factory=list)
+    """Converters applied to this model (e.g. LoRA, quantization).
+    Each may implement ``build_external_transforms(sd_adapter)``
+    returning a dict with ``to_external``/``from_external`` callables."""
