@@ -26,6 +26,10 @@ _TEST_SUITES_FUNCTION = {
     "h100": build_h100_tests_list,
 }
 
+# Held while a test writes its captured output so concurrent tests do not
+# interleave their lines.
+_OUTPUT_LOCK = threading.Lock()
+
 
 class GPUPool:
     """Allocator for a fixed-size pool of physical GPU ids.
@@ -53,62 +57,34 @@ class GPUPool:
             self._cond.notify_all()
 
 
-_OUTPUT_LOCK = threading.Lock()
-
-
-def _run_cmd_capture(cmd: str, prefix: str, timeout: float | None = None):
-    """Run ``cmd``, capturing merged stdout/stderr into memory.
+def _run_cmd(cmd: str, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Run ``cmd`` in a shell, capturing merged stdout/stderr into memory.
 
     Output is *not* streamed to the parent in real time: when running tests
     concurrently we want each test's log to appear as one contiguous block
     rather than interleaved line-by-line with other tests.
 
-    A copy of the live output is written to ``{output_dir}``-rooted log files
-    by the caller if desired; this function just buffers everything and
-    returns it.
-
-    Returns ``(returncode, captured_text)``. Raises
-    ``subprocess.TimeoutExpired`` if ``timeout`` is exceeded.
+    On timeout, returns a synthetic ``CompletedProcess`` with ``returncode=-1``
+    and ``stdout`` populated with whatever the child had emitted so far, so
+    callers do not need to special-case ``TimeoutExpired``.
     """
-    proc = subprocess.Popen(
-        cmd,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
-
-    timed_out: list[bool] = []
-    timer: threading.Timer | None = None
-    if timeout is not None:
-
-        def _kill() -> None:
-            timed_out.append(True)
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-
-        timer = threading.Timer(timeout, _kill)
-        timer.daemon = True
-        timer.start()
-
-    captured: list[str] = []
-    assert proc.stdout is not None
     try:
-        for raw in proc.stdout:
-            captured.append(raw.rstrip("\n"))
-    finally:
-        proc.wait()
-        if timer is not None:
-            timer.cancel()
-
-    if timed_out:
-        raise subprocess.TimeoutExpired(cmd, timeout)
-
-    return proc.returncode, "\n".join(captured)
+        return subprocess.run(
+            [cmd],
+            encoding="utf-8",
+            errors="replace",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        stdout = (
+            e.stdout.decode("utf-8", errors="replace")
+            if isinstance(e.stdout, bytes)
+            else (e.stdout or "")
+        )
+        return subprocess.CompletedProcess(cmd, -1, stdout=stdout, stderr=None)
 
 
 def _emit_block(prefix: str, header: str, body: str, footer: str = "") -> None:
@@ -131,6 +107,8 @@ def run_single_test(
     output_dir: str,
     module: str | None = None,
     config: str | None = None,
+    # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
+    # child process to use all visible GPUs.
     gpu_ids: list[int] | None = None,
 ):
     # run_test supports sequence of tests.
@@ -156,7 +134,7 @@ def run_single_test(
             cmd += f"MODULE={module} "
         if config is not None:
             cmd += f"CONFIG={config} "
-        cmd = (
+        cmd += (
             f"{gpu_env_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
             f"./run_train.sh"
         )
@@ -178,15 +156,9 @@ def run_single_test(
             )
 
         start_ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            returncode, captured = _run_cmd_capture(
-                cmd, prefix=test_name, timeout=test_flavor.timeout
-            )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(
-                f"\nTest timed out after {test_flavor.timeout}s: {test_flavor.test_descr}.\n"
-                f"Command: {cmd}\n"
-            ) from e
+        result = _run_cmd(cmd, timeout=test_flavor.timeout)
+        returncode = result.returncode
+        captured = result.stdout or ""
 
         end_ts = time.strftime("%Y-%m-%d %H:%M:%S")
         header = (
@@ -199,8 +171,14 @@ def run_single_test(
 
         if returncode != 0:
             tail = "\n".join(captured.splitlines()[-50:])
+            # ``_run_cmd`` returns rc=-1 to signal a timeout.
+            reason = (
+                f"timed out after {test_flavor.timeout}s"
+                if returncode == -1
+                else f"rc={returncode}"
+            )
             raise RuntimeError(
-                f"\nFailed test flavor: {test_flavor.test_descr} (rc={returncode}).\n"
+                f"\nFailed test flavor: {test_flavor.test_descr} ({reason}).\n"
                 f"Command: {cmd}\n"
                 f"Last 50 lines:\n{tail}\n"
             )
@@ -252,7 +230,11 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
         # physical GPUs. A test can run as soon as `test_flavor.ngpu` GPUs are
         # free; the sum of in-flight test ngpu never exceeds `args.ngpu`.
         pool = GPUPool(args.ngpu)
-        # Sort largest-first to reduce fragmentation / head-of-line blocking.
+        # Submit largest-first so the very first wave packs efficiently and
+        # avoids head-of-line blocking by an oversized test arriving late.
+        # NOTE: this only deterministically orders the *first* batch; once
+        # workers start finishing at different times, subsequent acquisition
+        # order is driven by completion times, not by ``ngpu``.
         scheduled = sorted(runnable, key=lambda t: -t.ngpu)
         # Worst case: every test wants 1 GPU and runs in parallel.
         max_workers = max(1, min(len(scheduled), args.ngpu))
