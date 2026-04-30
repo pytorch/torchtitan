@@ -11,8 +11,8 @@ buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
 FSDP uses ``DataParallelMeshDims`` to identify which mesh axes
 are data-parallel.
 
-TP and CP shardings are handled by ``Module.parallelize(spmd_mesh)`` using
-config-based ``ShardingConfig``.
+TP, CP, and EP shardings are handled by ``Module.parallelize(spmd_mesh)``
+using config-based ``ShardingConfig``.
 """
 
 from typing import Any
@@ -54,13 +54,7 @@ def validate_config(
 
 
 def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
-    """Build ``DataParallelMeshDims`` for dense (non-MoE) parameters.
-
-    Uses ``dp_shard`` and ``cp`` as separate shard axes rather than
-    the flattened ``fsdp`` axis from the non-full-dtensor path. The
-    return type still spells ``Dims`` because that's the upstream class
-    name.
-    """
+    """Build ``DataParallelMeshDims`` for dense (non-MoE) parameters."""
     shard_axes: list[str] = []
     if parallel_dims.dp_shard_enabled:
         shard_axes.append("dp_shard")
@@ -82,9 +76,9 @@ def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
 def _dense_spmd_axes(parallel_dims: ParallelDims) -> list[str]:
     """Canonical dense SPMD axis list, intersected with enabled axes."""
     return [
-        a
-        for a in ("dp_replicate", "dp_shard", "cp", "tp")
-        if parallel_dims.get_optional_mesh(a) is not None
+        axis
+        for axis in ("dp_replicate", "dp_shard", "cp", "tp")
+        if parallel_dims.get_optional_mesh(axis) is not None
     ]
 
 
@@ -172,10 +166,10 @@ def parallelize_inputs(
     labels: torch.Tensor,
     extra_kwargs: dict[str, Any],
 ) -> tuple[DTensor, DTensor, dict[str, Any]]:
-    """Convert inputs, labels, and extra kwargs to DTensors on the SPMD mesh.
+    """Convert inputs, labels, and extra kwargs to DTensors on the dense SPMD mesh.
 
     DP axes get Shard(0) (batch), CP gets Shard(1) (sequence), TP gets Replicate.
-    Tensor values in extra_kwargs (e.g. positions) use the same placements.
+    Tensor values in extra_kwargs (e.g. positions) use the same shardings.
 
     NOTE: This API assumes the inputs are already sharded; it only converts
     the class from ``torch.Tensor`` to ``DTensor`` via ``DTensor.from_local``.
@@ -191,10 +185,6 @@ def parallelize_inputs(
     if parallel_dims.tp_enabled:
         placements.append(Replicate())
 
-    assert mesh.ndim == len(placements)
-
-    # Convert extra_kwargs tensors (e.g. positions) to DTensors. A new dict is
-    # returned so the side effect is visible in the signature, not hidden.
     new_extra_kwargs: dict[str, Any] = {
         k: (
             DTensor.from_local(v, mesh, placements)
