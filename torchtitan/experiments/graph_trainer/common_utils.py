@@ -13,7 +13,12 @@ from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.traceback import annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    data_parallel,
+    MixedPrecisionPolicy,
+)
 from torchtitan.tools.logging import logger
 
 _MODULE_FQN = "module_fqn"
@@ -197,3 +202,71 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     module_to_name = {m: n for n, m in model.named_modules()}
     module_fqns = convert_modules_to_fqns(module_list, module_to_name)
     return module_fqns
+
+
+def apply_simple_fsdp(
+    model: nn.Module,
+    *,
+    parallel_dims: ParallelDims,
+    training: TrainingConfig,
+) -> nn.Module:
+    """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
+
+    For MoE-enabled models, ``moe.experts`` submodules are separately wrapped
+    on the EDP mesh when expert parallelism is enabled.
+    """
+    if parallel_dims.dp_replicate_enabled:
+        if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+            dp_mesh_dim_names = ["dp_replicate", "fsdp"]
+            dp_mode = "hybrid_shard"
+        else:
+            dp_mesh_dim_names = ["dp_replicate"]
+            dp_mode = "replicate"
+    else:
+        dp_mesh_dim_names = ["fsdp"]
+        dp_mode = "fully_shard"
+
+    dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+    )
+
+    if parallel_dims.ep_enabled and hasattr(model, "layers"):
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        assert edp_mesh is not None
+
+        for _, transformer_block in model.layers.items():
+            if not getattr(transformer_block, "moe_enabled", False):
+                continue
+            assert hasattr(transformer_block, "moe")
+            experts_shard_dim = 0
+            if (
+                edp_mesh["efsdp"].size() * parallel_dims.ep
+                > transformer_block.moe.experts.num_experts
+            ):
+                experts_shard_dim = 1
+
+            transformer_block.moe.experts = data_parallel(
+                transformer_block.moe.experts,
+                edp_mesh,
+                dp_mode,
+                mp_policy=mp_policy,
+                shard_dim=experts_shard_dim,
+            )
+
+    model = data_parallel(
+        model,
+        dp_mesh,
+        dp_mode,
+        mp_policy=mp_policy,
+    )
+    logger.info(
+        "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
+    )
+    return model
