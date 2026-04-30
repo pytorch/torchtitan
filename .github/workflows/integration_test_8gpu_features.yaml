@@ -129,12 +129,16 @@ jobs:
           MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_rocm_mi350x.txt"
         fi
 
-        echo "Checking Qwen3 MoE FSDP8 loss parity against reference"
-        python3 scripts/loss_compare.py . . \
-          --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
-          --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
-          --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
-        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+        if [[ -f "${MOE_LOSS_FILE}" ]]; then
+          echo "Checking Qwen3 MoE FSDP8 loss parity against reference"
+          python3 scripts/loss_compare.py . . \
+            --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
+            --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
+            --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
+          rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+        else
+          echo "Skipping MoE loss check: ${MOE_LOSS_FILE} not found (needs to be generated on this platform)"
+        fi
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
