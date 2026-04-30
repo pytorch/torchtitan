@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import functools
 import operator
-import os
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -159,7 +158,6 @@ def compile_time_passes(
         functools.partial(
             apply_cpu_offload_pass,
             prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
-            cpu_budget_gb=float(os.environ.get("OFFLOAD_CPU_MEMORY_BUDGET_GB", "100")),
         ),
         selective_activation_remat_pass,
         functools.partial(
@@ -807,7 +805,7 @@ def tag_with_memory_policy_pass(
     Other memory policies combining SAC and CPU offload can be added here.
     """
     memory_policy = config.compile.memory_policy
-    if memory_policy == "default":
+    if memory_policy in ("default", "default_offload"):
         fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
             config.parallelism.fsdp_reshard_after_forward,
             pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
@@ -817,15 +815,18 @@ def tag_with_memory_policy_pass(
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
         )
         apply_sac_pass(gm, policy_fn=default_policy_fn())
+        if memory_policy == "default_offload":
+            tag_all_offloadable_activations(
+                gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
+            )
     elif memory_policy == "eager":
         apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
     elif memory_policy == "cpu_offload_all":
-        tag_all_offloadable_activations(gm)
+        tag_all_offloadable_activations(
+            gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
+        )
     else:
         raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
-
-    if config.compile.enable_cpu_offload and memory_policy != "cpu_offload_all":
-        tag_all_offloadable_activations(gm)
 
     return gm
 
