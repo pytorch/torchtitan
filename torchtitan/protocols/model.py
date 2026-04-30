@@ -152,10 +152,13 @@ class BaseModel(Module):
                     if self._converters_to_external is None:
                         self._converters_to_external = []
                         self._converters_from_external = []
+                    to_ext = self._converters_to_external
+                    from_ext = self._converters_from_external
+                    assert from_ext is not None
                     if "to_external" in ct:
-                        self._converters_to_external.append(ct["to_external"])
+                        to_ext.append(ct["to_external"])
                     if "from_external" in ct:
-                        self._converters_from_external.append(ct["from_external"])
+                        from_ext.append(ct["from_external"])
 
     def to_external(self, sd: dict[str, Any], mode: StateDictMode) -> dict[str, Any]:
         """Convert native state dict keys to external format.

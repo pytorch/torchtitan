@@ -155,6 +155,7 @@ class LoRAConfig(Configurable.Config):
         from dataclasses import replace
 
         inner = self.inner
+        assert inner._owner is not None
         lora_cls = _get_lora_cls(inner._owner)
         instance = lora_cls(
             config=replace(inner),

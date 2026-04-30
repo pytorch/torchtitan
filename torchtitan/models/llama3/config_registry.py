@@ -111,6 +111,7 @@ def llama3_debugmodel_lora() -> Trainer.Config:
     lora_converter = LoRAConverter(
         LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"])
     )
+    assert config.model_spec is not None
     lora_converter.convert(config.model_spec.model)
     config.model_spec.converters.append(lora_converter)
     return config
