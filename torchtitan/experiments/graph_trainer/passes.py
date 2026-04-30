@@ -170,6 +170,10 @@ def compile_time_passes(
 
     inductor_compilation = config.compile.inductor_compilation
     if inductor_compilation == "full":
+        # Compile the entire graph into optimized Triton kernels. Must
+        # be terminal — the FX graph is no longer authoritative after
+        # this pass, so custom_codegen_pass and
+        # insert_kernel_annotations_pass cannot follow.
         passes.append(full_inductor_compilation_pass)
     if inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to
