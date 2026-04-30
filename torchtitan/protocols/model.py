@@ -6,10 +6,10 @@
 
 import enum
 from abc import abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -60,20 +60,31 @@ class BaseModel(Module):
             sd.update(get_model_state_dict(part))
         return sd
 
-    def get_sd(self, mode: StateDictMode = StateDictMode.FULL) -> dict[str, Any]:
+    def get_sd(
+        self,
+        mode: StateDictMode = StateDictMode.FULL,
+        *,
+        external: bool = False,
+        dtype: "torch.dtype | None" = None,
+    ) -> dict[str, Any]:
         """Get state dict for checkpointing.
 
         Args:
-            mode: FULL returns all keys. TRAINABLE returns only requires_grad=True
-                keys (uses DCP's ignore_frozen_params for correct FQN handling
-                with torch.compile / DDP wrappers). BASE returns only
-                requires_grad=False keys (or all if nothing is frozen).
+            mode: Which params to include.
+                FULL: all keys.
+                TRAINABLE: only requires_grad=True keys (uses DCP's
+                    ignore_frozen_params). When no params are frozen,
+                    TRAINABLE == FULL.
+                BASE: only requires_grad=False keys (or all if nothing frozen).
+            external: If True, remap keys to external format via
+                ``to_external`` (sd_adapter HF remapping, then converter
+                transforms in order).
+            dtype: Optional dtype cast for export (e.g. bfloat16).
         """
         if mode == StateDictMode.FULL:
-            return self._raw_sd()
-
-        if mode == StateDictMode.TRAINABLE:
-            sd: dict[str, Any] = {}
+            sd = self._raw_sd()
+        elif mode == StateDictMode.TRAINABLE:
+            sd = {}
             for part in self._get_parts():
                 sd.update(
                     get_model_state_dict(
@@ -81,14 +92,25 @@ class BaseModel(Module):
                         options=StateDictOptions(ignore_frozen_params=True),
                     )
                 )
-            return sd
+        else:
+            # BASE: full minus trainable
+            full_sd = self._raw_sd()
+            trainable_sd = self.get_sd(StateDictMode.TRAINABLE)
+            if len(trainable_sd) == len(full_sd):
+                sd = full_sd
+            else:
+                sd = {k: v for k, v in full_sd.items() if k not in trainable_sd}
 
-        # BASE: full minus trainable
-        full_sd = self._raw_sd()
-        trainable_sd = self.get_sd(StateDictMode.TRAINABLE)
-        if len(trainable_sd) == len(full_sd):
-            return full_sd
-        return {k: v for k, v in full_sd.items() if k not in trainable_sd}
+        if external:
+            sd = self.to_external(sd, mode)
+
+        if dtype is not None:
+            sd = {
+                k: v.to(dtype) if isinstance(v, torch.Tensor) else v
+                for k, v in sd.items()
+            }
+
+        return sd
 
     def load_sd(self, sd: dict[str, Any]) -> None:
         """Load state dict with strict=False (partial loads OK)."""
@@ -99,27 +121,45 @@ class BaseModel(Module):
                 options=StateDictOptions(strict=False),
             )
 
-    _to_external: Callable[[dict[str, Any]], dict[str, Any]] | None = None
-    _from_external: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    # State dict transforms, set once by set_sd_transforms().
+    _to_hf = None
+    _from_hf = None
 
-    def to_external(self, adapter_sd: dict[str, Any]) -> dict[str, Any]:
-        """Convert native adapter SD to external format (e.g. PEFT).
+    def set_sd_transforms(self, sd_adapter=None) -> None:
+        """Wire state dict transforms onto this model.
 
-        Set ``_to_external`` callable via trainer wiring (e.g. from
-        ``LoRAStateDictAdapter.to_hf``).
+        Extracts HF key remapping from sd_adapter (``to_hf``, ``from_hf``).
+        I/O concerns (storage reader/writer, fqn mapping) stay on
+        CheckpointManager.
+
+        Called once by the trainer after model build.
         """
-        if self._to_external is not None:
-            return self._to_external(adapter_sd)
-        return adapter_sd
+        if sd_adapter is not None:
+            self._to_hf = sd_adapter.to_hf
+            self._from_hf = sd_adapter.from_hf
 
-    def from_external(self, external_sd: dict[str, Any]) -> dict[str, Any]:
-        """Convert external format (e.g. PEFT) to native adapter SD.
+    def to_external(self, sd: dict[str, Any], mode: StateDictMode) -> dict[str, Any]:
+        """Convert native state dict keys to external format.
 
-        Set ``_from_external`` callable via trainer wiring.
+        The mode determines which transforms to apply:
+        - BASE: HF remapping only (base model keys)
+        - TRAINABLE: no-op (reserved for converter transforms)
+        - FULL: HF remapping (same as BASE for now)
         """
-        if self._from_external is not None:
-            return self._from_external(external_sd)
-        return external_sd
+        if mode in (StateDictMode.FULL, StateDictMode.BASE):
+            if self._to_hf is not None:
+                sd = self._to_hf(sd)
+        return sd
+
+    def from_external(self, sd: dict[str, Any], mode: StateDictMode) -> dict[str, Any]:
+        """Convert external format state dict keys to native format.
+
+        Reverse of ``to_external``, filtered by mode.
+        """
+        if mode in (StateDictMode.FULL, StateDictMode.BASE):
+            if self._from_hf is not None:
+                sd = self._from_hf(sd)
+        return sd
 
     def init_weights(self, **kwargs) -> None:
         """Backward-compatible alias for ``init_states``.
