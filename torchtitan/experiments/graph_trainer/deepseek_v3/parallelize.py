@@ -4,28 +4,24 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.traceback import annotate_fn
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.graph_trainer.common_utils import annotate_module_fqns
+from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_module_fqns,
+    apply_simple_fsdp,
+)
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import (
-    data_parallel,
-    MixedPrecisionPolicy,
-)
-from torchtitan.tools.logging import logger
 
 
 def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
@@ -91,68 +87,10 @@ def parallelize_deepseekv3(
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-    )
-
-    # apply data parallel
-    dp_mesh: DeviceMesh | None = None
-    if (
-        parallel_dims.fsdp_enabled
-        or parallel_dims.ep_enabled
-        or parallel_dims.dp_replicate_enabled
-    ):
-        if parallel_dims.dp_replicate_enabled:
-            if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
-                dp_mode = "hybrid_shard"
-            else:
-                dp_mesh_dim_names = ["dp_replicate"]
-                dp_mode = "replicate"
-        else:
-            dp_mesh_dim_names = ["fsdp"]
-            dp_mode = "fully_shard"
-
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
-
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
-
-        for _, transformer_block in model.layers.items():
-            if transformer_block.moe_enabled and parallel_dims.ep_enabled:
-                experts_shard_dim = 0
-                assert edp_mesh is not None
-                assert hasattr(transformer_block, "moe")
-                if (
-                    edp_mesh["efsdp"].size() * parallel_dims.ep
-                    > transformer_block.moe.experts.num_experts
-                ):
-                    experts_shard_dim = 1
-
-                transformer_block.moe.experts = data_parallel(
-                    transformer_block.moe.experts,
-                    edp_mesh,
-                    dp_mode,
-                    mp_policy=mp_policy,
-                    shard_dim=experts_shard_dim,
-                )
-
-        model = data_parallel(
-            model,
-            dp_mesh,
-            dp_mode,
-            mp_policy=mp_policy,
-        )
-
-        logger.info(
-            "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
-        )
+    # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
+    # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
+    # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
+    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
 
     # Apply compilation based on mode
     model = apply_compile(
