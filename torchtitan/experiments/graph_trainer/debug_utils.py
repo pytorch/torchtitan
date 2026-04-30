@@ -89,3 +89,53 @@ def log_graph_diff(
         logger.info(f"[{pass_name}] graph unchanged")
     else:
         logger.info(f"[{pass_name}] graph diff:\n" + "\n".join(lines))
+
+
+class FQNInterpreter(torch.fx.Interpreter):
+    """Interpreter that sets activation tracer context vars from node metadata.
+
+    For each node, reads:
+    - ``node.meta["custom"]["module_fqn"]`` → sets _current_module_name
+    - ``node.meta["stack_trace"]`` → parsed and set as _current_stack_frames
+    - ``node.meta["autograd_backward"]`` → sets _current_is_backward
+
+    This is needed because traced graph replay via ``gm(*inputs)`` bypasses
+    module forwards entirely, so the monkeypatched forwards from _patch_model
+    never fire.  FQNInterpreter walks the graph node-by-node, restoring the
+    context that _patch_model would have set during eager execution.
+    """
+
+    def run_node(self, n: torch.fx.Node):
+        from contextvars import Token
+
+        from torchtitan.tools.activation_tracer import (
+            _current_module_name,
+            _current_phase_override,
+            _current_stack_frames,
+            _parse_stack_trace,
+        )
+
+        fqn = (n.meta.get("custom") or {}).get("module_fqn")
+        stack_trace = n.meta.get("stack_trace")
+        is_backward = n.meta.get("autograd_backward", False)
+
+        # Each ContextVar.set() returns a Token that remembers the
+        # previous value.  We collect them so the finally block can
+        # restore all vars in reverse order (LIFO, like nested withs).
+        tokens: list[Token] = []
+        if fqn:
+            tokens.append(_current_module_name.set(fqn))
+        if stack_trace:
+            tokens.append(
+                _current_stack_frames.set(_parse_stack_trace(stack_trace))
+            )
+        tokens.append(
+            _current_phase_override.set("backward" if is_backward else "forward")
+        )
+        try:
+            return super().run_node(n)
+        finally:
+            # Reset each context var to its value before this node,
+            # so the next node starts with a clean slate.
+            for token in reversed(tokens):
+                token.var.reset(token)
