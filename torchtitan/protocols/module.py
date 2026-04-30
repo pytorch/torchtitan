@@ -280,28 +280,6 @@ class Module(nn.Module, Configurable):
 
         needed_axes = self._needed_axes(sharding_config)
 
-        # Under full_dtensor, the declared axes must equal one of the known
-        # SPMD partitions so distribute_tensor reaches every SPMD peer rank.
-        # Originally guaranteed by the caller passing an SPMD mesh; now that
-        # the module self-resolves its mesh, we check here. The check survives
-        # the eventual removal of get_module_mesh because both
-        # parallel_dims.spmd_axes() and _needed_axes() are independent of it.
-        if parallel_dims.full_dtensor:
-            # Filter declared axes to enabled ones; disabled axes (size 1) in
-            # the config are no-ops and don't affect SPMD coverage. Helpers
-            # emit all dense axes including CP even when CP is off -- that's
-            # fine, only the enabled subset must match a partition.
-            declared = {
-                a for a in needed_axes if parallel_dims.get_optional_mesh(a) is not None
-            }
-            partitions = parallel_dims.spmd_axes()
-            if not any(declared == set(p) for p in partitions):
-                raise ValueError(
-                    f"{type(self).__name__}.sharding_config enabled axes "
-                    f"{sorted(declared)} do not match any SPMD partition. "
-                    f"Valid partitions: {[list(p) for p in partitions]}."
-                )
-
         mesh = parallel_dims.get_module_mesh(needed_axes)
         if mesh is None:
             # TODO(fegin): This should only happen when full_dtensor is False
@@ -317,6 +295,19 @@ class Module(nn.Module, Configurable):
 
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
         mesh_axis_names = mesh.mesh_dim_names
+
+        # Under full_dtensor, the resolved mesh must be one of the known SPMD
+        # meshes so distribute_tensor reaches every SPMD peer rank. Axis order
+        # matters: get_module_mesh caches by tuple key, so a sharding_config
+        # that lists axes out of canonical SPMD order resolves to a different
+        # sub-mesh and falls out of this check.
+        if parallel_dims.full_dtensor and mesh not in parallel_dims.spmd_meshes():
+            raise ValueError(
+                f"{type(self).__name__}.sharding_config mesh "
+                f"{list(mesh_axis_names)} does not match any SPMD mesh. "
+                f"Valid meshes: "
+                f"{[list(m.mesh_dim_names or ()) for m in parallel_dims.spmd_meshes()]}."
+            )
 
         # Distribute parameters and buffers per state_shardings. Every sharding_config
         # must declare a placement for every mesh axis; ``resolve_placements``

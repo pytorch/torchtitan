@@ -32,7 +32,7 @@ class ParallelDims:
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _multi_axis_meshes: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
-    _spmd_axes: list[tuple[str, ...]] = field(default_factory=list)
+    _spmd_meshes: list[DeviceMesh] = field(default_factory=list)
 
     @classmethod
     def from_config(
@@ -171,14 +171,6 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
-        # Dense mesh layout depends on ``full_dtensor``:
-        #   - full_dtensor=False: ``dp_shard`` and ``cp`` are pre-flattened into
-        #     a single ``fsdp`` axis so FSDP2's 1D API works directly.
-        #   - full_dtensor=True: keep them separate so
-        #     ``DataParallelMeshDims(shard=("dp_shard", "cp"))`` can declare
-        #     both as data-parallel while CP activations stay sharded on the
-        #     distinct ``cp`` axis. The ``fsdp`` flatten would lose the CP
-        #     boundary, so this layout cannot be derived from the other one.
         if self.full_dtensor:
             dense_mesh = unflatten_mesh(
                 self._world_mesh,
@@ -223,28 +215,19 @@ class ParallelDims:
         # Validate mesh sizes
         self._validate_meshes()
 
-        # Precompute valid full-SPMD axis partitions. A module's
-        # ``sharding_config`` declared axes (under ``full_dtensor``) must equal
-        # one of these to guarantee ``distribute_tensor`` reaches every SPMD
-        # peer. Today: dense (attn/MLP/norm/embed/lm_head) and sparse (MoE
-        # expert params). New partitions only need to be added here; the check
-        # site in ``Module.parallelize`` does not need to change.
-        def _enabled(*candidates: str) -> tuple[str, ...]:
-            # Preserve canonical SPMD axis order (outer-to-inner) so callers
-            # that need to look up a mesh keyed on these axes get the right
-            # ordering. ``dp_shard`` only exists as a single-axis mesh under
-            # full_dtensor (legacy mode pre-flattens it into ``fsdp``); skip
-            # names that aren't in the meshes dict so this works in both modes.
-            return tuple(
-                a
-                for a in candidates
-                if a in self._single_axis_meshes
-                and self.get_optional_mesh(a) is not None
-            )
+        def _enabled_mesh(*candidates: str) -> DeviceMesh | None:
+            """Sub-mesh of the candidate axes that are enabled, in canonical order."""
+            axes = [
+                axis
+                for axis in candidates
+                if axis in self._single_axis_meshes
+                and self.get_optional_mesh(axis) is not None
+            ]
+            return self.get_optional_mesh(axes) if axes else None
 
-        dense = _enabled("dp_replicate", "dp_shard", "cp", "tp")
-        sparse = _enabled("dp_replicate", "efsdp", "ep", "etp")
-        self._spmd_axes = [dense, sparse]
+        dense_mesh = _enabled_mesh("dp_replicate", "dp_shard", "cp", "tp")
+        sparse_mesh = _enabled_mesh("dp_replicate", "efsdp", "ep", "etp")
+        self._spmd_meshes = [m for m in (dense_mesh, sparse_mesh) if m is not None]
 
         logger.info(
             f"Successfully created meshes with active dimensions: "
@@ -324,24 +307,14 @@ class ParallelDims:
         if key in self._multi_axis_meshes:
             return self._multi_axis_meshes[key]
 
-        # Collect every global mesh that covers the requested axes. Different
-        # global meshes can produce different submesh objects even when their
-        # rank groups coincide, and FSDP2 / DCP compare by identity, so we
-        # must not silently pick one of several. If more than one matches
-        # the caller should add disambiguating axes.
         candidates = [
-            (name, gm)
-            for name, gm in self._global_meshes.items()
-            if gm.mesh_dim_names is not None
-            and set(dims).issubset(set(gm.mesh_dim_names))
+            (name, global_mesh)
+            for name, global_mesh in self._global_meshes.items()
+            if global_mesh.mesh_dim_names is not None
+            and set(dims).issubset(set(global_mesh.mesh_dim_names))
         ]
         if not candidates:
             raise ValueError(f"Invalid mesh name combinations {dims}.")
-        assert len(candidates) == 1, (
-            f"Mesh axes {dims} match multiple global meshes "
-            f"({[name for name, _ in candidates]}); the request is ambiguous. "
-            f"Add an axis that selects one of them."
-        )
         submesh = candidates[0][1][key]
         self._multi_axis_meshes[key] = submesh
         return submesh
@@ -372,18 +345,19 @@ class ParallelDims:
             )
         return mesh
 
-    def spmd_axes(self) -> list[tuple[str, ...]]:
-        """Valid full-SPMD axis partitions, restricted to enabled axes.
+    def spmd_meshes(self) -> list[DeviceMesh]:
+        """Valid full-SPMD meshes, restricted to enabled axes.
 
-        Each tuple is a partition (in canonical outer-to-inner mesh order)
-        that fully covers the SPMD ranks for one class of parameters. A
-        module's ``sharding_config`` axes (under ``full_dtensor``) must equal
-        one of these as a set so that ``distribute_tensor`` reaches every SPMD
-        peer rather than only a sub-mesh.
+        Each entry is a sub-mesh (in canonical outer-to-inner axis order)
+        that fully covers the SPMD ranks for one class of parameters --
+        dense (e.g. attention/MLP/norm) and sparse (MoE expert weights).
+        Under ``full_dtensor``, the mesh resolved from a module's
+        ``sharding_config`` must be one of these so ``distribute_tensor``
+        reaches every SPMD peer rather than only a sub-mesh.
         """
-        if not self._spmd_axes:
+        if not self._spmd_meshes:
             self.build_mesh()
-        return self._spmd_axes
+        return self._spmd_meshes
 
     def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
         """Return the mesh a ``Module`` should use for ``distribute_tensor``.
