@@ -6,9 +6,8 @@
 
 import math
 import re
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -23,6 +22,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
+
 
 def _lora_adapter_sharding(
     base_sharding: ShardingConfig | None,
@@ -60,7 +60,6 @@ def _lora_adapter_sharding(
         state_shardings={"weight": base_weight_sharding},
     )
     return replicate_weight, lora_b_sharding
-    return replicate_weight, lora_b_sharding
 
 
 # Cache for dynamically created LoRA classes
@@ -93,18 +92,14 @@ def _get_lora_cls(parent_cls: type) -> type:
                 self.bias.requires_grad_(False)
             self._lora_scaling = _lora_alpha / _lora_rank
 
-            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
-                _base_sharding
-            )
+            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(_base_sharding)
             self.lora_a = Linear.Config(
                 in_features=config.in_features,
                 out_features=_lora_rank,
                 bias=False,
                 sharding_config=lora_a_sharding,
                 param_init={
-                    "weight": lambda w: nn.init.kaiming_uniform_(
-                        w, a=math.sqrt(5)
-                    ),
+                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
                 },
             ).build()
             self.lora_b = Linear.Config(
@@ -139,9 +134,6 @@ class LoRAConfig(Configurable.Config):
     inner config so that sharding and other config-level operations work
     transparently through the wrapper.
     """
-
-    _is_adapter: ClassVar[bool] = True
-    _key_pattern: ClassVar[str] = "lora_"
 
     inner: Linear.Config
     """The original Linear config (preserved for composition with quantization)."""
@@ -273,8 +265,7 @@ class LoRAConverter(Configurable):
         for fqn, cfg, parent, attr in model_config.traverse(Linear.Config):
             last_segment = fqn.rsplit(".", 1)[-1]
             is_target = (
-                self.target_modules is None
-                or last_segment in self.target_modules
+                self.target_modules is None or last_segment in self.target_modules
             )
             if is_target:
                 wrapped = LoRAConfig(
@@ -307,13 +298,20 @@ class LoRAConverter(Configurable):
                 f"Linear.Config in the model config tree."
             )
 
-    @staticmethod
-    def build_to_external(
-        sd_adapter,
-    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-        """Return a function that converts native adapter keys to external format."""
+    def build_external_transforms(self, sd_adapter) -> dict[str, Any] | None:
+        """Build LoRA external format transforms.
+
+        Returns a dict with ``to_external``/``from_external`` callables
+        for PEFT key remapping, or None if LoRA is not active.
+        """
+        if not _lora_class_cache or sd_adapter is None:
+            return None
         from_hf_map = sd_adapter.from_hf_map
-        return lambda sd: remap_lora_keys_to_hf(sd, from_hf_map)
+
+        return {
+            "to_external": lambda sd: remap_lora_keys_to_hf(sd, from_hf_map),
+            "from_external": lambda sd: remap_lora_keys_from_hf(sd, from_hf_map),
+        }
 
 
 def remap_lora_keys_to_hf(
