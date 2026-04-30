@@ -8,6 +8,7 @@ import argparse
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 
 from torchtitan.tools.logging import logger
 
@@ -15,6 +16,29 @@ from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
+
+
+class _IntegrationTestFailure(RuntimeError):
+    """Carries structured info about a failed integration test."""
+
+    def __init__(self, test_descr: str, cmd: str, stderr: str):
+        self.cmd = cmd
+        self.stderr_text = stderr
+        super().__init__(
+            f"\nFailed test flavor: {test_descr}.\n"
+            f"Command: {cmd}\n"
+            f"stderr: {stderr}\n"
+        )
+
+
+@dataclass
+class _FailureRecord:
+    """Structured record of a single integration test failure."""
+
+    test_name: str
+    test_descr: str
+    cmd: str
+    stderr_tail: str
 
 
 _TEST_SUITES_FUNCTION = {
@@ -84,11 +108,40 @@ def run_single_test(
         if result.stdout:
             logger.info(result.stdout)
         if result.returncode != 0:
-            raise RuntimeError(
-                f"\nFailed test flavor: {test_flavor.test_descr}.\n"
-                f"Command: {cmd}\n"
-                f"stderr: {result.stderr}\n"
-            )
+            raise _IntegrationTestFailure(test_flavor.test_descr, cmd, result.stderr)
+
+
+def _print_failure_summary(failed_tests: list[_FailureRecord]):
+    """Print a clear, scannable failure summary and raise RuntimeError.
+
+    This is printed at the very end of the test run so it's easy to find
+    in flooded CI logs. Each failure includes the test name and a
+    copy-paste repro command.
+    """
+    sep = "=" * 70
+    n = len(failed_tests)
+    lines = [
+        "",
+        sep,
+        f"  FAILURE SUMMARY: {n} integration test(s) failed",
+        sep,
+    ]
+    for i, rec in enumerate(failed_tests, 1):
+        lines.append("")
+        lines.append(f"  [{i}/{n}] {rec.test_name} — {rec.test_descr}")
+        lines.append("")
+        lines.append("  Repro command:")
+        lines.append(f"    {rec.cmd}")
+        if rec.stderr_tail:
+            lines.append("")
+            lines.append("  Last lines of stderr:")
+            for sline in rec.stderr_tail.splitlines():
+                lines.append(f"    {sline}")
+    lines.append("")
+    lines.append(sep)
+    summary = "\n".join(lines)
+    logger.error(summary)
+    raise RuntimeError(summary)
 
 
 def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
@@ -98,7 +151,7 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
     ran_any_test = False
-    failed_tests: list[tuple[str, str]] = []
+    failed_tests: list[_FailureRecord] = []
     for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
@@ -123,18 +176,35 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
         else:
             try:
                 run_single_test(test_flavor, args.output_dir, module, config)
+            except _IntegrationTestFailure as e:
+                logger.error(str(e))
+                # Keep last 30 lines of stderr for the summary
+                stderr_lines = e.stderr_text.strip().splitlines()
+                tail = "\n".join(stderr_lines[-30:])
+                if len(stderr_lines) > 30:
+                    tail = f"... ({len(stderr_lines) - 30} lines truncated)\n" + tail
+                failed_tests.append(
+                    _FailureRecord(
+                        test_flavor.test_name,
+                        test_flavor.test_descr,
+                        e.cmd,
+                        tail,
+                    )
+                )
             except Exception as e:
                 logger.error(str(e))
-                failed_tests.append((test_flavor.test_name, str(e)))
+                failed_tests.append(
+                    _FailureRecord(
+                        test_flavor.test_name,
+                        test_flavor.test_descr,
+                        cmd="<unknown>",
+                        stderr_tail=str(e),
+                    )
+                )
             ran_any_test = True
 
     if failed_tests:
-        failure_summary = "\n".join(
-            f"  {name}: {error}" for name, error in failed_tests
-        )
-        raise RuntimeError(
-            f"{len(failed_tests)} integration test(s) failed:\n{failure_summary}"
-        )
+        _print_failure_summary(failed_tests)
 
     if not ran_any_test:
         available_tests = [t.test_name for t in test_list if not t.disabled]
