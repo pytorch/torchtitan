@@ -67,6 +67,7 @@ jobs:
         run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
 
       - name: Check in-repo links with Lychee (offline)
+        shell: bash -eo pipefail {0}
         env:
           ALL_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
