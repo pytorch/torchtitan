@@ -104,6 +104,8 @@ def parallelize_deepseekv3(
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
     model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
 
+    # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
+    # the common HybridEP buffer init into a shared utility.
     if comm_backend == "hybridep" and parallel_dims.ep_enabled:
         from torchtitan.distributed.deepep.hybridep import get_buffer
 
