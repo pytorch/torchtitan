@@ -122,9 +122,7 @@ def parallelize_llama(
             dp_mesh_dims=dp_mesh_dims,
         )
 
-        if dp_mesh_dims is not None:
-            logger.info("Applied FSDP with full DTensor (SPMD mesh) to the model")
-        elif parallel_dims.dp_replicate_enabled:
+        if parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
