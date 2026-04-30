@@ -10,11 +10,9 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     norm_config,
-    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
@@ -54,9 +52,7 @@ def set_qwen3_vl_sharding_config(
     Vision encoder is sharded with the same Replicate-output discipline.
     """
     # Decoder dense (top-level: tok_embeddings, norm, lm_head).
-    set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=False
-    )
+    set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=False)
     for layer_cfg in config.layers:
         _set_qwen3_vl_layer_sharding(
             layer_cfg,
@@ -144,9 +140,9 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     # with Replicate output), attn.proj (rowwise with Replicate output),
     # mlp.linear_fc1 (colwise replicate), mlp.linear_fc2 (rowwise replicate).
     block_norm = norm_config(enable_sp=False)
-    for layer_cfg in ve_cfg.layers.values() if hasattr(
-        ve_cfg.layers, "values"
-    ) else ve_cfg.layers:
+    for layer_cfg in (
+        ve_cfg.layers.values() if hasattr(ve_cfg.layers, "values") else ve_cfg.layers
+    ):
         layer_cfg.norm1.sharding_config = block_norm
         layer_cfg.norm2.sharding_config = block_norm
         layer_cfg.attn.qkv.sharding_config = _vision_colwise_config()
@@ -156,9 +152,9 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
 
     # Mergers (main + deepstack): same plan as vision MLP.
     _set_merger_sharding(ve_cfg.merger)
-    for merger_cfg in ve_cfg.deepstack_merger_list if hasattr(
-        ve_cfg, "deepstack_merger_list"
-    ) else []:
+    for merger_cfg in (
+        ve_cfg.deepstack_merger_list if hasattr(ve_cfg, "deepstack_merger_list") else []
+    ):
         _set_merger_sharding(merger_cfg)
 
 

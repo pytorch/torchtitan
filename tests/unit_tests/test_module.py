@@ -9,9 +9,12 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import Partial, Replicate, Shard
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.types import MeshAxisName
 
 
 class TestModuleInitStates(unittest.TestCase):
@@ -375,11 +378,6 @@ class TestNeededAxes(unittest.TestCase):
     """Tests for Module._needed_axes static helper."""
 
     def test_collects_from_state_shardings(self):
-        from torch.distributed.tensor import Replicate, Shard
-
-        from torchtitan.protocols.sharding import ShardingConfig
-        from torchtitan.protocols.types import MeshAxisName
-
         sc = ShardingConfig(
             state_shardings={
                 "weight": {MeshAxisName.TP: Shard(0)},
@@ -392,11 +390,6 @@ class TestNeededAxes(unittest.TestCase):
         # _needed_axes scans every NamedPlacement-bearing field and asserts
         # they all reference the same axes (family-purity since PR6). This
         # fixture exercises every field with a single shared axis set.
-        from torch.distributed.tensor import Partial, Replicate, Shard
-
-        from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
-        from torchtitan.protocols.types import MeshAxisName
-
         axes = {MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD, MeshAxisName.TP}
 
         def named(tp_placement):
@@ -424,11 +417,6 @@ class TestNeededAxes(unittest.TestCase):
     def test_inconsistent_axes_across_fields_raises(self):
         # Family-purity: a sharding_config that names different axes in
         # different fields must raise (no implicit union).
-        from torch.distributed.tensor import Replicate, Shard
-
-        from torchtitan.protocols.sharding import ShardingConfig
-        from torchtitan.protocols.types import MeshAxisName
-
         sc = ShardingConfig(
             state_shardings={"weight": {MeshAxisName.TP: Shard(0)}},
             local_output_grad_placements={MeshAxisName.EP: Replicate()},
@@ -437,8 +425,6 @@ class TestNeededAxes(unittest.TestCase):
             Module._needed_axes(sc)
 
     def test_empty_config_returns_empty(self):
-        from torchtitan.protocols.sharding import ShardingConfig
-
         self.assertEqual(Module._needed_axes(ShardingConfig()), [])
 
 
