@@ -62,6 +62,7 @@ def build_minimal_trainer(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
                 enable_async_tensor_parallel=False,
+                full_dtensor=False,
             ),
         )
         trainer._fwd_bwd_step_module = None
