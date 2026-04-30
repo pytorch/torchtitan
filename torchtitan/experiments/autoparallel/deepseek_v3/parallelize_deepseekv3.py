@@ -114,8 +114,7 @@ def _moe_forward(
     #       1st computation in router is to update self.tokens_per_expert
     #       which would be the same across all TP ranks.
     #       2nd computation in reorderer is for the actual routing and experts computation
-    #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
-    #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+    #       which would be sharded over TP ranks.
     (
         top_scores_experts_sorted,
         token_indices_experts_sorted,
@@ -286,7 +285,7 @@ def parallelize_deepseekv3(
     # allow configuring inductor comms optimizations from torchtitan commandline
     configure_inductor_for_autobucketing(compile_config.comms_bucket_reorder_strategy)
 
-    sparse_names = ["dp_replicate", "efsdp", "ep", "etp"]
+    sparse_names = ["dp_replicate", "efsdp", "ep"]
     sparse_names = [
         name
         for name in sparse_names
@@ -342,13 +341,11 @@ def parallelize_deepseekv3(
             "dp_replicate": Shard(0),
             "efsdp": Shard(0),
             "ep": Shard(0),
-            "etp": Replicate(),
         }
         # only used if loss parallel is enabled
         possible_output_shardings = {
             # maps relative to mesh dim names used in torchtitan
             "efsdp": Shard(0),
-            "etp": Shard(2),
         }
         assert all(
             name in possible_input_shardings for name in sparse_mesh.mesh_dim_names
@@ -389,7 +386,7 @@ def parallelize_deepseekv3(
         # it would require putting the loss inside the model as well
         def _return_as_dtensor_for_loss_parallel(module, args, output):
             return torch.distributed.tensor.DTensor.from_local(
-                output, sparse_mesh["etp"], (Shard(2),)
+                output, parallel_dims.get_mesh("tp"), (Shard(2),)
             )
 
         # not keeping a reference to the hook, don't plan on

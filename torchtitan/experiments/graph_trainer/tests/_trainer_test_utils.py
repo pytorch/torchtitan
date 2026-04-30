@@ -45,9 +45,9 @@ def build_minimal_trainer(
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 passes=[] if compile_passes is None else list(compile_passes),
-                joint_passes=[]
-                if compile_joint_passes is None
-                else list(compile_joint_passes),
+                joint_passes=(
+                    [] if compile_joint_passes is None else list(compile_joint_passes)
+                ),
                 precompile_artifact_dir="",
                 memory_policy="default",
                 inductor_compilation="regional",
@@ -61,6 +61,7 @@ def build_minimal_trainer(
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+                enable_async_tensor_parallel=False,
             ),
         )
         trainer._fwd_bwd_step_module = None

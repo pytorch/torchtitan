@@ -8,19 +8,15 @@ from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.graph_trainer.common_utils import annotate_module_fqns
+from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_module_fqns,
+    apply_simple_fsdp,
+)
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
-from torchtitan.experiments.graph_trainer.simple_fsdp import (
-    data_parallel,
-    MixedPrecisionPolicy,
-)
-from torchtitan.tools.logging import logger
 
 
 def annotate_llama(model: GraphTrainerLlama3Model) -> None:
@@ -62,39 +58,11 @@ def parallelize_llama(
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
         model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
-    # apply data parallel
-    if (
-        parallel_dims.dp_replicate_enabled
-        or parallel_dims.dp_shard_enabled
-        or parallel_dims.cp_enabled
-    ):
-        if parallel_dims.dp_replicate_enabled:
-            if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
-                dp_mode = "hybrid_shard"
-            else:
-                dp_mesh_dim_names = ["dp_replicate"]
-                dp_mode = "replicate"
-        else:
-            dp_mesh_dim_names = ["fsdp"]
-            dp_mode = "fully_shard"
-
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        )
-
-        model = data_parallel(
-            model,
-            parallel_dims.get_mesh(dp_mesh_dim_names),
-            mode=dp_mode,
-            mp_policy=mp_policy,
-        )
-        logger.info(
-            "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
-        )
+    # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
+    # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
+    # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
+    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
 
     # Apply compilation based on mode
     model = apply_compile(
