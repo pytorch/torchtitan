@@ -53,6 +53,9 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
 )
+from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
+    log_activation_memory_policy,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
@@ -573,6 +576,7 @@ def cudagraph_pass(
         static_input_indices,
         tensor_input_indices=tensor_input_indices,
     )
+    logger.info("Applied cudagraph pass.")
     return gm
 
 
@@ -824,6 +828,8 @@ def tag_with_memory_policy_pass(
         tag_all_offloadable_activations(gm)
     else:
         raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
+
+    log_activation_memory_policy(gm)
     return gm
 
 

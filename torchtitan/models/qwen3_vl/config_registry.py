@@ -85,7 +85,6 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=4,
             expert_parallel_degree=4,
-            expert_tensor_parallel_degree=1,
             tensor_parallel_degree=2,
         ),
         checkpoint=CheckpointManager.Config(

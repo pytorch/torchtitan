@@ -101,7 +101,7 @@ def create_torchtitan_config_from_vllm_config(
         Tuple of (ParallelDims, ParallelismConfig) mapped from vLLM config
 
     Note:
-        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
+        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1)
         in inference. These are set to default values.
     """
     world_size = dist.get_world_size()
@@ -114,7 +114,6 @@ def create_torchtitan_config_from_vllm_config(
         tp=parallel_config.tensor_parallel_size,
         pp=parallel_config.pipeline_parallel_size,
         ep=1,
-        etp=1,
         world_size=world_size,
     )
 
@@ -125,7 +124,6 @@ def create_torchtitan_config_from_vllm_config(
         tensor_parallel_degree=parallel_config.tensor_parallel_size,
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=1,
-        expert_tensor_parallel_degree=1,
         disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
         enable_sequence_parallel=False,
     )

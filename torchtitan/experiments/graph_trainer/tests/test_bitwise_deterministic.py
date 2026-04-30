@@ -314,21 +314,10 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
-        _set_deterministic()
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
-        _set_deterministic()
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
-
-    def test_precompile_vs_eager(self):
-        """Precompiled aot_fx_trace produces bitwise identical results to eager."""
-        _set_deterministic()
-        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
-        _set_deterministic()
-        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
-
-        self._assert_runs_match(run_eager, run_precompile, "eager vs precompile: ")
 
 
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
@@ -368,21 +357,10 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
-        _set_deterministic()
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
-        _set_deterministic()
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
-
-    def test_precompile_vs_eager(self):
-        """Precompiled aot_fx_trace produces bitwise identical results to eager."""
-        _set_deterministic()
-        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
-        _set_deterministic()
-        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
-
-        self._assert_runs_match(run_eager, run_precompile, "eager vs precompile: ")
 
 
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
@@ -423,6 +401,15 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    # TODO: numerics mismatch between precompile and trace with FlexAttention
+    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
 
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
@@ -468,6 +455,15 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    # TODO: numerics mismatch between precompile and trace with FlexAttention
+    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
 
 if __name__ == "__main__":

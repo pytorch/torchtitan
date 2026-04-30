@@ -205,9 +205,17 @@ def make_token_dispatcher_config(
     """Build the appropriate token dispatcher config.
 
     Returns the right Config subclass based on comm_backend:
-    - "standard": AllToAllTokenDispatcher.Config (falls back to local
+    - "standard": Uses PyTorch all-to-all collectives (falls back to local
       dispatch when EP=1, i.e. ep_mesh is None at runtime)
-    - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
+    - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
+    - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
+
+    DeepEP/HybridEP requires installation:
+    https://github.com/deepseek-ai/DeepEP
+
+    For HybridEP, SM configuration can be set via environment variables:
+    - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
+    - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
     if comm_backend in ("deepep", "hybridep"):
         return DeepEPTokenDispatcher.Config(
