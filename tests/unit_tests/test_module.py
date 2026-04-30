@@ -352,31 +352,41 @@ class TestNeededAxes(unittest.TestCase):
         )
         self.assertEqual(Module._needed_axes(sc), [MeshAxisName.TP])
 
-    def test_unions_across_all_fields(self):
+    def test_collects_from_all_fields(self):
+        # _needed_axes scans every NamedPlacement-bearing field and asserts
+        # they all reference the same axes (family-purity). This fixture
+        # exercises every field with a single shared axis set.
+        axes = {MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD, MeshAxisName.TP}
+
+        def named(tp_placement):
+            return {
+                MeshAxisName.DP_REPLICATE: Replicate(),
+                MeshAxisName.DP_SHARD: Replicate(),
+                MeshAxisName.TP: tp_placement,
+            }
+
+        sc = ShardingConfig(
+            state_shardings={"weight": named(Shard(0))},
+            in_src_shardings={"x": named(Replicate())},
+            in_dst_shardings={"x": named(Replicate())},
+            out_dst_shardings=named(Shard(-1)),
+            local_map=LocalMapConfig(
+                in_placements=(named(Replicate()),),
+                out_placements=(named(Shard(-1)),),
+                in_grad_placements=(named(Replicate()),),
+            ),
+        )
+        self.assertEqual(set(Module._needed_axes(sc)), axes)
+
+    def test_inconsistent_axes_across_fields_raises(self):
+        # Family-purity: a sharding_config that names different axes in
+        # different fields must raise (no implicit union).
         sc = ShardingConfig(
             state_shardings={"weight": {MeshAxisName.TP: Shard(0)}},
             in_src_shardings={"x": {MeshAxisName.DP_SHARD: Shard(0)}},
-            in_dst_shardings={"x": {MeshAxisName.CP: Shard(1)}},
-            out_dst_shardings={MeshAxisName.DP_REPLICATE: Replicate()},
-            local_map=LocalMapConfig(
-                in_placements=({MeshAxisName.EP: Shard(0)},),
-                out_placements=({MeshAxisName.ETP: Replicate()},),
-                in_grad_placements=({MeshAxisName.EFSDP: Replicate()},),
-            ),
         )
-        # Order is first-seen across the iteration order in _needed_axes.
-        self.assertEqual(
-            set(Module._needed_axes(sc)),
-            {
-                MeshAxisName.TP,
-                MeshAxisName.DP_SHARD,
-                MeshAxisName.CP,
-                MeshAxisName.DP_REPLICATE,
-                MeshAxisName.EP,
-                MeshAxisName.ETP,
-                MeshAxisName.EFSDP,
-            },
-        )
+        with self.assertRaisesRegex(ValueError, "Inconsistent axes"):
+            Module._needed_axes(sc)
 
     def test_empty_config_returns_empty(self):
         self.assertEqual(Module._needed_axes(ShardingConfig()), [])
