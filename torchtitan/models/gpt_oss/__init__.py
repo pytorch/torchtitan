@@ -14,7 +14,7 @@ from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe import BatchWiseAuxLoss, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -199,6 +199,7 @@ def _build_gptoss_layers(
                 ),
                 top_k=top_k,
             ),
+            aux_loss=BatchWiseAuxLoss.Config(weight=1e-3),
         )
         layer_cfg = GptOssTransformerBlock.Config(
             attention=attn_cfg,

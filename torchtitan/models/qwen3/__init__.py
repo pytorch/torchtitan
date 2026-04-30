@@ -22,6 +22,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.models.common.moe import BatchWiseAuxLoss
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -172,6 +173,7 @@ def _build_qwen3_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
+                    aux_loss=BatchWiseAuxLoss.Config(weight=1e-3),
                 ),
             )
         )

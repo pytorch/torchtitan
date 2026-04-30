@@ -22,6 +22,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_sliding_window_mask_mod,
 )
+from torchtitan.models.common.config_utils import update_moe_aux_loss_configs
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
@@ -211,6 +212,12 @@ class GptOssModel(Decoder):
                             "Failed to use grouped mm, which is only supported on SM90 or later",
                         )
                         layer_cfg.moe.experts.use_grouped_mm = False
+
+            update_moe_aux_loss_configs(
+                self.layers,
+                pp_enabled=parallelism.pipeline_parallel_degree > 1,
+                global_batch_size=kwargs["global_batch_size"],
+            )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
