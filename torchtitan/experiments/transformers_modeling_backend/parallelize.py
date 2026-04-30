@@ -130,6 +130,52 @@ def _make_moe_to_local_pre_hook(grad_placements):
     return hook
 
 
+def _is_phimoe_router(module: nn.Module) -> bool:
+    """Detect HF PhiMoE's ``PhimoeTopKRouter`` without importing eagerly."""
+    return type(module).__name__ == "PhimoeTopKRouter" and type(
+        module
+    ).__module__.endswith("modeling_phimoe")
+
+
+def _patch_phimoe_sparsemixer():
+    """Wrap HF PhiMoE's ``sparsemixer`` to unwrap DTensor inputs.
+
+    ``sparsemixer`` (in ``transformers.models.phimoe.modeling_phimoe``) is a
+    free function that calls a custom ``torch.autograd.Function``
+    (``PhimoeMultiplier``) whose ``backward`` uses ``scatter_add_``. Custom
+    autograd Functions don't dispatch through DTensor, so when ``scores``
+    arrives as a ``DTensor(Replicate)``, we must convert it to local before
+    running. The output (multiplier, selected_experts) is returned as plain
+    tensors — autograd tracks gradients on the unwrapped boundary because
+    we use ``to_local(grad_placements=(Replicate(),))`` so the gradient
+    that flows back into the F.linear of the gate is on a Replicate
+    DTensor with the correct placement.
+
+    ``PhimoeTopKRouter.forward`` references ``sparsemixer`` from its
+    ``__globals__``, which IS ``modeling_phimoe.__dict__``; setting
+    ``modeling_phimoe.sparsemixer`` updates the binding seen by the call
+    site. Idempotent.
+    """
+    from transformers.models.phimoe import modeling_phimoe
+
+    if getattr(modeling_phimoe.sparsemixer, "_titan_sparsemixer_patched", False):
+        return
+
+    original_sparsemixer = modeling_phimoe.sparsemixer
+
+    def wrapped_sparsemixer(scores, jitter_eps, training, top_k=2):
+        if isinstance(scores, DTensor):
+            # Replicate gradient placement: scores comes from F.linear of a
+            # Replicate input × Replicate weight, so the gradient flowing
+            # back must be on the same Replicate placement to match the
+            # gate's nn.Linear backward.
+            scores = scores.to_local(grad_placements=(Replicate(),))
+        return original_sparsemixer(scores, jitter_eps, training, top_k=top_k)
+
+    wrapped_sparsemixer._titan_sparsemixer_patched = True
+    modeling_phimoe.sparsemixer = wrapped_sparsemixer
+
+
 def _experts_to_local_pre_hook(module, args):
     """Convert DTensor expert params to local for the HF for-loop.
 
@@ -518,42 +564,30 @@ def apply_moe_ep_tp(
                     distribute_tensor(experts.down_proj, tp_mesh, [Shard(2)])
                 )
 
-            # Replicate gate params on TP mesh. Most routers (Mixtral,
-            # Qwen3, DeepSeek V3, etc.) use NoParallel which wraps
-            # inputs as DTensor for the gate's nn.Linear forward.
+            # Replicate gate params on TP mesh. All HF MoE routers in
+            # scope (Mixtral, Qwen2/3 MoE, DeepSeek V3, GLM-4/4-lite/MoE-DSA)
+            # have ``forward`` bodies built only from DTensor-dispatchable
+            # ops (``view``, ``F.linear``, ``softmax``, ``topk``, ``gather``,
+            # arithmetic), so ``NoParallel`` wraps the input as DTensor,
+            # the forward runs entirely in DTensor space, and the output is
+            # unwrapped back to a local tensor with ``Partial`` grad
+            # placement (matching the row-parallel expert backward).
             #
-            # PhiMoE's PhimoeTopKRouter overrides forward to call a
-            # custom autograd Function (sparsemixer) whose backward
-            # uses scatter_add_, incompatible with DTensor placement
-            # changes. For these routers, use distribute_module (bare)
-            # + __dict__ param shadowing so the entire forward operates
-            # on local tensors. Same pattern as _experts_to_local hooks.
-            if type(gate).forward is not nn.Linear.forward:
-                distribute_module(gate, tp_mesh)
-
-                def _router_params_to_local(gate_mod):
-                    # Use direct attribute access (not named_parameters).
-                    # FSDP2 manages params at block level — after unshard,
-                    # module.weight works but named_parameters may not.
-                    # The local tensor stays in __dict__ between forwards;
-                    # FSDP manages the DTensor via its own FSDPParamGroup
-                    # references, not module attribute access, so this is
-                    # safe. The pre-hook overwrites it each forward with
-                    # a fresh to_local() from the newly-unsharded DTensor.
-                    def pre_hook(module, args):
-                        weight = gate_mod.weight
-                        if isinstance(weight, DTensor):
-                            gate_mod.__dict__["weight"] = weight.to_local()
-
-                    return pre_hook
-
-                gate.register_forward_pre_hook(_router_params_to_local(gate))
-            else:
-                parallelize_module(
-                    gate,
-                    tp_mesh,
-                    NoParallel(local_output_grad_placements=(Partial(),)),
-                )
+            # PhiMoE's ``PhimoeTopKRouter`` is special: its forward calls
+            # the free function ``sparsemixer``, which uses a custom
+            # ``torch.autograd.Function`` (``PhimoeMultiplier``) whose
+            # backward does ``scatter_add_``. Custom autograd Functions
+            # don't dispatch through DTensor, so we monkey-patch
+            # ``sparsemixer`` to unwrap DTensor scores before the custom
+            # autograd Function runs. The ``NoParallel`` wrapping of the
+            # router itself is identical to the other routers.
+            if _is_phimoe_router(gate):
+                _patch_phimoe_sparsemixer()
+            parallelize_module(
+                gate,
+                tp_mesh,
+                NoParallel(local_output_grad_placements=(Partial(),)),
+            )
 
             # FSDP converts gate buffers (e.g. e_score_correction_bias in
             # DeepSeek V3/GLM-4.7 routers) to DTensors for mesh alignment.

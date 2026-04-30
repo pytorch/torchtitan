@@ -19,8 +19,8 @@ MODULE=transformers_modeling_backend
 CONFIG=transformers_modeling_backend_debugmodel_moe
 STEPS=${2:-200}
 
-RESULTS_DIR=$(mktemp -d)
-trap "rm -rf $RESULTS_DIR" EXIT
+RESULTS_DIR=${RESULTS_DIR:-$(mktemp -d)}
+mkdir -p "$RESULTS_DIR"
 
 run_test() {
     local name="$1"
