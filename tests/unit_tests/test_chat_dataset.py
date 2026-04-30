@@ -77,9 +77,8 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
-        ds = _load_dataset()
         chat_ds = ChatDataset(
-            dataset=ds,
+            dataset=_load_dataset(),
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=2048,
@@ -90,8 +89,9 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         input_ids = batch["input"]
         label_ids = labels
 
-        # Tokenize the first sample directly to get ground truth tokens
-        sample = ds[0]
+        # Tokenize the first sample directly to get ground truth tokens. ChatDataset shuffles the
+        # dataset internally at init, and ChatDataset._original_data is the post-shuffle dataset.
+        sample = chat_ds._original_data[0]
         messages = _process_sample(sample)
         full_text = tokenizer.apply_chat_template(messages)
         # Chat templates already include end tokens, so no add_eos
