@@ -11,6 +11,11 @@ on:
         description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
         required: false
         type: string
+      is-experimental:
+        description: 'Check if the workflow is experimental'
+        required: false
+        type: boolean
+        default: false
     outputs:
       matrix:
         description: dynamically set matrix
@@ -46,8 +51,11 @@ jobs:
           ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
-          # Define ROCm matrix
-          ROCM_MATRIX=$(cat <<EOF
+          # Define ROCm matrix (empty for experimental workflows)
+          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
+            ROCM_MATRIX=""
+          else
+            ROCM_MATRIX="$(cat <<EOF
           {
             "name": "rocm",
             "runner": "${ROCM_RUNNER}",
@@ -58,10 +66,11 @@ jobs:
             "torch-version": ""
           }
           EOF
-          )
+          )"
+          fi
 
           # Define CUDA matrix
-          CUDA_MATRIX=$(cat <<EOF
+          CUDA_MATRIX="$(cat <<EOF
           {
             "name": "cuda",
             "runner": "${CUDA_RUNNER}",
@@ -72,7 +81,7 @@ jobs:
             "torch-version": ""
           }
           EOF
-          )
+          )"
 
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"

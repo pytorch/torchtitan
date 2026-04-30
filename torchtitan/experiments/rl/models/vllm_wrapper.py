@@ -238,13 +238,11 @@ class TorchTitanVLLMModelWrapper(Module):
         # Apply parallelism using the model's own parallelize function.
         # AC and compile are explicitly disabled; skip_dp=True skips FSDP.
         from torchtitan.config import ActivationCheckpointConfig, CompileConfig
-        from torchtitan.protocols.model_converter import ModelConvertersContainer
 
         self.parallelize_fn(
             self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
-            model_converters=ModelConvertersContainer.Config(),
             parallelism=parallelism,
             compile_config=CompileConfig(enable=False),
             ac_config=ActivationCheckpointConfig(mode="none"),

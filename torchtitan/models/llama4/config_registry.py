@@ -59,7 +59,7 @@ def llama4_debugmodel() -> Trainer.Config:
 
 def llama4_debugmodel_ep() -> Trainer.Config:
     config = llama4_debugmodel()
-    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    config.model_spec = model_registry("debugmodel")
     return config
 
 
@@ -71,7 +71,6 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry(
             "debugmodel",
-            moe_comm_backend="standard",
             quantization=[
                 Float8GroupedExpertsConverter.Config(
                     model_compile_enabled=(

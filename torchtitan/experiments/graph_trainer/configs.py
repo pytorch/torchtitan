@@ -54,6 +54,16 @@ class GraphTrainerCompileConfig(CompileConfig):
             Work in progress — for development and testing only.
     """
 
+    inductor_compilation: Literal["regional", "full"] = "regional"
+    """
+    Inductor compilation strategy. Mutually exclusive options:
+        regional: compile tagged regions (e.g. FlexAttention HOPs) with
+            regional_inductor while leaving the rest interpreted.
+        full: compile the entire graph with inductor into optimized
+            Triton kernels. Provides better performance but may change
+            bitwise numerics compared to regional/interpreted execution.
+    """
+
     enable_cudagraph: bool = True
     """When False, skip the cudagraph pass even if the graph is compatible."""
 
