@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_fixed_block_mask_mod,
 )
+from torchtitan.models.common.config_utils import update_moe_aux_loss_configs
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -161,6 +162,12 @@ class Llama4Model(Decoder):
                             f"{comm_backend.upper()} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
+
+            update_moe_aux_loss_configs(
+                self.layers,
+                pp_enabled=parallelism.pipeline_parallel_degree > 1,
+                global_batch_size=kwargs["global_batch_size"],
+            )
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(

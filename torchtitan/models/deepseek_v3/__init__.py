@@ -20,6 +20,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.models.common.moe import MoELoadBalanceAuxLoss, SequenceWiseAuxLoss
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
@@ -174,6 +175,7 @@ def _build_dsv3_layers(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
+    aux_loss: MoELoadBalanceAuxLoss.Config | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
 
@@ -237,6 +239,7 @@ def _build_dsv3_layers(
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
                 ),
+                aux_loss=aux_loss,
             )
 
         layers.append(
@@ -285,8 +288,9 @@ def _debugmodel(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=3,
-        router_score_func="softmax",
+        router_score_func="sigmoid",
         score_before_experts=False,
+        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -350,8 +354,9 @@ def _16b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="softmax",
+        router_score_func="sigmoid",
         score_before_experts=False,
+        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -416,11 +421,12 @@ def _236b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="softmax",
+        router_score_func="sigmoid",
         router_num_expert_groups=8,
         router_num_limited_groups=3,
         router_route_scale=16.0,
         score_before_experts=False,
+        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -491,6 +497,7 @@ def _671b(
         router_route_scale=2.5,
         router_route_norm=True,
         score_before_experts=False,
+        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
