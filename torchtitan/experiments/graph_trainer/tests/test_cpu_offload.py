@@ -212,50 +212,6 @@ class TestCpuOffloadPass(TestCase):
             "Each offload/reload should have a matching wait_tensor",
         )
 
-        # Each offloaded tensor gets a dealloc to free GPU storage in forward
-        dealloc_ops = [
-            n
-            for n in gm.graph.nodes
-            if n.op == "call_function" and n.target is torch.ops.ao.dealloc.default
-        ]
-        self.assertEqual(
-            len(dealloc_ops),
-            len(offload_ops),
-            "Each offloaded tensor should have a matching dealloc",
-        )
-
-    def test_dealloc_after_last_forward_user(self):
-        """Dealloc nodes must appear after all forward users of the offloaded tensor."""
-        from torchtitan.experiments.graph_trainer.cpu_offload import (
-            apply_cpu_offload_pass,
-            tag_all_offloadable_activations,
-        )
-
-        gm, fwd_nodes, bwd_nodes = self._build_joint_graph(num_layers=3)
-        tag_all_offloadable_activations(gm)
-        gm = apply_cpu_offload_pass(gm)
-
-        nodes = list(gm.graph.nodes)
-        pos = {n: i for i, n in enumerate(nodes)}
-
-        for node in nodes:
-            if not (
-                node.op == "call_function"
-                and node.target is torch.ops.ao.dealloc.default
-            ):
-                continue
-            gpu_node = node.args[0]
-            # dealloc must come after every user of the gpu tensor
-            for user in gpu_node.users:
-                if user is node:
-                    continue
-                self.assertGreater(
-                    pos[node],
-                    pos[user],
-                    f"dealloc of {gpu_node.name} at {pos[node]} "
-                    f"should be after user {user.name} at {pos[user]}",
-                )
-
     def test_view_ops_not_tagged(self):
         """View ops should never be tagged for offload."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
@@ -357,7 +313,7 @@ class TestCpuOffloadPass(TestCase):
 
         gm, fwd_nodes, bwd_nodes = self._build_joint_graph(num_layers=4)
         tag_all_offloadable_activations(gm)
-        apply_cpu_offload_pass(gm)
+        apply_cpu_offload_pass(gm, prefetch_lookahead=0)
 
         # Record pre-prefetch reload positions
         nodes_before = list(gm.graph.nodes)
@@ -408,31 +364,106 @@ class TestCpuOffloadPass(TestCase):
         """cpu_offload_pass with prefetch_n_layers should insert and move reloads."""
         from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
 
-        gm, _, _ = self._build_joint_graph(num_layers=4)
-        gm = cpu_offload_pass(gm, prefetch_n_layers=1)
+        def _reload_positions(graph_module):
+            nodes = list(graph_module.graph.nodes)
+            return [
+                nodes.index(n)
+                for n in nodes
+                if n.op == "call_function" and n.target is torch.ops.ao.reload.default
+            ]
 
-        reload_ops = [
-            n
-            for n in gm.graph.nodes
-            if n.op == "call_function" and n.target is torch.ops.ao.reload.default
-        ]
-        wait_ops = [
-            n
-            for n in gm.graph.nodes
-            if n.op == "call_function"
-            and n.target is torch.ops.ao.wait_tensor.default
-            and isinstance(n.args[0], torch.fx.Node)
-            and n.args[0].target is torch.ops.ao.reload.default
-        ]
-        self.assertGreater(len(reload_ops), 0)
-        # Each reload should have a corresponding wait after it (not adjacent)
+        gm_no_prefetch, _, _ = self._build_joint_graph(num_layers=4)
+        gm_no_prefetch = cpu_offload_pass(gm_no_prefetch, prefetch_n_layers=0)
+        pos_no_prefetch = _reload_positions(gm_no_prefetch)
+
+        gm_prefetch, _, _ = self._build_joint_graph(num_layers=4)
+        gm_prefetch = cpu_offload_pass(gm_prefetch, prefetch_n_layers=1)
+        pos_prefetch = _reload_positions(gm_prefetch)
+
+        self.assertGreater(len(pos_prefetch), 0)
+        self.assertEqual(len(pos_no_prefetch), len(pos_prefetch))
+        # With prefetch, reloads should be earlier in the graph
+        earlier_count = sum(1 for a, b in zip(pos_prefetch, pos_no_prefetch) if a < b)
+        self.assertGreater(
+            earlier_count,
+            0,
+            "prefetch_n_layers=1 should move reloads earlier than prefetch_n_layers=0",
+        )
+
+    def test_prefetch_n_layers_2(self):
+        """n_layers=2 should move reloads further than n_layers=1."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
+
+        def _reload_positions(graph_module):
+            nodes = list(graph_module.graph.nodes)
+            return [
+                nodes.index(n)
+                for n in nodes
+                if n.op == "call_function" and n.target is torch.ops.ao.reload.default
+            ]
+
+        gm1, _, _ = self._build_joint_graph(num_layers=5)
+        gm1 = cpu_offload_pass(gm1, prefetch_n_layers=1)
+        pos_1 = _reload_positions(gm1)
+
+        gm2, _, _ = self._build_joint_graph(num_layers=5)
+        gm2 = cpu_offload_pass(gm2, prefetch_n_layers=2)
+        pos_2 = _reload_positions(gm2)
+
+        self.assertEqual(len(pos_1), len(pos_2))
+        # n_layers=2 should move at least some reloads further than n_layers=1
+        further_count = sum(1 for a, b in zip(pos_2, pos_1) if a < b)
+        self.assertGreater(
+            further_count,
+            0,
+            "prefetch_n_layers=2 should move reloads further than n_layers=1",
+        )
+
+    def test_wait_after_last_forward_consumer(self):
+        """Forward waits should be placed after the last forward consumer."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            _is_backward_node,
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
+        )
+
+        gm, _, _ = self._build_joint_graph(num_layers=4)
+        tag_all_offloadable_activations(gm)
+        apply_cpu_offload_pass(gm, prefetch_lookahead=0)
+
         nodes = list(gm.graph.nodes)
-        for wait_node in wait_ops:
-            reload_node = wait_node.args[0]
-            self.assertLess(nodes.index(reload_node), nodes.index(wait_node))
+        node_pos = {n: i for i, n in enumerate(nodes)}
+
+        for node in nodes:
+            if not (
+                node.op == "call_function"
+                and node.target is torch.ops.ao.wait_tensor.default
+                and not node.meta.get("autograd_backward")
+            ):
+                continue
+            gpu_tensor = node.args[1] if len(node.args) > 1 else None
+            if gpu_tensor is None:
+                continue
+            wait_pos = node_pos[node]
+            ao_ops = {
+                torch.ops.ao.offload.default,
+                torch.ops.ao.reload.default,
+                torch.ops.ao.wait_tensor.default,
+            }
+            for user in gpu_tensor.users:
+                if user.op != "call_function":
+                    continue
+                if _is_backward_node(user) or user.target in ao_ops:
+                    continue
+                self.assertLess(
+                    node_pos[user],
+                    wait_pos,
+                    f"Forward consumer {user.name} at pos {node_pos[user]} "
+                    f"should precede wait at pos {wait_pos}",
+                )
 
     def test_view_replay_in_backward(self):
-        """View replay: base tensor with view-chain backward users gets offloaded + deallocated."""
+        """View replay: base tensor with view-chain backward users gets offloaded."""
         from torchtitan.experiments.graph_trainer.cpu_offload import (
             apply_cpu_offload_pass,
             tag_all_offloadable_activations,
@@ -492,17 +523,7 @@ class TestCpuOffloadPass(TestCase):
             for n in gm.graph.nodes
             if n.op == "call_function" and n.target is torch.ops.ao.offload.default
         ]
-        dealloc_ops = [
-            n
-            for n in gm.graph.nodes
-            if n.op == "call_function" and n.target is torch.ops.ao.dealloc.default
-        ]
         self.assertGreater(len(offload_ops), 0, "Expected offload ops")
-        self.assertEqual(
-            len(dealloc_ops),
-            len(offload_ops),
-            "View replay should allow dealloc for all offloaded tensors",
-        )
 
         # Verify replayed view exists in backward
         view_ops = [

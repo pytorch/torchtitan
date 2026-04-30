@@ -14,7 +14,6 @@ from torch import nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    LocalMapInnerAttention,
     ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -22,6 +21,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -50,7 +50,7 @@ class Attention(BaseAttention):
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
-        inner_attention: LocalMapInnerAttention.Config = field(
+        inner_attention: Module.Config = field(
             default_factory=ScaledDotProductAttention.Config
         )
         mask_type: str = "causal"
@@ -233,6 +233,16 @@ class DeepSeekV3Model(Decoder):
                     "ScaledDotProductAttention. Got "
                     f"{type(self.layers[0].attention.inner_attention).__name__}."
                 )
+
+            from torchtitan.models.deepseek_v3.sharding import (
+                set_deepseek_v3_sharding_config,
+            )
+
+            set_deepseek_v3_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_sp=parallelism.enable_sequence_parallel,
+            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

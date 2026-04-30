@@ -22,6 +22,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
+        qkv_map: dict[str, str | None]
         if self.fuse_qkv:
             qkv_map = {
                 "model.layers.{}.self_attn.q_proj.weight": None,
@@ -44,7 +45,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
-            **qkv_map,  # pyrefly: ignore [invalid-argument]
+            **qkv_map,
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "model.layers.{}.self_attn.o_proj.bias": "layers.{}.attention.wo.bias",
             "model.layers.{}.self_attn.sinks": "layers.{}.attention.sinks",
@@ -59,7 +60,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
+            "lm_head.weight": "lm_head.weight",
         }
 
     def get_hf_storage_reader(
@@ -264,6 +265,8 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 state_dict[tt_key] = value
             else:
                 tt_key = self.from_hf_map[key]
+                if tt_key is None:
+                    continue
                 state_dict[tt_key] = value
 
         if self.fuse_qkv and pending_qkv_weight:

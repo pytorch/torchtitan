@@ -14,7 +14,8 @@ them around saved activations to reduce GPU memory.
 Offload pattern (forward):
     cpu = ao.offload(gpu_tensor)
     ... forward consumers use gpu_tensor ...
-    cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor)
+    cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor, dep=last_consumer)
+    # wait_tensor frees gpu_tensor's storage after D2H completes
 
 Reload pattern (backward):
     gpu = ao.reload(cpu, device)
@@ -275,24 +276,16 @@ def _detect_sac_active(gm: torch.fx.GraphModule) -> bool:
 def tag_all_offloadable_activations(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
-    force_joint_graph: bool = False,
 ) -> torch.fx.GraphModule:
     """Tag all saved activations eligible for CPU offloading.
 
-    Two modes of operation:
+    Sets ``node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD`` on
+    eligible forward nodes. When SAC is active, only MUST_SAVE nodes are
+    tagged (the surviving activations after recomputation decisions).
+    Without SAC, any forward node with backward consumers is eligible.
 
-    **Without SAC** (no recompute tags): Sets
-    ``node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD`` and the
-    caller inserts ao:: ops in the joint graph.
-
-    **With SAC** (MUST_SAVE / PREFER_RECOMPUTE tags present): Sets
-    ``node.meta["should_offload"] = True`` on MUST_SAVE nodes and enables
-    ``config.enable_activation_offloading``. The partitioner's built-in
-    offloading then inserts offload/reload ops AFTER the fwd/bwd split,
-    so recomputed ops in backward naturally receive reloaded tensors.
-
-    In both modes, the last layer is skipped (its activations are consumed
-    immediately in backward).
+    The last layer is skipped (its activations are consumed immediately
+    in backward).
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
@@ -302,7 +295,7 @@ def tag_all_offloadable_activations(
         The GraphModule with eligible nodes tagged for offload.
     """
     forward_nodes, _ = _classify_forward_backward(gm)
-    sac_active = not force_joint_graph and _detect_sac_active(gm)
+    sac_active = _detect_sac_active(gm)
 
     # Find all layer IDs to determine the last layer
     all_layer_ids: set[int] = set()
@@ -314,8 +307,6 @@ def tag_all_offloadable_activations(
 
     tagged = 0
     total_bytes = 0
-    delegated = 0
-    delegated_bytes = 0
 
     for node in gm.graph.nodes:
         if node not in forward_nodes:
@@ -329,53 +320,30 @@ def tag_all_offloadable_activations(
         existing = node.meta.get("recompute")
 
         if sac_active:
-            # SAC coexistence: delegate MUST_SAVE nodes to the partitioner's
-            # built-in offloading, which inserts offload/reload AFTER the
-            # fwd/bwd split. Recomputed ops in backward naturally receive
-            # the reloaded tensor, avoiding the dealloc-vs-recompute conflict.
-            if existing == CheckpointPolicy.MUST_SAVE:
-                node.meta["should_offload"] = True
-                node.meta["offload_group"] = layer_id
-                delegated += 1
-                delegated_bytes += _tensor_bytes(node.meta["val"])
-            continue
-
-        if force_joint_graph and existing == CheckpointPolicy.MUST_SAVE:
-            # Post-remat: SAC already resolved recomputation. MUST_SAVE nodes
-            # are the surviving activations — safe to offload on the joint graph.
-            node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
-            tagged += 1
-            total_bytes += _tensor_bytes(node.meta["val"])
-            continue
-
-        # Non-SAC path: tag for joint-graph ao:: insertion
-        if existing in (
-            CheckpointPolicy.MUST_RECOMPUTE,
-            CheckpointPolicy.PREFER_RECOMPUTE,
-        ):
-            continue
-        if _has_recompute_consumer(node):
-            continue
-
-        _, has_bwd = _get_storage_chain(node)
-        if not has_bwd:
-            continue
+            # SAC already resolved recomputation. Only MUST_SAVE nodes are
+            # the surviving activations — safe to offload.
+            if existing != CheckpointPolicy.MUST_SAVE:
+                continue
+        else:
+            if existing in (
+                CheckpointPolicy.MUST_RECOMPUTE,
+                CheckpointPolicy.PREFER_RECOMPUTE,
+            ):
+                continue
+            if _has_recompute_consumer(node):
+                continue
+            _, has_bwd = _get_storage_chain(node)
+            if not has_bwd:
+                continue
 
         node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
         tagged += 1
         total_bytes += _tensor_bytes(node.meta["val"])
 
-    if sac_active:
-        logger.info(
-            f"CPU offload (SAC coexistence): marked {delegated} MUST_SAVE "
-            f"activations for partitioner-level offloading "
-            f"({delegated_bytes / 1024 / 1024:.2f} MB)"
-        )
-    else:
-        logger.info(
-            f"CPU offload: tagged {tagged} activations for offload "
-            f"({total_bytes / 1024 / 1024:.2f} MB)"
-        )
+    logger.info(
+        f"CPU offload: tagged {tagged} activations for offload "
+        f"({total_bytes / 1024 / 1024:.2f} MB)"
+    )
     return gm
 
 
@@ -384,84 +352,25 @@ def tag_all_offloadable_activations(
 # ============================================================
 
 
-def _sink_forward_waits_per_group(
-    gm: torch.fx.GraphModule,
-    wait_offload_map: dict[Node, Node],
-    lookahead: int,
-) -> None:
-    """Sink forward wait_offload nodes to group boundaries.
-
-    Group G's waits are moved to just after group (G + lookahead)'s last
-    ao.offload node.  This gives nearly a full layer of compute-transfer
-    overlap: the D2H copies from group G run in parallel with group
-    G+lookahead's entire compute, so by the time the waits fire the
-    transfers have finished.
-    """
-    node_to_idx: dict[Node, int] = {n: i for i, n in enumerate(gm.graph.nodes)}
-
-    # Collect wait_offload and offload nodes by layer group.
-    wait_groups: dict[int, list[Node]] = {}
-    offload_groups: dict[int, list[Node]] = {}
-
-    for gpu_node, wait_node in wait_offload_map.items():
-        layer_id = _get_layer_id(gpu_node)
-        if layer_id == _NOT_IN_LAYERS:
-            continue
-        wait_groups.setdefault(layer_id, []).append(wait_node)
-
-    for node in gm.graph.nodes:
-        if node.op == "call_function" and node.target == torch.ops.ao.offload.default:
-            original = node.args[0]
-            if isinstance(original, Node):
-                layer_id = _get_layer_id(original)
-                if layer_id != _NOT_IN_LAYERS:
-                    offload_groups.setdefault(layer_id, []).append(node)
-
-    if not wait_groups:
-        return
-
-    sorted_groups = sorted(wait_groups.keys())
-    group_last_offload: dict[int, Node] = {
-        g: max(nodes, key=lambda n: node_to_idx.get(n, 0))
-        for g, nodes in offload_groups.items()
-    }
-
-    # Find the first backward node as fallback anchor for the last group's
-    # waits.  Using output_node would place waits *after* backward nodes,
-    # breaking reloads that reference them.
-    first_bwd_node = None
-    for n in gm.graph.nodes:
-        if _is_backward_node(n):
-            first_bwd_node = n
-            break
-    fallback_anchor = first_bwd_node or gm.graph.find_nodes(op="output")[0]
-
-    moved = 0
-    for idx, group in enumerate(sorted_groups):
-        target_idx = min(idx + lookahead, len(sorted_groups) - 1)
-        target_group = sorted_groups[target_idx]
-
-        if target_idx > idx and target_group in group_last_offload:
-            anchor = group_last_offload[target_group]
-            for wait_node in wait_groups[group]:
-                anchor.append(wait_node)
-                moved += 1
-        else:
-            for wait_node in wait_groups[group]:
-                fallback_anchor.prepend(wait_node)
-                moved += 1
-
-    logger.info(
-        f"CPU offload: sunk {moved} forward waits across "
-        f"{len(sorted_groups)} groups, lookahead={lookahead}"
-    )
+def _find_tensor_dep(node: Node, node_positions: dict[Node, int]) -> Node | None:
+    """Find a tensor-valued node suitable for a scheduling dependency."""
+    if isinstance(node.meta.get("val"), torch.Tensor):
+        return node
+    for user in node.users:
+        if (
+            user.op == "call_function"
+            and user.target is operator.getitem
+            and isinstance(user.meta.get("val"), torch.Tensor)
+            and not _is_backward_node(user)
+        ):
+            return user
+    return None
 
 
 def apply_cpu_offload_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    sink_lookahead: int = 1,
     prefetch_lookahead: int = 1,
     cpu_budget_gb: float = 100.0,
 ) -> torch.fx.GraphModule:
@@ -470,22 +379,31 @@ def apply_cpu_offload_pass(
     Reads ``node.meta["recompute"] is CheckpointPolicy.MUST_CPU_OFFLOAD`` (set by
     ``tag_all_offloadable_activations``) and inserts:
       Forward:  cpu = ao.offload(gpu_tensor)
-                cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor)
-                ao.dealloc(gpu_tensor, [forward_deps])
+                cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor, dep=last_consumer)
       Backward: gpu = ao.reload(cpu, device)
                 gpu = ao.wait_tensor(gpu)
                 replayed_views = replay view chain from gpu
     Then redirects backward consumers to use the reloaded/replayed tensors.
 
-    View replay: views share storage with the base tensor. Instead of
-    skipping dealloc for tensors with view descendants used in backward,
-    we replay the view ops from the reloaded tensor and redirect backward
-    consumers to the replayed versions. This allows deallocating ALL
-    offloaded tensors' GPU storage in forward.
+    GPU storage is freed inside ``ao.wait_tensor`` when ``keepalive`` is
+    provided: after the D2H sync completes, the keepalive tensor's storage
+    is released back to the allocator. The ``dep`` argument creates an
+    explicit scheduling dependency that prevents graph reordering passes
+    from moving the wait before the last forward consumer.
+
+    Forward waits are repositioned after the last forward consumer of each
+    GPU tensor's storage chain, maximizing D2H/compute overlap.
+
+    View replay: views share storage with the base tensor. We replay the
+    view ops from the reloaded tensor in backward and redirect backward
+    consumers to the replayed versions.
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
         example_inputs: Example inputs (unused, required by graph pass interface).
+        prefetch_lookahead: Move ao.reload nodes this many layers earlier in
+            the backward graph to overlap H2D with compute.
+        cpu_budget_gb: Maximum CPU memory budget for offloaded activations.
 
     Returns:
         The transformed GraphModule with offload/reload ops inserted.
@@ -535,7 +453,6 @@ def apply_cpu_offload_pass(
 
     # 4. Insert offload/reload/wait_tensor + view replay
     total_bytes = 0
-    dealloc_targets: list[Node] = []
     wait_offload_map: dict[Node, Node] = {}
 
     for node, direct_bwd, view_tree, all_bwd in offloadable:
@@ -588,6 +505,10 @@ def apply_cpu_offload_pass(
         for user in direct_bwd:
             user.replace_input_with(node, wait_node)
 
+        # Store mapping so the remat pass can redirect recomputed nodes
+        # to the reloaded tensor instead of the freed forward tensor.
+        node.meta["cpu_offload_reload_node"] = wait_node
+
         # Replay view tree in backward and redirect view backward users
         replay_map: dict[Node, Node] = {node: wait_node}
         insert_point = wait_node
@@ -610,11 +531,13 @@ def apply_cpu_offload_pass(
             replay_map[view_node] = replay
             insert_point = replay
 
+            # Store mapping so the remat pass can redirect recomputed nodes
+            # that access this view to the replayed backward version.
+            view_node.meta["cpu_offload_reload_node"] = replay
+
             view_bwd = [u for u in view_node.users if _is_backward_node(u)]
             for user in view_bwd:
                 user.replace_input_with(view_node, replay)
-
-        dealloc_targets.append(node)
 
         logger.debug(
             f"CPU offload: offloading {node.name} "
@@ -622,43 +545,32 @@ def apply_cpu_offload_pass(
         )
         total_bytes += _tensor_bytes(val)
 
-    # 4. Per-group forward wait sinking: sink each group's wait_offload to
-    # N groups ahead so GPU memory is freed at group boundaries. Must happen
-    # before dealloc insertion since dealloc deps reference wait nodes.
-    if sink_lookahead > 0:
-        _sink_forward_waits_per_group(gm, wait_offload_map, sink_lookahead)
-
-    # 5. Insert dealloc ops to free GPU storage after all forward consumers.
-    # After view replay above, all backward consumers have been redirected
-    # to replayed views, so _get_storage_chain should find no backward users
-    # and ALL offloaded tensors can be deallocated.
+    # 4b. Move each forward wait to after the last forward consumer of
+    # its GPU tensor. This maximizes D2H/compute overlap and lets
+    # wait_tensor free GPU storage at the optimal point.
+    _AO_OPS = {
+        torch.ops.ao.offload.default,
+        torch.ops.ao.reload.default,
+        torch.ops.ao.wait_tensor.default,
+    }
     node_positions: dict[Node, int] = {n: i for i, n in enumerate(gm.graph.nodes)}
-    dealloc_plan: list[tuple[Node, list[Node], Node]] = []
-    for gpu_node in dealloc_targets:
-        chain_nodes, has_bwd = _get_storage_chain(gpu_node)
-        if has_bwd:
-            logger.warning(
-                f"CPU offload: {gpu_node.name} still has backward users after "
-                "view replay — skipping dealloc"
-            )
+    repositioned = 0
+    for node, direct_bwd, view_tree, all_bwd in offloadable:
+        wait_node = wait_offload_map[node]
+        chain_nodes, has_bwd = _get_storage_chain(node)
+        real_consumers = {n for n in chain_nodes if n.target not in _AO_OPS}
+        if has_bwd or not real_consumers:
             continue
-        if not chain_nodes:
-            continue
-        tensor_deps = [
-            n for n in chain_nodes if isinstance(n.meta.get("val"), torch.Tensor)
-        ]
-        last_consumer = max(chain_nodes, key=lambda n: node_positions[n])
-        dealloc_plan.append((gpu_node, tensor_deps, last_consumer))
+        last_consumer = max(real_consumers, key=lambda n: node_positions.get(n, 0))
+        dep_node = _find_tensor_dep(last_consumer, node_positions)
+        if dep_node is not None:
+            wait_node.args = (*wait_node.args[:2], dep_node)
+            dep_node.append(wait_node)
+        else:
+            last_consumer.append(wait_node)
+        repositioned += 1
 
-    for gpu_node, fwd_users, last_user in dealloc_plan:
-        with gm.graph.inserting_after(last_user):
-            dealloc_node = gm.graph.call_function(
-                torch.ops.ao.dealloc.default,
-                args=(gpu_node, fwd_users),
-            )
-            dealloc_node.meta["val"] = None
-
-    # 6. Per-group backward reload prefetch.
+    # 5. Per-group backward reload prefetch.
     if prefetch_lookahead > 0:
         prefetch_offloads(gm, prefetch_lookahead)
 
@@ -667,7 +579,7 @@ def apply_cpu_offload_pass(
     logger.info(
         f"CPU offload: offloaded {len(offloadable)} tensors "
         f"({total_bytes / 1024 / 1024:.2f} MB), "
-        f"deallocated {len(dealloc_plan)} in forward"
+        f"repositioned {repositioned} forward waits"
     )
     return gm
 
@@ -758,73 +670,27 @@ def cpu_offload_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    prefetch_n_layers: int = 0,
-    force_joint_graph: bool = False,
+    prefetch_n_layers: int = 1,
 ) -> torch.fx.GraphModule:
-    """Two-phase CPU offload pass: tag eligible activations, then insert ops.
-
-    This is the top-level entry point conforming to the graph pass signature.
-
-    **Without SAC**: Tags activations with ``MUST_CPU_OFFLOAD`` and inserts
-    ao:: offload/reload/wait ops directly in the joint graph.
-
-    **With SAC**: Tags MUST_SAVE activations with ``should_offload`` and
-    enables ``config.enable_activation_offloading``, delegating offload/reload
-    insertion to the partitioner. This works because the partitioner inserts
-    ops AFTER the fwd/bwd split, so recomputed backward ops naturally
-    receive reloaded tensors.
+    """Tag eligible activations and insert ao:: offload/reload/wait ops.
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
         example_inputs: Example inputs (unused, required by pass interface).
-        prefetch_n_layers: When > 0, move ao.reload nodes this many layers
-            earlier in the backward graph to overlap H2D with compute.
+        prefetch_n_layers: Move ao.reload nodes this many layers earlier in
+            the backward graph to overlap H2D with compute.
 
     Returns:
         The transformed GraphModule with offload/reload ops inserted.
     """
-    tag_all_offloadable_activations(gm, force_joint_graph=force_joint_graph)
+    tag_all_offloadable_activations(gm)
 
-    has_should_offload = not force_joint_graph and any(
-        node.meta.get("should_offload", False) for node in gm.graph.nodes
+    cpu_mem_budget = float(os.environ.get("OFFLOAD_CPU_MEMORY_BUDGET_GB", "100"))
+    apply_cpu_offload_pass(
+        gm,
+        example_inputs,
+        prefetch_lookahead=prefetch_n_layers,
+        cpu_budget_gb=cpu_mem_budget,
     )
-    if has_should_offload:
-        # Reset the pytorch-side cumulative offload counter so the
-        # partitioner's per-subgraph budget tracking starts fresh.
-        import torch._functorch._activation_offloading.activation_offloading as _ao_mod
-        import torch._functorch.config as functorch_config
-
-        _ao_mod._cumulative_offload_bytes = 0
-
-        sink_la = int(os.environ.get("OFFLOAD_SINK_LOOKAHEAD", "1"))
-        prefetch_la = int(os.environ.get("OFFLOAD_PREFETCH_LOOKAHEAD", "1"))
-        use_dealloc = os.environ.get("OFFLOAD_DEALLOC", "0") == "1"
-
-        cpu_mem_budget = float(os.environ.get("OFFLOAD_CPU_MEMORY_BUDGET_GB", "100"))
-
-        functorch_config.enable_activation_offloading = True
-        functorch_config.activation_offload_separate_stream = True
-        functorch_config.activation_offload_sink_wait = sink_la == 0
-        functorch_config.activation_offload_sink_wait_group_lookahead = sink_la
-        functorch_config.activation_reload_prefetch = prefetch_la == 0
-        functorch_config.activation_reload_prefetch_group_lookahead = prefetch_la
-        functorch_config.activation_offload_dealloc = use_dealloc
-        functorch_config.activation_offload_cpu_memory_budget_gb = cpu_mem_budget
-        logger.info(
-            f"Enabled partitioner-level activation offloading for SAC coexistence "
-            f"(sink_la={sink_la}, prefetch_la={prefetch_la}, dealloc={use_dealloc}, "
-            f"cpu_mem_budget={cpu_mem_budget}GB)"
-        )
-    else:
-        sink_la = int(os.environ.get("OFFLOAD_SINK_LOOKAHEAD", "1"))
-        prefetch_la = int(os.environ.get("OFFLOAD_PREFETCH_LOOKAHEAD", "1"))
-        cpu_mem_budget = float(os.environ.get("OFFLOAD_CPU_MEMORY_BUDGET_GB", "100"))
-        apply_cpu_offload_pass(
-            gm,
-            example_inputs,
-            sink_lookahead=sink_la,
-            prefetch_lookahead=prefetch_la,
-            cpu_budget_gb=cpu_mem_budget,
-        )
 
     return gm

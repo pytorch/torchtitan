@@ -6,7 +6,6 @@
 
 from dataclasses import fields
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -19,12 +18,8 @@ from .parallelize import parallelize_llama
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str | None = None,
 ) -> ModelSpec:
-    kwargs = dict(attn_backend=attn_backend)
-    if moe_comm_backend is not None:
-        kwargs["moe_comm_backend"] = moe_comm_backend
-    base = llama3_configs[flavor](**kwargs)
+    base = llama3_configs[flavor](attn_backend=attn_backend)
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
@@ -34,7 +29,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
     )

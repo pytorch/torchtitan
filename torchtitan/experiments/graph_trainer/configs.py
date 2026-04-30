@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
+from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
@@ -16,12 +17,12 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot"
+    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
-        jit: standard torch.compile() with custom backend
-        aot: explicit joint graph export + custom graph passes
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
+        jit: standard torch.compile() with custom backend (deprecated)
+        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -43,13 +44,38 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
+    memory_policy: Literal["default", "eager", "cpu_offload_all"] = "default"
+    """
+    Memory optimization policy for activation management (SAC, offload).
+        default: save all compute-intensive ops and FSDP all_gathers.
+        eager: alternate mm ops between save/recompute, matching the eager
+            AC policy in torchtitan.distributed.activation_checkpoint.
+        cpu_offload_all: offload all eligible activations to CPU.
+            Work in progress — for development and testing only.
+    """
+
+    inductor_compilation: Literal["regional", "full"] = "regional"
+    """
+    Inductor compilation strategy. Mutually exclusive options:
+        regional: compile tagged regions (e.g. FlexAttention HOPs) with
+            regional_inductor while leaving the rest interpreted.
+        full: compile the entire graph with inductor into optimized
+            Triton kernels. Provides better performance but may change
+            bitwise numerics compared to regional/interpreted execution.
+    """
+
     enable_cudagraph: bool = True
     """When False, skip the cudagraph pass even if the graph is compatible."""
 
-    cpu_offload_prefetch_n_layers: int = 0
-    """When > 0, prefetch reloads this many layers ahead in the backward graph
-    to overlap H2D transfers with compute. Only effective when cpu_offload is
-    in joint_passes."""
+    enable_cpu_offload: bool = False
+    """When True, tag saved activations for CPU offloading after the
+    memory_policy pass. Combines with SAC: memory_policy selects which
+    activations to save vs recompute, then offloading moves saved
+    activations to CPU."""
+
+    cpu_offload_prefetch_n_layers: int = 1
+    """Prefetch reloads this many layers ahead in the backward graph
+    to overlap H2D transfers with compute."""
 
     precompile_artifact_dir: str = ""
     """
@@ -97,6 +123,10 @@ def to_graph_trainer_config(
     ac = d.get("activation_checkpoint")
     if ac is not None and ac.mode != "none":
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+
+    # TODO: graph_trainer doesn't yet support ChunkedCELoss
+    if isinstance(d.get("loss"), ChunkedCELoss.Config):
+        d["loss"] = CrossEntropyLoss.Config()
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).

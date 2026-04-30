@@ -67,15 +67,13 @@ jobs:
         pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "dense"
 
         # Run the graph passes unit tests
-        torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestReassignToPgPass -v
-        pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestApplySACPass -v
-        pytest torchtitan/experiments/graph_trainer/tests/test_passes.py::TestAnnotateModuleFqns -v
+        pytest torchtitan/experiments/graph_trainer/tests/test_passes.py -v
 
         # Run kernel annotation profiler tests (skips if cuda-compat < 13.1)
         pytest torchtitan/experiments/graph_trainer/tests/test_profiler.py -v
 
         # Run the make_fx tracer unit tests
-        pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v -k "TestTraceModule or TestTraceDTensor or TestMetadataPropagation"
+        pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v
 
         # Run precompile unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_precompile.py -v

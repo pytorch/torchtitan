@@ -112,7 +112,7 @@ class VLLMGenerator(Actor, Configurable):
 
     Maintains a vLLM engine synchronized with the Trainer via weight
     sync. ``generate()`` produces a flat list of Completions; reward
-    and advantage computation live in the controller and Grader.
+    and advantage computation live in the controller.
 
     Args:
         config: Generator-specific configuration.
@@ -144,14 +144,29 @@ class VLLMGenerator(Actor, Configurable):
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            assert self.parallelism.data_parallel_shard_degree in (1, -1), (
-                f"Generator does not support data parallel sharding, "
-                f"got dp_shard={self.parallelism.data_parallel_shard_degree}"
-            )
-            assert self.parallelism.data_parallel_replicate_degree == 1, (
-                f"Generator does not support data parallel replication, "
-                f"got dp_replicate={self.parallelism.data_parallel_replicate_degree}"
-            )
+            # Generator only supports TP. vLLM handles its own parallelism
+            # and we only apply TP via the core parallelize function.
+            p = self.parallelism
+            if p.data_parallel_replicate_degree != 1:
+                raise ValueError(
+                    f"Generator does not support data parallel replication, "
+                    f"got dp_replicate={p.data_parallel_replicate_degree}"
+                )
+            if p.pipeline_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support pipeline parallelism, "
+                    f"got pp={p.pipeline_parallel_degree}"
+                )
+            if p.context_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support context parallelism, "
+                    f"got cp={p.context_parallel_degree}"
+                )
+            if p.expert_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support expert parallelism, "
+                    f"got ep={p.expert_parallel_degree}"
+                )
 
     def __init__(
         self,
@@ -243,9 +258,9 @@ class VLLMGenerator(Actor, Configurable):
     ) -> list[Completion]:
         """Generate completions for the given prompts.
 
-        Returns a flat list of length ``len(prompts) * sampling.n``,
-        ordered by input prompt index then sample index within a vLLM
-        RequestOutput.
+        Returns a flat list of length ``len(prompts) * sampling.n``
+        ordered by ``prompt_idx``, with ``sampling.n`` consecutive
+        completions per prompt.
 
         Args:
             prompts: List of prompt strings.
@@ -332,6 +347,9 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=is_rdma_available(),
         )
         self.policy_version = version
+        # Invalidate the KV prefix cache so stale values computed with the
+        # old weights are never reused for new generations.
+        self._engine.reset_prefix_cache()
         logger.debug(
             f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
