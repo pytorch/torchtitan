@@ -13,8 +13,8 @@ them around saved activations to reduce GPU memory.
 
 Offload pattern (forward):
     cpu = ao.offload(gpu_tensor)
-    ... forward consumers use gpu_tensor ...
-    cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor)
+    ... forward consumers read gpu_tensor ...
+    cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor)  # frees gpu_tensor storage
 
 Reload pattern (backward):
     gpu = ao.reload(cpu, device)
@@ -27,6 +27,7 @@ This module works with the make_fx traced joint fwd+bwd graph, using
 """
 
 import operator
+import os
 
 import torch
 
@@ -59,6 +60,7 @@ _VIEW_OPS = frozenset(
         aten.t,
         aten.transpose,
         aten.view,
+        aten._unsafe_view,
         aten.reshape,
         aten.unsqueeze,
         aten.squeeze,
@@ -69,6 +71,9 @@ _VIEW_OPS = frozenset(
         aten.as_strided,
         aten.alias,
         aten.split,
+        aten.narrow,
+        aten.unfold,
+        aten.detach,
     }
 )
 
@@ -86,6 +91,59 @@ def _get_aten_target(node: Node) -> object:
 def _is_view(node: Node) -> bool:
     """Check if a node produces a view (aliased memory, not a new allocation)."""
     return _get_aten_target(node) in _VIEW_OPS
+
+
+def _get_storage_chain(node: Node) -> tuple[set[Node], bool]:
+    """Walk the view chain to find all nodes sharing this tensor's storage.
+
+    Views alias the base tensor's storage, so any node reachable through view
+    edges (and its non-view consumers) depends on the storage being alive.
+
+    Returns:
+        (chain_nodes, has_bwd) where chain_nodes is every forward
+        ``call_function`` node reachable through the view chain (including
+        non-view endpoints) and has_bwd is True if any node in the chain
+        has un-redirected backward consumers.
+    """
+    chain_nodes: set[Node] = set()
+    has_bwd = False
+
+    def _walk(n: Node) -> None:
+        nonlocal has_bwd
+        for user in n.users:
+            if user.op != "call_function":
+                continue
+            if _is_backward_node(user):
+                has_bwd = True
+                continue
+            chain_nodes.add(user)
+            if _is_view(user):
+                _walk(user)
+
+    _walk(node)
+    return chain_nodes, has_bwd
+
+
+def _collect_view_tree(node: Node) -> list[Node]:
+    """BFS collecting all forward view descendants in topological order.
+
+    Views share storage with the base tensor, so they must be replayed from
+    a reloaded tensor to allow deallocating the original GPU storage.
+    """
+    result: list[Node] = []
+    queue = [node]
+    visited = {node}
+    while queue:
+        current = queue.pop(0)
+        for user in current.users:
+            if user in visited or user.op != "call_function":
+                continue
+            if _is_backward_node(user) or not _is_view(user):
+                continue
+            visited.add(user)
+            result.append(user)
+            queue.append(user)
+    return result
 
 
 def _is_collective_or_wait(node: Node) -> bool:
@@ -148,6 +206,22 @@ def _can_offload_node(node: Node) -> bool:
     return _has_offloadable_tensor(node)
 
 
+def _has_recompute_consumer(node: Node) -> bool:
+    """Check if any forward user (or transitive view user) is tagged for recomputation."""
+    for user in node.users:
+        if user.op != "call_function" or _is_backward_node(user):
+            continue
+        policy = user.meta.get("recompute")
+        if policy in (
+            CheckpointPolicy.MUST_RECOMPUTE,
+            CheckpointPolicy.PREFER_RECOMPUTE,
+        ):
+            return True
+        if _is_view(user) and _has_recompute_consumer(user):
+            return True
+    return False
+
+
 # ============================================================
 # Forward/backward node classification for make_fx traced graphs
 # ============================================================
@@ -183,27 +257,34 @@ def _classify_forward_backward(
 # ============================================================
 
 
+def _detect_sac_active(gm: torch.fx.GraphModule) -> bool:
+    """Check if SAC has already tagged nodes in the graph."""
+    for node in gm.graph.nodes:
+        if node.op != "call_function" or _is_backward_node(node):
+            continue
+        policy = node.meta.get("recompute")
+        if policy in (
+            CheckpointPolicy.MUST_SAVE,
+            CheckpointPolicy.PREFER_RECOMPUTE,
+            CheckpointPolicy.MUST_RECOMPUTE,
+        ):
+            return True
+    return False
+
+
 def tag_all_offloadable_activations(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
     """Tag all saved activations eligible for CPU offloading.
 
-    This is a reference implementation that offloads all offloadable
-    activations. In practice, users should tag activations via annotations
-    or graph passes for more fine-grained control over which activations
-    are offloaded.
-
     Sets ``node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD`` on
-    eligible nodes. Eligibility requires:
-      1. Node is a forward node (not ``autograd_backward``)
-      2. Node has a layer index derivable from ``meta["custom"]["module_fqn"]``
-      3. Passes ``_can_offload_node`` (not a view, not tiny, etc.)
-      4. Has at least one backward consumer
+    eligible forward nodes. When SAC is active, only MUST_SAVE nodes are
+    tagged (the surviving activations after recomputation decisions).
+    Without SAC, any forward node with backward consumers is eligible.
 
-    The last layer is skipped when multiple layers exist, since its activations
-    are consumed immediately in backward (offloading adds overhead with no
-    benefit).
+    The last layer is skipped (its activations are consumed immediately
+    in backward).
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
@@ -213,6 +294,7 @@ def tag_all_offloadable_activations(
         The GraphModule with eligible nodes tagged for offload.
     """
     forward_nodes, _ = _classify_forward_backward(gm)
+    sac_active = _detect_sac_active(gm)
 
     # Find all layer IDs to determine the last layer
     all_layer_ids: set[int] = set()
@@ -229,17 +311,29 @@ def tag_all_offloadable_activations(
         if node not in forward_nodes:
             continue
         layer_id = _get_layer_id(node)
-        # Skip the last layer: its activations are consumed immediately in
-        # backward, so offloading adds overhead with no memory benefit.
         if layer_id == _NOT_IN_LAYERS or layer_id == last_layer_id:
             continue
         if not _can_offload_node(node):
             continue
 
-        # Check for backward consumers
-        has_backward_users = any(_is_backward_node(u) for u in node.users)
-        if not has_backward_users:
-            continue
+        existing = node.meta.get("recompute")
+
+        if sac_active:
+            # SAC already resolved recomputation. Only MUST_SAVE nodes are
+            # the surviving activations — safe to offload.
+            if existing != CheckpointPolicy.MUST_SAVE:
+                continue
+        else:
+            if existing in (
+                CheckpointPolicy.MUST_RECOMPUTE,
+                CheckpointPolicy.PREFER_RECOMPUTE,
+            ):
+                continue
+            if _has_recompute_consumer(node):
+                continue
+            _, has_bwd = _get_storage_chain(node)
+            if not has_bwd:
+                continue
 
         node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
         tagged += 1
@@ -257,22 +351,54 @@ def tag_all_offloadable_activations(
 # ============================================================
 
 
+def _find_tensor_dep(node: Node, node_positions: dict[Node, int]) -> Node | None:
+    """Find a tensor-valued node suitable for a scheduling dependency.
+
+    If ``node`` itself produces a tensor, return it. Otherwise (e.g. a
+    multi-output op returning a tuple), search its forward ``getitem``
+    users for a tensor-valued one.
+    """
+    if isinstance(node.meta.get("val"), torch.Tensor):
+        return node
+    for user in node.users:
+        if (
+            user.op == "call_function"
+            and user.target is operator.getitem
+            and isinstance(user.meta.get("val"), torch.Tensor)
+            and not _is_backward_node(user)
+        ):
+            return user
+    return None
+
+
 def apply_cpu_offload_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
+    *,
+    prefetch_lookahead: int = 1,
+    cpu_budget_gb: float = 100.0,
 ) -> torch.fx.GraphModule:
     """Insert ao offload/reload/wait_tensor ops for nodes tagged ``MUST_CPU_OFFLOAD``.
 
     Reads ``node.meta["recompute"] is CheckpointPolicy.MUST_CPU_OFFLOAD`` (set by
     ``tag_all_offloadable_activations``) and inserts:
       Forward:  cpu = ao.offload(gpu_tensor)
+                ... forward consumers use gpu_tensor ...
                 cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor)
+                     (placed after last forward consumer; frees GPU storage)
       Backward: gpu = ao.reload(cpu, device)
                 gpu = ao.wait_tensor(gpu)
-    Then redirects backward consumers to use the reloaded tensor.
+                replayed_views = replay view chain from gpu
+    Then redirects backward consumers to use the reloaded/replayed tensors.
 
-    The reload device is inferred from the original tensor's device
-    (from ``node.meta["val"].device``) before offloading.
+    The forward ``ao.wait_tensor`` is placed after the last forward consumer
+    of the GPU tensor. This maximizes compute-transfer overlap (the D2H copy
+    runs on the transfer stream while forward compute continues) and frees
+    GPU storage as early as possible.
+
+    View replay: views share storage with the base tensor. We replay the
+    view ops from the reloaded tensor in backward and redirect backward
+    consumers to the replayed versions.
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
@@ -281,27 +407,54 @@ def apply_cpu_offload_pass(
     Returns:
         The transformed GraphModule with offload/reload ops inserted.
     """
-    # 1. Collect nodes tagged for offload, with their backward consumers
-    offloadable: list[tuple[Node, list[Node]]] = []
+    # 1. Collect nodes tagged for offload with their backward consumers
+    # (direct and through view chain)
+    offloadable: list[tuple[Node, list[Node], list[Node], list[Node]]] = []
     for node in gm.graph.nodes:
         if node.meta.get("recompute") is not CheckpointPolicy.MUST_CPU_OFFLOAD:
             continue
-        bwd_users = [u for u in node.users if _is_backward_node(u)]
-        if not bwd_users:
+        direct_bwd = [u for u in node.users if _is_backward_node(u)]
+        view_tree = _collect_view_tree(node)
+        all_bwd = list(direct_bwd)
+        for vn in view_tree:
+            all_bwd.extend(u for u in vn.users if _is_backward_node(u))
+        if not all_bwd:
             continue
-        offloadable.append((node, bwd_users))
+        offloadable.append((node, direct_bwd, view_tree, all_bwd))
 
     if not offloadable:
         return gm
 
-    # 2. Build position index for ordering queries (only used for pre-existing
-    # nodes; newly inserted nodes never appear in bwd_users).
+    # 2. Apply CPU memory budget: sort by size descending, accept until budget.
+    budget_bytes = cpu_budget_gb * (1024**3)
+    if budget_bytes > 0:
+        offloadable.sort(key=lambda t: _tensor_bytes(t[0].meta["val"]), reverse=True)
+        filtered = []
+        cumulative = 0
+        for entry in offloadable:
+            nbytes = _tensor_bytes(entry[0].meta["val"])
+            if cumulative + nbytes > budget_bytes:
+                continue
+            cumulative += nbytes
+            filtered.append(entry)
+        logger.info(
+            f"CPU offload budget: selected {len(filtered)}/{len(offloadable)} "
+            f"tensors ({cumulative / 1024**3:.2f} / {cpu_budget_gb:.1f} GB)"
+        )
+        offloadable = filtered
+
+    if not offloadable:
+        return gm
+
+    # 3. Build position index for ordering queries (only used for pre-existing
+    # nodes; newly inserted nodes never appear in all_bwd).
     node_to_index: dict[Node, int] = {n: i for i, n in enumerate(gm.graph.nodes)}
 
-    # 3. Insert offload/reload/wait_tensor ops
+    # 4. Insert offload/reload/wait_tensor + view replay
     total_bytes = 0
+    wait_offload_map: dict[Node, Node] = {}
 
-    for node, bwd_users in offloadable:
+    for node, direct_bwd, view_tree, all_bwd in offloadable:
         val = node.meta.get("val")
         assert (
             val is not None
@@ -317,7 +470,6 @@ def apply_cpu_offload_pass(
             )
             offload_node.meta["val"] = val.to(torch.device("cpu"))
 
-        # --- Forward: wait_tensor for D2H completion (initially after offload) ---
         with gm.graph.inserting_after(offload_node):
             wait_offload_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
@@ -325,8 +477,10 @@ def apply_cpu_offload_pass(
             )
             wait_offload_node.meta["val"] = offload_node.meta["val"]
 
-        # --- Backward: async CPU->GPU reload + wait before first consumer ---
-        first_consumer = min(bwd_users, key=lambda n: node_to_index[n])
+        wait_offload_map[node] = wait_offload_node
+
+        # --- Backward: async CPU->GPU reload before earliest consumer ---
+        first_consumer = min(all_bwd, key=lambda n: node_to_index[n])
 
         with gm.graph.inserting_before(first_consumer):
             reload_node = gm.graph.call_function(
@@ -335,6 +489,7 @@ def apply_cpu_offload_pass(
             )
             reload_node.meta["val"] = val
             reload_node.meta["autograd_backward"] = True
+            reload_node.meta["partitioner_tag"] = "must_be_in_backward"
 
         with gm.graph.inserting_before(first_consumer):
             wait_node = gm.graph.call_function(
@@ -343,16 +498,80 @@ def apply_cpu_offload_pass(
             )
             wait_node.meta["val"] = val
             wait_node.meta["autograd_backward"] = True
+            wait_node.meta["partitioner_tag"] = "must_be_in_backward"
 
-        # Redirect backward consumers to the reloaded tensor
-        for user in bwd_users:
+        # Redirect direct backward users to the reloaded tensor
+        for user in direct_bwd:
             user.replace_input_with(node, wait_node)
+
+        # Replay view tree in backward and redirect view backward users
+        replay_map: dict[Node, Node] = {node: wait_node}
+        insert_point = wait_node
+
+        for view_node in view_tree:
+            new_args = tuple(
+                replay_map.get(a, a) if isinstance(a, Node) else a
+                for a in view_node.args
+            )
+            with gm.graph.inserting_after(insert_point):
+                replay = gm.graph.call_function(
+                    view_node.target,
+                    args=new_args,
+                    kwargs=view_node.kwargs,
+                )
+                replay.meta["val"] = view_node.meta.get("val")
+                replay.meta["autograd_backward"] = True
+                replay.meta["partitioner_tag"] = "must_be_in_backward"
+
+            replay_map[view_node] = replay
+            insert_point = replay
+
+            view_bwd = [u for u in view_node.users if _is_backward_node(u)]
+            for user in view_bwd:
+                user.replace_input_with(view_node, replay)
 
         logger.debug(
             f"CPU offload: offloading {node.name} "
             f"({_tensor_bytes(val) / 1024:.1f} KB, {val.shape})"
         )
         total_bytes += _tensor_bytes(val)
+
+    # 4b. Move each forward wait to after the last forward consumer of
+    # its GPU tensor. This maximizes D2H/compute overlap and lets
+    # wait_tensor free GPU storage at the optimal point.
+    _AO_OPS = {
+        torch.ops.ao.offload.default,
+        torch.ops.ao.reload.default,
+        torch.ops.ao.wait_tensor.default,
+    }
+    node_positions: dict[Node, int] = {n: i for i, n in enumerate(gm.graph.nodes)}
+    repositioned = 0
+    for node, direct_bwd, view_tree, all_bwd in offloadable:
+        wait_node = wait_offload_map[node]
+        chain_nodes, has_bwd = _get_storage_chain(node)
+        real_consumers = {n for n in chain_nodes if n.target not in _AO_OPS}
+        if has_bwd or not real_consumers:
+            continue
+        last_consumer = max(real_consumers, key=lambda n: node_positions.get(n, 0))
+        # Find a tensor-valued node at or after last_consumer for the dep arg.
+        # Multi-output ops (e.g. attention) return tuples; use a getitem child.
+        dep_node = _find_tensor_dep(last_consumer, node_positions)
+        if dep_node is not None:
+            wait_node.args = (*wait_node.args[:2], dep_node)
+            # Place after dep_node (which may be a getitem child of last_consumer)
+            dep_node.append(wait_node)
+        else:
+            last_consumer.append(wait_node)
+        repositioned += 1
+
+    logger.info(
+        f"CPU offload: repositioned {repositioned} forward waits "
+        f"to after last consumer"
+    )
+
+    # 5. Per-group backward reload prefetch.
+    if prefetch_lookahead > 0:
+        prefetch_offloads(gm, prefetch_lookahead)
 
     gm.graph.lint()
     gm.recompile()
@@ -363,22 +582,113 @@ def apply_cpu_offload_pass(
     return gm
 
 
+def _get_reload_layer(reload_node: Node) -> int:
+    """Get the layer ID of an offloaded activation from the forward op chain.
+
+    Traces: ao.reload(fwd_wait) -> fwd_wait = ao.wait_tensor(offload, orig)
+    -> offload = ao.offload(orig) -> orig has module_fqn.
+    """
+    fwd_wait = reload_node.args[0] if reload_node.args else None
+    if not isinstance(fwd_wait, Node):
+        return _NOT_IN_LAYERS
+    offload = fwd_wait.args[0] if fwd_wait.args else None
+    if not isinstance(offload, Node):
+        return _NOT_IN_LAYERS
+    original = offload.args[0] if offload.args else None
+    if not isinstance(original, Node):
+        return _NOT_IN_LAYERS
+    return _get_layer_id(original)
+
+
+def prefetch_offloads(
+    gm: torch.fx.GraphModule,
+    n_layers: int,
+) -> None:
+    """Move ao.reload nodes N layers earlier in the backward for prefetching.
+
+    For each ao.reload serving layer L's backward, moves it to just before
+    layer (L + n_layers)'s first backward wait node. The corresponding
+    ao.wait_tensor stays in place, so synchronization still happens just
+    before the data is needed. This overlaps the H2D transfer with N layers
+    of backward compute.
+
+    Layer IDs are determined from the forward op chain (ao.reload ->
+    ao.wait_tensor -> ao.offload -> original forward node) rather than
+    backward node metadata, since backward nodes may not carry module_fqn
+    annotations in all tracing modes.
+    """
+    reload_info: list[tuple[Node, Node, int]] = []
+    for node in gm.graph.nodes:
+        if not (
+            node.op == "call_function"
+            and node.target == torch.ops.ao.reload.default
+            and _is_backward_node(node)
+        ):
+            continue
+        wait_node = next(
+            (u for u in node.users if u.target == torch.ops.ao.wait_tensor.default),
+            None,
+        )
+        if wait_node is None:
+            continue
+
+        layer_id = _get_reload_layer(node)
+        if layer_id != _NOT_IN_LAYERS:
+            reload_info.append((node, wait_node, layer_id))
+
+    if not reload_info:
+        return
+
+    node_to_idx: dict[Node, int] = {n: i for i, n in enumerate(gm.graph.nodes)}
+    reload_info.sort(key=lambda x: node_to_idx[x[1]])
+
+    layer_first_wait: dict[int, Node] = {}
+    for _reload, wait, lid in reload_info:
+        if lid not in layer_first_wait:
+            layer_first_wait[lid] = wait
+
+    max_layer = max(layer_first_wait.keys())
+
+    moved = 0
+    for reload_node, _wait_node, layer_id in reload_info:
+        target_layer = min(layer_id + n_layers, max_layer)
+        if target_layer == layer_id or target_layer not in layer_first_wait:
+            continue
+
+        layer_first_wait[target_layer].prepend(reload_node)
+        moved += 1
+
+    if moved > 0:
+        logger.info(
+            f"CPU offload prefetch: moved {moved} reloads " f"{n_layers} layer(s) ahead"
+        )
+
+
 def cpu_offload_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
+    *,
+    prefetch_n_layers: int = 1,
 ) -> torch.fx.GraphModule:
-    """Two-phase CPU offload pass: tag eligible activations, then insert ops.
-
-    This is the top-level entry point conforming to the graph pass signature.
-    It first tags eligible activations with ``tag_all_offloadable_activations``,
-    then inserts offload/reload/wait ops with ``apply_cpu_offload_pass``.
+    """Tag eligible activations and insert ao:: offload/reload/wait ops.
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
         example_inputs: Example inputs (unused, required by pass interface).
+        prefetch_n_layers: Move ao.reload nodes this many layers earlier in
+            the backward graph to overlap H2D with compute.
 
     Returns:
         The transformed GraphModule with offload/reload ops inserted.
     """
     tag_all_offloadable_activations(gm)
-    return apply_cpu_offload_pass(gm, example_inputs)
+
+    cpu_mem_budget = float(os.environ.get("OFFLOAD_CPU_MEMORY_BUDGET_GB", "100"))
+    apply_cpu_offload_pass(
+        gm,
+        example_inputs,
+        prefetch_lookahead=prefetch_n_layers,
+        cpu_budget_gb=cpu_mem_budget,
+    )
+
+    return gm

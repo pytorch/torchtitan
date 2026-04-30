@@ -146,6 +146,7 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
+    compile_config = config.compile
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -155,9 +156,12 @@ def compile_time_passes(
             tag_with_memory_policy_pass,
             config=config,
         ),
-        # TODO: currently either SAC or CPU offload is used, not both at the
-        # same time. Composability between these two passes is untested.
-        apply_cpu_offload_pass,
+        # apply_cpu_offload_pass is a no-op unless tag_with_memory_policy_pass
+        # tagged nodes with MUST_CPU_OFFLOAD (via memory_policy="cpu_offload_all").
+        functools.partial(
+            apply_cpu_offload_pass,
+            prefetch_lookahead=compile_config.cpu_offload_prefetch_n_layers,
+        ),
         selective_activation_remat_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
@@ -167,12 +171,8 @@ def compile_time_passes(
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    inductor_compilation = config.compile.inductor_compilation
+    inductor_compilation = compile_config.inductor_compilation
     if inductor_compilation == "full":
-        # Compile the entire graph into optimized Triton kernels. Must
-        # be terminal — the FX graph is no longer authoritative after
-        # this pass, so custom_codegen_pass and
-        # insert_kernel_annotations_pass cannot follow.
         passes.append(full_inductor_compilation_pass)
     if inductor_compilation == "regional":
         # FlexAttention HOPs must be compiled (via regional_inductor) to

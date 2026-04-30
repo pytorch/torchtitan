@@ -549,7 +549,13 @@ def get_joint_custom_passes_from_config(
                 f"Available joint passes: {list(AVAILABLE_JOINT_PASSES.keys())}"
             )
 
-        joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
+        pass_fn = AVAILABLE_JOINT_PASSES[pass_name]
+
+        if pass_name == "cpu_offload":
+            prefetch_n = getattr(compile_config, "cpu_offload_prefetch_n_layers", 1)
+            pass_fn = functools.partial(pass_fn, prefetch_n_layers=prefetch_n)
+
+        joint_custom_passes.append(pass_fn)
 
     if joint_pass_names:
         logger.info(f"Using joint passes from config: {joint_pass_names}")
