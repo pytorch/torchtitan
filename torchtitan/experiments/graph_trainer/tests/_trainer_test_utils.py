@@ -26,6 +26,7 @@ def build_minimal_trainer(
     compile_passes: list[str] | None = None,
     compile_joint_passes: list[str] | None = None,
     tokenizer=None,
+    fsdp_reshard_after_forward: str = "default",
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
@@ -44,17 +45,23 @@ def build_minimal_trainer(
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 passes=[] if compile_passes is None else list(compile_passes),
-                joint_passes=[]
-                if compile_joint_passes is None
-                else list(compile_joint_passes),
+                joint_passes=(
+                    [] if compile_joint_passes is None else list(compile_joint_passes)
+                ),
                 precompile_artifact_dir="",
                 memory_policy="default",
+                inductor_compilation="regional",
                 enable_cudagraph=True,
                 debug_graph_passes=False,
             ),
             model_spec=SimpleNamespace(model=model_config),
             activation_checkpoint=ActivationCheckpointConfig(
                 mode=activation_checkpoint_mode
+            ),
+            parallelism=SimpleNamespace(
+                pipeline_parallel_degree=1,
+                fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+                enable_async_tensor_parallel=False,
             ),
         )
         trainer._fwd_bwd_step_module = None

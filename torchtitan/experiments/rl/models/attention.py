@@ -14,7 +14,7 @@ from torch.nn.attention import (
     current_flash_attention_impl,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import LocalMapInnerAttention
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import has_cuda_capability
 from vllm.model_executor.layers.attention import Attention
@@ -198,15 +198,13 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         )
 
 
-class VLLMAttentionWrapper(LocalMapInnerAttention):
+class VLLMAttentionWrapper(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
     but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
 
-    Receives ``(bs, seq, heads, dim)`` layout from GQAttention. DTensor with
-    ``Shard(2)`` placements is handled by the base class
-    ``LocalMapInnerAttention.__call__``.
+    Receives ``(bs, seq, heads, dim)`` layout from GQAttention.
 
     Used as ``inner_attention`` in GQAttention via Config-based construction.
     """
@@ -219,7 +217,7 @@ class VLLMAttentionWrapper(LocalMapInnerAttention):
     _layer_counter: itertools.count = itertools.count()
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LocalMapInnerAttention.Config):
+    class Config(Module.Config):
         hidden_size: int
         num_heads: int
         num_kv_heads: int
@@ -227,7 +225,7 @@ class VLLMAttentionWrapper(LocalMapInnerAttention):
         scale: float | None = None
 
     def __init__(self, config: Config) -> None:
-        super().__init__(config)
+        super().__init__()
 
         from vllm.config import get_current_vllm_config
 

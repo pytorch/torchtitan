@@ -22,12 +22,12 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
     get_sliding_window_mask_mod,
-    LocalMapInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -45,7 +45,7 @@ class Attention(BaseAttention):
         dim: int
         qkv_linear: BaseQKVLinear.Config
         wo: Linear.Config  # output projection
-        inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
+        inner_attention: Module.Config = dataclasses.field(
             default_factory=FlexAttention.Config
         )
         mask_type: str = "causal"

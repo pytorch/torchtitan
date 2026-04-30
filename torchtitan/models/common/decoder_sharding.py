@@ -7,22 +7,23 @@
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import MeshDimName, NamedPlacement, ShardingConfig
+from torchtitan.protocols.sharding import LocalMapConfig, NamedPlacement, ShardingConfig
+from torchtitan.protocols.types import MeshAxisName
 
-DP_REPLICATE = MeshDimName.DP_REPLICATE
-DP_SHARD = MeshDimName.DP_SHARD
-CP = MeshDimName.CP
-TP = MeshDimName.TP
+DP_REPLICATE = MeshAxisName.DP_REPLICATE
+DP_SHARD = MeshAxisName.DP_SHARD
+CP = MeshAxisName.CP
+TP = MeshAxisName.TP
 
 
 def dense_param_placement(*, tp: Placement) -> NamedPlacement:
     """Placement for dense-path params/buffers.
 
-    DP/CP dims are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
+    DP/CP axes are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
     DP_SHARD post-parallelize. TP placement is caller-specified.
 
     TODO: Ideally placements would be defined on a computation mesh that
-    has a single DP dim (no DP_REPLICATE vs DP_SHARD distinction). That
+    has a single DP axis (no DP_REPLICATE vs DP_SHARD distinction). That
     requires a mesh switch between FSDP storage and computation — likely
     resolved by FlexShard. Revisit once FlexShard lands.
     """
@@ -41,7 +42,7 @@ def dense_activation_placement(
 ) -> NamedPlacement:
     """Placement for dense-path activations.
 
-    DP dims are batch-sharded (``Shard(0)``). CP defaults to seq-sharded
+    DP axes are batch-sharded (``Shard(0)``). CP defaults to seq-sharded
     (``Shard(1)``); override to ``Replicate()`` for K/V after all-gather.
     TP placement is caller-specified.
     """
@@ -122,7 +123,7 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
-    Shared by llama3, qwen3, and llama4 — all three have a GQA block whose
+    Shared by llama3, qwen3, and llama4 -- all three have a GQA block whose
     ``forward(x, rope_cache, ...)`` takes ``x`` (per-SP layout, gathered to
     Replicate internally) and a plain ``rope_cache`` (annotated Replicate).
 
@@ -146,6 +147,30 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
     attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+
+
+def set_gqa_inner_attention_local_map(
+    inner_attention_cfg, *, return_lse: bool = False
+) -> None:
+    """Install a ``LocalMapConfig`` on an inner-attention config.
+
+    q/k/v arrive as ``(bs, seq, heads, head_dim)`` DTensors with heads
+    TP-sharded (``Shard(2)``), regardless of SP. ``local_map`` converts them
+    to local tensors before the kernel runs, then wraps outputs back.
+
+    ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
+    GPT-OSS's flash attention with ``return_lse=True``); both outputs share
+    the same heads-sharded placement.
+    """
+    qkv_placements: NamedPlacement = {TP: Shard(2)}
+    num_outputs = 2 if return_lse else 1
+    inner_attention_cfg.sharding_config = ShardingConfig(
+        local_map=LocalMapConfig(
+            in_placements=(qkv_placements, qkv_placements, qkv_placements),
+            out_placements=(qkv_placements,) * num_outputs,
+            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
 
 
 def set_dense_ffn_sharding(
@@ -186,7 +211,7 @@ def set_decoder_sharding_config(
     activation_tp: Placement = Shard(1) if enable_sp else Replicate()
     loss_tp: Placement = Shard(-1) if loss_parallel else Replicate()
 
-    # freqs_cis buffer on the decoder root: Replicate on all dims.
+    # freqs_cis buffer on the decoder root: Replicate on all axes.
     config.sharding_config = ShardingConfig(
         state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
     )

@@ -19,7 +19,7 @@ from .parallelize import parallelize_deepseekv3
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
 ) -> ModelSpec:
     base = deepseekv3_configs[flavor](
         attn_backend=attn_backend, moe_comm_backend=moe_comm_backend

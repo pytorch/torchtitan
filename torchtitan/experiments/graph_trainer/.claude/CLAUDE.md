@@ -23,11 +23,17 @@ bound during pass construction in `construct_default_graph_passes` via
 parameters. The apply function is a generic pass runner and must not contain
 pass-specific arguments.
 
-## Memory Policy Framework
+## Flexible Memory Policy Framework
 
-`tag_with_memory_policy_pass` is the unified framework for activation memory
-management — selective activation checkpointing (SAC), CPU offload, and
-mixtures of both. It is a two-step process:
+PyTorch's module-level `torch.utils.checkpoint` and eager SAC make
+coarse save-or-recompute decisions for an entire module's output, and
+composing activation checkpointing with CPU offload is difficult. This
+framework instead operates on the FX graph at individual tensor
+granularity: each activation can independently be saved, recomputed, or
+offloaded, and different strategies mix freely within a single layer.
+
+`tag_with_memory_policy_pass` is the unified entry point. It is a
+two-step process:
 
 1. **Tag nodes.** Each saved forward activation is tagged with one of:
    - `MUST_SAVE` — keep the activation in GPU memory.
@@ -48,6 +54,13 @@ mixtures of both. It is a two-step process:
 The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
+
+**Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
+prints all forward nodes consumed by backward, grouped by layer with
+identical patterns consolidated. Shows memory, dtype, policy
+(SAVE/RECOMPUTE/OFFLOAD), shape, submodule, target op, and source location.
+It runs automatically at the end of `tag_with_memory_policy_pass`,
+logging to both `logger.debug` and tlparse (via `trace_structured`).
 
 ## Don't Modify Core for This Experiment
 
@@ -148,6 +161,40 @@ def my_pass(gm, example_inputs):
 diff /tmp/my_pass_before.txt /tmp/my_pass_after.txt
 ```
 
+### Printing and Inspecting Tensors Inside a Compiled Function
+
+To inspect tensor values or gradients *inside* `torch.compile` without graph
+breaks:
+
+- **Simple printing**: `torch._higher_order_ops.print("norm={}", x.norm())` —
+  format-string, forward-only. DTensors print each rank's local view with an
+  automatic `[rank N]` prefix.
+- **Gradient norms**: `from torch.utils.debug_log import debug_grad_log` —
+  call on intermediates (not direct graph inputs); fires during backward and
+  logs per-tensor gradient norms.
+- **Custom logic** (arbitrary Python, file logging, rank filtering, fwd+bwd):
+  compose `@leaf_function` with `@fn.register_multi_grad_hook` from
+  `torch._dynamo.decorators`, following the pattern in
+  `torch/utils/debug_log.py`:
+
+  ```python
+  from torch._dynamo.decorators import leaf_function
+
+  @leaf_function
+  def log_tensor(x, tag=""):
+      return None  # no-op in forward
+
+  @log_tensor.register_fake
+  def log_tensor_fake(x, tag=""):
+      return None
+
+  @log_tensor.register_multi_grad_hook
+  def log_tensor_hook(x_grad, tag=""):  # non-tensor args passed through unchanged
+      print(f"[{tag}][bwd] grad_norm={x_grad.norm():.4f}")
+
+  log_tensor(x, "after_add")
+  ```
+
 ### Benchmark
 
 Use `./run_train.sh` with a small number of steps. Disable tensorboard,
@@ -234,6 +281,28 @@ This verifies that the aot_fx_trace path produces bitwise identical losses
 and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
+
+### Async Tensor Parallel (micro-pipeline TP)
+
+Enable with `--parallelism.enable_async_tensor_parallel`. This fuses
+all-gather + matmul and matmul + reduce-scatter into pipelined ops using
+symmetric memory (NVLink).
+
+**When to use:**
+- TP is enabled and the model has large hidden dimensions (shard_dim >= 1024
+  after TP split; e.g. llama3 8B dim=4096 with TP=4 gives shard=1024).
+- Below this threshold the pipeline chunking overhead exceeds the overlap
+  benefit — the pass silently skips small shards.
+- Requires NVLink-connected GPUs (H100, A100 NVSwitch, etc.).
+
+**Example:**
+```bash
+NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.tensor_parallel_degree=4 \
+    --parallelism.enable_async_tensor_parallel \
+    --dataloader.dataset c4_test
+```
 
 ### CUDA Graph Kernel Annotations
 

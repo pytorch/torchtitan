@@ -124,7 +124,7 @@ def _make_gptoss_experts_config(
     layer_id: int,
     top_k: int,
     score_before_experts: bool,
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GptOssGroupedExperts.Config:
     """Build a fully-specified GptOssGroupedExperts.Config for a single layer."""
@@ -160,7 +160,7 @@ def _build_gptoss_layers(
     score_before_experts: bool,
     load_balance_coeff: float,
     fuse_qkv: bool = False,
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
@@ -212,7 +212,7 @@ def _build_gptoss_layers(
 
 
 def _debugmodel(
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str,
 ) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
@@ -254,7 +254,7 @@ def _debugmodel(
 
 
 def _20b(
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -296,7 +296,7 @@ def _20b(
 
 
 def _120b(
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -346,8 +346,7 @@ gptoss_configs = {
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str = "standard",
     quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     config = gptoss_configs[flavor](

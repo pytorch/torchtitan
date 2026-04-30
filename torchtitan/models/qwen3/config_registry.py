@@ -311,7 +311,7 @@ def qwen3_moe_debug() -> Trainer.Config:
 
 def qwen3_moe_debug_ep() -> Trainer.Config:
     config = qwen3_moe_debug()
-    config.model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
+    config.model_spec = model_registry("debugmodel_moe")
     return config
 
 

@@ -13,6 +13,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
+    set_gqa_inner_attention_local_map,
 )
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ def set_llama3_sharding_config(
 
     Specs are populated unconditionally — the mesh actually passed to
     ``Module.parallelize()`` at runtime determines which declarations
-    apply. Declarations for mesh dims that aren't enabled (e.g. ``TP``
+    apply. Declarations for mesh axes that aren't enabled (e.g. ``TP``
     placements under FSDP-only) are skipped at parallelize time.
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
@@ -61,6 +62,7 @@ def _set_llama3_layer_sharding(
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
+    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(
