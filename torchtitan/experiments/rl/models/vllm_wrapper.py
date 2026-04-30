@@ -27,6 +27,7 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+from vllm.compilation import codegen as _codegen
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -54,6 +55,32 @@ def _dtensor_safe_weak_ref_tensor(tensor):
 _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 
 
+# NOTE: Monkeypatch vLLM's _node_ref to handle DTensor placement types
+# whose repr() uses unqualified class names not available in the generated
+# code's exec namespace (which only has `import torch`).
+_original_node_ref = _codegen._node_ref
+
+# TODO: Followup with core vLLM fix
+# https://github.com/pytorch/torchtitan/issues/3067
+def _patched_node_ref(arg):
+    try:
+        from torch.distributed.tensor.placement_types import Partial, Placement
+
+        if isinstance(arg, Placement):
+            cls = type(arg)
+            # Partial.__repr__ leaves reduce_op unquoted (e.g. "Partial(sum)")
+            # which would resolve to the builtin sum, not the string "sum".
+            if isinstance(arg, Partial):
+                return f"{cls.__module__}.{cls.__name__}({arg.reduce_op!r})"
+            return f"{cls.__module__}.{repr(arg)}"
+    except ImportError:
+        pass
+    return _original_node_ref(arg)
+
+
+_codegen._node_ref = _patched_node_ref
+
+
 def create_torchtitan_config_from_vllm_config(
     vllm_config: VllmConfig,
 ) -> tuple[ParallelDims, ParallelismConfig]:
@@ -74,7 +101,7 @@ def create_torchtitan_config_from_vllm_config(
         Tuple of (ParallelDims, ParallelismConfig) mapped from vLLM config
 
     Note:
-        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
+        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1)
         in inference. These are set to default values.
     """
     world_size = dist.get_world_size()
@@ -87,7 +114,6 @@ def create_torchtitan_config_from_vllm_config(
         tp=parallel_config.tensor_parallel_size,
         pp=parallel_config.pipeline_parallel_size,
         ep=1,
-        etp=1,
         world_size=world_size,
     )
 
@@ -98,7 +124,8 @@ def create_torchtitan_config_from_vllm_config(
         tensor_parallel_degree=parallel_config.tensor_parallel_size,
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=1,
-        expert_tensor_parallel_degree=1,
+        disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
+        enable_sequence_parallel=False,
     )
 
     logger.info(
@@ -178,27 +205,47 @@ class TorchTitanVLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
+        # Create ParallelDims and configs from vLLM config at runtime.
+        self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
+            vllm_config
+        )
+
+        # Fill sharding configs on the config BEFORE build so every sub-module
+        # is constructed with its ShardingConfig attached (required by the
+        # declarative model.parallelize() API).
+        # TODO: Refactor update_from_config to accept ParallelismConfig
+        # directly instead of requiring a trainer_config wrapper.
+        from types import SimpleNamespace
+
+        from torchtitan.config import DebugConfig, TrainingConfig
+
+        self.config.update_from_config(
+            trainer_config=SimpleNamespace(
+                training=TrainingConfig(),
+                parallelism=parallelism,
+                debug=DebugConfig(),
+            )
+        )
+
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
 
         # RoPE config from model for cache extension
         self.rope_config = self.config.rope
 
-        # Create ParallelDims and configs from vLLM config at runtime.
-        # vLLM config contains the tensor_parallel_size from command-line args
-        # and this will be consistent across all worker processes.
-        self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
-            vllm_config
-        )
+        # Apply parallelism using the model's own parallelize function.
+        # AC and compile are explicitly disabled; skip_dp=True skips FSDP.
+        from torchtitan.config import ActivationCheckpointConfig, CompileConfig
 
-        # NOTE: We need to apply parallelize within model.__init__ because vllm
-        # doesn't separate model creation and parallelism application and instead
-        # requires parallelization to be done inside model constructor.
-        self.model = self.parallelize_fn(
-            model=self.model,
+        self.parallelize_fn(
+            self.model,
             parallel_dims=self.parallel_dims,
+            training=TrainingConfig(),
             parallelism=parallelism,
-            has_position_id=True,  # vLLM always passes positions explicitly
+            compile_config=CompileConfig(enable=False),
+            ac_config=ActivationCheckpointConfig(mode="none"),
+            dump_folder="",
+            skip_dp=True,
         )
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
@@ -338,7 +385,11 @@ class TorchTitanVLLMModelWrapper(Module):
                 ],
             )
 
-        logits = self.model.output(hidden_states)
+        logits = self.model.lm_head(hidden_states)
+
+        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
+        if isinstance(logits, DTensor):
+            logits = logits.to_local()
 
         return logits
 

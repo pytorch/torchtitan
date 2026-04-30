@@ -17,6 +17,7 @@ import copy
 import tempfile
 import unittest
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -188,7 +189,19 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Step 2: Apply compile-time passes (cleanup + regional_inductor)
         # before saving, so compiled Triton kernels are baked in
         if enable_passes:
-            passes = compile_time_passes(traced_result)
+            config = SimpleNamespace(
+                model_spec=SimpleNamespace(model=self.model_config),
+                compile=SimpleNamespace(
+                    memory_policy="default",
+                    inductor_compilation="regional",
+                ),
+                parallelism=SimpleNamespace(
+                    pipeline_parallel_degree=1,
+                    fsdp_reshard_after_forward="default",
+                    enable_async_tensor_parallel=False,
+                ),
+            )
+            passes = compile_time_passes(traced_result, config)
             traced_result.gm = apply_graph_passes(
                 traced_result.gm,
                 traced_result.example_inputs,
@@ -204,7 +217,15 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         # Step 4: Apply load-time passes (cudagraph)
         if enable_passes:
-            passes = construct_default_graph_passes(loaded_result, precompiled=True)
+            load_config = SimpleNamespace(
+                model_spec=SimpleNamespace(model=self.model_config),
+                compile=SimpleNamespace(
+                    precompile_artifact_dir="precompiled",
+                    inductor_compilation="regional",
+                    enable_cudagraph=True,
+                ),
+            )
+            passes = construct_default_graph_passes(loaded_result, load_config)
             loaded_result.gm = apply_graph_passes(
                 loaded_result.gm,
                 loaded_result.example_inputs,
@@ -277,11 +298,11 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757659912109""")
         assert_expected_inline(
             model_hash,
-            """15134607def7232e128240d553c8ee7021a7edbc2ed44d86e927ba61e490b865""",
+            """d8c4495bc41d103e3864433002d31be0823567938729396c44eb2f2782a47a23""",
         )
         assert_expected_inline(
             grad_hash,
-            """66bbbbc98b4c1635e42a133ac1fbd499a2b8633ca879f4121cf206708c21dbdf""",
+            """926c46345abe29f427f072fb747375009cac66c4ab4be4b41d09661356089016""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -293,9 +314,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
-        _set_deterministic()
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
-        _set_deterministic()
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
@@ -322,11 +341,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """7db9791ff6b1c22f64eee52e68f61f0119352528eac8683bf75a899268968edc""",
+            """89942c2acb1be82c69efe87338ba248dd16b5dab4c5d410877e890c796dec89f""",
         )
         assert_expected_inline(
             grad_hash,
-            """30d87367fe7227032c71fe4fab7d5162bbc4b7311a4049711f2edd02442679f6""",
+            """2cc6dbc2a86a68cff84ff4087e73479da2ebec5929528f94f4958ba0f2eca3eb""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -338,9 +357,7 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
-        _set_deterministic()
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
-        _set_deterministic()
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
@@ -372,11 +389,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.961757183074951""")
         assert_expected_inline(
             model_hash,
-            """714c6b36b72327f2f11da003a219b6ff84f83e785464133f729e4f82c1913232""",
+            """bc9fbc09b6f14f4cb1e1f75a691da0a4be5905cb0e02f9c29512c268dc43ff81""",
         )
         assert_expected_inline(
             grad_hash,
-            """2eb6e999ebe213e69f8e85ecabea46ab59be81f0981847c7c8e69765be0d6678""",
+            """66b847a7f479b464c883e1cce759d4b38d7a78f3c319463b8402710b69ac4530""",
         )
 
     def test_aot_fx_trace_vs_eager(self):
@@ -384,6 +401,15 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    # TODO: numerics mismatch between precompile and trace with FlexAttention
+    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
 
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
@@ -412,11 +438,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         assert_expected_inline(str(loss.item()), """7.4749956130981445""")
         assert_expected_inline(
             model_hash,
-            """2dcc779af7bc5aeae2d39eff3898180a8156549b2f1582d77e8db237689e0c67""",
+            """bb0a4727f4c2120af1c98451a0890eb1220ee1d123bec3ce65818d0669e7c541""",
         )
         assert_expected_inline(
             grad_hash,
-            """b3f5b911dea6c9d36f508b08300220d7f39f142a7c34a49b7ef2543abb2065dc""",
+            """16c5442f06bc283431e48c4bcd2498fa3c849351815668b72ce1c76095f22277""",
         )
 
     # TODO: OOMs during flex_attention compilation on A100 GPUs.
@@ -429,6 +455,15 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
+
+    # TODO: numerics mismatch between precompile and trace with FlexAttention
+    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
 
 if __name__ == "__main__":

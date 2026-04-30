@@ -12,7 +12,6 @@ Some configs live near their owner instead of here:
   - OptimizersContainer.Config      (in components/optimizer.py)
   - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)
-  - ModelConvertersContainer.Config  (in protocols/model_converter.py)
   - CheckpointManager.Config        (in components/checkpoint.py)
 
 Configs without a clear single owner (or with circular-import constraints)
@@ -222,36 +221,10 @@ class ParallelismConfig:
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
-    Currently, etp is either 1 or is the same as tp.
-
-    Note that this is still an experimental feature. Some constraints will be
-    relaxed soon when we have more flexible DeviceMesh support.
-    """
-
-    expert_tensor_parallel_degree: int = 1
-    """
-    Expert tensor parallelism degree. 1 means disabled. No effect for non-MoE models, or when ep = 1.
-    With this option, the tensor parallel degree on routed experts can be different from that on other params.
-    Currently, we only support either
-    - [partial dp -> ep] etp = tp
-    - [partial dp + all tp -> ep] etp = 1
-    Note that this is still an experimental feature.
-    """
-
-    expert_parallel_comm_backend: Literal["standard", "deepep", "hybridep"] = "standard"
-    """
-    Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
-
-    - "standard": Uses PyTorch all-to-all collectives (default)
-    - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
-    - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
-
-    DeepEP/HybridEP requires installation:
-    https://github.com/deepseek-ai/DeepEP.
-
-    For HybridEP, SM configuration can be set via environment variables:
-    - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
-    - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
+    Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
+    (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
+    EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
+    pp and dp_replicate are outer dimensions unaffected by this constraint.
     """
 
 

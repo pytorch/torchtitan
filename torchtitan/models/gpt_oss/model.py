@@ -21,12 +21,12 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
     get_sliding_window_mask_mod,
-    LocalMapInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -44,7 +44,7 @@ class Attention(BaseAttention):
         dim: int
         qkv_linear: BaseQKVLinear.Config
         wo: Linear.Config  # output projection
-        inner_attention: LocalMapInnerAttention.Config = dataclasses.field(
+        inner_attention: Module.Config = dataclasses.field(
             default_factory=FlexAttention.Config
         )
         mask_type: str = "causal"
@@ -215,7 +215,6 @@ class GptOssModel(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
-                # pyrefly: ignore [missing-attribute]
                 n_kv_heads = self.layers[0].attention.n_kv_heads
                 if n_heads % tp != 0:
                     raise ValueError(
@@ -225,6 +224,14 @@ class GptOssModel(Decoder):
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
+
+            from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
+
+            set_gpt_oss_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_sp=parallelism.enable_sequence_parallel,
+            )
 
         # pyrefly: ignore [bad-override]
         def get_nparams_and_flops(

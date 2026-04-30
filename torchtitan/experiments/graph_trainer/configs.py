@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import Literal
 
+from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
@@ -16,12 +17,12 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot"
+    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
-        jit: standard torch.compile() with custom backend
-        aot: explicit joint graph export + custom graph passes
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
+        jit: standard torch.compile() with custom backend (deprecated)
+        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -43,6 +44,29 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
+    memory_policy: Literal["default", "eager", "cpu_offload_all"] = "default"
+    """
+    Memory optimization policy for activation management (SAC, offload).
+        default: save all compute-intensive ops and FSDP all_gathers.
+        eager: alternate mm ops between save/recompute, matching the eager
+            AC policy in torchtitan.distributed.activation_checkpoint.
+        cpu_offload_all: offload all eligible activations to CPU.
+            Work in progress — for development and testing only.
+    """
+
+    inductor_compilation: Literal["regional", "full"] = "regional"
+    """
+    Inductor compilation strategy. Mutually exclusive options:
+        regional: compile tagged regions (e.g. FlexAttention HOPs) with
+            regional_inductor while leaving the rest interpreted.
+        full: compile the entire graph with inductor into optimized
+            Triton kernels. Provides better performance but may change
+            bitwise numerics compared to regional/interpreted execution.
+    """
+
+    enable_cudagraph: bool = True
+    """When False, skip the cudagraph pass even if the graph is compatible."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
@@ -52,23 +76,17 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
 
 
-@dataclass(kw_only=True, slots=True)
-class GraphTrainerConfig(Trainer.Config):
-    compile: GraphTrainerCompileConfig = field(
-        default_factory=GraphTrainerCompileConfig
-    )
-
-
 def to_graph_trainer_config(
     base_config: Trainer.Config,
     model_registry: Callable[[str], ModelSpec],
-) -> GraphTrainerConfig:
-    """Convert a base Trainer.Config to a GraphTrainerConfig.
+) -> "GraphTrainer.Config":
+    """Convert a base Trainer.Config to a GraphTrainer.Config.
 
     Copies all fields from the base config and replaces the model_spec with one
     from the graph_trainer model_registry. The compile field is removed and
-    left as the GraphTrainerConfig default; callers should explicitly set it.
+    left as the GraphTrainer.Config default; callers should explicitly set it.
     """
+    from .cudagraph import cudagraph_annotate_trace_post_processor
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
@@ -95,5 +113,16 @@ def to_graph_trainer_config(
     ac = d.get("activation_checkpoint")
     if ac is not None and ac.mode != "none":
         d["activation_checkpoint"] = ActivationCheckpointConfig(mode="selective")
+
+    # TODO: graph_trainer doesn't yet support ChunkedCELoss
+    if isinstance(d.get("loss"), ChunkedCELoss.Config):
+        d["loss"] = CrossEntropyLoss.Config()
+
+    # Merge CUDA graph kernel annotations into profiler traces when profiling
+    # is active.  No-op otherwise (and no-op when requirements aren't met).
+    # It's also a no-op if there is CUDA graph is not enabled.
+    profiler = d.get("profiler")
+    if profiler is not None:
+        profiler.trace_post_processor = cudagraph_annotate_trace_post_processor()
 
     return GraphTrainer.Config(**d)

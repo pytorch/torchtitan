@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
@@ -23,6 +24,7 @@ from . import model_registry
 
 def qwen3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
@@ -73,6 +75,7 @@ def qwen3_debugmodel_param_groups() -> Trainer.Config:
 
 def qwen3_debugmodel_flex() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel", attn_backend="flex"),
@@ -101,6 +104,7 @@ def qwen3_debugmodel_flex() -> Trainer.Config:
 
 def qwen3_debugmodel_flex_flash() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel", attn_backend="flex_flash"),
@@ -129,6 +133,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
 
 def qwen3_0_6b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("0.6B"),
@@ -155,6 +160,7 @@ def qwen3_0_6b() -> Trainer.Config:
 
 def qwen3_1_7b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-1.7B",
         model_spec=model_registry("1.7B"),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -180,6 +186,7 @@ def qwen3_1_7b() -> Trainer.Config:
 
 def qwen3_14b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-14B",
         model_spec=model_registry("14B"),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -211,6 +218,7 @@ def qwen3_14b() -> Trainer.Config:
 
 def qwen3_32b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-32B",
         model_spec=model_registry("32B"),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -242,6 +250,7 @@ def qwen3_32b() -> Trainer.Config:
 
 def qwen3_debugmodel_fused_qkv() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel_fused_qkv"),
@@ -270,6 +279,7 @@ def qwen3_debugmodel_fused_qkv() -> Trainer.Config:
 
 def qwen3_moe_debug() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel_moe"),
@@ -285,7 +295,6 @@ def qwen3_moe_debug() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -300,7 +309,7 @@ def qwen3_moe_debug() -> Trainer.Config:
 
 def qwen3_moe_debug_ep() -> Trainer.Config:
     config = qwen3_moe_debug()
-    config.model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
+    config.model_spec = model_registry("debugmodel_moe")
     return config
 
 
@@ -321,6 +330,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
 
     model_spec = model_registry("8B", attn_backend="varlen")
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-8B",
         model_spec=model_spec,
         optimizer=OptimizersContainer.Config(lr=2e-5),

@@ -4,34 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.traceback import annotate_fn
 
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
-    annotate_ac_regions,
-    apply_graph_ac,
+    annotate_module_fqns,
+    apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.qwen3.model import GraphTrainerQwen3Model
-
-from torchtitan.experiments.graph_trainer.simple_fsdp import (
-    data_parallel,
-    MixedPrecisionPolicy,
-)
 from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
-from torchtitan.models.qwen3.parallelize import apply_non_moe_tp
-from torchtitan.protocols.model_converter import ModelConvertersContainer
-from torchtitan.tools.logging import logger
 
 
 def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
@@ -39,16 +27,10 @@ def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
 
     - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
       regions in MoE for debugging purposes (only if MoE layers exist).
-    - Flex attention annotation: Tags FlexAttention.forward with
-      {"compile_with_inductor": "flex_attention"} so the compiler can apply
-      regional inductor pass based on the annotation. Regional inductor is now only
-      supported in AOT mode.
-    - AC region annotation: Tags each transformer block's forward with a unique
-      ac_region_id so that apply_sac_pass can assign per-block ac_graph_id
-      boundaries for the min-cut partitioner.
+    - Module FQN annotation: Tags each submodule's forward with its
+      fully-qualified name for downstream passes (bucketing, SAC region
+      boundaries, etc.).
     """
-    from torchtitan.models.common.attention import FlexAttention
-
     # Annotate MoE EP regions if any layer has MoE enabled
     if any(layer.moe is not None for layer in model.config.layers):
         from torchtitan.models.common.moe import MoE
@@ -62,11 +44,7 @@ def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
         )
         MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
-    FlexAttention.forward = annotate_fn({"compile_with_inductor": "flex_attention"})(
-        FlexAttention.forward
-    )
-
-    annotate_ac_regions(model)
+    annotate_module_fqns(model)
 
 
 def parallelize_qwen3(
@@ -74,7 +52,6 @@ def parallelize_qwen3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -97,101 +74,23 @@ def parallelize_qwen3(
     annotate_qwen3(model)
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
         tp_mesh = parallel_dims.get_mesh("tp")
-        apply_non_moe_tp(
-            model,
-            tp_mesh,
-            enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=parallelism.enable_async_tensor_parallel,
-            enable_cp=parallel_dims.cp_enabled,
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+        # Config-based sharding: ShardingConfig is populated on the model
+        # config in Trainer.Config.__post_init__; Module.parallelize applies it.
+        model.parallelize(tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            etp_mesh=parallel_dims.get_optional_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+            enable_sp=parallelism.enable_sequence_parallel,
         )
 
-    if ac_config.mode != "none":
-        apply_graph_ac(compile_config, ac_config)
-
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-    )
-
-    # apply data parallel
-    dp_mesh: DeviceMesh | None = None
-    if (
-        parallel_dims.fsdp_enabled
-        or parallel_dims.ep_enabled
-        or parallel_dims.dp_replicate_enabled
-    ):
-        if parallel_dims.dp_replicate_enabled:
-            if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
-                dp_mode = "hybrid_shard"
-            else:
-                dp_mesh_dim_names = ["dp_replicate"]
-                dp_mode = "replicate"
-        else:
-            dp_mesh_dim_names = ["fsdp"]
-            dp_mode = "fully_shard"
-
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
-
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
-
-        for _, transformer_block in model.layers.items():
-            if transformer_block.moe_enabled and parallel_dims.ep_enabled:
-                experts_shard_dim = 0
-                assert edp_mesh is not None
-                assert hasattr(transformer_block, "moe")
-                if (
-                    edp_mesh["efsdp"].size() * parallel_dims.ep
-                    > transformer_block.moe.experts.num_experts
-                ):
-                    experts_shard_dim = 1
-
-                transformer_block.moe.experts = data_parallel(
-                    transformer_block.moe.experts,
-                    edp_mesh,
-                    dp_mode,
-                    mp_policy=mp_policy,
-                    shard_dim=experts_shard_dim,
-                )
-
-        model = data_parallel(
-            model,
-            dp_mesh,
-            dp_mode,
-            mp_policy=mp_policy,
-        )
-
-        logger.info(
-            "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
-        )
+    # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
+    # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
+    # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
+    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
 
     # Apply compilation based on mode
     model = apply_compile(

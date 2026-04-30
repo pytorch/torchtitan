@@ -4,13 +4,18 @@ on:
   workflow_call:
     inputs:
       runner-rocm:
-        description: 'Override default (linux.rocm.gpu.gfx942.8) ROCm runner label'
+        description: 'Override default (linux.rocm.gpu.ecosystem.gfx950.8) ROCm runner label'
         required: false
         type: string
       runner-cuda:
         description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
         required: false
         type: string
+      is-experimental:
+        description: 'Check if the workflow is experimental'
+        required: false
+        type: boolean
+        default: false
     outputs:
       matrix:
         description: dynamically set matrix
@@ -30,7 +35,7 @@ jobs:
       TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
       # Default CUDA & ROCm runners
-      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.gfx942.8
+      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.ecosystem.gfx950.8
       DEFAULT_CUDA_RUNNER: linux.g5.48xlarge.nvidia.gpu
 
       # Input CUDA & ROCm runners
@@ -46,8 +51,11 @@ jobs:
           ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
-          # Define ROCm matrix
-          ROCM_MATRIX=$(cat <<EOF
+          # Define ROCm matrix (empty for experimental workflows)
+          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
+            ROCM_MATRIX=""
+          else
+            ROCM_MATRIX="$(cat <<EOF
           {
             "name": "rocm",
             "runner": "${ROCM_RUNNER}",
@@ -58,10 +66,11 @@ jobs:
             "torch-version": ""
           }
           EOF
-          )
+          )"
+          fi
 
           # Define CUDA matrix
-          CUDA_MATRIX=$(cat <<EOF
+          CUDA_MATRIX="$(cat <<EOF
           {
             "name": "cuda",
             "runner": "${CUDA_RUNNER}",
@@ -72,7 +81,7 @@ jobs:
             "torch-version": ""
           }
           EOF
-          )
+          )"
 
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"

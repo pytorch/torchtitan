@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -38,6 +39,7 @@ def _qwen3_vl_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
 
 def qwen3_vl_debugmodel() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
@@ -51,8 +53,8 @@ def qwen3_vl_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            local_batch_size=1,
+            seq_len=512,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -67,22 +69,22 @@ def qwen3_vl_debugmodel() -> Trainer.Config:
 
 def qwen3_vl_debugmodel_moe() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_moe", moe_comm_backend="standard"),
+        model_spec=model_registry("debugmodel_moe"),
         dataloader=_qwen3_vl_dataloader("cc12m-test"),
         optimizer=OptimizersContainer.Config(lr=3e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            local_batch_size=1,
+            seq_len=512,
             steps=10,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=4,
             expert_parallel_degree=4,
-            expert_tensor_parallel_degree=1,
             tensor_parallel_degree=2,
         ),
         checkpoint=CheckpointManager.Config(
@@ -97,6 +99,7 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
 
 def qwen3_vl_2b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         model_spec=model_registry("2B"),
@@ -106,7 +109,7 @@ def qwen3_vl_2b() -> Trainer.Config:
         training=TrainingConfig(
             local_batch_size=8,
             seq_len=4096,
-            steps=100,
+            steps=1000,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
@@ -126,6 +129,7 @@ def qwen3_vl_2b() -> Trainer.Config:
 
 def qwen3_vl_8b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-VL-8B-Instruct",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         model_spec=model_registry("8B"),
@@ -135,7 +139,7 @@ def qwen3_vl_8b() -> Trainer.Config:
         training=TrainingConfig(
             local_batch_size=4,
             seq_len=4096,
-            steps=100,
+            steps=1000,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
@@ -155,16 +159,17 @@ def qwen3_vl_8b() -> Trainer.Config:
 
 def qwen3_vl_30b_a3b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-VL-30B-A3B-Instruct",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
-        model_spec=model_registry("30B-A3B", moe_comm_backend="standard"),
+        model_spec=model_registry("30B-A3B"),
         dataloader=_qwen3_vl_dataloader("cc12m"),
         optimizer=OptimizersContainer.Config(lr=3e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
             local_batch_size=4,
             seq_len=4096,
-            steps=100,
+            steps=1000,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,

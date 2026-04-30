@@ -5,11 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.quantization.float8 import (
-    Float8GroupedMMConverter,
+from torchtitan.components.quantization import (
+    Float8GroupedExpertsConverter,
     Float8LinearConverter,
 )
 from torchtitan.config import (
@@ -19,7 +20,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -27,6 +27,7 @@ from . import model_registry
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
@@ -45,7 +46,6 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -59,7 +59,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    config.model_spec = model_registry("debugmodel")
     return config
 
 
@@ -71,18 +71,15 @@ def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry(
-        "debugmodel", attn_backend="flex", moe_comm_backend="standard"
-    )
+    config.model_spec = model_registry("debugmodel", attn_backend="flex")
     return config
 
 
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry(
-            "16B", attn_backend="flex", moe_comm_backend="standard"
-        ),
+        model_spec=model_registry("16B", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -100,7 +97,6 @@ def deepseek_v3_16b() -> Trainer.Config:
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=8,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=10),
         activation_checkpoint=ActivationCheckpointConfig(
@@ -111,10 +107,25 @@ def deepseek_v3_16b() -> Trainer.Config:
 
 
 def deepseek_v3_671b() -> Trainer.Config:
+    compile_config = CompileConfig(enable=True, components=["loss"])
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
     return Trainer.Config(
+        loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_registry(
-            "671B", attn_backend="flex", moe_comm_backend="torchao"
+            "671B",
+            attn_backend="flex",
+            quantization=[
+                Float8LinearConverter.Config(
+                    filter_fqns=["output", "router.gate"],
+                    model_compile_enabled=model_compile_enabled,
+                ),
+                Float8GroupedExpertsConverter.Config(
+                    model_compile_enabled=model_compile_enabled
+                ),
+            ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
@@ -133,18 +144,11 @@ def deepseek_v3_671b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
+            expert_parallel_degree=2,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="selective",
         ),
-        compile=CompileConfig(enable=True, components=["loss"]),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[
-                Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
-                Float8GroupedMMConverter.Config(fqns=["experts"]),
-            ]
-        ),
+        compile=compile_config,
     )

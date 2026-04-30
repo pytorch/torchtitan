@@ -17,7 +17,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
     GQAttention,
-    LocalMapInnerAttention,
     QKVLinear,
     ScaledDotProductAttention,
     VarlenAttention,
@@ -30,13 +29,13 @@ from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     LocalTokenDispatcher,
-    TorchAOTokenDispatcher,
 )
+from torchtitan.protocols.module import Module
 
 
 def get_attention_config(
     backend: str,
-) -> tuple[LocalMapInnerAttention.Config, str]:
+) -> tuple[Module.Config, str]:
     """Map backend string to (inner_attention config, mask_type)."""
     if backend == "sdpa":
         return ScaledDotProductAttention.Config(), "causal"
@@ -67,7 +66,7 @@ def make_gqa_config(
     n_heads: int,
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
-    inner_attention: LocalMapInnerAttention.Config,
+    inner_attention: Module.Config,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
@@ -200,36 +199,31 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     score_before_experts: bool = True,
-    comm_backend: str | None = None,
+    comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
     Returns the right Config subclass based on comm_backend:
-    - None: LocalTokenDispatcher.Config (no EP communication)
-    - "standard": AllToAllTokenDispatcher.Config (standard all-to-all EP)
-    - "torchao": TorchAOTokenDispatcher.Config (padded all-to-all EP)
-    - "deepep"/"hybridep": DeepEPTokenDispatcher.Config
+    - "standard": Uses PyTorch all-to-all collectives (falls back to local
+      dispatch when EP=1, i.e. ep_mesh is None at runtime)
+    - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
+    - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
+
+    DeepEP/HybridEP requires installation:
+    https://github.com/deepseek-ai/DeepEP
+
+    For HybridEP, SM configuration can be set via environment variables:
+    - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
+    - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
-    if comm_backend is None:
-        return LocalTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
-        )
-    elif comm_backend in ("deepep", "hybridep"):
+    if comm_backend in ("deepep", "hybridep"):
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
             comm_backend=comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
-        )
-    elif comm_backend == "torchao":
-        return TorchAOTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            score_before_experts=score_before_experts,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
@@ -240,7 +234,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of None, 'standard', 'torchao', 'deepep', 'hybridep'."
+            "Must be one of 'standard', 'deepep', 'hybridep'."
         )
 
 
@@ -253,7 +247,7 @@ def make_experts_config(
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
     use_grouped_mm: bool = True,
-    comm_backend: str | None = None,
+    comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
     """Build a fully-specified GroupedExperts.Config."""

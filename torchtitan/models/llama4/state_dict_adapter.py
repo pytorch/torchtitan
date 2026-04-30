@@ -28,6 +28,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
             model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
+        qkv_map: dict[str, str | None]
         if self.fuse_qkv:
             qkv_map = {
                 "language_model.model.layers.{}.self_attn.q_proj.weight": None,
@@ -44,8 +45,8 @@ class Llama4StateDictAdapter(StateDictAdapter):
         self.from_hf_map = {
             "language_model.model.embed_tokens.weight": "tok_embeddings.weight",
             "language_model.model.norm.weight": "norm.weight",
-            "language_model.lm_head.weight": "output.weight",
-            **qkv_map,  # pyrefly: ignore [invalid-argument]
+            "language_model.lm_head.weight": "lm_head.weight",
+            **qkv_map,
             "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "language_model.model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "language_model.model.layers.{}.feed_forward.router.weight": "layers.{}.moe.router.gate.weight",
@@ -98,13 +99,13 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 )
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.q_proj.weight"
-                ] = wq  # pyrefly: ignore [unsupported-operation]
+                ] = wq
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.k_proj.weight"
-                ] = wk  # pyrefly: ignore [unsupported-operation]
+                ] = wk
                 hf_state_dict[
                     f"language_model.model.layers.{layer_num}.self_attn.v_proj.weight"
-                ] = wv  # pyrefly: ignore [unsupported-operation]
+                ] = wv
             elif key in to_hf_map:
                 # do direct mapping
                 if key in "layers.{}.moe.experts.w2":
@@ -172,7 +173,6 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 "language_model.model.layers.{}.self_attn.k_proj.weight",
                 "language_model.model.layers.{}.self_attn.v_proj.weight",
             ):
-                # pyrefly: ignore [unsupported-operation]
                 if layer_num not in pending_qkv:
                     # pyrefly: ignore [unsupported-operation]
                     pending_qkv[layer_num] = {}

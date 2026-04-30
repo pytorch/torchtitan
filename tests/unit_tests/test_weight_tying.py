@@ -15,7 +15,7 @@ from torchtitan.models.llama3.model import Llama3Model
 
 def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
     # Start from the standard debugmodel config and adjust weight tying.
-    config = llama3_configs["debugmodel"]()
+    config = llama3_configs["debugmodel"](attn_backend="sdpa")
     # Replace tok_embeddings param_init based on weight tying flag.
     import dataclasses
     from functools import partial
@@ -39,7 +39,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         model = Llama3Model(_make_config(enable_weight_tying=True))
         self.assertIs(
             model.tok_embeddings.weight,
-            model.output.weight,
+            model.lm_head.weight,
             "tok_embeddings.weight and output.weight must be the same tensor object",
         )
 
@@ -48,7 +48,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         model = Llama3Model(_make_config(enable_weight_tying=False))
         self.assertIsNot(
             model.tok_embeddings.weight,
-            model.output.weight,
+            model.lm_head.weight,
             "tok_embeddings.weight and output.weight must be distinct tensor objects",
         )
 
@@ -59,7 +59,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         model.init_states()
         self.assertIs(
             model.tok_embeddings.weight,
-            model.output.weight,
+            model.lm_head.weight,
             "tok_embeddings.weight and output.weight must remain tied after init_states",
         )
 

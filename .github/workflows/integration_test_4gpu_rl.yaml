@@ -31,6 +31,8 @@ jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
     uses: ./.github/workflows/set-matrix.yaml
+    with:
+      is-experimental: true
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
@@ -80,7 +82,7 @@ jobs:
         uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         # 4. Install torchtitan in editable mode because integration test spawns
-        # python simple_grpo_sum_digits.py as a subprocess
+        # python grpo.py as a subprocess
         uv pip install -e .
 
         # 5. Download HF model checkpoint for tests

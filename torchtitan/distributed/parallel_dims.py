@@ -26,7 +26,6 @@ class ParallelDims:
     tp: int
     pp: int
     ep: int
-    etp: int
     world_size: int
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -43,7 +42,6 @@ class ParallelDims:
             tp=parallelism_config.tensor_parallel_degree,
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
             world_size=world_size,
         )
 
@@ -51,16 +49,15 @@ class ParallelDims:
         self._validate()
 
     def _validate(self):
-        dp_replicate, dp_shard, cp, tp, pp, ep, etp = (
+        dp_replicate, dp_shard, cp, tp, pp, ep = (
             self.dp_replicate,
             self.dp_shard,
             self.cp,
             self.tp,
             self.pp,
             self.ep,
-            self.etp,
         )
-        for d in (dp_replicate, cp, tp, pp, ep, etp):
+        for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
 
         assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
@@ -72,9 +69,6 @@ class ParallelDims:
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
-
-        if ep > 1:
-            assert etp == tp or etp == 1, "Currently we only support ETP=TP or ETP=1"
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
         if name == "fsdp":
@@ -109,7 +103,6 @@ class ParallelDims:
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
             efsdp:   FSDP in the EP region.
-            etp:     TP in the EP region.
 
         Note: Most dimensions above are created by unflattening the world mesh, except for loss,
         which is created by flattening the batch and cp dimensions.
@@ -117,7 +110,7 @@ class ParallelDims:
 
             ["pp", "batch", "cp", "tp"]  # dataloading_mesh
             ["pp", "dp_replicate", "fsdp", "tp"]  # dense_mesh
-            ["pp", "dp_replicate", "efsdp", "ep", "etp"]  # sparse_mesh
+            ["pp", "dp_replicate", "efsdp", "ep"]  # sparse_mesh
 
         Note: DeviceMesh currently recreates the process group for each dimension.
         It should share the process group for the same dim group to avoid unnecessary
@@ -146,19 +139,18 @@ class ParallelDims:
                 0,
                 dim_degrees,
                 dim_names,
-                # pyrefly: ignore [bad-argument-type]
                 backend_override=backend_override,
             )
 
         logger.info(
             f"Building device mesh with parallelism: "
             f"pp={self.pp}, dp_replicate={self.dp_replicate}, dp_shard={self.dp_shard}, "
-            f"cp={self.cp}, tp={self.tp}, ep={self.ep}, etp={self.etp}"
+            f"cp={self.cp}, tp={self.tp}, ep={self.ep}"
         )
 
         batch = self.dp_replicate * self.dp_shard
         fsdp = self.dp_shard * self.cp
-        efsdp = fsdp * self.tp // (self.etp * self.ep)
+        efsdp = fsdp * self.tp // self.ep
 
         self._world_mesh = init_device_mesh(
             device_type, (self.world_size,), mesh_dim_names=("world",)
@@ -176,8 +168,8 @@ class ParallelDims:
         )
         sparse_mesh = unflatten_mesh(
             self._world_mesh,
-            ("pp", "dp_replicate", "efsdp", "ep", "etp"),
-            (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
+            ("pp", "dp_replicate", "efsdp", "ep"),
+            (self.pp, self.dp_replicate, efsdp, self.ep),
         )
 
         self._global_meshes = {
@@ -197,7 +189,6 @@ class ParallelDims:
             "tp": dataloading_mesh["tp"],
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
-            "etp": sparse_mesh["etp"],
         }
 
         # Validate mesh sizes
@@ -221,8 +212,7 @@ class ParallelDims:
             "cp": self.cp,
             "tp": self.tp,
             "ep": self.ep,
-            "efsdp": self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
-            "etp": self.etp,
+            "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
         }
 
         for mesh_name, expected_size in expected_sizes.items():
@@ -238,7 +228,7 @@ class ParallelDims:
         Args:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
-                 'cp', 'tp', 'ep', 'etp', 'efsdp'.
+                 'cp', 'tp', 'ep', 'efsdp'.
 
         Returns:
             DeviceMesh for the requested dimension(s), or None if:
@@ -282,7 +272,7 @@ class ParallelDims:
         Args:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
-                 'cp', 'tp', 'ep', 'etp', 'efsdp'.
+                 'cp', 'tp', 'ep', 'efsdp'.
 
         Returns:
             DeviceMesh for the requested dimension(s).
@@ -319,7 +309,7 @@ class ParallelDims:
 
         Example:
             >>> parallel_dims = ParallelDims(
-            ...     dp_replicate=2, dp_shard=2, cp=1, tp=2, pp=1, ep=1, etp=1, world_size=8
+            ...     dp_replicate=2, dp_shard=2, cp=1, tp=2, pp=1, ep=1, world_size=8
             ... )
             >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
             >>> print(meshes.keys())
@@ -370,10 +360,6 @@ class ParallelDims:
     @property
     def ep_enabled(self):
         return self.ep > 1
-
-    @property
-    def etp_enabled(self):
-        return self.etp > 1
 
     @property
     def non_data_parallel_size(self):

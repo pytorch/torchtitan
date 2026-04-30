@@ -62,7 +62,10 @@ class ExpertParallel(ParallelStyle):
             mod.token_dispatcher,
             (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
         ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
-        mod.token_dispatcher.ep_group = device_mesh.get_group()
+        # Pass DeviceMesh (not ProcessGroup) so that CooR precompile
+        # can use torch.ops._dtensor.mesh_get_process_group to keep
+        # the FX graph rank-agnostic.
+        mod.token_dispatcher.ep_mesh = device_mesh
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -70,41 +73,3 @@ class ExpertParallel(ParallelStyle):
             device_mesh,
             partition_fn=self._partition_fn,
         )
-
-
-# TODO: Remove this class — all TP ranks within the same EP group perform
-# redundant all-to-all communication.
-# This class is for dp2ep with TP (without TP we can just use ExpertParallel)
-class ExpertTensorParallel(ExpertParallel):
-    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
-        # w1 shape = (experts, out_dim, in_dim)
-        mod.register_parameter(
-            "w1",
-            # pyrefly: ignore [bad-argument-type]
-            nn.Parameter(distribute_tensor(mod.w1, device_mesh, [Shard(0), Shard(1)])),
-        )  # Column-wise sharding
-
-        # w2 shape = (experts, in_dim, out_dim)
-        mod.register_parameter(
-            "w2",
-            # pyrefly: ignore [bad-argument-type]
-            nn.Parameter(distribute_tensor(mod.w2, device_mesh, [Shard(0), Shard(2)])),
-        )  # Row-wise sharding
-
-        # w3 shape = (experts, out_dim, in_dim)
-        mod.register_parameter(
-            "w3",
-            # pyrefly: ignore [bad-argument-type]
-            nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),
-        )  # Column-wise sharding
-        # Set ep_group on the token dispatcher for all-to-all communication.
-        # device_mesh is the 2D (EP, ETP) mesh; slice the EP dimension.
-
-        assert hasattr(
-            mod, "token_dispatcher"
-        ), f"{type(mod)} missing token_dispatcher attribute"
-        assert isinstance(
-            mod.token_dispatcher,
-            (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
-        ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
-        mod.token_dispatcher.ep_group = device_mesh["ep"].get_group()

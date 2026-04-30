@@ -14,6 +14,7 @@ import torch.distributed.checkpoint as dcp
 import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
     set_model_state_dict,
     StateDictOptions,
 )
@@ -21,6 +22,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
+    ActivationCheckpointConfig,
     CompileConfig,
     DebugConfig,
     ParallelismConfig,
@@ -38,21 +40,24 @@ from torchtitan.experiments.rl.actors.utils import (
 from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
+from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
 
 
 class PolicyTrainer(Actor, Configurable):
-    """
-    Updates policy based on collected Episode using TorchTitan components.
+    """Updates policy based on collected Episode using TorchTitan components.
 
-    Uses ModelSpec for model construction, parallelization, and weight loading.
+    Exposes separate ``forward_backward`` and ``optim_step`` endpoints, called
+    explicitly by the controller.
 
     Args:
-        config: PolicyTrainer.Config for model/optimizer/parallelism settings.
-        model_spec: Model specification (model config, parallelize_fn, state_dict_adapter).
+        config: PolicyTrainer.Config with all model/optimizer/parallelism settings.
+        model_spec: TorchTitan model specification.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
-        transfer_dtype: DType to cast weights to before transfer. If None, no cast is performed.
+            Shared with the generator (both load from the same HF checkpoint).
+        generator_dtype: Generator dtype (e.g. "bfloat16"). Needed to cast weights to generator dtype
+            if generator dtype differs from training dtype. If None, no cast is performed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -71,6 +76,11 @@ class PolicyTrainer(Actor, Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: Configurable.Config = field(default_factory=Configurable.Config)
+        ac_config: ActivationCheckpointConfig = field(
+            default_factory=lambda: ActivationCheckpointConfig(mode="none")
+        )
+        dump_folder: str = ""
+        """Folder for AC debug dumps when using memory_budget mode."""
 
     def __init__(
         self,
@@ -78,23 +88,19 @@ class PolicyTrainer(Actor, Configurable):
         *,
         model_spec: ModelSpec,
         hf_assets_path: str = "",
-        transfer_dtype: str = "",
+        generator_dtype: str = "",
     ):
+
+        init_logger()
+
         self.config = config
         self.loss_fn = config.loss.build()
-        self.model_spec = model_spec
-        # Only cast if transfer dtype differs from training dtype, otherwise
+
+        # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
-        requested = TORCH_DTYPE_MAP[transfer_dtype] if transfer_dtype else None
-        self._transfer_dtype = requested if requested != training_dtype else None
-
-        # The policy and ref models share code objects, so dynamo's
-        # per-code-object cache must hold entries for both grad modes
-        # (grad for policy, no_grad for ref). The default limit of 8
-        # is not enough; 16 accommodates both without recompile storms.
-        # TODO: @Lucaskabela fix recompiles in general as these increase startup
-        torch._dynamo.config.cache_size_limit = 16
+        gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
+        self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -129,19 +135,6 @@ class PolicyTrainer(Actor, Configurable):
         model.train()
         self.model = model
         self.model_parts = [model]
-
-        # Conditionally build frozen reference model for KL penalty
-        # TODO: @joecummings remove ref entirely, this is hacky and we don't need it
-        if getattr(config.loss, "kl_coef", 0) > 0:
-            ref_model = self._build_model(
-                model_spec, config, device_type, hf_assets_path
-            )
-            ref_model.eval()
-            ref_model.requires_grad_(False)
-            self.ref_model = ref_model
-            logger.info("Built frozen reference model for KL penalty")
-        else:
-            self.ref_model = None
 
         # Build optimizer and LR scheduler
         self.optimizers = config.optimizer.build(model_parts=self.model_parts)
@@ -209,7 +202,6 @@ class PolicyTrainer(Actor, Configurable):
         hf_assets_path: str,
     ):
         """Build, parallelize, and initialize a model from checkpoint.
-        Will be used to build trainer's policy model and reference model.
 
         Args:
             model_spec: Model specification for building and parallelizing.
@@ -221,12 +213,17 @@ class PolicyTrainer(Actor, Configurable):
             Initialized model with weights loaded from checkpoint.
         """
 
-        # TODO Also support flex attention backend later.
+        # TODO: Also support flex attention backend later.
         from torchtitan.models.common.attention import VarlenAttention
 
         assert isinstance(
             model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
         ), "Only varlen attention backend is allowed."
+
+        # Fill sharding configs on the config BEFORE build via the
+        # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
+        # ``torchtitan.Trainer``'s call, so we invoke it directly).
+        model_spec.model.update_from_config(trainer_config=config)
 
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
@@ -235,8 +232,11 @@ class PolicyTrainer(Actor, Configurable):
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
+            training=config.training,
             parallelism=config.parallelism,
             compile_config=config.compile,
+            ac_config=config.ac_config,
+            dump_folder=config.dump_folder,
         )
 
         model.to_empty(device=device_type)
@@ -249,48 +249,18 @@ class PolicyTrainer(Actor, Configurable):
         return model
 
     @endpoint
-    async def push_model_state_dict(self) -> None:
-        """Publish model weights for generator consumption via TorchStore.
-
-        When ``direct_rdma=True``, weights are transferred directly from
-        GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
-        entirely. When ``False``, data goes through StorageVolumes
-        (which may themselves use RDMA as a transport internally).
-
-        Note: we couple ``is_rdma_available()`` with ``direct_rdma`` here,
-        but the two concepts are not identical — StorageVolumes can also
-        use RDMA as their transport layer. ``direct_rdma`` specifically
-        means "skip StorageVolumes and let the destination read directly
-        from the source's GPU memory".
-        """
-        from monarch.rdma import is_rdma_available
-
-        await ts.put_state_dict(
-            self.model.state_dict(),
-            "model_state_dict",
-            direct_rdma=is_rdma_available(),
-            transfer_dtype=self._transfer_dtype,
-        )
-
-    @endpoint
-    async def step(self, train_data: list[TrainBatch]) -> dict:
-        """Perform one training step.
+    async def forward_backward(self, train_data: list[TrainBatch]) -> dict:
+        """Run forward pass, compute loss, and call backward.
 
         Args:
-            train_data (list[TrainBatch]): List of batches, one per DP rank.
+            train_data: List of batches, one per DP rank.
 
         Returns:
-            dict: Training metrics (loss, policy version, etc.).
+            dict with loss metrics, advantage stats, and logprob verification.
         """
-        # The policy and ref models share code objects, so dynamo's
-        # per-code-object cache must hold entries for both grad modes
-        # (grad for policy, no_grad for ref). The default limit of
-        # is not enough; 16 accommodates both without recompile storms.
-        # TODO: @Lucaskabela fix recompiles in general as these increase startup
-        torch._dynamo.config.recompile_limit = 16
-
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
+            f"{os.getpid()=} PolicyTrainer forward_backward "
+            f"step {self.policy_version}"
         )
 
         local_batch = train_data[self.dp_rank]
@@ -322,21 +292,9 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        ref_logprobs = None
-        if self.ref_model is not None:
-            with torch.no_grad():
-                ref_logits = self.ref_model(
-                    token_ids, attention_masks=attention_masks, positions=positions
-                )
-                all_ref_logprobs = compute_logprobs(ref_logits, token_ids)
-                ref_logprobs = extract_response_logprobs(
-                    all_ref_logprobs, seq_lens, prompt_lens, response_lens
-                )
-
         loss, loss_metrics = self.loss_fn(
             policy_logprobs=policy_logprobs,
             advantages=advantages,
-            ref_logprobs=ref_logprobs,
         )
 
         verification_result = verify_logprob_identity(
@@ -352,11 +310,33 @@ class PolicyTrainer(Actor, Configurable):
             f"tokens_checked={verification_result['total_tokens_checked']}"
         )
 
-        # Update weights
+        # Backward pass
         self.optimizers.zero_grad()
         loss.backward()
 
-        # Gradient clipping
+        return {
+            "loss": loss.item(),
+            "advantage_mean": advantages.mean().item(),
+            "advantage_std": advantages.std().item(),
+            "logprob_diff_mean": verification_result["logprob_diff_mean"],
+            "logprob_diff_max": verification_result["logprob_diff_max"],
+            "logprob_max_delta": verification_result["logprob_max_delta"],
+            "logprob_bitwise_identical": verification_result[
+                "logprob_bitwise_identical"
+            ],
+            **loss_metrics,
+        }
+
+    @endpoint
+    async def optim_step(self) -> dict:
+        """Clip gradients, step optimizer and LR scheduler.
+
+        Returns:
+            dict with grad_norm and policy_version.
+        """
+        # TODO: Accept optional optimizer params (e.g. learning rate)
+        # to allow controller-owned schedules (see Tinker API).
+
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.config.training.max_norm,
@@ -369,23 +349,50 @@ class PolicyTrainer(Actor, Configurable):
 
         self.policy_version += 1
 
-        # Return metrics
-        metrics = {
-            "loss": loss.item(),
-            "advantage_mean": advantages.mean().item(),
-            "advantage_std": advantages.std().item(),
-            "policy_version": self.policy_version,
-            "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
-            # Trainer vs generator log prob divergence
-            "logprob_diff_mean": verification_result["logprob_diff_mean"],
-            "logprob_diff_max": verification_result["logprob_diff_max"],
-            "logprob_max_delta": verification_result["logprob_max_delta"],
-            "logprob_bitwise_identical": verification_result[
-                "logprob_bitwise_identical"
-            ],
-            **loss_metrics,
-        }
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer finished step {self.policy_version}"
+            f"{os.getpid()=} PolicyTrainer optim_step done, "
+            f"policy_version={self.policy_version}"
         )
-        return metrics
+
+        return {
+            "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
+            "policy_version": self.policy_version,
+        }
+
+    @endpoint
+    async def save_checkpoint(self, path: str) -> None:
+        """Save model state dict to disk via DCP.
+
+        Args:
+            path: Directory to save the checkpoint to.
+        """
+        # TODO: Reuse torchtitan's CheckpointManager for async saves, HF export,
+        # and checkpoint loading for resume support.
+        state_dict = {"model": get_model_state_dict(self.model)}
+        dcp.save(state_dict, checkpoint_id=path)
+        logger.info(f"Saved checkpoint to {path}")
+
+    @endpoint
+    async def push_model_state_dict(self) -> None:
+        """Publish model weights for generator consumption via TorchStore.
+
+        When ``direct_rdma=True``, weights are transferred directly from
+        GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
+        entirely. When ``False``, data goes through StorageVolumes
+        (which may themselves use RDMA as a transport internally).
+
+        Note: we couple ``is_rdma_available()`` with ``direct_rdma`` here,
+        but the two concepts are not identical -- StorageVolumes can also
+        use RDMA as their transport layer. ``direct_rdma`` specifically
+        means "skip StorageVolumes and let the destination read directly
+        from the source's GPU memory".
+
+        """
+        from monarch.rdma import is_rdma_available
+
+        await ts.put_state_dict(
+            self.model.state_dict(),
+            "model_state_dict",
+            direct_rdma=is_rdma_available(),
+            transfer_dtype=self._transfer_dtype,
+        )

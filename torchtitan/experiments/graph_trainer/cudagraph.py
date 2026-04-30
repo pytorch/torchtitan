@@ -11,7 +11,7 @@ This module provides a cudagraph pass that can be applied to graph modules
 during compilation.
 """
 
-import logging
+import json
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -21,7 +21,8 @@ from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
-logger = logging.getLogger(__name__)
+from torchtitan.config.function import Function
+from torchtitan.tools.logging import logger
 
 
 class _CUDAGraphManager:
@@ -31,6 +32,10 @@ class _CUDAGraphManager:
         self._initialized = False
         self._cudagraph_wrappers: list["CUDAGraphWrapper"] = []
         self._teardown_called = False
+        # toolsId (graph_id << 32 | node_id) -> list of annotation dicts
+        # (e.g. [{"module_fqn": "layers.0.attention.wq"}]).
+        self.all_annotations: dict[int, list] = {}
+        self.enable_annotations: bool = False
 
     def maybe_initialize(self) -> None:
         if self._initialized:
@@ -98,6 +103,54 @@ def cudagraph_teardown() -> None:
     See Note [explicit cudagraph teardown] for more details.
     """
     _cg_manager.teardown()
+
+
+def get_cudagraph_annotations() -> dict[int, list]:
+    """Return all kernel annotations accumulated across CUDA graph captures."""
+    return _cg_manager.all_annotations
+
+
+def enable_cudagraph_annotations() -> None:
+    """Enable kernel annotation capture on subsequent CUDA graph recordings."""
+    _cg_manager.enable_annotations = True
+
+
+def cudagraph_annotate_trace_post_processor() -> Function.Config:
+    """Return a ``Function.Config`` that merges captured CUDA graph kernel
+    annotations into a profiler trace file.
+
+    Attach this to ``Profiler.Config.trace_post_processor`` so that exported
+    profiler traces automatically carry ``module_fqn`` fields on graphed kernel
+    events.
+    """
+    return Function.Config(fn=_cudagraph_annotate_trace_file)
+
+
+def _cudagraph_annotate_trace_file(trace_path: str) -> None:
+    """Post-process a profiler trace with CUDA graph kernel annotations."""
+    annotations = _cg_manager.all_annotations
+    if not annotations:
+        return
+
+    try:
+        from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-import]
+            annotate_trace,
+        )
+    except ImportError:
+        logger.warning(
+            "torch.cuda._annotate_cuda_graph_trace not available. "
+            "Upgrade PyTorch to enable trace CUDA graph kernel annotation."
+        )
+        return
+
+    with open(trace_path) as f:
+        trace = json.load(f)
+
+    count = annotate_trace(trace, annotations)
+    if count > 0:
+        with open(trace_path, "w") as f:
+            json.dump(trace, f)
+        logger.info(f"Annotated {count} CUDAGraph kernel event(s) in profiler trace")
 
 
 class CUDAGraphWrapper:
@@ -219,9 +272,15 @@ class CUDAGraphWrapper:
                 self._cudagraph,
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
+                enable_annotations=_cg_manager.enable_annotations,
             ):
                 # `output` is managed by pytorch's cudagraph pool
                 self._output = self._runnable(*args)
+
+            if _cg_manager.enable_annotations:
+                from torch.cuda._graph_annotations import get_kernel_annotations
+
+                _cg_manager.all_annotations.update(get_kernel_annotations())
 
         if self._should_check_address:
             self._check_static_inputs_address()
@@ -257,6 +316,8 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
     - **``aten._grouped_mm``**: the grouped matmul kernel used by MoE may
       perform internal CPU↔CUDA copies (e.g. workspace allocation) that
       are invisible in the FX graph metadata, breaking CUDA graph capture.
+      On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
+      cudagraph-compatible.
     - **flex_attention HOPs**: flex_attention higher-order ops require
       torch.compile (e.g. regional_inductor) to lower them into fused
       Triton kernels.  Without compilation they fall back to an unfused
@@ -293,13 +354,17 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
         # _grouped_mm may perform internal CPU↔CUDA copies (e.g. workspace
         # allocation) that are not visible from the FX graph metadata, so we
         # cannot rely on checking input device types alone.
+        # On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
+        # cudagraph-compatible.
         if node.target == torch.ops.aten._grouped_mm.default:
-            logger.warning(
-                "Skipping cudagraph: graph contains aten._grouped_mm "
-                "which may perform internal CPU↔CUDA copies incompatible "
-                "with CUDA graph capture"
-            )
-            return False
+            capability = torch.cuda.get_device_capability()
+            if capability < (10, 0):
+                logger.warning(
+                    "Skipping cudagraph: graph contains aten._grouped_mm "
+                    "which may perform internal CPU↔CUDA copies incompatible "
+                    "with CUDA graph capture"
+                )
+                return False
 
     for node in gm.graph.nodes:
         if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:

@@ -96,7 +96,6 @@ class Llama3Model(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
-                # pyrefly: ignore [missing-attribute]
                 n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
@@ -111,6 +110,14 @@ class Llama3Model(Decoder):
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
                 )
+
+            from torchtitan.models.llama3.sharding import set_llama3_sharding_config
+
+            set_llama3_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_sp=parallelism.enable_sequence_parallel,
+            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -129,7 +136,7 @@ class Llama3Model(Decoder):
         self.enable_weight_tying = config.enable_weight_tying
 
         if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.output.weight
+            self.tok_embeddings.weight = self.lm_head.weight
 
     def init_states(
         self,
@@ -140,7 +147,7 @@ class Llama3Model(Decoder):
             # Re-tie weights before parameter init so that tok_embeddings.weight
             # (skipped by skip_param_init) and output.weight point to the same
             # tensor after output is initialized.
-            assert self.tok_embeddings is not None and self.output is not None
-            self.tok_embeddings.weight = self.output.weight
+            assert self.tok_embeddings is not None and self.lm_head is not None
+            self.tok_embeddings.weight = self.lm_head.weight
 
         super().init_states(buffer_device=buffer_device)

@@ -18,11 +18,11 @@ from torch.distributed import ProcessGroup
 from torch.utils._python_dispatch import _disable_current_modes
 
 try:
-    from deep_ep import Buffer  # pyrefly: ignore[missing-import]
-    from deep_ep.utils import (  # pyrefly: ignore[missing-import]
-        EventHandle,
-        EventOverlap,
-    )
+    # pyrefly: ignore [missing-import]
+    from deep_ep import Buffer
+
+    # pyrefly: ignore [missing-import]
+    from deep_ep.utils import EventHandle, EventOverlap
 except ImportError as e:
     raise ImportError(
         "DeepEP is required for this module. "
@@ -31,7 +31,6 @@ except ImportError as e:
 
 
 # Global buffer (single buffer per process, recreated if group changes)
-# pyrefly: ignore [bad-assignment]
 _buffer: Buffer = None
 
 # Global cache for dispatch handles, keyed by handle_id
@@ -118,7 +117,6 @@ def _dispatch_op_impl(
     recv_num_tokens_per_expert = torch.tensor(
         recv_num_tokens_per_expert_list, dtype=torch.int32, device="cpu"
     )
-    # pyrefly: ignore [bad-return]
     return recv_x, recv_indices, recv_scores, recv_num_tokens_per_expert, handle_id
 
 
@@ -243,7 +241,6 @@ torch.library.register_autograd(
 )
 
 
-@torch.compiler.disable()
 def sync_combine() -> None:
     """Synchronize the current CUDA stream with the pending combine operation.
 
@@ -253,7 +250,7 @@ def sync_combine() -> None:
     the combine to finish.
 
     torch.compile Compatibility:
-        Decorated with @torch.compiler.disable() to always run in eager mode.
+        Guarded with is_compiling() to skip in compile mode.
         This avoids issues with CUDA event operations not being traceable.
 
     Process Isolation:
@@ -279,6 +276,13 @@ def sync_combine() -> None:
     was already synced or if no combine operation is pending.
     """
     global _pending_combine_event
+    # is_compiling() is True under Dynamo (aot mode) — skip to avoid tracing
+    # through global state Dynamo can't handle. Under make_fx (aot_fx_trace),
+    # is_compiling() is False so this guard doesn't fire, but the function is
+    # still safe: _pending_combine_event is None during tracing (no real
+    # combine ran), so the body below is a no-op.
+    if torch.compiler.is_compiling():
+        return
 
     if _pending_combine_event is not None:
         _pending_combine_event.current_stream_wait()

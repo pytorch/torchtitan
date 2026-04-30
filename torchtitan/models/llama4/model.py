@@ -148,6 +148,19 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
+                    comm_backend = getattr(
+                        layer_cfg.moe.experts.token_dispatcher,
+                        "comm_backend",
+                        "standard",
+                    )
+                    if (
+                        comm_backend in ("deepep", "hybridep")
+                        and parallelism.expert_parallel_degree == 1
+                    ):
+                        raise ValueError(
+                            f"{comm_backend.upper()} requires expert parallelism "
+                            "(expert_parallel_degree > 1)."
+                        )
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -158,7 +171,6 @@ class Llama4Model(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
-                # pyrefly: ignore [missing-attribute]
                 n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
                 if n_heads % tp != 0:
                     raise ValueError(
@@ -168,6 +180,14 @@ class Llama4Model(Decoder):
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
+
+            from torchtitan.models.llama4.sharding import set_llama4_sharding_config
+
+            set_llama4_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_sp=parallelism.enable_sequence_parallel,
+            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

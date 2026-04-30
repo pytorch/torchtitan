@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 
 from torchtitan.models.llama3 import llama3_configs
@@ -16,15 +15,14 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .parallelize_llama import parallelize_llama
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    config = llama3_configs[flavor]()
+def model_registry(flavor: str, attn_backend: str = "sdpa") -> ModelSpec:
+    config = llama3_configs[flavor](attn_backend=attn_backend)
     return ModelSpec(
         name="autoparallel/llama3",
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
     )

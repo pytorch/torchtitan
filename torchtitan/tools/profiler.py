@@ -8,10 +8,12 @@ import os
 import pickle
 import time
 from dataclasses import dataclass
+from typing import Annotated
 
 import torch
-
+import tyro
 from torchtitan.config import Configurable
+from torchtitan.config.function import Function
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
 
@@ -168,6 +170,15 @@ class Profiler(Configurable):
         save_memory_snapshot_folder: str = "memory_snapshot"
         """Memory snapshot files location."""
 
+        trace_post_processor: Annotated[
+            Function.Config | None, tyro.conf.Suppress
+        ] = None
+        """Optional hook invoked with the trace path after each export.
+
+        Wraps ``fn(trace_path: str) -> None``.
+        Set programmatically (not via CLI) — tyro cannot parse Callable types.
+        """
+
     def __init__(
         self,
         config: Config,
@@ -269,6 +280,9 @@ class Profiler(Configurable):
         }
 
         rank = torch.distributed.get_rank()
+        post_processor = (
+            cfg.trace_post_processor.build() if cfg.trace_post_processor else None
+        )
 
         def trace_handler(prof):
             curr_trace_dir_name = "iteration_" + str(prof.step_num)
@@ -281,6 +295,10 @@ class Profiler(Configurable):
 
             output_file = os.path.join(curr_trace_dir, f"rank{rank}_trace.json")
             prof.export_chrome_trace(output_file)
+
+            if post_processor is not None:
+                post_processor(output_file)
+
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
             )

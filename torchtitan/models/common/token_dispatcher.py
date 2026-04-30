@@ -7,13 +7,12 @@
 from dataclasses import dataclass
 
 import torch
-import torch.distributed as dist
-
 from torch import nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
     all_to_all_single_autograd,
 )
+from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
 from torchtitan.ops.scatter_add import deterministic_scatter_add
@@ -156,7 +155,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
-    ep_group is set by the parallelization code after construction.
+    ep_mesh is set by the parallelization code after construction.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -165,12 +164,15 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # Set at runtime by ExpertParallel / ExpertTensorParallel._partition_fn()
-        self.ep_group: dist.ProcessGroup | None = None
+        # DeviceMesh (not ProcessGroup) so that CooR precompile can use
+        # torch.ops._dtensor.mesh_get_process_group to keep the FX graph
+        # rank-agnostic. Set by ExpertParallel._partition_fn().
+        self.ep_mesh: DeviceMesh | None = None
         # TODO: these should be set at config time
-        # Set at runtime by apply_moe_ep_tp from tp_mesh.get_local_rank()
+        # Set at runtime by apply_moe_ep_tp. Uses _sym_get_coordinate
+        # so the rank is a SymInt under CooR precompile.
         self.sp_size: int = 1
-        self.sp_rank: int = -1
+        self.sp_rank: int | torch.SymInt = -1
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
@@ -195,8 +197,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, AllToAllDispatchMetadata]:
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, AllToAllDispatchMetadata | LocalDispatchMetadata
+    ]:
         """Reorder tokens, then all-to-all dispatch to expert-parallel ranks.
+
+        When ep_mesh is None (EP=1), falls back to local dispatch — no
+        all-to-all communication, just local token reordering with padding.
 
         When sp_size > 1 (sequence parallel), inputs are first split along
         the token dim so each EP rank processes a disjoint subset.
@@ -209,18 +216,18 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Returns:
             routed_input: (R, dim) tokens in expert-major order for local experts
             num_tokens_per_expert_local: (num_local_experts,) token counts
-            metadata: AllToAllDispatchMetadata for combine()
+            metadata: dispatch metadata for combine()
         """
-        assert self.ep_group is not None, (
-            "ep_group must be set before dispatch. "
-            "ExpertParallel._partition_fn() should set it."
-        )
-        ep_size = self.ep_group.size()
+        # EP=1: fall back to local dispatch (no all-to-all needed)
+        if self.ep_mesh is None:
+            return super().dispatch(x, top_scores, selected_experts_indices)
+
+        ep_size = self.ep_mesh.size()
 
         if self.sp_size > 1:
             assert self.sp_rank >= 0, (
                 "sp_rank must be set before use. "
-                "apply_moe_ep_tp() should set it from tp_mesh.get_local_rank()."
+                "apply_moe_ep_tp() should set it from tp_mesh._sym_get_coordinate()."
             )
             # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
             # shape (batch_size * seq_len // ep_size, top_k)
@@ -264,7 +271,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 num_tokens_per_expert,
                 None,
                 None,
-                group=self.ep_group,
+                group=self.ep_mesh,
             )
             # Need to wait explicitly because it is used by a triton kernel later
             # which doesn't realize that AsyncCollectiveTensor needs unwrapping
@@ -294,7 +301,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             routed_input,
             output_splits_list,
             input_splits_list,
-            self.ep_group,
+            self.ep_mesh,
         )
 
         # Reorder from rank-major to expert-major via _permute.
@@ -357,9 +364,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         output_starts = segment_lens.cumsum(0) - segment_lens
         permuted_indices = (
             input_starts[seg_ids]
-            + torch.arange(
-                total, device=device
-            )  # pyrefly: ignore [no-matching-overload]
+            + torch.arange(total, device=device)
             - output_starts[seg_ids]
         )
 
@@ -403,14 +408,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Returns:
             (num_tokens, dim) combined output with shared_experts added.
         """
+        # EP=1: fall back to local combine (no all-to-all needed)
+        if self.ep_mesh is None:
+            return super().combine(routed_output, metadata, x, shared_experts)
+
         # Reverse expert-major reordering
         routed_output = self._unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
-        )
-
-        assert self.ep_group is not None, (
-            "ep_group must be set before dispatch. "
-            "ExpertParallel._partition_fn() should set it."
         )
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
@@ -418,7 +422,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             routed_output,
             metadata.input_splits,
             metadata.output_splits,
-            self.ep_group,
+            self.ep_mesh,
         )
 
         # shared_experts overlaps with the async a2a (NCCL stream).
@@ -442,6 +446,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted
 
+        assert isinstance(token_indices_experts_sorted, torch.Tensor)
         out = deterministic_scatter_add(
             out,
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
@@ -451,24 +456,33 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
-    """Token dispatcher for EP>1 with token group padding for quantized grouped GEMMs.
+    """Token dispatcher with token group padding for quantized grouped GEMMs.
 
     Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
     reorder tokens into expert-major order and pad each expert's token group to
     a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
     quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
 
-    ep_group is set by ExpertParallel / ExpertTensorParallel._apply().
+    Requires EP to be enabled (ep_mesh must be set). Raises ValueError
+    if ep_mesh is None, since quantized grouped GEMMs need padded token
+    groups which are only produced by the EP permute_and_pad path.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(AllToAllTokenDispatcher.Config):
-        pass
+        pad_multiple: int
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
-        self.pad_multiple: int
+        self.pad_multiple = config.pad_multiple
+
+    def dispatch(self, x, top_scores, selected_experts_indices):
+        if self.ep_mesh is None:
+            raise ValueError(
+                "TorchAOTokenDispatcher requires expert parallelism (ep_mesh must be set). "
+                "Quantized grouped GEMMs need padded token groups, which requires EP>1. "
+            )
+        return super().dispatch(x, top_scores, selected_experts_indices)
 
     def _permute(
         self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
@@ -492,7 +506,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             num_tokens_per_expert_group,
             ep_size,
             num_local_experts,
-            self.pad_multiple,  # pyrefly: ignore [bad-argument-type]
+            self.pad_multiple,
         )
         return (
             input_shape,
@@ -522,7 +536,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     token dispatch and combine. For the DeepEP backend, combine is asynchronous
     — callers must call sync_combine() before using the result.
 
-    ep_group is set by ExpertParallel / ExpertTensorParallel._apply().
+    ep_mesh is set by ExpertParallel._apply().
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -562,18 +576,15 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         comm_backend: str
         non_blocking_capacity_factor: float | None = None
+        pad_multiple: int | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.comm_backend = config.comm_backend
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
-        # TODO: should be set at config time, not at runtime by apply_moe_ep_tp.
-        # pad_multiple: Alignment size for token groups needed by quantized
-        # grouped GEMMs (e.g. 16 for FP8, 32 for MXFP8). Only supported
-        # with hybridep. None means no padding.
-        self.pad_multiple: int | None = None
-        # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
-        self.ep_group: dist.ProcessGroup | None = None
+        self.pad_multiple = config.pad_multiple
+        # Set by ExpertParallel._partition_fn()
+        self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -589,11 +600,12 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
-        assert self.ep_group is not None, (
-            "ep_group must be set before dispatch. "
+        assert self.ep_mesh is not None, (
+            "ep_mesh must be set before dispatch. "
             "ExpertParallel._partition_fn() should set it."
         )
-        num_local_experts = self.num_experts // self.ep_group.size()
+        ep_group = self.ep_mesh.get_group()
+        num_local_experts = self.num_experts // ep_group.size()
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep.hybridep import dispatch_tokens
 
@@ -603,7 +615,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 top_scores,
                 num_local_experts,
                 self.num_experts,
-                self.ep_group,
+                ep_group,
                 score_before_experts=self.score_before_experts,
                 non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
                 pad_multiple=self.pad_multiple,
@@ -617,7 +629,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
                 top_scores,
                 num_local_experts,
                 self.num_experts,
-                self.ep_group,
+                ep_group,
                 score_before_experts=self.score_before_experts,
             )
 

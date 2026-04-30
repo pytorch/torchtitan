@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
+from autoparallel.compile import autoparallel_backend
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -22,8 +23,8 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 from torchtitan.models.common.moe import _run_experts_grouped_mm
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import device_type
 
 
 def create_functional_router_forward(
@@ -113,8 +114,7 @@ def _moe_forward(
     #       1st computation in router is to update self.tokens_per_expert
     #       which would be the same across all TP ranks.
     #       2nd computation in reorderer is for the actual routing and experts computation
-    #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
-    #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+    #       which would be sharded over TP ranks.
     (
         top_scores_experts_sorted,
         token_indices_experts_sorted,
@@ -264,7 +264,6 @@ def parallelize_deepseekv3(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: AutoParallelCompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -286,7 +285,7 @@ def parallelize_deepseekv3(
     # allow configuring inductor comms optimizations from torchtitan commandline
     configure_inductor_for_autobucketing(compile_config.comms_bucket_reorder_strategy)
 
-    sparse_names = ["dp_replicate", "efsdp", "ep", "etp"]
+    sparse_names = ["dp_replicate", "efsdp", "ep"]
     sparse_names = [
         name
         for name in sparse_names
@@ -306,7 +305,7 @@ def parallelize_deepseekv3(
                 0,
                 model.config.vocab_size,
                 (global_batch_size, training.seq_len),
-                device=torch.device("cuda"),
+                device=torch.device(device_type),
             ),
         )
 
@@ -334,7 +333,6 @@ def parallelize_deepseekv3(
         input_fn,
         sparse_mesh,
         mp_policy=mp_policy,
-        compile=compile_config,
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
@@ -343,13 +341,11 @@ def parallelize_deepseekv3(
             "dp_replicate": Shard(0),
             "efsdp": Shard(0),
             "ep": Shard(0),
-            "etp": Replicate(),
         }
         # only used if loss parallel is enabled
         possible_output_shardings = {
             # maps relative to mesh dim names used in torchtitan
             "efsdp": Shard(0),
-            "etp": Shard(2),
         }
         assert all(
             name in possible_input_shardings for name in sparse_mesh.mesh_dim_names
@@ -375,6 +371,9 @@ def parallelize_deepseekv3(
         logger.info(f"AutoParallel took {t1 - t0} seconds")
         parallel_mod = autop.apply_placement(sharding_placement)
 
+    if compile_config.enable:
+        parallel_mod = torch.compile(parallel_mod, backend=autoparallel_backend())
+
     set_torchtitan_fields(model, parallel_mod)
 
     if loss_parallel_enabled:
@@ -387,7 +386,7 @@ def parallelize_deepseekv3(
         # it would require putting the loss inside the model as well
         def _return_as_dtensor_for_loss_parallel(module, args, output):
             return torch.distributed.tensor.DTensor.from_local(
-                output, sparse_mesh["etp"], (Shard(2),)
+                output, parallel_dims.get_mesh("tp"), (Shard(2),)
             )
 
         # not keeping a reference to the hook, don't plan on

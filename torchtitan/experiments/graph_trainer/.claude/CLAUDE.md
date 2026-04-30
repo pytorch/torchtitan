@@ -23,6 +23,45 @@ bound during pass construction in `construct_default_graph_passes` via
 parameters. The apply function is a generic pass runner and must not contain
 pass-specific arguments.
 
+## Flexible Memory Policy Framework
+
+PyTorch's module-level `torch.utils.checkpoint` and eager SAC make
+coarse save-or-recompute decisions for an entire module's output, and
+composing activation checkpointing with CPU offload is difficult. This
+framework instead operates on the FX graph at individual tensor
+granularity: each activation can independently be saved, recomputed, or
+offloaded, and different strategies mix freely within a single layer.
+
+`tag_with_memory_policy_pass` is the unified entry point. It is a
+two-step process:
+
+1. **Tag nodes.** Each saved forward activation is tagged with one of:
+   - `MUST_SAVE` — keep the activation in GPU memory.
+   - `MUST_RECOMPUTE` — discard and recompute during backward.
+   - `MUST_CPU_OFFLOAD` — offload to CPU, reload before backward.
+
+   Tagging can be done manually (per-node annotations) or with an
+   advanced solver algorithm that optimizes the save/recompute/offload
+   split based on memory budget and compute cost.
+
+2. **Act on tags.** Two passes run unconditionally after tagging (both
+   are no-ops when no nodes carry the relevant tag):
+   - `apply_cpu_offload_pass` — inserts offload/reload/wait ops for
+     `MUST_CPU_OFFLOAD` nodes.
+   - `selective_activation_remat_pass` — duplicates `MUST_RECOMPUTE`
+     ops before backward and DCEs the originals.
+
+The `--compile.memory_policy` config selects the tagging strategy.
+New policies (e.g. budget-aware mixed SAC + offload) should be added
+as new branches in `tag_with_memory_policy_pass`.
+
+**Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
+prints all forward nodes consumed by backward, grouped by layer with
+identical patterns consolidated. Shows memory, dtype, policy
+(SAVE/RECOMPUTE/OFFLOAD), shape, submodule, target op, and source location.
+It runs automatically at the end of `tag_with_memory_policy_pass`,
+logging to both `logger.debug` and tlparse (via `trace_structured`).
+
 ## Don't Modify Core for This Experiment
 
 Do not add `if graph_trainer:` branches to `torchtitan/train.py`
@@ -122,6 +161,40 @@ def my_pass(gm, example_inputs):
 diff /tmp/my_pass_before.txt /tmp/my_pass_after.txt
 ```
 
+### Printing and Inspecting Tensors Inside a Compiled Function
+
+To inspect tensor values or gradients *inside* `torch.compile` without graph
+breaks:
+
+- **Simple printing**: `torch._higher_order_ops.print("norm={}", x.norm())` —
+  format-string, forward-only. DTensors print each rank's local view with an
+  automatic `[rank N]` prefix.
+- **Gradient norms**: `from torch.utils.debug_log import debug_grad_log` —
+  call on intermediates (not direct graph inputs); fires during backward and
+  logs per-tensor gradient norms.
+- **Custom logic** (arbitrary Python, file logging, rank filtering, fwd+bwd):
+  compose `@leaf_function` with `@fn.register_multi_grad_hook` from
+  `torch._dynamo.decorators`, following the pattern in
+  `torch/utils/debug_log.py`:
+
+  ```python
+  from torch._dynamo.decorators import leaf_function
+
+  @leaf_function
+  def log_tensor(x, tag=""):
+      return None  # no-op in forward
+
+  @log_tensor.register_fake
+  def log_tensor_fake(x, tag=""):
+      return None
+
+  @log_tensor.register_multi_grad_hook
+  def log_tensor_hook(x_grad, tag=""):  # non-tensor args passed through unchanged
+      print(f"[{tag}][bwd] grad_norm={x_grad.norm():.4f}")
+
+  log_tensor(x, "after_add")
+  ```
+
 ### Benchmark
 
 Use `./run_train.sh` with a small number of steps. Disable tensorboard,
@@ -137,7 +210,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
-    --profiling.no-enable_profiling \
+    --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
     --training.steps 20
 
@@ -149,7 +222,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
     --parallelism.expert_parallel_degree=2 \
     --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
-    --profiling.no-enable_profiling \
+    --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
     --training.steps 20
 ```
@@ -163,8 +236,8 @@ step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,3
 
 ### Profiling
 
-Add `--profiling.enable_profiling` to any `./run_train.sh` command.
-Set `--profiling.profile_freq` to control which step is captured
+Add `--profiler.enable_profiling` to any `./run_train.sh` command.
+Set `--profiler.profile_freq` to control which step is captured
 (default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
 
 ```bash
@@ -173,13 +246,13 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
-    --profiling.enable_profiling \
-    --profiling.profile_freq 10
+    --profiler.enable_profiling \
+    --profiler.profile_freq 10
 ```
 
 ### Memory Snapshot
 
-Add `--profiling.enable_memory_snapshot` to capture a memory snapshot.
+Add `--profiler.enable_memory_snapshot` to capture a memory snapshot.
 The snapshot fires at every `profile_freq`-th step and is saved to
 `{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
 Each rank produces its own file:
@@ -194,8 +267,8 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
-    --profiling.enable_memory_snapshot \
-    --profiling.profile_freq 10
+    --profiler.enable_memory_snapshot \
+    --profiler.profile_freq 10
 ```
 
 ### Bitwise Deterministic Guardrail
@@ -208,3 +281,41 @@ This verifies that the aot_fx_trace path produces bitwise identical losses
 and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
+
+### Async Tensor Parallel (micro-pipeline TP)
+
+Enable with `--parallelism.enable_async_tensor_parallel`. This fuses
+all-gather + matmul and matmul + reduce-scatter into pipelined ops using
+symmetric memory (NVLink).
+
+**When to use:**
+- TP is enabled and the model has large hidden dimensions (shard_dim >= 1024
+  after TP split; e.g. llama3 8B dim=4096 with TP=4 gives shard=1024).
+- Below this threshold the pipeline chunking overhead exceeds the overlap
+  benefit — the pass silently skips small shards.
+- Requires NVLink-connected GPUs (H100, A100 NVSwitch, etc.).
+
+**Example:**
+```bash
+NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.tensor_parallel_degree=4 \
+    --parallelism.enable_async_tensor_parallel \
+    --dataloader.dataset c4_test
+```
+
+### CUDA Graph Kernel Annotations
+
+The `insert_kernel_annotations_pass` labels CUDA graph kernels with their
+originating `nn.Module` path in profiler traces. It runs automatically in the
+`aot_fx_trace` path (bundled with the cudagraph pass). The post-processor
+is attached via ``Profiler.Config.trace_post_processors`` (see
+``cudagraph_annotate_trace_post_processor``) so exported traces are
+annotated automatically — no manual post-processing is needed.
+
+Requirements: `cuda-python` package and CUDA toolkit/driver >= 13.1
+(or `cuda-compat >= 13.1` on `LD_LIBRARY_PATH`). The pass is a no-op when
+these are unavailable.
+
+To view annotated traces, open the exported JSON in https://ui.perfetto.dev.
+Kernel events will have `module_fqn` fields like `layers.0.attention.wq`.

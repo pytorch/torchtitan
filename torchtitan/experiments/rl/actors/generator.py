@@ -15,11 +15,11 @@ from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
 from torchtitan.config.configs import DebugConfig, ParallelismConfig
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.plugin import (
+from torchtitan.experiments.rl.models.vllm_registry import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.types import Episode
+from torchtitan.experiments.rl.types import Completion
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -93,6 +93,9 @@ class GeneratorCompileConfig:
 class SamplingConfig:
     """Sampling parameters passed to vLLM's SamplingParams."""
 
+    n: int = 8
+    """Number of completions to generate per prompt (vLLM SamplingParams.n)."""
+
     temperature: float = 0.8
     """Sampling temperature. 0.0 = greedy, higher = more random."""
 
@@ -107,15 +110,14 @@ class VLLMGenerator(Actor, Configurable):
     """
     Generates rollouts using vLLM engine.
 
-    Maintains a vLLM engine that is synchronized with the Trainer
-    via weight sync. Generates completions for given prompts and
-    computes rewards/advantages.
+    Maintains a vLLM engine synchronized with the Trainer via weight
+    sync. ``generate()`` produces a flat list of Completions; reward
+    and advantage computation live in the controller.
 
     Args:
         config: Generator-specific configuration.
+        model_spec: TorchTitan model specification.
         model_path: Path to the HF model checkpoint.
-        prompt_texts: List of prompt strings.
-        TODO: refine `prompt_texts` according to input type (eg, a list of token sequences, or conversion)
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -138,21 +140,33 @@ class VLLMGenerator(Actor, Configurable):
         compile: GeneratorCompileConfig = field(default_factory=GeneratorCompileConfig)
         """Compilation and CUDA graph settings for the vLLM engine."""
 
-        num_samples_per_prompt: int = 8
-        """Number of completions to generate per prompt."""
-
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            assert self.parallelism.data_parallel_shard_degree in (1, -1), (
-                f"Generator does not support data parallel sharding, "
-                f"got dp_shard={self.parallelism.data_parallel_shard_degree}"
-            )
-            assert self.parallelism.data_parallel_replicate_degree == 1, (
-                f"Generator does not support data parallel replication, "
-                f"got dp_replicate={self.parallelism.data_parallel_replicate_degree}"
-            )
+            # Generator only supports TP. vLLM handles its own parallelism
+            # and we only apply TP via the core parallelize function.
+            p = self.parallelism
+            if p.data_parallel_replicate_degree != 1:
+                raise ValueError(
+                    f"Generator does not support data parallel replication, "
+                    f"got dp_replicate={p.data_parallel_replicate_degree}"
+                )
+            if p.pipeline_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support pipeline parallelism, "
+                    f"got pp={p.pipeline_parallel_degree}"
+                )
+            if p.context_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support context parallelism, "
+                    f"got cp={p.context_parallel_degree}"
+                )
+            if p.expert_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support expert parallelism, "
+                    f"got ep={p.expert_parallel_degree}"
+                )
 
     def __init__(
         self,
@@ -174,12 +188,7 @@ class VLLMGenerator(Actor, Configurable):
 
         self._set_determinism(config.debug)
 
-        # Extract needed fields from configs
         self.model_path = model_path
-        self.max_new_tokens = config.sampling.max_tokens
-        self.temperature = config.sampling.temperature
-        self.top_p = config.sampling.top_p
-        self.num_samples_per_prompt = config.num_samples_per_prompt
 
         # Build vLLM engine
         engine_kwargs = dict(
@@ -243,82 +252,76 @@ class VLLMGenerator(Actor, Configurable):
     @endpoint
     async def generate(
         self,
-        prompt_texts: list[str],
-        expected_answers: list[str],
-    ) -> list[Episode]:
-        """Generate completions and return a flat list of Episodes.
+        prompts: list[str],
+        *,
+        sampling_config: SamplingConfig | None = None,
+    ) -> list[Completion]:
+        """Generate completions for the given prompts.
 
-        Each prompt produces ``num_samples_per_prompt`` Episodes. Episodes
-        from the same prompt share a ``group_id`` so the controller can
-        compute group-level advantages later.
+        Returns a flat list of length ``len(prompts) * sampling.n``
+        ordered by ``prompt_idx``, with ``sampling.n`` consecutive
+        completions per prompt.
 
         Args:
-            prompt_texts: List of prompt strings for which to generate completions.
-            expected_answers: List of expected answers, one per prompt.
-                They are copied into each Episode so downstream graders can use them
-                for reward computation and generator doesn't use this field.
+            prompts: List of prompt strings.
+            sampling_config: Optional per-call override for the generator's
+                default SamplingConfig. ``seed`` always comes from
+                ``config.debug.seed`` (not part of SamplingConfig).
         """
+        _sampling_config = (
+            sampling_config if sampling_config is not None else self.config.sampling
+        )
+
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
         )
 
         with torch.no_grad():
-            # Generate samples using vLLM
             sampling_params = SamplingParams(
-                temperature=self.temperature,
-                top_p=self.top_p,
-                max_tokens=self.max_new_tokens,
-                n=self.num_samples_per_prompt,
+                temperature=_sampling_config.temperature,
+                top_p=_sampling_config.top_p,
+                max_tokens=_sampling_config.max_tokens,
+                n=_sampling_config.n,
                 seed=self.config.debug.seed,
                 logprobs=1,
-                prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
-                output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
+                output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            for request_id, prompt in enumerate(prompt_texts):
-                self._engine.add_request(str(request_id), prompt, sampling_params)
+            for i, prompt in enumerate(prompts):
+                self._engine.add_request(str(i), prompt, sampling_params)
 
-            # Step through engine until all requests are finished
             all_outputs = []
             while self._engine.has_unfinished_requests():
-                request_outputs = self._engine.step()
-                all_outputs.extend(request_outputs)
+                all_outputs.extend(self._engine.step())
 
-            # Sort outputs by request_id to guarantee prompt ordering,
-            # since vLLM may return completed requests out of order.
+            # vLLM may return requests out of order; sort by the integer
+            # request_id we assigned so prompt_idx lines up with the input.
             all_outputs.sort(key=lambda o: int(o.request_id))
 
-            # Build flat list of Episodes; assign a group_id per prompt.
-            # TODO: Assigning group_id here is GRPO-specific and should be
-            # decoupled from the generator in the future.
-            episodes: list[Episode] = []
-            for idx, output in enumerate(all_outputs):
+            completions: list[Completion] = []
+            for output in all_outputs:
+                prompt_idx = int(output.request_id)
                 prompt_token_ids = output.prompt_token_ids
-                gid = f"{os.getpid()}_{self.policy_version}_{idx}"
-
                 for sample in output.outputs:
-                    per_token_log_probs = [
+                    per_token_logprobs = [
                         list(logprob_dict.values())[0].logprob
                         for logprob_dict in sample.logprobs
                     ]
-                    episodes.append(
-                        Episode(
+                    completions.append(
+                        Completion(
                             policy_version=self.policy_version,
+                            prompt_idx=prompt_idx,
                             prompt_token_ids=prompt_token_ids,
                             text=sample.text,
                             token_ids=sample.token_ids,
-                            token_log_probs=per_token_log_probs,
-                            expected_answer=expected_answers[idx]
-                            if expected_answers
-                            else "",
-                            group_id=gid,
+                            token_logprobs=per_token_logprobs,
                         )
                     )
 
         logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
-        return episodes
+        return completions
 
     @endpoint
     async def pull_model_state_dict(self, version: int) -> None:
@@ -344,6 +347,9 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=is_rdma_available(),
         )
         self.policy_version = version
+        # Invalidate the KV prefix cache so stale values computed with the
+        # old weights are never reused for new generations.
+        self._engine.reset_prefix_cache()
         logger.debug(
             f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )

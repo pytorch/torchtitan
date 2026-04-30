@@ -66,7 +66,7 @@ class Decoder(BaseModel):
     class Config(BaseModel.Config):
         dim: int
         vocab_size: int
-        output: Linear.Config
+        lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
@@ -79,6 +79,12 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+
+    # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
+    # per-chunk inside the loss function instead of in forward().
+    # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
+    # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
+    _skip_lm_head: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -93,7 +99,7 @@ class Decoder(BaseModel):
             self.layers[str(i)] = layer_config.build()
 
         self.norm = config.norm.build()
-        self.output = config.output.build()
+        self.lm_head = config.lm_head.build()
 
     def init_states(
         self,
@@ -133,7 +139,13 @@ class Decoder(BaseModel):
             h = layer(h, self.freqs_cis, attention_masks, positions)
 
         h = self.norm(h) if self.norm is not None else h
-        output = self.output(h) if self.output is not None else h
+
+        # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
+        # calls .requires_grad on all stage inputs, which fails on bool kwargs.
+        # TODO: fix PP backward upstream to skip non-tensor inputs
+        if self._skip_lm_head:
+            return h
+        output = self.lm_head(h) if self.lm_head is not None else h
         return output
 
     def _get_flex_attention_masks(

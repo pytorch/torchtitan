@@ -9,7 +9,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
@@ -72,12 +72,8 @@ class BaseTokenizer(ABC, Configurable):
             lstrip_blocks=True,
             extensions=[jinja2.ext.loopcontrols],
         )
-        env.globals[
-            "raise_exception"
-        ] = raise_exception  # pyrefly: ignore [unsupported-operation]
-        env.globals[
-            "strftime_now"
-        ] = strftime_now  # pyrefly: ignore [unsupported-operation]
+        env.globals["raise_exception"] = cast(Any, raise_exception)
+        env.globals["strftime_now"] = cast(Any, strftime_now)
         env.filters["tojson"] = tojson
         self._chat_template = env.from_string(template)
 
@@ -235,13 +231,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 tokenizer = Tokenizer(bpe_model)
 
                 # Configure GPT-2 style components for proper space handling
-                # pyrefly: ignore [read-only]
                 tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
                     add_prefix_space=False
                 )
-                # pyrefly: ignore [read-only]
                 tokenizer.decoder = decoders.ByteLevel()
-                # pyrefly: ignore [read-only]
                 tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
 
                 return tokenizer

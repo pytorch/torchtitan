@@ -40,7 +40,7 @@ jobs:
           # Load the archive, extract into temp folder, move the binary, delete the rest
           mkdir -p lychee_install
           curl -sLO "$URL"
-          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install
+          tar -xzf "lychee-x86_64-unknown-linux-gnu.tar.gz" -C lychee_install --strip-components=1
           sudo mv lychee_install/lychee /usr/local/bin/
           rm -rf lychee_install "lychee-x86_64-unknown-linux-gnu.tar.gz"
 
@@ -55,11 +55,33 @@ jobs:
 
       - name: Get changed files
         id: changed-files
-        uses: tj-actions/changed-files@22103cc46bda19c2b464ffe86db46df6922fd323 # v45.0.6
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v45.0.6
 
       - name: Lint modified files
-        run: pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}
+        env:
+          # External-link checking via lychee is flaky on transient network
+          # failures and runs in the nightly Link Check workflow. We still run
+          # lychee on PRs in the next step, but in --offline mode for in-repo
+          # link validation only.
+          SKIP: lychee-link-checker
+        run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
 
-      - name: Check links with Lychee
+      - name: Check in-repo links with Lychee (offline)
+        shell: bash -eo pipefail {0}
+        env:
+          ALL_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
-          pre-commit run lychee-link-checker --all-files
+          FILES=""
+          for f in $ALL_FILES; do
+            case "$f" in
+              *.md|*.py) FILES="$FILES $f" ;;
+            esac
+          done
+          if [ -z "$FILES" ]; then
+            echo "No modified markdown/python files; skipping lychee."
+            exit 0
+          fi
+          # --offline checks only filesystem links; no network requests, so
+          # no external flakiness. The nightly Link Check workflow covers
+          # external links.
+          lychee --offline --no-progress --root-dir=. $FILES

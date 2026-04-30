@@ -20,6 +20,7 @@ Usage (aot mode):
     python -m torchtitan.experiments.graph_trainer.precompile_main \
         --module graph_trainer.llama3 \
         --config graph_trainer_llama3_debugmodel \
+        --compile.mode aot \
         --compile.passes full_inductor_compilation \
         --compile.joint_passes inductor_decomposition \
         --compile.precompile_artifact_dir /tmp/precompile_artifacts
@@ -35,6 +36,7 @@ Usage (aot_fx_trace mode):
 import contextlib
 import dataclasses
 import functools
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -42,7 +44,6 @@ import torch.distributed as dist
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
-    apply_graph_ac,
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
@@ -63,6 +64,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -127,7 +129,6 @@ def _common_setup(config):
         tp=tp,
         pp=pp,
         ep=parallelism.expert_parallel_degree,
-        etp=parallelism.expert_tensor_parallel_degree,
         world_size=world_size,
     )
     parallel_dims.build_mesh()
@@ -155,9 +156,6 @@ def _common_setup(config):
 
     # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
     # (returns model unchanged), so we pass the real compile_config.
-    # This lets side effects from parallelize_fn (e.g. apply_graph_ac
-    # adding "apply_sac" to joint_passes) be visible to
-    # compute_config_fingerprint later without needing a manual hack.
     # For aot, apply_compile would try to load a non-existent artifact,
     # so we suppress it with a copy that has enable=False. This
     # complexity goes away once we complete the migration to
@@ -171,7 +169,6 @@ def _common_setup(config):
         model,
         parallel_dims=parallel_dims,
         training=config.training,
-        model_converters=config.model_converters,
         parallelism=parallelism,
         compile_config=parallelize_compile_config,
         ac_config=config.activation_checkpoint,
@@ -193,11 +190,28 @@ def _common_setup(config):
 
     logger.info("Model parallelized and materialized")
 
-    return model, model_config, model_spec, compile_config, parallel_dims, device
+    tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+
+    return (
+        model,
+        model_config,
+        model_spec,
+        compile_config,
+        parallel_dims,
+        device,
+        tokenizer,
+    )
 
 
 def _precompile_aot(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device
+    config,
+    model,
+    model_config,
+    model_spec,
+    compile_config,
+    parallel_dims,
+    device,
+    tokenizer,
 ):
     """AOT mode precompilation: joint graph export + Inductor."""
     # Only one pass in the pipeline needs to produce serializable OutputCode.
@@ -207,12 +221,6 @@ def _precompile_aot(
             "serializable output "
             f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
         )
-
-    # Augment compile_config with AC joint passes to match the training
-    # path, which calls apply_graph_ac during parallelization. Without
-    # this the SAC pass won't run and the config fingerprint will differ.
-    if config.activation_checkpoint.mode != "none":
-        apply_graph_ac(compile_config, config.activation_checkpoint)
 
     register_blockmask_pytree_node()
 
@@ -282,7 +290,14 @@ def _precompile_aot(
 
 
 def _precompile_aot_fx_trace(
-    config, model, model_config, model_spec, compile_config, parallel_dims, device
+    config,
+    model,
+    model_config,
+    model_spec,
+    compile_config,
+    parallel_dims,
+    device,
+    tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
     from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
@@ -292,7 +307,7 @@ def _precompile_aot_fx_trace(
     )
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
-    loss_fn = model_spec.build_loss_fn(compile_config, parallel_dims=parallel_dims)
+    loss_fn = config.loss.build(compile_config=compile_config)
 
     fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
 
@@ -318,7 +333,47 @@ def _precompile_aot_fx_trace(
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
     extra_inputs: dict[str, torch.Tensor] = {}
-    extra_kwargs: dict[str, torch.Tensor] = {}
+    extra_kwargs: dict[str, Any] = {}
+
+    if isinstance(model_config, Decoder.Config) and model_config.layers:
+        attn_config = model_config.layers[0].attention
+        mask_type = getattr(attn_config, "mask_type", "causal")
+
+        if mask_type == "block_causal" or parallel_dims.cp_enabled:
+            extra_kwargs["positions"] = torch.arange(
+                0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
+            ).expand(dummy_inputs.shape)
+
+        inner_attention = getattr(attn_config, "inner_attention", None)
+        if inner_attention is not None:
+            from torchtitan.models.common.attention import (
+                FlexAttention,
+                VarlenAttention,
+            )
+
+            if isinstance(
+                inner_attention,
+                (FlexAttention.Config, VarlenAttention.Config),
+            ):
+                assert (
+                    tokenizer is not None
+                ), "tokenizer is required for flex/varlen attention"
+                extra_kwargs["attention_masks"] = cast(
+                    Decoder, model
+                ).get_attention_masks(
+                    input_batch=dummy_inputs,
+                    tokenizer=tokenizer,
+                    extra_inputs=extra_inputs or {},
+                )
+
+    # TODO: Add CP support — call prepare_context_parallel_input here
+    # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
+    # dimension, matching the trainer's post_dataloading_process.
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError(
+            "CooR precompile does not yet support context parallelism. "
+            "Set --parallelism.context_parallel_degree 1."
+        )
 
     # Enable loss_parallel when TP is active and loss_parallel is not
     # disabled. This matches the training path which wraps tracing +
@@ -353,12 +408,29 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
+    from torchtitan.experiments.graph_trainer.bucketing import (
+        joint_transformer_block_bucketing_reordering_pass,
+    )
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,
     )
 
-    passes = compile_time_passes(traced_result)
+    passes = compile_time_passes(traced_result, config)
+
+    # TODO: Remove this filter once upstream manual_overlap_bucketing
+    # supports make_fx-traced graphs where collective group_name args
+    # are FX Node references instead of string literals. The bucketing
+    # and comm_analysis code crashes with
+    # "AttributeError: 'Node' object has no attribute 'size'" or
+    # "assert isinstance(group_name, str)".
+    passes = [
+        p
+        for p in passes
+        if getattr(p, "func", p)
+        is not joint_transformer_block_bucketing_reordering_pass
+    ]
+
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )
@@ -402,6 +474,7 @@ def main():
         compile_config,
         parallel_dims,
         device,
+        tokenizer,
     ) = _common_setup(config)
 
     if mode == "aot":
@@ -413,6 +486,7 @@ def main():
             compile_config,
             parallel_dims,
             device,
+            tokenizer,
         )
     elif mode == "aot_fx_trace":
         _precompile_aot_fx_trace(
@@ -423,6 +497,7 @@ def main():
             compile_config,
             parallel_dims,
             device,
+            tokenizer,
         )
 
     dist.destroy_process_group()

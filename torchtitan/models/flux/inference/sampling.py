@@ -96,9 +96,7 @@ def generate_image(
     clip_tokens = tokens["clip"]
     t5_tokens = tokens["t5"]
     if len(prompt) == 1:
-        # pyrefly: ignore [missing-attribute]
         clip_tokens = clip_tokens.unsqueeze(0)
-        # pyrefly: ignore [missing-attribute]
         t5_tokens = t5_tokens.unsqueeze(0)
 
     batch = preprocess_data(
@@ -107,20 +105,18 @@ def generate_image(
         autoencoder=None,
         clip_encoder=clip_encoder,
         t5_encoder=t5_encoder,
-        # pyrefly: ignore [bad-argument-type]
         batch={
             "clip": clip_tokens,
             "t5": t5_tokens,
         },
     )
 
+    empty_batch = None
     if enable_classifier_free_guidance:
         num_images = len(prompt)
 
         empty_tokens = tokenizer.encode("")
-        # pyrefly: ignore [missing-attribute]
         empty_clip_tokens = empty_tokens["clip"].repeat(num_images, 1)
-        # pyrefly: ignore [missing-attribute]
         empty_t5_tokens = empty_tokens["t5"].repeat(num_images, 1)
 
         empty_batch = preprocess_data(
@@ -146,16 +142,10 @@ def generate_image(
         t5_encodings=batch["t5_encodings"],
         enable_classifier_free_guidance=enable_classifier_free_guidance,
         empty_t5_encodings=(
-            # pyrefly: ignore [unbound-name]
-            empty_batch["t5_encodings"]
-            if enable_classifier_free_guidance
-            else None
+            empty_batch["t5_encodings"] if empty_batch is not None else None
         ),
         empty_clip_encodings=(
-            # pyrefly: ignore [unbound-name]
-            empty_batch["clip_encodings"]
-            if enable_classifier_free_guidance
-            else None
+            empty_batch["clip_encodings"] if empty_batch is not None else None
         ),
         classifier_free_guidance_scale=classifier_free_guidance_scale,
     )
