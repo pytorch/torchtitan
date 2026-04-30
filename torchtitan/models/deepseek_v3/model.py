@@ -228,7 +228,10 @@ class DeepSeekV3Model(Decoder):
                         "comm_backend",
                         "standard",
                     )
-                    if comm_backend in ("deepep", "hybridep") and parallelism.expert_parallel_degree == 1:
+                    if (
+                        comm_backend in ("deepep", "hybridep")
+                        and parallelism.expert_parallel_degree == 1
+                    ):
                         raise ValueError(
                             f"{comm_backend.upper()} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
