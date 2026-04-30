@@ -25,6 +25,18 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
             module.set_gradient_divide_factor(1.0)
 
 
+def enable_fsdp_symm_mem(model: nn.Module) -> None:
+    """
+    Enable symmetric-memory communication optimizations for all FSDP modules.
+    """
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            # Potential hiccup: TorchTitan also supports float8 FSDP all-gather
+            # via torchao. That path customizes FSDP communication behavior, so
+            # this combination may need extra validation when both are enabled.
+            module.set_symm_mem_for_comm()
+
+
 def get_fsdp_reshard_after_forward_policy(
     reshard_after_forward_policy: str, pp_enabled: bool
 ) -> bool:

@@ -467,7 +467,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
             state["hf_dataset_state"] = self._data.state_dict()
 
         if self.enable_packing:
-            # pyrefly: ignore [bad-typed-dict-key]
+
             state["packer_state"] = {
                 "sample_buffer": list(self.packer._sample_buffer.values()),
                 "packed_samples": list(self.packer.packed_samples),

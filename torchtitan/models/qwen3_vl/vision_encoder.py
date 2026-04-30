@@ -611,7 +611,7 @@ class Qwen3VLVisionEncoder(Module):
                 )
             learned_pos = self._local_map_learned_pos_fn(
                 learned_pos_embed,
-                grid_thw,  # pyrefly: ignore [bad-argument-count]
+                grid_thw,
                 max_num_patch,
                 self.num_grid_per_side,
                 self.spatial_merge_size,
