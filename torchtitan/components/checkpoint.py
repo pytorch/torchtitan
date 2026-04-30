@@ -494,6 +494,7 @@ class CheckpointManager(Configurable):
             )
 
         if hf_storage and keys_match_mapping:
+            assert fqn_to_index_mapping is not None
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
