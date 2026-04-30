@@ -124,38 +124,66 @@ class BaseModel(Module):
     # State dict transforms, set once by set_sd_transforms().
     _to_hf = None
     _from_hf = None
+    _converters_to_external: list | None = None
+    _converters_from_external: list | None = None
 
-    def set_sd_transforms(self, sd_adapter=None) -> None:
+    def set_sd_transforms(
+        self, sd_adapter=None, converters: list | None = None
+    ) -> None:
         """Wire state dict transforms onto this model.
 
-        Extracts HF key remapping from sd_adapter (``to_hf``, ``from_hf``).
-        I/O concerns (storage reader/writer, fqn mapping) stay on
-        CheckpointManager.
+        Extracts HF key remapping from sd_adapter and collects converter
+        transforms. Each converter may implement
+        ``build_external_transforms(sd_adapter)`` returning a dict with
+        ``to_external``/``from_external`` callables.
 
         Called once by the trainer after model build.
         """
         if sd_adapter is not None:
             self._to_hf = sd_adapter.to_hf
             self._from_hf = sd_adapter.from_hf
+        self._converters_to_external = None
+        self._converters_from_external = None
+        for converter in converters or []:
+            build_fn = getattr(converter, "build_external_transforms", None)
+            if build_fn is not None:
+                ct = build_fn(sd_adapter)
+                if ct is not None:
+                    if self._converters_to_external is None:
+                        self._converters_to_external = []
+                        self._converters_from_external = []
+                    if "to_external" in ct:
+                        self._converters_to_external.append(ct["to_external"])
+                    if "from_external" in ct:
+                        self._converters_from_external.append(ct["from_external"])
 
     def to_external(self, sd: dict[str, Any], mode: StateDictMode) -> dict[str, Any]:
         """Convert native state dict keys to external format.
 
         The mode determines which transforms to apply:
         - BASE: HF remapping only (base model keys)
-        - TRAINABLE: no-op (reserved for converter transforms)
-        - FULL: HF remapping (same as BASE for now)
+        - TRAINABLE: converter transforms only (adapter keys)
+        - FULL: both (base + adapter keys)
         """
         if mode in (StateDictMode.FULL, StateDictMode.BASE):
             if self._to_hf is not None:
                 sd = self._to_hf(sd)
+        if mode in (StateDictMode.FULL, StateDictMode.TRAINABLE):
+            if self._converters_to_external:
+                for fn in self._converters_to_external:
+                    sd = fn(sd)
         return sd
 
     def from_external(self, sd: dict[str, Any], mode: StateDictMode) -> dict[str, Any]:
         """Convert external format state dict keys to native format.
 
-        Reverse of ``to_external``, filtered by mode.
+        Reverse of ``to_external``: converter transforms (reversed) then
+        HF remapping, filtered by mode.
         """
+        if mode in (StateDictMode.FULL, StateDictMode.TRAINABLE):
+            if self._converters_from_external:
+                for fn in reversed(self._converters_from_external):
+                    sd = fn(sd)
         if mode in (StateDictMode.FULL, StateDictMode.BASE):
             if self._from_hf is not None:
                 sd = self._from_hf(sd)
