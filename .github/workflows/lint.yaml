@@ -67,11 +67,20 @@ jobs:
         run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
 
       - name: Check in-repo links with Lychee (offline)
+        env:
+          ALL_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
-          FILES=$(echo "${{ steps.changed-files.outputs.all_changed_files }}" \
-            | tr ' ' '\n' | grep -E '\.(md|py)$' || true)
+          FILES=""
+          for f in $ALL_FILES; do
+            case "$f" in
+              *.md|*.py) FILES="$FILES $f" ;;
+            esac
+          done
           if [ -z "$FILES" ]; then
             echo "No modified markdown/python files; skipping lychee."
             exit 0
           fi
+          # --offline checks only filesystem links; no network requests, so
+          # no external flakiness. The nightly Link Check workflow covers
+          # external links.
           lychee --offline --no-progress --root-dir=. $FILES
