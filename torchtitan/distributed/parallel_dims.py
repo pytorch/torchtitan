@@ -350,10 +350,9 @@ class ParallelDims:
 
         Each entry is a sub-mesh (in canonical outer-to-inner axis order)
         that fully covers the SPMD ranks for one class of parameters --
-        dense (e.g. attention/MLP/norm) and sparse (MoE expert weights).
+        dense and sparse (these are the only two we have now).
         Under ``full_dtensor``, the mesh resolved from a module's
-        ``sharding_config`` must be one of these so ``distribute_tensor``
-        reaches every SPMD peer rather than only a sub-mesh.
+        ``sharding_config`` must be one of these .
         """
         if not self._spmd_meshes:
             self.build_mesh()
@@ -379,13 +378,14 @@ class ParallelDims:
         # single-axis mesh under the current mode (e.g. dp_shard doesn't
         # exist under non-full_dtensor; it's pre-flattened into fsdp).
         axes = [
-            a
-            for a in axes
-            if a in self._single_axis_meshes and self.get_optional_mesh(a) is not None
+            axis
+            for axis in axes
+            if axis in self._single_axis_meshes
+            and self.get_optional_mesh(axis) is not None
         ]
         if not self.full_dtensor:
             in_band = {"tp", "ep", "etp"}
-            axes = [a for a in axes if a in in_band]
+            axes = [axis for axis in axes if axis in in_band]
         if not axes:
             return None
         return self.get_optional_mesh(axes)
