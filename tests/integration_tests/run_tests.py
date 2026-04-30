@@ -214,7 +214,13 @@ def _filter_tests(
     return runnable, skipped_ngpu
 
 
-def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
+def run_tests(
+    args,
+    test_list: list[OverrideDefinitions],
+    module=None,
+    config=None,
+    parallel: bool = True,
+):
     """Run all integration tests to test the core features of TorchTitan."""
     runnable, skipped_ngpu = _filter_tests(args, test_list)
     for test_flavor in skipped_ngpu:
@@ -225,7 +231,7 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
 
     failed_tests: list[tuple[str, str]] = []
 
-    if args.parallel and runnable:
+    if parallel and runnable:
         # Schedule tests concurrently, packing them onto a fixed pool of
         # physical GPUs. A test can run as soon as `test_flavor.ngpu` GPUs are
         # free; the sum of in-flight test ngpu never exceeds `args.ngpu`.
@@ -359,7 +365,7 @@ def main():
     ), f"Unknown test suite {args.test_suite}"
 
     test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
-    run_tests(args, test_list)
+    run_tests(args, test_list, parallel=args.parallel)
 
 
 if __name__ == "__main__":
