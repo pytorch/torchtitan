@@ -5,6 +5,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Note CUDA uses devel container since comm_backend like DeepEP
+# needs the CUDA toolkit during runtime.
+
 set -exu
 
 IMAGE_NAME="$1"
