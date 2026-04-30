@@ -215,7 +215,18 @@ class ParallelDims:
         # Validate mesh sizes
         self._validate_meshes()
 
-        dense_mesh = self.get_enabled_mesh(["dp_replicate", "dp_shard", "cp", "tp"])
+        # Under full_dtensor, ``dp_shard`` and ``cp`` are first-class single-axis
+        # meshes; under the legacy path they are pre-flattened into ``fsdp``.
+        # ``_spmd_meshes`` mirrors that so non-full_dtensor HSDP+CP runs (where
+        # the only enabled axes from this set would otherwise be
+        # ``['dp_replicate', 'cp']`` -- no global mesh contains both) don't
+        # raise during ``build_mesh``.
+        dense_axes = (
+            ["dp_replicate", "dp_shard", "cp", "tp"]
+            if self.full_dtensor
+            else ["dp_replicate", "fsdp", "tp"]
+        )
+        dense_mesh = self.get_enabled_mesh(dense_axes)
         sparse_mesh = self.get_enabled_mesh(["dp_replicate", "efsdp", "ep", "etp"])
         self._spmd_meshes = [m for m in (dense_mesh, sparse_mesh) if m is not None]
 
