@@ -23,11 +23,17 @@ bound during pass construction in `construct_default_graph_passes` via
 parameters. The apply function is a generic pass runner and must not contain
 pass-specific arguments.
 
-## Memory Policy Framework
+## Flexible Memory Policy Framework
 
-`tag_with_memory_policy_pass` is the unified framework for activation memory
-management — selective activation checkpointing (SAC), CPU offload, and
-mixtures of both. It is a two-step process:
+PyTorch's module-level `torch.utils.checkpoint` and eager SAC make
+coarse save-or-recompute decisions for an entire module's output, and
+composing activation checkpointing with CPU offload is difficult. This
+framework instead operates on the FX graph at individual tensor
+granularity: each activation can independently be saved, recomputed, or
+offloaded, and different strategies mix freely within a single layer.
+
+`tag_with_memory_policy_pass` is the unified entry point. It is a
+two-step process:
 
 1. **Tag nodes.** Each saved forward activation is tagged with one of:
    - `MUST_SAVE` — keep the activation in GPU memory.
@@ -48,6 +54,13 @@ mixtures of both. It is a two-step process:
 The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
+
+**Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
+prints all forward nodes consumed by backward, grouped by layer with
+identical patterns consolidated. Shows memory, dtype, policy
+(SAVE/RECOMPUTE/OFFLOAD), shape, submodule, target op, and source location.
+It runs automatically at the end of `tag_with_memory_policy_pass`,
+logging to both `logger.debug` and tlparse (via `trace_structured`).
 
 ## Don't Modify Core for This Experiment
 
