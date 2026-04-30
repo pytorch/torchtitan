@@ -74,10 +74,21 @@ AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 class VarlenAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        pass
+        window_size: tuple[int, int] = (-1, 0)
+        """ window_size=(left, right) controls the attention window relative to each
+            query position. 'left' is how many tokens before the query to attend to,
+            and 'right' is how many tokens after. A value of -1 means unlimited.
+
+              - (-1, 0): Causal attention - each token attends to all previous tokens
+                         and itself, but no future tokens. Equivalent to is_causal=True.
+              - (-1, -1): Full bidirectional attention (no masking). Equivalent to
+                          is_causal=False.
+              - (W, 0): Sliding window causal - attend to at most W previous tokens.
+        """
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        self.window_size = config.window_size
 
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -141,17 +152,7 @@ class VarlenAttention(Module):
             max_q,
             max_k,
             scale=scale,
-            # window_size=(left, right) controls the attention window relative to each
-            # query position. 'left' is how many tokens before the query to attend to,
-            # and 'right' is how many tokens after. A value of -1 means unlimited.
-            #
-            # This replaces the is_causal flag:
-            #   - (-1, 0): Causal attention - each token attends to all previous tokens
-            #              and itself, but no future tokens. Equivalent to is_causal=True.
-            #   - (-1, -1): Full bidirectional attention (no masking). Equivalent to
-            #               is_causal=False.
-            #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
-            window_size=(-1, 0),
+            window_size=self.window_size,
             **varlen_kwargs,  # pyrefly: ignore [bad-argument-type]
         )
         assert isinstance(out_packed, torch.Tensor)
