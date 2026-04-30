@@ -289,8 +289,12 @@ def apply_fsdp(
                 )
 
                 assert edp_mesh is not None
-                edp_mesh_info = FSDPMeshInfo(mesh=edp_mesh, shard_mesh_dim=0)
-                dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
+                edp_mesh_info = FSDPMeshInfo(
+                    mesh=edp_mesh, shard_mesh_dim=0
+                )  # edp mesh is also 2D, [replicated, efsdp]
+                dp_mesh_info = FSDPMeshInfo(
+                    mesh=dp_mesh, shard_mesh_dim=0
+                )  # dp mesh is 2D, [replicate, shard]
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
@@ -303,7 +307,7 @@ def apply_fsdp(
                         return ShardPlacementResult(
                             placement=_expert_placement, mesh_info=_edp_mesh_info
                         )
-                    else:
+                    else:  # moe.router / moe.shared_experts, apply dense dp shard
                         return ShardPlacementResult(
                             placement=Shard(0), mesh_info=_dp_mesh_info
                         )

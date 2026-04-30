@@ -184,10 +184,13 @@ class PolicyTrainer(Actor, Configurable):
         dcp.load(hf_state_dict, storage_reader=storage_reader)
         torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
 
+        # strict=False: some buffers (e.g. expert_bias for MoE load
+        # balancing) exist in the model but not in HF checkpoints.
+        # They are zero-initialized by init_states().
         set_model_state_dict(
             model=model,
             model_state_dict=torchtitan_state_dict,
-            options=StateDictOptions(strict=True),
+            options=StateDictOptions(strict=False),
         )
         logger.info(
             f"Loaded initial weights from {checkpoint_path} "
@@ -243,8 +246,15 @@ class PolicyTrainer(Actor, Configurable):
         with torch.no_grad():
             model.init_weights(buffer_device=None)
 
-        # Load initial weights from HF
-        self._load_initial_hf_weights(model, hf_assets_path)
+        # Load initial weights from HF (skipped if no checkpoint available —
+        # useful for debug models where we want to test the RL loop with
+        # random weights synced from trainer to generator).
+        if os.environ.get("TORCHTITAN_SKIP_INITIAL_HF_LOAD") != "1":
+            self._load_initial_hf_weights(model, hf_assets_path)
+        else:
+            logger.info(
+                "Skipping initial HF load (TORCHTITAN_SKIP_INITIAL_HF_LOAD=1)"
+            )
 
         return model
 
@@ -342,6 +352,7 @@ class PolicyTrainer(Actor, Configurable):
             self.config.training.max_norm,
             foreach=True,
             pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+            ep_enabled=self.parallel_dims.ep_enabled,
         )
 
         self.optimizers.step()
