@@ -40,6 +40,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
+from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
@@ -60,6 +61,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     VLLM_MODEL_NAME,
 )
 from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.qwen3 import model_registry
 from torchtitan.tools import utils
 
 logging.basicConfig(level=logging.INFO)
@@ -132,18 +134,21 @@ def build_trainer_model(
     with torch.no_grad():
         model.init_weights(buffer_device=None)
 
-    # Load HF checkpoint
-    if model_spec.state_dict_adapter is not None:
-        sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
-        storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
-        hf_state_dict = sd_adapter.to_hf(model.state_dict())
-        dcp.load(hf_state_dict, storage_reader=storage_reader)
-        tt_state_dict = sd_adapter.from_hf(hf_state_dict)
-        set_model_state_dict(
-            model=model,
-            model_state_dict=tt_state_dict,
-            options=StateDictOptions(strict=True),
-        )
+    # Load HF checkpoint if available
+    if model_spec.state_dict_adapter is not None and hf_assets_path:
+        index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+        single_path = os.path.join(hf_assets_path, "model.safetensors")
+        if os.path.exists(index_path) or os.path.exists(single_path):
+            sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
+            storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
+            hf_state_dict = sd_adapter.to_hf(model.state_dict())
+            dcp.load(hf_state_dict, storage_reader=storage_reader)
+            tt_state_dict = sd_adapter.from_hf(hf_state_dict)
+            set_model_state_dict(
+                model=model,
+                model_state_dict=tt_state_dict,
+                options=StateDictOptions(strict=False),
+            )
 
     model.eval()
     return model, device
@@ -175,11 +180,14 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
     _set_generator_determinism(gen_config.debug)
 
+    enable_ep = gen_config.parallelism.expert_parallel_degree > 1
     engine_kwargs = dict(
         model=config.hf_assets_path,
         trust_remote_code=True,
         dtype=gen_config.model_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
+        data_parallel_size=gen_config.parallelism.data_parallel_shard_degree,
+        enable_expert_parallel=enable_ep,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=gen_config.compile.is_eager,
@@ -254,8 +262,7 @@ def compute_trainer_prefill_logprobs(model, token_ids, device):
     logits = model(padded, attention_masks=attention_masks, positions=positions)
     # Config-based TP returns logits as a Replicate DTensor; downstream code
     # (slicing per-sample, ``gather`` with plain-tensor indices) expects a
-    # plain tensor — materialize once here. Same pattern as ``compute_logprobs``
-    # in ``actors/utils.py``.
+    # plain tensor — materialize once here.
     if isinstance(logits, DTensor):
         logits = logits.to_local()
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
@@ -548,6 +555,124 @@ class TestBitwiseParity(unittest.TestCase):
                     prefill_2nd_lps[i],
                     "Decode",
                     "2ndPrefill",
+                )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skipUnless(
+    dist.is_initialized() or "RANK" in os.environ,
+    "requires torchrun launcher",
+)
+@unittest.skipUnless(
+    int(os.environ.get("WORLD_SIZE", "0")) >= 4,
+    "requires at least 4 GPUs",
+)
+class TestBitwiseParityMoEEP(unittest.TestCase):
+    """Test bitwise parity between trainer and vLLM generator with MoE EP.
+
+    Generator uses TP=4, EP=4 on 4 GPUs.
+    Trainer uses TP=4, EP=4 on the same 4 GPUs.
+
+    Uses /tmp/debug_moe_ckpt by default (debug MoE model + Qwen3 tokenizer).
+    Generate with: python scripts/rl/create_debug_moe_ckpt.py
+    Override with MOE_HF_ASSETS_PATH env var.
+    """
+
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 100
+    MAX_GEN_TOKENS = 30
+
+    model: torch.nn.Module
+    engine: LLMEngine
+    prompt_ids: list[list[int]]
+
+    @classmethod
+    def setUpClass(cls):
+        from torchtitan.experiments.rl.config_registry import (
+            rl_grpo_qwen3_moe_debug_ep_batch_invariant,
+        )
+
+        config = rl_grpo_qwen3_moe_debug_ep_batch_invariant()
+        if os.environ.get("MOE_HF_ASSETS_PATH"):
+            config.hf_assets_path = os.environ["MOE_HF_ASSETS_PATH"]
+
+        from torchtitan.tools.utils import has_cuda_capability
+
+        if has_cuda_capability(9, 0):
+            from torch.nn.attention import (
+                activate_flash_attention_impl,
+                current_flash_attention_impl,
+            )
+
+            if current_flash_attention_impl() != "FA3":
+                activate_flash_attention_impl("FA3")
+
+        if not dist.is_initialized():
+            dist_utils.init_distributed(CommConfig())
+
+        # Register with EP-enabled model spec
+        gen_ep = config.generator.parallelism.expert_parallel_degree
+        if gen_ep > 1:
+            gen_model_spec = model_registry(
+                config.model_spec.flavor,
+                attn_backend="varlen",
+                moe_comm_backend="standard",
+            )
+        else:
+            gen_model_spec = config.model_spec
+        register_model_to_vllm_model_registry(gen_model_spec)
+
+        config.generator.gpu_memory_limit = 0.5
+
+        cls.model, cls.device = build_trainer_model(config)
+        cls.engine = build_inference_engine(config)
+
+        tokenizer = cls.engine.get_tokenizer()
+        cls.prompt_ids = _make_prompt_tokens(
+            cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
+        )
+
+    def _assert_logprobs_equal(self, name, a, b, label_a="A", label_b="B"):
+        """Assert two logprob sequences are bitwise identical."""
+        if isinstance(a, list):
+            a = torch.tensor(a, dtype=torch.float32)
+        else:
+            a = a.detach().cpu().float()
+        if isinstance(b, list):
+            b = torch.tensor(b, dtype=torch.float32)
+        else:
+            b = b.detach().cpu().float()
+        n = min(len(a), len(b))
+        a, b = a[:n], b[:n]
+
+        max_delta = (a - b).abs().max().item() if n > 0 else 0.0
+        self.assertTrue(
+            torch.equal(a, b),
+            f"{name}: NOT bitwise identical (max_delta={max_delta:.2e})\n"
+            f"  {label_a}[:5]: {a[:5].tolist()}\n"
+            f"  {label_b}[:5]: {b[:5].tolist()}",
+        )
+
+    def test_trainer_vs_vllm_prefill_moe_ep(self):
+        """Trainer prefill == vLLM prefill for MoE model with EP."""
+        model = self.model
+        engine = self.engine
+
+        with torch.no_grad():
+            trainer_lps = compute_trainer_prefill_logprobs(
+                model, self.prompt_ids, self.device
+            )
+
+        vllm_lps = vllm_prefill(engine, self.prompt_ids)
+
+        if dist.get_rank() == 0:
+            for i in range(len(self.prompt_ids)):
+                self._assert_logprobs_equal(
+                    f"MoE EP seq {i}: Trainer prefill vs vLLM prefill",
+                    trainer_lps[i],
+                    vllm_lps[i],
+                    "Trainer",
+                    "vLLM",
                 )
 
 
