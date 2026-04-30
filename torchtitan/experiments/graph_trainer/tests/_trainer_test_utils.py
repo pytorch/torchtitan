@@ -68,6 +68,8 @@ def build_minimal_trainer(
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
-        trainer.config = SimpleNamespace()
+        trainer.config = SimpleNamespace(
+            parallelism=SimpleNamespace(full_dtensor=False),
+        )
 
     return trainer
