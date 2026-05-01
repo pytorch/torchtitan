@@ -246,7 +246,7 @@ class Module(nn.Module, Configurable):
 
         1. Ask ``parallel_dims`` for the mesh covering the axes the sharding_config
            references. Under ``full_dtensor=False`` the workaround
-           ``get_module_mesh`` filters to ``{tp, ep, etp}``.
+           ``get_module_mesh`` filters to ``{tp, ep}``.
         2. ``distribute_tensor`` on params and buffers per ``state_shardings``.
         3. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
 

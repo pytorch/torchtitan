@@ -19,7 +19,6 @@ from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.tools.logging import logger
 
-
 # Adapted from llama4/infra/parallelize.py
 def parallelize_gptoss(
     model: GptOssModel,

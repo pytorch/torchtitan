@@ -51,20 +51,6 @@ def parallelize_deepseekv3(
             parallel_dims.get_mesh("cp"),
         )
 
-    # Check if using DeepEP/HybridEP for MoE communication
-    comm_backend = parallelism.expert_parallel_comm_backend
-    if comm_backend in ("deepep", "hybridep"):
-        if not parallel_dims.ep_enabled:
-            raise ValueError(
-                f"{comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
-                "Please set expert_parallel_degree > 1 or use standard communication backend."
-            )
-        if parallel_dims.etp_enabled:
-            raise NotImplementedError(
-                f"{comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
-                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
-            )
-
     # ``model.parallelize`` walks every ``Module`` and applies its
     # ``sharding_config`` (dense + MoE). Replaces the imperative
     # ``apply_moe_ep_tp`` call.
