@@ -94,7 +94,6 @@ def build_trainer_model(
         tp=parallelism.tensor_parallel_degree,
         pp=parallelism.pipeline_parallel_degree,
         ep=parallelism.expert_parallel_degree,
-        etp=parallelism.expert_tensor_parallel_degree,
         world_size=dist.get_world_size(),
     )
 

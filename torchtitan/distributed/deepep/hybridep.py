@@ -163,9 +163,7 @@ def _dispatch_impl(
         )
 
     num_local_experts = num_experts // _buffer.group_size
-    from deep_ep.hybrid_ep_buffer import (  # pyrefly: ignore [missing-import]
-        indices_to_map,
-    )
+    from deep_ep.hybrid_ep_buffer import indices_to_map
 
     routing_map, probs = indices_to_map(
         topk_idx, topk_weights.float(), x.shape[0], num_experts
@@ -237,7 +235,7 @@ def _dispatch_fake(
     else:
         out_tokens = x.shape[0]
     hidden = x.new_empty(out_tokens, x.shape[1])
-    scores = x.new_empty(0, dtype=torch.float32)
+    scores = x.new_empty(out_tokens, dtype=torch.float32)
     tpe = x.new_empty(num_local_experts, dtype=torch.int64)
     return hidden, scores, tpe, DispatchHandle()
 
@@ -275,25 +273,34 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
         return None, None, None, None, None, None, None
 
     dispatch_handle = ctx.dispatch_handle
-    if dispatch_handle is None or dispatch_handle.value is None:
-        raise RuntimeError("DispatchHandle not found in dispatch backward")
-
     (topk_idx,) = ctx.saved_tensors
-    grad_x, grad_probs_dense = _buffer.combine_with_unpermute(
-        hidden=grad_hidden,
-        probs=(
-            grad_scores if grad_scores is not None and grad_scores.numel() > 0 else None
-        ),
-        handle=dispatch_handle.value,
-    )
-    grad_x = grad_x.to(ctx.input_dtype)
 
-    # grad_probs_dense is [num_tokens, num_experts]; gather back to sparse [num_tokens, top_k]
-    grad_weights = (
-        grad_probs_dense.gather(dim=1, index=topk_idx)
-        if grad_probs_dense is not None
-        else None
-    )
+    if dispatch_handle is None or dispatch_handle.value is None:
+        from torch._subclasses.fake_tensor import FakeTensor
+        from torch._subclasses.functional_tensor import FunctionalTensor
+
+        if not isinstance(grad_hidden, (FunctionalTensor, FakeTensor)):
+            raise RuntimeError("DispatchHandle not found in dispatch backward")
+        grad_x = grad_hidden.new_zeros(topk_idx.shape[0], grad_hidden.shape[-1])
+        grad_weights = grad_hidden.new_zeros(topk_idx.shape)
+    else:
+        grad_x, grad_probs_dense = _buffer.combine_with_unpermute(
+            hidden=grad_hidden,
+            probs=(
+                grad_scores
+                if grad_scores is not None and grad_scores.numel() > 0
+                else None
+            ),
+            handle=dispatch_handle.value,
+        )
+        grad_x = grad_x.to(ctx.input_dtype)
+
+        # grad_probs_dense is [num_tokens, num_experts]; gather back to sparse [num_tokens, top_k]
+        grad_weights = (
+            grad_probs_dense.gather(dim=1, index=topk_idx)
+            if grad_probs_dense is not None
+            else None
+        )
     # Gradients for: x, topk_idx, topk_weights, num_experts, non_blocking,
     #                moe_expert_capacity_factor, pad_multiple
     return grad_x, None, grad_weights, None, None, None, None
@@ -312,15 +319,22 @@ def _combine_backward(ctx, grad_combined):
     """Backward: scatter gradients via dispatch."""
     dispatch_handle = ctx.dispatch_handle
     if dispatch_handle is None or dispatch_handle.value is None:
-        raise RuntimeError("DispatchHandle not found in combine backward")
+        from torch._subclasses.fake_tensor import FakeTensor
+        from torch._subclasses.functional_tensor import FunctionalTensor
 
-    grad_x, _, _, _, _ = _buffer.dispatch_with_permute(
-        hidden=grad_combined,
-        scaling_factor=None,
-        handle=dispatch_handle.value,
-        num_permuted_tokens=ctx.num_permuted_tokens,
-        pad_multiple=ctx.pad_multiple,
-    )
+        if not isinstance(grad_combined, (FunctionalTensor, FakeTensor)):
+            raise RuntimeError("DispatchHandle not found in combine backward")
+        grad_x = grad_combined.new_zeros(
+            ctx.num_permuted_tokens, grad_combined.shape[-1]
+        )
+    else:
+        grad_x, _, _, _, _ = _buffer.dispatch_with_permute(
+            hidden=grad_combined,
+            scaling_factor=None,
+            handle=dispatch_handle.value,
+            num_permuted_tokens=ctx.num_permuted_tokens,
+            pad_multiple=ctx.pad_multiple,
+        )
     # Gradients for: x, handle, num_tokens, pad_multiple
     return grad_x, None, None, None
 
@@ -366,7 +380,6 @@ def get_buffer(
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
     try:
-        # pyrefly: ignore [missing-import]
         from deep_ep import HybridEPBuffer
     except ImportError as e:
         raise ImportError(
@@ -439,13 +452,14 @@ def dispatch_tokens(
     # Buffer.__init__ calls all_gather_object() which triggers aten._to_copy
     # (CUDA→CPU), a MUST_SAVE op in our SAC policy. These are infrastructure
     # ops, not model compute, and must not enter SAC's FIFO cache.
-    with _disable_current_modes():
-        get_buffer(
-            group=group,
-            hidden_dim=hidden_states.shape[1],
-            num_tokens=hidden_states.shape[0],
-            num_local_experts=num_local_experts,
-        )
+    if _buffer is None:
+        with _disable_current_modes():
+            get_buffer(
+                group=group,
+                hidden_dim=hidden_states.shape[1],
+                num_tokens=hidden_states.shape[0],
+                num_local_experts=num_local_experts,
+            )
 
     (
         hidden,

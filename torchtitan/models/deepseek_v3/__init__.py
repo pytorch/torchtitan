@@ -172,7 +172,7 @@ def _build_dsv3_layers(
     score_before_experts: bool = False,
     attn_backend: str,
     moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
+    non_blocking_capacity_factor: float | None,
 ) -> list[TransformerBlock.Config]:
     """Build the list of per-layer TransformerBlock configs.
 
@@ -255,6 +255,7 @@ def _build_dsv3_layers(
 def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
+    non_blocking_capacity_factor: float | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -287,6 +288,7 @@ def _debugmodel(
         score_before_experts=False,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -318,6 +320,7 @@ def _debugmodel(
 def _16b(
     attn_backend: str,
     moe_comm_backend: str,
+    non_blocking_capacity_factor: float | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -350,6 +353,7 @@ def _16b(
         score_before_experts=False,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -381,6 +385,7 @@ def _16b(
 def _236b(
     attn_backend: str,
     moe_comm_backend: str,
+    non_blocking_capacity_factor: float | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -417,6 +422,7 @@ def _236b(
         score_before_experts=False,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -448,6 +454,7 @@ def _236b(
 def _671b(
     attn_backend: str,
     moe_comm_backend: str,
+    non_blocking_capacity_factor: float | None = None,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
@@ -485,6 +492,7 @@ def _671b(
         score_before_experts=False,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
     return DeepSeekV3Model.Config(
         vocab_size=vocab_size,
@@ -525,11 +533,13 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
     quantization: list[QuantizationConverter.Config] | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
     if quantization is not None:
         for q in quantization:
