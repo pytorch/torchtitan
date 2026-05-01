@@ -15,8 +15,8 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .parallelize_llama import parallelize_llama
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    config = llama3_configs[flavor]()
+def model_registry(flavor: str, attn_backend: str = "sdpa") -> ModelSpec:
+    config = llama3_configs[flavor](attn_backend=attn_backend)
     return ModelSpec(
         name="autoparallel/llama3",
         flavor=flavor,

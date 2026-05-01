@@ -316,6 +316,8 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
     - **``aten._grouped_mm``**: the grouped matmul kernel used by MoE may
       perform internal CPU↔CUDA copies (e.g. workspace allocation) that
       are invisible in the FX graph metadata, breaking CUDA graph capture.
+      On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
+      cudagraph-compatible.
     - **flex_attention HOPs**: flex_attention higher-order ops require
       torch.compile (e.g. regional_inductor) to lower them into fused
       Triton kernels.  Without compilation they fall back to an unfused
@@ -352,13 +354,17 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
         # _grouped_mm may perform internal CPU↔CUDA copies (e.g. workspace
         # allocation) that are not visible from the FX graph metadata, so we
         # cannot rely on checking input device types alone.
+        # On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
+        # cudagraph-compatible.
         if node.target == torch.ops.aten._grouped_mm.default:
-            logger.warning(
-                "Skipping cudagraph: graph contains aten._grouped_mm "
-                "which may perform internal CPU↔CUDA copies incompatible "
-                "with CUDA graph capture"
-            )
-            return False
+            capability = torch.cuda.get_device_capability()
+            if capability < (10, 0):
+                logger.warning(
+                    "Skipping cudagraph: graph contains aten._grouped_mm "
+                    "which may perform internal CPU↔CUDA copies incompatible "
+                    "with CUDA graph capture"
+                )
+                return False
 
     for node in gm.graph.nodes:
         if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:

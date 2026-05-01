@@ -296,7 +296,6 @@ def qwen3_moe_debug() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,

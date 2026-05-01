@@ -72,8 +72,8 @@ subclassing.
 ### Local development (debug models, 8 GPUs)
 
 **Run all commands from the repo root.** Use the root `./run_train.sh` with
-`MODULE=graph_trainer.llama3` (or `.deepseek_v3`). The 8B/16B configs use
-`hf_assets_path` relative to the repo root.
+`MODULE=graph_trainer.llama3` (or `.deepseek_v3`, `.qwen3`). The 8B/16B configs
+use `hf_assets_path` relative to the repo root.
 
 For CooR precompile workflows that need `--virtual-local-rank`, use
 `torchtitan/experiments/graph_trainer/run_train_precompile.sh` instead.
