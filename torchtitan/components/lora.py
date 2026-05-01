@@ -84,7 +84,7 @@ def _get_lora_cls(parent_cls: type) -> type:
         ) -> None:
             super().__init__(config)
             # Freeze base weight — only adapters should be trainable
-            for param in self.parameters():
+            for param in nn.Module.parameters(self):
                 param.requires_grad_(False)
             self._lora_scaling = _lora_alpha / _lora_rank
 
