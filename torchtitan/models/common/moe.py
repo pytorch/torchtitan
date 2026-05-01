@@ -126,18 +126,19 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add.
-
-        shared_experts is passed to combine() where it overlaps with the async
-        combine all-to-all (NCCL stream) or async DeepEP combine.
-        """
+        """Dispatch tokens to experts, compute, combine, and scatter_add."""
+        # Convert DTensor to local tensor for routed expert dispatch/compute.
+        # grad_placements=(Partial(),) ensures x_local.grad is Partial on
+        # the tp_mesh in backward, so gradient reduction happens once at
+        # the MoE boundary.
+        if isinstance(x, DTensor):
+            x = x.to_local(grad_placements=(Partial(),))
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+        return self.token_dispatcher.combine(routed_output, metadata, x)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -304,18 +305,14 @@ class MoE(Module):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
-    1. Router computes expert assignments
-    2. GroupedExperts.forward() handles:
+    1. Router computes expert assignments (stays on DTensor via NoParallel)
+    2. Shared experts run on DTensor (handled by ColwiseParallel/RowwiseParallel)
+    3. GroupedExperts.forward() converts DTensor to local, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
-          With EP, also performs all-to-all communication to send tokens
-          to expert-owning ranks.
-       b. expert computation
+          With EP, also performs all-to-all communication.
+       b. expert computation (local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
-          With EP, starts async communication (NCCL all-to-all or DeepEP
-          combine), runs shared_experts in parallel, then forces sync
-          (scatter_add for NCCL AllToAll, sync_combine for DeepEP) and
-          produces final output.
-          Without EP (LocalTokenDispatcher), no communication is needed.
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -365,55 +362,29 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
-        # in backward, so gradient reduction (reduce-scatter from Partial to
-        # Shard(1)) happens once at the MoE boundary rather than being
-        # duplicated inside the MoE.
-        #
-        # Why grad(x) is Partial on the tp_mesh across all parallelism:
-        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
-        #   w1/w3, Rowwise on w2) produce Partial output gradients.
-        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via sequence-parallel token splitting in AllToAllTokenDispatcher),
-        #   so grad(x) is non-zero only at each rank's token positions (Partial).
-        #
-        # This holds for all MoE components (router.gate, routed experts, shared
-        # experts) and regardless of score_before_experts.
-        if isinstance(x, DTensor):
-            assert (
-                x.device_mesh.ndim == 1
-            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            assert x.device_mesh.mesh_dim_names == (
-                "tp",
-            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
-        # top_scores and selected_experts_indices shape (bs*slen, top_k)
-        # num_tokens_per_expert shape (num_experts,)
+        # Router stays on DTensor (handled by NoParallel via parallelize_module).
         (
             top_scores,
             selected_experts_indices,
             num_tokens_per_expert,
         ) = self.router(x, self.expert_bias)
 
-        # tokens_per_expert will be used to update the expert bias for load balancing.
-        # and also to count the expert usage
         # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        out = self.experts(
-            x,
-            top_scores,
-            selected_experts_indices,
-            shared_experts=self.shared_experts,
-        )
+        # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
+        # Routed experts convert to local tensor at GroupedExperts boundary.
+        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
 
+        routed_out = self.experts(x, top_scores, selected_experts_indices)
+
+        out = routed_out if shared_out is None else routed_out + shared_out
         return out.reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
