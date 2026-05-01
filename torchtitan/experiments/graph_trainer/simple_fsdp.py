@@ -8,6 +8,7 @@ import sys
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -29,6 +30,107 @@ from torchtitan.protocols.module import Module
 _active_parametrization = True
 
 
+@dataclass(frozen=True)
+class _FSDPPostAllGatherState:
+    """Values produced by pre-all-gather and consumed by post-all-gather.
+
+    metadata: Hook-defined auxiliary values needed to reconstruct the tensor
+        subclass after all-gather, e.g. torchao Float8 scale tensors.
+    param_dtype: Logical parameter dtype for the reconstructed wrapper. This
+        is not necessarily the communication tensor dtype.
+    """
+
+    metadata: Any
+    param_dtype: torch.dtype
+
+
+class _PostAllGather(torch.autograd.Function):
+    """Call a tensor subclass's FSDP post-all-gather hook differentiably.
+
+    The hook reconstructs the wrapper subclass around the all-gathered local
+    tensor. When the gathered input is a DTensor, this also restores the DTensor
+    spec around the hook-produced local wrapper.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        gathered: torch.Tensor,
+        wrapper: torch.Tensor,
+        post_all_gather_state: _FSDPPostAllGatherState,
+    ) -> torch.Tensor:
+        gathered_local = (
+            gathered._local_tensor if isinstance(gathered, DTensor) else gathered
+        )
+        # FSDP2 uses the returned inner tensors to manage storage lifetime for
+        # its cached unsharded parameter. SimpleFSDP keeps the returned wrapper
+        # live directly through autograd, so there is no separate storage to free.
+        output, _ = wrapper.fsdp_post_all_gather(
+            (gathered_local,),
+            post_all_gather_state.metadata,
+            post_all_gather_state.param_dtype,
+        )
+        if isinstance(gathered, DTensor):
+            return DTensor(
+                output,
+                gathered._spec,
+                requires_grad=gathered.requires_grad,
+            )
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
+
+
+class _PreAllGatherDTensor(torch.autograd.Function):
+    """Call a DTensor-local wrapper's FSDP pre-all-gather hook differentiably.
+
+    torchao pre-all-gather hooks return plain tensors to communicate. Taking the
+    original wrapper-containing DTensor as the Function input preserves the
+    autograd edge from the eventual loss back to the wrapped parameter.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        dtensor: DTensor,
+        device_mesh: DeviceMesh,
+        mp_policy: "MixedPrecisionPolicy",
+    ) -> tuple[DTensor, _FSDPPostAllGatherState]:
+        wrapper = dtensor._local_tensor
+        assert mp_policy.param_dtype is not None, (
+            "FSDP hook mixed precision policy should have a concrete param dtype "
+            "before calling fsdp_pre_all_gather"
+        )
+        all_gather_inputs, metadata = wrapper.fsdp_pre_all_gather(
+            device_mesh,
+            dtensor.size(),
+            dtensor.stride(),
+            None,
+            mp_policy,
+        )
+        assert len(all_gather_inputs) == 1, (
+            "simple_fsdp currently supports tensor subclass FSDP hooks with "
+            f"one all-gather input; got {len(all_gather_inputs)}"
+        )
+        return (
+            DTensor(
+                all_gather_inputs[0],
+                dtensor._spec,
+                requires_grad=dtensor.requires_grad,
+            ),
+            _FSDPPostAllGatherState(
+                metadata=metadata,
+                param_dtype=mp_policy.param_dtype,
+            ),
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output, _grad_post_all_gather_state):
+        return grad_output, None, None
+
+
 @contextmanager
 def disable_active_parametrization() -> Generator[None, None, None]:
     global _active_parametrization
@@ -43,6 +145,23 @@ def disable_active_parametrization() -> Generator[None, None, None]:
 class MixedPrecisionPolicy:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
+
+
+def _has_fsdp_all_gather_hooks(tensor: torch.Tensor) -> bool:
+    has_pre_hook = hasattr(tensor, "fsdp_pre_all_gather")
+    has_post_hook = hasattr(tensor, "fsdp_post_all_gather")
+    if has_pre_hook != has_post_hook:
+        raise AssertionError(
+            "simple_fsdp requires tensor subclasses to define both "
+            "fsdp_pre_all_gather and fsdp_post_all_gather"
+        )
+    return has_pre_hook
+
+
+def _uses_fsdp_all_gather_hooks(param: torch.Tensor) -> bool:
+    if isinstance(param, DTensor):
+        return _has_fsdp_all_gather_hooks(param._local_tensor)
+    return _has_fsdp_all_gather_hooks(param)
 
 
 def _distribute_dtensor(
@@ -144,7 +263,7 @@ def _register_parametrization(
     """
     param_name_to_property = {
         param_name: property(
-            lambda self, pn=param_name: parametrization(self._parameters[pn])
+            lambda self, pn=param_name: parametrization(self._parameters[pn], pn)
         )
         for param_name in param_names
     }
@@ -172,6 +291,7 @@ class ReplicateComputation(Module):
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
         full_dtensor: bool = False,
+        fsdp_hook_param_names: set[str] | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -185,8 +305,39 @@ class ReplicateComputation(Module):
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
         self.full_dtensor = full_dtensor
+        self.fsdp_hook_param_names = fsdp_hook_param_names or set()
 
-    def replicate_compute(self, x: DTensor) -> torch.Tensor:
+    def _fsdp_pre_all_gather_dtensor(
+        self,
+        dtensor: DTensor,
+    ) -> tuple[DTensor, _FSDPPostAllGatherState]:
+        wrapper = dtensor._local_tensor
+        # Match FSDP2's post-hook dtype contract: use the mixed precision
+        # param dtype when configured, otherwise fall back to the original
+        # wrapper dtype as the logical reconstructed parameter dtype.
+        param_dtype = self.param_dtype or wrapper.dtype
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=param_dtype,
+            reduce_dtype=self.reduce_dtype,
+        )
+        pre_all_gather_dtensor, post_all_gather_state = _PreAllGatherDTensor.apply(
+            dtensor,
+            self.device_mesh,
+            mp_policy,
+        )
+        return pre_all_gather_dtensor, post_all_gather_state
+
+    def replicate_compute(self, x: DTensor, param_name: str = "") -> torch.Tensor:
+        original_dtensor = x
+        post_all_gather_state = None
+        forward_dtype = self.param_dtype
+        use_fsdp_hooks = param_name in self.fsdp_hook_param_names
+        if use_fsdp_hooks:
+            x, post_all_gather_state = self._fsdp_pre_all_gather_dtensor(x)
+            # The pre-all-gather hook applies mp_policy.param_dtype when
+            # producing the communication tensor; avoid a second DTensor cast.
+            forward_dtype = None
+
         # data parallel runtime replicate parameters and do local compute
         # the gradients are partial tensors that needs to perform reduction
         # (i.e. DDP: allreduce, FSDP: reduce_scatter, HSDP: mix of both)
@@ -209,7 +360,7 @@ class ReplicateComputation(Module):
             # DDP's bwd all-reduce on dp_mesh
             replicated_dtensor = sharded_dtensor.redistribute(
                 placements=self.compute_placements,
-                forward_dtype=self.param_dtype,
+                forward_dtype=forward_dtype,
                 backward_dtype=self.reduce_dtype,
             )
 
@@ -231,7 +382,7 @@ class ReplicateComputation(Module):
         elif non_dp_mesh_dims == 0:
             output = x.redistribute(
                 placements=self.compute_placements,
-                forward_dtype=self.param_dtype,
+                forward_dtype=forward_dtype,
                 backward_dtype=self.reduce_dtype,
             )
 
@@ -242,9 +393,17 @@ class ReplicateComputation(Module):
                 f"Unsupported replicate compute on placement {x._spec.placements} for DTensor {x}"
             )
 
-        return output
+        if not use_fsdp_hooks:
+            return output
 
-    def forward(self, x: DTensor) -> torch.Tensor:
+        assert post_all_gather_state is not None
+        return _PostAllGather.apply(
+            output,
+            original_dtensor._local_tensor,
+            post_all_gather_state,
+        )
+
+    def forward(self, x: DTensor, param_name: str = "") -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -254,8 +413,7 @@ class ReplicateComputation(Module):
         if not _active_parametrization:
             return x
 
-        output = self.replicate_compute(x)
-        return output
+        return self.replicate_compute(x, param_name)
 
 
 def data_parallel(
@@ -289,8 +447,12 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
+        fsdp_hook_param_names: set[str] = set()
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
+                if _uses_fsdp_all_gather_hooks(p):
+                    fsdp_hook_param_names.add(p_name)
+
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
@@ -324,6 +486,7 @@ def data_parallel(
                 mode,
                 mp_policy=mp_policy,
                 full_dtensor=full_dtensor,
+                fsdp_hook_param_names=fsdp_hook_param_names,
             ),
         )
     return model
