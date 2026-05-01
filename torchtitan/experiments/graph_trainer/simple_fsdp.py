@@ -8,6 +8,7 @@ import sys
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -23,10 +24,42 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
+from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
 from torchtitan.protocols.module import Module
 
 _active_parametrization = True
+
+
+class _WrapInSubclass(torch.autograd.Function):
+    """Wrap a plain tensor in a traceable wrapper subclass, differentiably.
+
+    Traceable wrapper subclasses constructed via ``_make_wrapper_subclass``
+    do not register an autograd edge from the inner plain tensor to the new
+    wrapper. When a wrapper is produced mid-graph (so its
+    ``__torch_function__`` overrides can fire on downstream ops), this missing
+    edge would leave the upstream plain tensor disconnected from the loss.
+    This Function re-establishes the edge: forward constructs the wrapper,
+    backward hands the grad off as-is to the plain input.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        plain: torch.Tensor,
+        wrapper_cls: type,
+        inner_attr: str,
+        flatten_ctx: Any,
+    ) -> torch.Tensor:
+        return wrapper_cls.__tensor_unflatten__(
+            {inner_attr: plain}, flatten_ctx, plain.size(), plain.stride()
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Forward grad back to the plain input; return None for each
+        # non-tensor metadata argument (wrapper_cls, inner_attr, flatten_ctx).
+        return grad_output, None, None, None
 
 
 @contextmanager
@@ -144,7 +177,7 @@ def _register_parametrization(
     """
     param_name_to_property = {
         param_name: property(
-            lambda self, pn=param_name: parametrization(self._parameters[pn])
+            lambda self, pn=param_name: parametrization(self._parameters[pn], pn)
         )
         for param_name in param_names
     }
@@ -172,6 +205,7 @@ class ReplicateComputation(Module):
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
         full_dtensor: bool = False,
+        rewrap_hints: dict[str, tuple[type, str, Any]] | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -185,6 +219,11 @@ class ReplicateComputation(Module):
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
         self.full_dtensor = full_dtensor
+        # Per-param-name rewrap hint: (wrapper_subclass_cls, inner_attr, ctx).
+        # If present, the forward output (plain tensor post-replicate_compute)
+        # is wrapped back in the outer subclass via _WrapInSubclass so the
+        # subclass's __torch_function__ fires on the downstream op it overrides.
+        self.rewrap_hints: dict[str, tuple[type, str, Any]] = rewrap_hints or {}
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -244,7 +283,7 @@ class ReplicateComputation(Module):
 
         return output
 
-    def forward(self, x: DTensor) -> torch.Tensor:
+    def forward(self, x: DTensor, param_name: str = "") -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -255,6 +294,20 @@ class ReplicateComputation(Module):
             return x
 
         output = self.replicate_compute(x)
+
+        # If this param was originally a tensor subclass (e.g. torchao's MXFP8
+        # weight wrapper), rewrap the plain output via _WrapInSubclass so the
+        # subclass's __torch_function__ fires on the op it overrides. The leaf
+        # stays as plain DTensor so autograd/optimizer paths are unaffected;
+        # the wrap is transient, only during the parametrization forward call.
+        # This mirrors FSDP2's composition (leaf = DTensor, subclass =
+        # transient unsharded buffer) rather than storing the subclass at the
+        # leaf.
+        hint = self.rewrap_hints.get(param_name)
+        if hint is not None and isinstance(output, torch.Tensor):
+            wrapper_cls, inner_attr, ctx = hint
+            output = _WrapInSubclass.apply(output, wrapper_cls, inner_attr, ctx)
+
         return output
 
 
@@ -289,15 +342,35 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
+        rewrap_hints: dict[str, tuple[type, str, Any]] = {}
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
+                # If p is a wrapper subclass (e.g. torchao's MXFP8 weight),
+                # unwrap and store the inner DTensor as the leaf; rewrap in
+                # forward so the subclass's __torch_function__ still fires
+                # on the op it overrides.
+                inner_for_distribute: torch.Tensor = p
+                if is_traceable_wrapper_subclass(p) and not isinstance(p, DTensor):
+                    attrs, ctx = p.__tensor_flatten__()
+                    assert len(attrs) == 1, (
+                        "simple_fsdp only supports wrapper subclasses with a "
+                        f"single inner tensor; {type(p).__name__} has {attrs}"
+                    )
+                    (inner_attr,) = attrs
+                    inner_for_distribute = getattr(p, inner_attr)
+                    rewrap_hints[p_name] = (type(p), inner_attr, ctx)
+
                 distribute_tensor_func = (
-                    _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
+                    _distribute_dtensor
+                    if isinstance(inner_for_distribute, DTensor)
+                    else distribute_tensor
                 )
                 mod.register_parameter(
                     p_name,
                     nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
+                        distribute_tensor_func(
+                            inner_for_distribute, device_mesh, param_sharding
+                        )
                     ),
                 )
 
@@ -324,6 +397,7 @@ def data_parallel(
                 mode,
                 mp_policy=mp_policy,
                 full_dtensor=full_dtensor,
+                rewrap_hints=rewrap_hints,
             ),
         )
     return model
