@@ -32,12 +32,16 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
+    create_flex_block_mask,
     create_positions_from_seq_lens,
     create_varlen_metadata,
     extract_response_logprobs,
+    pad_to_block_aligned,
+    unpad_from_block_aligned,
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.types import TrainBatch
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
@@ -130,6 +134,13 @@ class PolicyTrainer(Actor, Configurable):
         else:
             self.sd_adapter = None
 
+        # Detect attention backend for mask creation
+        inner_attn_cfg = model_spec.model.layers[0].attention.inner_attention
+        self._use_flex = isinstance(inner_attn_cfg, FlexAttention.Config)
+        self._batch_invariant = config.debug.batch_invariant
+        if self._use_flex:
+            self._flex_block_size = inner_attn_cfg.block_size
+
         # Create training policy model
         model = self._build_model(model_spec, config, device_type, hf_assets_path)
         model.train()
@@ -213,12 +224,12 @@ class PolicyTrainer(Actor, Configurable):
             Initialized model with weights loaded from checkpoint.
         """
 
-        # TODO: Also support flex attention backend later.
         from torchtitan.models.common.attention import VarlenAttention
 
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention, VarlenAttention.Config
-        ), "Only varlen attention backend is allowed."
+            inner_attn, (VarlenAttention.Config, FlexAttention.Config)
+        ), f"Only varlen and flex attention backends are allowed, got {type(inner_attn)}."
 
         # Fill sharding configs on the config BEFORE build via the
         # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
@@ -281,12 +292,35 @@ class PolicyTrainer(Actor, Configurable):
                 f"generation max_tokens."
             )
 
-        attention_masks = create_varlen_metadata(seq_lens, device)
-        positions = create_positions_from_seq_lens(seq_lens, device)
+        if self._use_flex and self._batch_invariant:
+            attention_masks, maybe_padded_seq_lens = create_flex_block_mask(
+                seq_lens, device, self._flex_block_size
+            )
+            padded_ids, positions = pad_to_block_aligned(
+                token_ids.squeeze(0), seq_lens, maybe_padded_seq_lens, device
+            )
+            logits = self.model(
+                padded_ids, attention_masks=attention_masks, positions=positions
+            )
+            logits = unpad_from_block_aligned(logits, seq_lens, maybe_padded_seq_lens)
+            token_ids = unpad_from_block_aligned(
+                padded_ids, seq_lens, maybe_padded_seq_lens
+            )
+        elif self._use_flex:
+            attention_masks, _ = create_flex_block_mask(
+                seq_lens, device, self._flex_block_size
+            )
+            positions = create_positions_from_seq_lens(seq_lens, device)
+            logits = self.model(
+                token_ids, attention_masks=attention_masks, positions=positions
+            )
+        else:
+            attention_masks = create_varlen_metadata(seq_lens, device)
+            positions = create_positions_from_seq_lens(seq_lens, device)
+            logits = self.model(
+                token_ids, attention_masks=attention_masks, positions=positions
+            )
 
-        logits = self.model(
-            token_ids, attention_masks=attention_masks, positions=positions
-        )
         all_policy_logprobs = compute_logprobs(logits, token_ids)
         policy_logprobs = extract_response_logprobs(
             all_policy_logprobs, seq_lens, prompt_lens, response_lens

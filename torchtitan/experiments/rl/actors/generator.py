@@ -181,8 +181,15 @@ class VLLMGenerator(Actor, Configurable):
         # Register TorchTitan model with vLLM before any engine creation
         register_model_to_vllm_model_registry(model_spec)
 
-        # Set vLLM environment variables from config before any vLLM initialization
-        os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        from torchtitan.models.common.attention import FlexAttention
+
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        self._use_flex = isinstance(inner_attn, FlexAttention.Config)
+
+        if self._use_flex:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        else:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
         set_batch_invariance(config.debug.batch_invariant)
 
@@ -203,12 +210,14 @@ class VLLMGenerator(Actor, Configurable):
             enforce_eager=config.compile.is_eager,
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
-                backend=AttentionBackendEnum.CUSTOM,
+                backend=AttentionBackendEnum.FLEX_ATTENTION
+                if self._use_flex
+                else AttentionBackendEnum.CUSTOM,
             ),
             disable_log_stats=True,
         )
-        # FA2 requires block_size to be a multiple of 256
-        if not has_cuda_capability(9, 0):
+        if not has_cuda_capability(9, 0) and not self._use_flex:
+            # FA2 requires block_size to be a multiple of 256
             engine_kwargs["block_size"] = 256
         vllm_compilation_config = config.compile.get_vllm_compilation_config()
         if vllm_compilation_config is not None:
