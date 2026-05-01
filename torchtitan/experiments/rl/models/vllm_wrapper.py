@@ -103,20 +103,15 @@ def create_torchtitan_config_from_vllm_config(
     Note:
         vLLM doesn't use FSDP sharding (dp_shard=1) in inference.
         Expert parallelism is enabled when vLLM's enable_expert_parallel
-        flag is set, repurposing TP ranks for EP (ep=tp_size, etp=1).
+        flag is set, repurposing TP ranks for EP (ep=tp_size).
     """
     world_size = dist.get_world_size()
     parallel_config = vllm_config.parallel_config
 
     # When EP is enabled, all TP ranks are repurposed for expert parallelism
-    # (each rank holds a shard of experts): ep_size = tp_size, etp_size = 1.
+    # (each rank holds a shard of experts): ep_size = tp_size.
     tp_size = parallel_config.tensor_parallel_size
-    if parallel_config.enable_expert_parallel:
-        ep_size = tp_size
-        etp_size = 1
-    else:
-        ep_size = 1
-        etp_size = 1
+    ep_size = tp_size if parallel_config.enable_expert_parallel else 1
 
     parallel_dims = ParallelDims(
         dp_replicate=parallel_config.data_parallel_size,
@@ -125,7 +120,6 @@ def create_torchtitan_config_from_vllm_config(
         tp=tp_size,
         pp=parallel_config.pipeline_parallel_size,
         ep=ep_size,
-        etp=etp_size,
         world_size=world_size,
     )
 
@@ -136,12 +130,11 @@ def create_torchtitan_config_from_vllm_config(
         tensor_parallel_degree=tp_size,
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=ep_size,
-        expert_tensor_parallel_degree=etp_size,
-        disable_loss_parallel=True,
+        disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
         enable_sequence_parallel=False,
     )
 
-    # Build the full device mesh so all dimensions (tp, ep, etp, efsdp, etc.)
+    # Build the full device mesh so all dimensions (tp, ep, efsdp, etc.)
     # are available to the core parallelize function.
     parallel_dims.build_mesh()
 
@@ -149,7 +142,7 @@ def create_torchtitan_config_from_vllm_config(
         f"Created TorchTitan config from vLLM: "
         f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
         f"CP={parallel_dims.cp}, PP={parallel_dims.pp}, "
-        f"EP={parallel_dims.ep}, ETP={parallel_dims.etp}"
+        f"EP={parallel_dims.ep}"
     )
 
     return parallel_dims, parallelism
@@ -274,6 +267,19 @@ class TorchTitanVLLMModelWrapper(Module):
             skip_dp=True,
         )
 
+        # vLLM runs under torch.inference_mode(); the autograd functional
+        # collectives don't dispatch correctly there. Flip MoE token
+        # dispatchers to the non-autograd a2a path. Read at trace time.
+        from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+
+        for layer in self.model.layers.values():
+            moe = getattr(layer, "moe", None)
+            if moe is None:
+                continue
+            dispatcher = getattr(moe.experts, "token_dispatcher", None)
+            if isinstance(dispatcher, AllToAllTokenDispatcher):
+                dispatcher.use_inference_a2a = True
+
         # Materialize model on GPU — only allocates local shards (not full
         # model) thanks to EP/TP DTensor sharding applied above.
         device_type = vllm_config.device_config.device.type
@@ -289,8 +295,13 @@ class TorchTitanVLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Initial load model weights from HuggingFace checkpoint path
-        self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
+        # Initial load model weights from HuggingFace checkpoint path.
+        import os as _os
+
+        if _os.environ.get("TORCHTITAN_SKIP_INITIAL_HF_LOAD") != "1":
+            self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
+        else:
+            logger.info("Skipping initial HF load (TORCHTITAN_SKIP_INITIAL_HF_LOAD=1)")
 
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int
@@ -418,11 +429,8 @@ class TorchTitanVLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
-        if isinstance(logits, DTensor):
-            logits = logits.to_local()
-
-        # Ensure logits are plain tensors for vLLM's sampling code
+        # vLLM's sampling expects full plain tensors. full_tensor() handles both
+        # Replicate (no-op) and Shard(-1) (all-gather) lm_head output placements.
         if isinstance(logits, DTensor):
             logits = logits.full_tensor()
 
