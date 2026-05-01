@@ -335,6 +335,7 @@ class CheckpointManager(Configurable):
         self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
         self.last_save_model_only = config.last_save_model_only
         self.last_save_in_hf = config.last_save_in_hf
+        self.create_seed_checkpoint = config.create_seed_checkpoint
 
         # HF I/O config extracted from sd_adapter. CheckpointManager only
         # needs these for HF storage reader/writer — key transforms are on
@@ -816,9 +817,12 @@ class CheckpointManager(Configurable):
         )
 
     def _save_last_step(self, curr_step: int) -> None:
-        # Seed checkpoint (step 0) saves ALL params so it can be loaded
-        # under any parallelism. Training last-step saves only trainable.
-        save_mode = StateDictMode.FULL if curr_step == 0 else StateDictMode.TRAINABLE
+        # Seed checkpoints save ALL params so they can be loaded under any
+        # parallelism. Training last-step saves only trainable.
+        if self.create_seed_checkpoint:
+            save_mode = StateDictMode.FULL
+        else:
+            save_mode = StateDictMode.TRAINABLE
         if self.last_save_model_only:
             export_dtype = (
                 self.export_dtype

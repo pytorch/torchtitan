@@ -124,6 +124,8 @@ class BaseModel(Module):
     # State dict transforms, set once by set_sd_transforms().
     _to_hf = None
     _from_hf = None
+    _converters_to_external: list | None = None
+    _converters_from_external: list | None = None
 
     def set_sd_transforms(self, sd_adapter=None) -> None:
         """Wire state dict transforms onto this model.
@@ -143,11 +145,19 @@ class BaseModel(Module):
 
         The mode determines which transforms to apply:
         - BASE: HF remapping only (base model keys)
-        - TRAINABLE: no-op (reserved for converter transforms)
-        - FULL: HF remapping (same as BASE for now)
+        - TRAINABLE: converter transforms only (adapter keys).
+            When no converters are registered, trainable keys are base
+            keys, so HF remapping is applied as a fallback.
+        - FULL: both HF remapping and converter transforms
         """
         if mode in (StateDictMode.FULL, StateDictMode.BASE):
             if self._to_hf is not None:
+                sd = self._to_hf(sd)
+        if mode in (StateDictMode.FULL, StateDictMode.TRAINABLE):
+            if self._converters_to_external:
+                for fn in self._converters_to_external:
+                    sd = fn(sd)
+            elif mode == StateDictMode.TRAINABLE and self._to_hf is not None:
                 sd = self._to_hf(sd)
         return sd
 
@@ -156,6 +166,12 @@ class BaseModel(Module):
 
         Reverse of ``to_external``, filtered by mode.
         """
+        if mode in (StateDictMode.FULL, StateDictMode.TRAINABLE):
+            if self._converters_from_external:
+                for fn in reversed(self._converters_from_external):
+                    sd = fn(sd)
+            elif mode == StateDictMode.TRAINABLE and self._from_hf is not None:
+                sd = self._from_hf(sd)
         if mode in (StateDictMode.FULL, StateDictMode.BASE):
             if self._from_hf is not None:
                 sd = self._from_hf(sd)
