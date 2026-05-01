@@ -24,10 +24,13 @@ def annotate_rmsnorm_for_regional_inductor_pass(
 ) -> torch.fx.GraphModule:
     """Tag RMSNorm ops with compile_with_inductor for regional_inductor.
 
-    Identifies ``_fused_rms_norm`` and ``_fused_rms_norm_backward`` nodes
-    by their ``node.target`` and tags them (along with their ``getitem``
-    users) so that ``regional_inductor_pass`` compiles each norm as a
-    fused Inductor kernel.
+    ``nn.RMSNorm`` calls ``F.rms_norm``, which the autograd dispatch path
+    lowers to ``aten._fused_rms_norm`` during ``make_fx`` tracing with
+    backward (no explicit decomposition table needed).  This pass finds
+    those ``_fused_rms_norm`` / ``_fused_rms_norm_backward`` nodes by
+    ``node.target`` and tags them (along with their ``getitem`` users) so
+    that ``regional_inductor_pass`` compiles each norm as a fused Inductor
+    kernel.
 
     Args:
         gm: The graph module to annotate.
