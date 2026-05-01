@@ -129,7 +129,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2"
                 " --parallelism.expert_parallel_degree 4"
-                " --parallelism.expert_tensor_parallel_degree 1"
             ),
             override_args=[
                 "--module graph_trainer.deepseek_v3",
@@ -139,7 +138,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 "--parallelism.data_parallel_shard_degree 4",
                 "--parallelism.tensor_parallel_degree 2",
                 "--parallelism.expert_parallel_degree 4",
-                "--parallelism.expert_tensor_parallel_degree 1",
             ],
             test_descr="aot_fx_trace deepseek_v3 precompile FSDP+TP+EP",
             test_name="aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep",

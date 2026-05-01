@@ -41,7 +41,6 @@ def autoparallel_local_map_deepseek_v3_debugmodel() -> AutoParallelConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
