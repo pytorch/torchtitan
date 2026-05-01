@@ -173,7 +173,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     checkpointer: CheckpointManager
 
     # runtime utilities
-    device: torch.device
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.TrainContext
     gradient_accumulation_steps: int

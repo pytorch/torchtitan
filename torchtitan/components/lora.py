@@ -84,9 +84,8 @@ def _get_lora_cls(parent_cls: type) -> type:
         ) -> None:
             super().__init__(config)
             # Freeze base weight — only adapters should be trainable
-            self.weight.requires_grad_(False)
-            if self.bias is not None:
-                self.bias.requires_grad_(False)
+            for param in self.parameters():
+                param.requires_grad_(False)
             self._lora_scaling = _lora_alpha / _lora_rank
 
             lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(_base_sharding)
