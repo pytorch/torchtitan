@@ -84,20 +84,44 @@ def parallelize_deepseekv3(
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
         model.parallelize(tp_mesh)
 
+    comm_backend = parallelism.expert_parallel_comm_backend
+    if comm_backend == "hybridep":
+        from torchtitan.distributed.deepep import hybridep  # noqa: F401
+
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            etp_mesh=parallel_dims.get_optional_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             enable_sp=parallelism.enable_sequence_parallel,
+            comm_backend=comm_backend,
         )
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
     model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+
+    # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
+    # the common HybridEP buffer init into a shared utility.
+    if comm_backend == "hybridep" and parallel_dims.ep_enabled:
+        from torchtitan.distributed.deepep.hybridep import get_buffer
+
+        ep_group = parallel_dims.get_mesh("ep").get_group()
+        moe_config = next(l.moe for l in model.config.layers if l.moe is not None)
+        num_local_experts = moe_config.num_experts // parallel_dims.ep
+        hidden_dim = model.config.dim
+        num_tokens = training.local_batch_size * training.seq_len
+        get_buffer(
+            group=ep_group,
+            hidden_dim=hidden_dim,
+            num_tokens=num_tokens,
+            num_local_experts=num_local_experts,
+        )
+        logger.info(
+            f"Pre-initialized HybridEP buffer (hidden_dim={hidden_dim}, "
+            f"num_tokens={num_tokens}, num_local_experts={num_local_experts})"
+        )
 
     # Apply compilation based on mode
     model = apply_compile(

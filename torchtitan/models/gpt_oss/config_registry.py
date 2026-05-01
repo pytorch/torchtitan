@@ -44,7 +44,6 @@ def gpt_oss_debugmodel() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -86,7 +85,6 @@ def gpt_oss_20b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
@@ -113,7 +111,6 @@ def gpt_oss_120b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
