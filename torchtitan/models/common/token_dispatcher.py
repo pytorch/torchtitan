@@ -536,7 +536,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     token dispatch and combine. For the DeepEP backend, combine is asynchronous
     — callers must call sync_combine() before using the result.
 
-    ep_mesh is set by ExpertParallel / ExpertTensorParallel._apply().
+    ep_mesh is set by ExpertParallel._apply().
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -583,7 +583,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         self.comm_backend = config.comm_backend
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
-        # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
+        # Set by ExpertParallel._partition_fn()
         self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs

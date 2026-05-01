@@ -26,7 +26,6 @@ class ParallelDims:
     tp: int
     pp: int
     ep: int
-    etp: int
     world_size: int
     full_dtensor: bool = False
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -45,7 +44,6 @@ class ParallelDims:
             tp=parallelism_config.tensor_parallel_degree,
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
             world_size=world_size,
             full_dtensor=parallelism_config.full_dtensor,
         )
@@ -54,16 +52,15 @@ class ParallelDims:
         self._validate()
 
     def _validate(self):
-        dp_replicate, dp_shard, cp, tp, pp, ep, etp = (
+        dp_replicate, dp_shard, cp, tp, pp, ep = (
             self.dp_replicate,
             self.dp_shard,
             self.cp,
             self.tp,
             self.pp,
             self.ep,
-            self.etp,
         )
-        for d in (dp_replicate, cp, tp, pp, ep, etp):
+        for d in (dp_replicate, cp, tp, pp, ep):
             assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
 
         assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
@@ -75,9 +72,6 @@ class ParallelDims:
             f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
-
-        if ep > 1:
-            assert etp == tp or etp == 1, "Currently we only support ETP=TP or ETP=1"
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
         if name == "fsdp":
@@ -112,7 +106,6 @@ class ParallelDims:
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
             efsdp:   FSDP in the EP region.
-            etp:     TP in the EP region.
 
         Note: Most dimensions above are created by unflattening the world mesh, except for loss,
         which is created by flattening the batch and cp dimensions.
@@ -120,7 +113,7 @@ class ParallelDims:
 
             ["pp", "batch", "cp", "tp"]  # dataloading_mesh
             ["pp", "dp_replicate", "fsdp", "tp"]  # dense_mesh
-            ["pp", "dp_replicate", "efsdp", "ep", "etp"]  # sparse_mesh
+            ["pp", "dp_replicate", "efsdp", "ep"]  # sparse_mesh
 
         Note: DeviceMesh currently recreates the process group for each dimension.
         It should share the process group for the same dim group to avoid unnecessary
@@ -155,12 +148,12 @@ class ParallelDims:
         logger.info(
             f"Building device mesh with parallelism: "
             f"pp={self.pp}, dp_replicate={self.dp_replicate}, dp_shard={self.dp_shard}, "
-            f"cp={self.cp}, tp={self.tp}, ep={self.ep}, etp={self.etp}"
+            f"cp={self.cp}, tp={self.tp}, ep={self.ep}"
         )
 
         batch = self.dp_replicate * self.dp_shard
         fsdp = self.dp_shard * self.cp
-        efsdp = fsdp * self.tp // (self.etp * self.ep)
+        efsdp = fsdp * self.tp // self.ep
 
         self._world_mesh = init_device_mesh(
             device_type, (self.world_size,), mesh_dim_names=("world",)
@@ -185,8 +178,8 @@ class ParallelDims:
             )
         sparse_mesh = unflatten_mesh(
             self._world_mesh,
-            ("pp", "dp_replicate", "efsdp", "ep", "etp"),
-            (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
+            ("pp", "dp_replicate", "efsdp", "ep"),
+            (self.pp, self.dp_replicate, efsdp, self.ep),
         )
 
         self._global_meshes = {
@@ -205,7 +198,6 @@ class ParallelDims:
             "tp": dataloading_mesh["tp"],
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
-            "etp": sparse_mesh["etp"],
         }
         if self.full_dtensor:
             self._single_axis_meshes["dp_shard"] = dense_mesh["dp_shard"]
@@ -215,18 +207,19 @@ class ParallelDims:
         # Validate mesh sizes
         self._validate_meshes()
 
-        def _enabled_mesh(*candidates: str) -> DeviceMesh | None:
-            """Sub-mesh of the candidate axes that are enabled, in canonical order."""
-            axes = [
-                axis
-                for axis in candidates
-                if axis in self._single_axis_meshes
-                and self.get_optional_mesh(axis) is not None
-            ]
-            return self.get_optional_mesh(axes) if axes else None
-
-        dense_mesh = _enabled_mesh("dp_replicate", "dp_shard", "cp", "tp")
-        sparse_mesh = _enabled_mesh("dp_replicate", "efsdp", "ep", "etp")
+        # Under full_dtensor, ``dp_shard`` and ``cp`` are first-class single-axis
+        # meshes that participate in ``distribute_tensor``; under the legacy
+        # path they are folded into ``fsdp`` and handled by FSDP /
+        # ``apply_cp_to_forward`` out-of-band, so the SPMD dense mesh excludes
+        # them. (Including ``cp`` in the legacy axis list breaks HSDP+CP
+        # because no global mesh contains both ``dp_replicate`` and ``cp``.)
+        dense_axes = (
+            ["dp_replicate", "dp_shard", "cp", "tp"]
+            if self.full_dtensor
+            else ["dp_replicate", "tp"]
+        )
+        dense_mesh = self.get_enabled_mesh(dense_axes)
+        sparse_mesh = self.get_enabled_mesh(["dp_replicate", "efsdp", "ep"])
         self._spmd_meshes = [m for m in (dense_mesh, sparse_mesh) if m is not None]
 
         logger.info(
@@ -246,8 +239,7 @@ class ParallelDims:
             "cp": self.cp,
             "tp": self.tp,
             "ep": self.ep,
-            "efsdp": self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
-            "etp": self.etp,
+            "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
         }
         if self.full_dtensor:
             expected_sizes["dp_shard"] = self.dp_shard
@@ -267,7 +259,7 @@ class ParallelDims:
         Args:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
-                 'cp', 'tp', 'ep', 'etp', 'efsdp'.
+                 'cp', 'tp', 'ep', 'efsdp'.
 
         Returns:
             DeviceMesh for the requested dimension(s), or None if:
@@ -325,7 +317,7 @@ class ParallelDims:
         Args:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
-                 'cp', 'tp', 'ep', 'etp', 'efsdp'.
+                 'cp', 'tp', 'ep', 'efsdp'.
 
         Returns:
             DeviceMesh for the requested dimension(s).
@@ -358,37 +350,44 @@ class ParallelDims:
             self.build_mesh()
         return self._spmd_meshes
 
-    def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
-        """Return the mesh a ``Module`` should use for ``distribute_tensor``.
+    def get_enabled_mesh(self, axes: list[str]) -> DeviceMesh | None:
+        """Submesh of ``axes`` filtered to those actually enabled in this run.
 
-        TODO(fegin): This is a WORKAROUND to bridge ``full_dtensor`` and legacy
-        modes during the transition. Once all models support ``full_dtensor`` and
-        the legacy path is removed, this method goes away — callers should use
-        ``get_mesh(axes)`` directly.
-
-        - ``full_dtensor=True``: identical to ``get_mesh(axes)``.
-        - ``full_dtensor=False``: filters ``axes`` to ``{tp, ep, etp}`` first
-          (the axes that participate in ``distribute_tensor`` under the
-          legacy path; DP/CP are handled by FSDP / LocalMapConfig
-          out-of-band). Returns ``None`` if no in-band axis remains.
+        Unlike ``get_optional_mesh``, axes that don't exist as a single-axis
+        mesh in the current mode (e.g. ``dp_shard`` under non-full_dtensor)
+        or are disabled (size = 1) are silently dropped rather than causing
+        a ``None`` / ``ValueError``. Returns ``None`` only if no axis
+        remains after filtering. Order of the surviving axes follows the
+        input list.
         """
-        # Filter to enabled axes that exist in this mode. A config may
-        # declare axes that aren't active (e.g. dense config declares
-        # dp_replicate but the job sets it to 1) or that don't exist as a
-        # single-axis mesh under the current mode (e.g. dp_shard doesn't
-        # exist under non-full_dtensor; it's pre-flattened into fsdp).
+        if not self._single_axis_meshes:
+            self.build_mesh()
         axes = [
             axis
             for axis in axes
             if axis in self._single_axis_meshes
             and self.get_optional_mesh(axis) is not None
         ]
+        return self.get_optional_mesh(axes) if axes else None
+
+    def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
+        """Return the mesh a ``Module`` should use for ``distribute_tensor``.
+
+        TODO(fegin): This is a WORKAROUND to bridge ``full_dtensor`` and legacy
+        modes during the transition. Once all models support ``full_dtensor`` and
+        the legacy path is removed, this method goes away — callers should use
+        ``get_enabled_mesh(axes)`` directly.
+
+        - ``full_dtensor=True``: identical to ``get_enabled_mesh(axes)``.
+        - ``full_dtensor=False``: filters ``axes`` to ``{tp, ep}`` first
+          (the axes that participate in ``distribute_tensor`` under the
+          legacy path; DP/CP are handled by FSDP / LocalMapConfig
+          out-of-band) before delegating to ``get_enabled_mesh``.
+        """
         if not self.full_dtensor:
-            in_band = {"tp", "ep", "etp"}
+            in_band = {"tp", "ep"}
             axes = [axis for axis in axes if axis in in_band]
-        if not axes:
-            return None
-        return self.get_optional_mesh(axes)
+        return self.get_enabled_mesh(axes)
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
@@ -407,7 +406,7 @@ class ParallelDims:
 
         Example:
             >>> parallel_dims = ParallelDims(
-            ...     dp_replicate=2, dp_shard=2, cp=1, tp=2, pp=1, ep=1, etp=1, world_size=8
+            ...     dp_replicate=2, dp_shard=2, cp=1, tp=2, pp=1, ep=1, world_size=8
             ... )
             >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
             >>> print(meshes.keys())
@@ -466,10 +465,6 @@ class ParallelDims:
     @property
     def ep_enabled(self):
         return self.ep > 1
-
-    @property
-    def etp_enabled(self):
-        return self.etp > 1
 
     @property
     def non_data_parallel_size(self):

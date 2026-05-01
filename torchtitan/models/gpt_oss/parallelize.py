@@ -25,15 +25,12 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.expert_parallel import ExpertParallel
 from torchtitan.distributed.tensor_parallel import NoParallel
-from torchtitan.models.common.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    TorchAOTokenDispatcher,
-)
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.tools.logging import logger
 
-from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
+from .expert_parallel import GptossTensorParallel
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -78,8 +75,6 @@ def parallelize_gptoss(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            etp_enabled=parallel_dims.etp_enabled,
             enable_sp=True,
         )
 
@@ -135,8 +130,6 @@ def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
-    ep_etp_mesh: DeviceMesh | None,
-    etp_enabled: bool,
     enable_sp: bool = True,
 ):
     assert ep_mesh is not None or tp_mesh is not None
@@ -180,14 +173,12 @@ def apply_moe_ep_tp(
             )
 
         experts_mesh, experts_plan = None, None
+        # EP disabled: shard routed expert weights across TP mesh (input Replicate, produces Partial output reduced at MoE boundary)
         if ep_mesh is None:
             experts_mesh = tp_mesh
-            # input Replicate, output Partial
             experts_plan = GptossTensorParallel()
-        elif tp_mesh is None or not etp_enabled:
+        else:
             experts_mesh = ep_mesh
-            # sp_size and sp_rank are set for sequence-parallel token splitting
-            # when EP borrows from TP (ETP=1).
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
@@ -198,16 +189,6 @@ def apply_moe_ep_tp(
                     # under CooR precompile instead of a concrete int
                     # that gets baked into the FX graph.
                     dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
-        else:
-            # pyrefly: ignore [missing-attribute]
-            dispatcher = transformer_block.moe.experts.token_dispatcher
-            if isinstance(dispatcher, TorchAOTokenDispatcher):
-                raise NotImplementedError(
-                    "Quantized grouped GEMMs (FP8/MXFP8) with Expert Tensor "
-                    "Parallelism (ETP) is not yet supported."
-                )
-            experts_mesh = ep_etp_mesh
-            experts_plan = GptossExpertTensorParallel()
 
         parallelize_module(
             # pyrefly: ignore [missing-attribute]
