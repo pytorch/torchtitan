@@ -576,6 +576,7 @@ def cudagraph_pass(
         static_input_indices,
         tensor_input_indices=tensor_input_indices,
     )
+    logger.info("Applied cudagraph pass.")
     return gm
 
 

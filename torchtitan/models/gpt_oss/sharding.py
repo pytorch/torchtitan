@@ -44,7 +44,6 @@ def set_gpt_oss_sharding_config(
     enable_sp: bool,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Fill ``sharding_config`` on all GPT-OSS sub-configs.
 
@@ -61,7 +60,6 @@ def set_gpt_oss_sharding_config(
             enable_sp=enable_sp,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
         )
 
 
@@ -71,7 +69,6 @@ def _set_gpt_oss_layer_sharding(
     enable_sp: bool,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Set sharding on one GPT-OSS transformer layer.
 
@@ -112,7 +109,6 @@ def _set_gpt_oss_layer_sharding(
             layer_cfg.moe,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
             enable_sp=enable_sp,
             expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
         )

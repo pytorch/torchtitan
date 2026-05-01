@@ -47,8 +47,8 @@ def parallelize_flux(
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+    assert dp_mesh is not None
     apply_fsdp(
         model,
         dp_mesh,
@@ -207,8 +207,8 @@ def parallelize_encoders(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+    assert dp_mesh is not None
     fsdp_config: dict[str, Any] = {
         "mesh": dp_mesh,
         "mp_policy": mp_policy,

@@ -28,11 +28,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.expert_parallel import (
-    ExpertParallel,
-    ExpertTensorParallel,
-    TensorParallel,
-)
+from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -47,10 +43,7 @@ from torchtitan.distributed.tensor_parallel import (
     maybe_enable_async_tp,
     NoParallel,
 )
-from torchtitan.models.common.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    TorchAOTokenDispatcher,
-)
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
 
@@ -78,20 +71,6 @@ def parallelize_llama(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-
-    # Check if using DeepEP/HybridEP for MoE communication
-    comm_backend = parallelism.expert_parallel_comm_backend
-    if comm_backend in ("deepep", "hybridep"):
-        if not parallel_dims.ep_enabled:
-            raise ValueError(
-                f"{comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
-                "Please set expert_parallel_degree > 1 or use standard communication backend."
-            )
-        if parallel_dims.etp_enabled:
-            raise NotImplementedError(
-                f"{comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
-                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
-            )
 
     if parallelism.full_dtensor:
         validate_config(parallel_dims, model)
@@ -135,20 +114,13 @@ def parallelize_llama(
             parallel_dims, parallelism.full_dtensor
         )
     else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+        assert dp_mesh is not None
         dp_mesh_dims = None
         edp_mesh = None
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
-            edp_mesh_names = (
-                ["dp_replicate", "efsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["efsdp"]
-            )
-            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+            edp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "efsdp"])
 
     apply_fsdp(
         model,
@@ -416,9 +388,6 @@ def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
-    etp_mesh: DeviceMesh | None,
-    ep_etp_mesh: DeviceMesh | None,
-    comm_backend: str = "standard",
     enable_sp: bool = True,
 ):
     """
@@ -428,11 +397,7 @@ def apply_moe_ep_tp(
         model: Model containing transformer blocks.
         tp_mesh: Tensor-parallel device mesh.
         ep_mesh: Expert-parallel device mesh.
-        etp_mesh: Expert tensor-parallel device mesh.
-        ep_etp_mesh: Combined EP/ETP mesh.
-        comm_backend: MoE communication backend.
         enable_sp: Whether sequence parallelism is enabled.
-        pad_multiple: Optional token padding multiple for compatible expert kernels.
     """
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -497,20 +462,12 @@ def apply_moe_ep_tp(
             )
 
         experts_mesh, experts_plan = None, None
+        # EP disabled: shard routed expert weights across TP mesh (input Replicate, produces Partial output reduced at MoE boundary)
         if ep_mesh is None:
-            assert ep_etp_mesh is None
             experts_mesh = tp_mesh
-            # input Replicate, output Partial
             experts_plan = TensorParallel()
-        elif tp_mesh is None or etp_mesh is None:
-            assert ep_etp_mesh is None
+        else:
             experts_mesh = ep_mesh
-            if comm_backend in ("deepep", "hybridep"):
-                # pyrefly: ignore [missing-attribute]
-                dispatcher = transformer_block.moe.experts.token_dispatcher
-                logger.info(f"Applying {comm_backend.upper()} to MoE layer")
-            # sp_size and sp_rank are set for sequence-parallel token splitting
-            # when EP borrows from TP (ETP=1).
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
@@ -518,17 +475,6 @@ def apply_moe_ep_tp(
                 # ``sp_size``/``sp_rank`` are read-only properties off
                 # ``tp_mesh``; install via ``_wire_meshes`` (PR7-era contract).
                 dispatcher._wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
-        else:
-            # pyrefly: ignore [missing-attribute]
-            dispatcher = transformer_block.moe.experts.token_dispatcher
-            if isinstance(dispatcher, TorchAOTokenDispatcher):
-                raise NotImplementedError(
-                    "Quantized grouped GEMMs (FP8/MXFP8) with Expert Tensor "
-                    "Parallelism (ETP) is not yet supported. "
-                    "Please use EP without ETP."
-                )
-            experts_mesh = ep_etp_mesh
-            experts_plan = ExpertTensorParallel()
 
         parallelize_module(
             # pyrefly: ignore [missing-attribute]

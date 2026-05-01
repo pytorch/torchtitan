@@ -73,27 +73,8 @@ def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     return DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
-def _dense_spmd_axes(parallel_dims: ParallelDims) -> list[str]:
-    """Canonical dense SPMD axis list, intersected with enabled axes."""
-    return [
-        axis
-        for axis in ("dp_replicate", "dp_shard", "cp", "tp")
-        if parallel_dims.get_optional_mesh(axis) is not None
-    ]
-
-
-def _sparse_spmd_axes(parallel_dims: ParallelDims) -> list[str]:
-    """Canonical sparse SPMD axis list, intersected with enabled axes.
-
-    The sparse SPMD partition is used by routed-expert weights under MoE.
-    Mirrors ``_dense_spmd_axes`` for the ``(dp_replicate, efsdp, ep, etp)``
-    family. Returns ``[]`` when EP is disabled (no sparse subtree).
-    """
-    return [
-        a
-        for a in ("dp_replicate", "efsdp", "ep", "etp")
-        if parallel_dims.get_optional_mesh(a) is not None
-    ]
+_DENSE_SPMD_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
+_SPARSE_SPMD_AXES = ["dp_replicate", "efsdp", "ep"]
 
 
 def get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
@@ -120,14 +101,14 @@ def resolve_fsdp_mesh(
     In non-full DTensor mode, returns the conventional dp_mesh and None.
     """
     if full_dtensor:
-        spmd_mesh = parallel_dims.get_mesh(_dense_spmd_axes(parallel_dims))
+        spmd_mesh = parallel_dims.get_enabled_mesh(_DENSE_SPMD_AXES)
+        assert spmd_mesh is not None
         dp_mesh_axes = get_dp_mesh_axes(parallel_dims)
         return spmd_mesh, dp_mesh_axes
     else:
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        return parallel_dims.get_mesh(names), None
+        dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+        assert dp_mesh is not None
+        return dp_mesh, None
 
 
 def resolve_sparse_fsdp_mesh(
@@ -148,16 +129,12 @@ def resolve_sparse_fsdp_mesh(
     if not parallel_dims.ep_enabled:
         return None, None
     if full_dtensor:
-        sparse_mesh = parallel_dims.get_mesh(_sparse_spmd_axes(parallel_dims))
+        sparse_mesh = parallel_dims.get_enabled_mesh(_SPARSE_SPMD_AXES)
+        assert sparse_mesh is not None
         sparse_dp_mesh_axes = get_sparse_dp_mesh_axes(parallel_dims)
         return sparse_mesh, sparse_dp_mesh_axes
     else:
-        names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        return parallel_dims.get_optional_mesh(names), None
+        return parallel_dims.get_enabled_mesh(["dp_replicate", "efsdp"]), None
 
 
 def parallelize_inputs(
@@ -174,7 +151,8 @@ def parallelize_inputs(
     NOTE: This API assumes the inputs are already sharded; it only converts
     the class from ``torch.Tensor`` to ``DTensor`` via ``DTensor.from_local``.
     """
-    mesh = parallel_dims.get_mesh(_dense_spmd_axes(parallel_dims))
+    mesh = parallel_dims.get_enabled_mesh(_DENSE_SPMD_AXES)
+    assert mesh is not None
     placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         placements.append(Shard(0))
