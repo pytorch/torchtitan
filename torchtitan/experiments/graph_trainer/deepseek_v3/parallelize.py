@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
 from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp
+from torchtitan.tools.logging import logger
 
 
 def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
@@ -84,6 +85,17 @@ def parallelize_deepseekv3(
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
         model.parallelize(tp_mesh)
 
+    # Read comm_backend from the model's token dispatcher config
+    # (set by moe_comm_backend in model_registry / config factories).
+    moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
+    comm_backend = (
+        getattr(moe_config.experts.token_dispatcher, "comm_backend", "standard")
+        if moe_config is not None
+        else "standard"
+    )
+    if comm_backend == "hybridep":
+        from torchtitan.distributed.deepep import hybridep  # noqa: F401
+
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
@@ -96,6 +108,27 @@ def parallelize_deepseekv3(
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
     model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+
+    # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
+    # the common HybridEP buffer init into a shared utility.
+    if comm_backend == "hybridep" and parallel_dims.ep_enabled:
+        from torchtitan.distributed.deepep.hybridep import get_buffer
+
+        ep_group = parallel_dims.get_mesh("ep").get_group()
+        moe_config = next(l.moe for l in model.config.layers if l.moe is not None)
+        num_local_experts = moe_config.num_experts // parallel_dims.ep
+        hidden_dim = model.config.dim
+        num_tokens = training.local_batch_size * training.seq_len
+        get_buffer(
+            group=ep_group,
+            hidden_dim=hidden_dim,
+            num_tokens=num_tokens,
+            num_local_experts=num_local_experts,
+        )
+        logger.info(
+            f"Pre-initialized HybridEP buffer (hidden_dim={hidden_dim}, "
+            f"num_tokens={num_tokens}, num_local_experts={num_local_experts})"
+        )
 
     # Apply compilation based on mode
     model = apply_compile(
