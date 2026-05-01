@@ -474,14 +474,10 @@ class TorchTitanVLLMModelWrapper(Module):
         # Load HF state dict using DCP
         hf_state_dict = adapter.to_hf(self.model.state_dict())
 
-        # ``expert_bias`` is a TorchTitan training buffer for aux-loss-free
-        # load balancing; HF MoE checkpoints don't contain it. Skip it
-        # explicitly here, and error on any other missing key so that genuine
-        # mismatches are not silently masked.
-        # TODO: once aux-loss-based load balancing lands (#3000), switch the
-        # affected models to ``load_balance_coeff=None`` + aux loss. Then
-        # ``expert_bias`` will not exist in the model state dict and this
-        # special case can be removed.
+        # TODO: remove the ``expert_bias`` exemption after #3000 lands and the
+        # affected models switch to aux-loss-based LB (load_balance_coeff=None).
+        # Until then, HF MoE checkpoints don't carry ``expert_bias``, so ignore
+        # it; any other missing key still raises.
         hf_keys_in_checkpoint = set(
             storage_reader.read_metadata().state_dict_metadata.keys()
         )
