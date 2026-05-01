@@ -165,8 +165,10 @@ class BaseModel(Module):
 
         The mode determines which transforms to apply:
         - BASE: HF remapping only (base model keys)
-        - TRAINABLE: converter transforms only (adapter keys)
-        - FULL: both (base + adapter keys)
+        - TRAINABLE: converter transforms only (adapter keys).
+            When no converters are registered, trainable keys are base
+            keys, so HF remapping is applied as a fallback.
+        - FULL: both HF remapping and converter transforms
         """
         if mode in (StateDictMode.FULL, StateDictMode.BASE):
             if self._to_hf is not None:
@@ -175,6 +177,8 @@ class BaseModel(Module):
             if self._converters_to_external:
                 for fn in self._converters_to_external:
                     sd = fn(sd)
+            elif mode == StateDictMode.TRAINABLE and self._to_hf is not None:
+                sd = self._to_hf(sd)
         return sd
 
     def from_external(self, sd: dict[str, Any], mode: StateDictMode) -> dict[str, Any]:
@@ -187,6 +191,8 @@ class BaseModel(Module):
             if self._converters_from_external:
                 for fn in reversed(self._converters_from_external):
                     sd = fn(sd)
+            elif mode == StateDictMode.TRAINABLE and self._from_hf is not None:
+                sd = self._from_hf(sd)
         if mode in (StateDictMode.FULL, StateDictMode.BASE):
             if self._from_hf is not None:
                 sd = self._from_hf(sd)
