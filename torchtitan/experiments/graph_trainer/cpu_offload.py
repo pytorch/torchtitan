@@ -334,26 +334,12 @@ def tag_all_offloadable_activations(
 # ============================================================
 
 
-def _find_tensor_dep(node: Node, node_positions: dict[Node, int]) -> Node | None:
-    """Find a tensor-valued node suitable for a scheduling dependency."""
-    if isinstance(node.meta.get("val"), torch.Tensor):
-        return node
-    for user in node.users:
-        if (
-            user.op == "call_function"
-            and user.target is operator.getitem
-            and isinstance(user.meta.get("val"), torch.Tensor)
-            and not _is_backward_node(user)
-        ):
-            return user
-    return None
-
-
 def apply_cpu_offload_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
     prefetch_lookahead: int = 1,
+    defer_n_layers: int = 1,
 ) -> torch.fx.GraphModule:
     """Insert ao offload/reload/wait_tensor ops for nodes tagged ``MUST_CPU_OFFLOAD``.
 
@@ -376,6 +362,8 @@ def apply_cpu_offload_pass(
         example_inputs: Example inputs (unused, required by graph pass interface).
         prefetch_lookahead: Move ao.reload nodes this many layers earlier in
             the backward graph to overlap H2D with compute.
+        defer_n_layers: Defer forward wait_tensor ops this many layers past
+            the last consumer to overlap D2H with compute.
 
     Returns:
         The transformed GraphModule with offload/reload ops inserted.
@@ -460,7 +448,10 @@ def apply_cpu_offload_pass(
         total_bytes += _tensor_bytes(val)
 
     # 4b. Defer forward waits to maximize D2H/compute overlap.
-    repositioned = defer_offload_waits(gm, wait_offload_map)
+    if defer_n_layers > 0:
+        deferred = defer_offload_waits(gm, wait_offload_map, defer_n_layers)
+    else:
+        deferred = 0
 
     # 5. Per-group backward reload prefetch.
     if prefetch_lookahead > 0:
@@ -471,7 +462,7 @@ def apply_cpu_offload_pass(
     logger.info(
         f"CPU offload: offloaded {len(offloadable)} tensors "
         f"({total_bytes / 1024 / 1024:.2f} MB), "
-        f"repositioned {repositioned} forward waits"
+        f"deferred {deferred} forward waits"
     )
     return gm
 
@@ -491,14 +482,20 @@ _AO_OPS = {
 def defer_offload_waits(
     gm: torch.fx.GraphModule,
     wait_offload_map: dict[Node, Node],
+    n_layers: int = 1,
 ) -> int:
-    """Sink each forward wait_tensor to the next layer boundary.
+    """Defer each forward wait_tensor N layers past the last consumer.
 
     Each forward wait_tensor synchronizes the D2H transfer and frees GPU
-    storage. Sinking it one layer past the last consumer gives an extra
-    layer of compute to overlap with the D2H copy.
+    storage. Deferring it past the last consumer gives extra layers of
+    compute to overlap with the D2H copy.
 
-    Returns the number of wait nodes repositioned.
+    Args:
+        gm: The GraphModule containing the full fwd+bwd graph.
+        wait_offload_map: Mapping from offloaded node to its wait_tensor node.
+        n_layers: Number of layers to defer past the last consumer.
+
+    Returns the number of wait nodes deferred.
     """
     # Find the last forward compute node per layer (excluding AO ops).
     layer_last_fwd_node: dict[int, Node] = {}
@@ -508,14 +505,13 @@ def defer_offload_waits(
             if lid != _NOT_IN_LAYERS and n.target not in _AO_OPS:
                 layer_last_fwd_node[lid] = n
 
-    # Build next-layer map for cross-layer sinking.
+    # Build next-layer map for cross-layer deferral.
     sorted_layers = sorted(layer_last_fwd_node.keys())
     next_layer_map: dict[int, int] = {}
     for i in range(len(sorted_layers) - 1):
         next_layer_map[sorted_layers[i]] = sorted_layers[i + 1]
 
-    node_positions: dict[Node, int] = {n: i for i, n in enumerate(gm.graph.nodes)}
-    repositioned = 0
+    deferred = 0
     for node, wait_node in wait_offload_map.items():
         layer_id = _get_layer_id(node)
         if layer_id == _NOT_IN_LAYERS:
@@ -531,21 +527,19 @@ def defer_offload_waits(
             if cl != _NOT_IN_LAYERS:
                 consumer_layer = max(consumer_layer, cl)
 
-        # Sink to next layer if possible, otherwise stay in consumer layer.
-        sink_layer = next_layer_map.get(consumer_layer, consumer_layer)
-        if sink_layer not in layer_last_fwd_node:
+        # Defer N layers past consumer layer if possible.
+        defer_layer = consumer_layer
+        for _ in range(n_layers):
+            defer_layer = next_layer_map.get(defer_layer, defer_layer)
+        if defer_layer not in layer_last_fwd_node:
             continue
 
-        anchor = layer_last_fwd_node[sink_layer]
-        dep_node = _find_tensor_dep(anchor, node_positions)
-        if dep_node is not None:
-            wait_node.args = (*wait_node.args[:2], dep_node)
-            dep_node.append(wait_node)
-        else:
-            anchor.append(wait_node)
-        repositioned += 1
+        anchor = layer_last_fwd_node[defer_layer]
+        wait_node.args = (*wait_node.args[:2], anchor)
+        anchor.append(wait_node)
+        deferred += 1
 
-    return repositioned
+    return deferred
 
 
 def prefetch_reloads(
