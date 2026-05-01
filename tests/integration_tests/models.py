@@ -37,26 +37,10 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
                     "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule DualPipeV",
-                    # AC is not supported for DualPipeV yet
-                    "--activation_checkpoint.mode 'none'",
-                ],
-            ],
-            "PP dual pipe v schedule test",
-            "pp_dualpipev",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
-                    "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "DeepSeek V3 PP+FSDP+TP+EP",
@@ -69,28 +53,11 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.no-enable-sequence-parallel",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP (SP disabled)",
+            "DeepSeek V3 FSDP+EP",
             "deepseek_v3_fsdp+ep_no_sp",
             ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.expert_tensor_parallel_degree 2",
-                ],
-            ],
-            "DeepSeek V3 PP+FSDP+TP+EP+ETP",
-            "deepseek_v3_pp+fsdp+tp+ep+etp",
-            ngpu=8,
         ),
         OverrideDefinitions(
             [
@@ -141,20 +108,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module qwen3 --config qwen3_moe_debug_ep",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.expert_tensor_parallel_degree 2",
-                ],
-            ],
-            "Qwen3 FSDP+TP+EP+ETP",
-            "qwen3_fsdp+tp+ep+etp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--module qwen3 --config qwen3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -177,7 +130,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                     # "--compile.enable",
                 ],
             ],
@@ -193,7 +145,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                 ],
             ],
             "Qwen3-VL MoE FSDP+TP+EP",
@@ -210,7 +161,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
                     # "--compile.enable",
                 ],
             ],

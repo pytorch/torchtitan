@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
@@ -34,6 +35,9 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     permuted_indices: torch.Tensor  # for _unpermute
     input_splits: list[int]
     output_splits: list[int]
+    # Pre-pad token count. dispatch() rounds bs*slen up to a multiple of
+    # sp_size when sp_size > 1; combine() slices pad rows off using this.
+    original_num_tokens: int
 
 
 class LocalTokenDispatcher(Configurable):
@@ -173,6 +177,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # so the rank is a SymInt under CooR precompile.
         self.sp_size: int = 1
         self.sp_rank: int | torch.SymInt = -1
+        # Use the non-autograd all-to-all variant. Set to True for inference
+        # paths (e.g. vLLM under torch.inference_mode), where the autograd
+        # functional ops don't dispatch correctly without an active autograd
+        # context. Read at trace time, so it's a Python bool — not a runtime
+        # call to is_inference_mode_enabled() (which Dynamo cannot trace).
+        self.use_inference_a2a: bool = False
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
@@ -223,14 +233,22 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             return super().dispatch(x, top_scores, selected_experts_indices)
 
         ep_size = self.ep_mesh.size()
+        original_num_tokens = x.shape[0]
 
         if self.sp_size > 1:
             assert self.sp_rank >= 0, (
                 "sp_rank must be set before use. "
                 "apply_moe_ep_tp() should set it from tp_mesh._sym_get_coordinate()."
             )
-            # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
-            # shape (batch_size * seq_len // ep_size, top_k)
+            # Round bs*slen up to a multiple of sp_size. Pad rows route to
+            # expert 0 with zero scores -> zero contribution to scatter_add.
+            pad = (-original_num_tokens) % self.sp_size
+            if pad > 0:
+                x = F.pad(x, (0, 0, 0, pad))
+                top_scores = F.pad(top_scores, (0, 0, 0, pad))
+                selected_experts_indices = F.pad(
+                    selected_experts_indices, (0, 0, 0, pad)
+                )
             x, top_scores, selected_experts_indices = self._split_along_sp(
                 x, top_scores, selected_experts_indices
             )
@@ -297,13 +315,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             output_splits_list = output_splits.tolist()
 
         # All-to-all dispatch tokens to EP ranks.
-        # Use the non-autograd version when running in inference mode
-        # (e.g. vLLM), since _c10d_functional_autograd ops don't dispatch
-        # correctly without an active autograd context.
+        # Use the non-autograd version under inference (vLLM), since
+        # _c10d_functional_autograd ops don't dispatch correctly without
+        # an active autograd context. Gated by a Python bool so the choice
+        # is stable at trace time.
         a2a_fn = (
-            all_to_all_single
-            if torch.is_inference_mode_enabled()
-            else all_to_all_single_autograd
+            all_to_all_single if self.use_inference_a2a else all_to_all_single_autograd
         )
         routed_input = a2a_fn(
             routed_input,
@@ -338,6 +355,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
             output_splits=output_splits_list,
+            original_num_tokens=original_num_tokens,
         )
         return routed_input, num_tokens_per_expert_group, metadata
 
@@ -427,9 +445,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
         a2a_fn = (
-            all_to_all_single
-            if torch.is_inference_mode_enabled()
-            else all_to_all_single_autograd
+            all_to_all_single if self.use_inference_a2a else all_to_all_single_autograd
         )
         routed_output = a2a_fn(
             routed_output,
@@ -438,9 +454,26 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             self.ep_mesh,
         )
 
+        # Recover the dispatch-time padded length so scatter_add into
+        # pad-token indices stays in-bounds; pad rows are sliced off below.
+        original_num_tokens = metadata.original_num_tokens
+        if self.sp_size > 1:
+            padded_num_tokens = original_num_tokens + (
+                (-original_num_tokens) % self.sp_size
+            )
+        else:
+            padded_num_tokens = original_num_tokens
+        pad = padded_num_tokens - original_num_tokens
+
         # shared_experts overlaps with the async a2a (NCCL stream).
         # Score application + scatter_add forces the a2a to sync.
-        out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
+        if shared_experts is not None:
+            shared_out = shared_experts(x)
+            out = F.pad(shared_out, (0, 0, 0, pad)) if pad > 0 else shared_out
+        elif pad > 0:
+            out = x.new_zeros(padded_num_tokens, x.shape[-1])
+        else:
+            out = torch.zeros_like(x)
 
         if not self.score_before_experts:
             routed_output = (
@@ -452,7 +485,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # shard, so token_indices_experts_sorted are 0-based local indices.
         # Offset them to global positions so scatter_add into full x is correct.
         if self.sp_size > 1:
-            local_num_tokens = x.shape[0] // self.sp_size
+            local_num_tokens = padded_num_tokens // self.sp_size
             token_indices_experts_sorted = (
                 metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
             )
@@ -465,6 +498,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
             routed_output,
         )
+        if pad > 0:
+            out = out[:original_num_tokens]
         return out
 
 
@@ -549,7 +584,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     token dispatch and combine. For the DeepEP backend, combine is asynchronous
     — callers must call sync_combine() before using the result.
 
-    ep_mesh is set by ExpertParallel / ExpertTensorParallel._apply().
+    ep_mesh is set by ExpertParallel._apply().
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -596,7 +631,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         self.comm_backend = config.comm_backend
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
-        # Set by ExpertParallel / ExpertTensorParallel._partition_fn()
+        # Set by ExpertParallel._partition_fn()
         self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs
