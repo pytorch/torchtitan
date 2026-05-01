@@ -179,6 +179,12 @@ class VLLMGenerator(Actor, Configurable):
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
+        # Signal the wrapper to skip the HF weight load when running with
+        # random init. The trainer pushes its random-init weights to TorchStore
+        # at startup, so the generator picks up matching weights from there.
+        if config.debug.random_init:
+            os.environ["TORCHTITAN_SKIP_INITIAL_HF_LOAD"] = "1"
+
         set_batch_invariance(config.debug.batch_invariant)
 
         self._set_determinism(config.debug)

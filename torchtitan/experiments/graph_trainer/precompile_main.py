@@ -129,7 +129,6 @@ def _common_setup(config):
         tp=tp,
         pp=pp,
         ep=parallelism.expert_parallel_degree,
-        etp=parallelism.expert_tensor_parallel_degree,
         world_size=world_size,
     )
     parallel_dims.build_mesh()

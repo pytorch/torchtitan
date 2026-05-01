@@ -60,7 +60,7 @@ def parallelize_deepseekv3(
 
     # Build the sparse mesh for MoE expert parallelism
     # Filter to only include enabled mesh dimensions
-    sparse_names = ["dp_replicate", "efsdp", "ep", "etp"]
+    sparse_names = ["dp_replicate", "efsdp", "ep"]
     sparse_names = [
         name
         for name in sparse_names
@@ -137,7 +137,7 @@ def parallelize_deepseekv3(
         # it would require putting the loss inside the model as well
         def _return_as_dtensor_for_loss_parallel(module, args, output):
             return torch.distributed.tensor.DTensor.from_local(
-                output, sparse_mesh["etp"], (Shard(2),)
+                output, parallel_dims.get_mesh("tp"), (Shard(2),)
             )
 
         # not keeping a reference to the hook, don't plan on

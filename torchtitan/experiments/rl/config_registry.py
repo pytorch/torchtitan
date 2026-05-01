@@ -296,6 +296,9 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
+            # Disable torch.compile + CUDA graph capture: the EP all-to-all
+            # path issues an unpinned D2H copy of split sizes that the
+            # piecewise/full graph capture rejects.
             compile=GeneratorCompileConfig(
                 backend="none",
                 cudagraph_mode="none",
@@ -310,6 +313,68 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=50,
             ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
+    """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
+
+    Trainer: TP=4, EP=4 (4 GPUs). Generator: TP=4, EP=4 (4 GPUs).
+
+    Uses the bundled bootstrap directory ``tests/assets/qwen3_moe_debug``
+    (config.json + Qwen3 tokenizer files, no weights) together with
+    ``debug.random_init=True`` so no checkpoint is needed.
+    """
+    debug_config = DebugConfig(
+        batch_invariant=True, deterministic=True, random_init=True
+    )
+    return RLTrainer.Config(
+        model_spec=model_registry(
+            "debugmodel_moe", attn_backend="varlen", moe_comm_backend="standard"
+        ),
+        hf_assets_path="tests/assets/qwen3_moe_debug",
+        num_steps=5,
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=4,
+                expert_parallel_degree=4,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+            ),
+            compile=CompileConfig(enable=False, backend="aot_eager"),
+            debug=debug_config,
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            compile=GeneratorCompileConfig(
+                backend="none",
+                cudagraph_mode="none",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                expert_parallel_degree=4,
+            ),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+            debug=debug_config,
         ),
     )
 

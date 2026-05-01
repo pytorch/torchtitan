@@ -484,7 +484,7 @@ def _debugmodel_moe(
     dim = 256
     head_dim = 128
     n_layers = 8
-    vocab_size = 151936  # Match Qwen3 tokenizer for compatibility with HF tokenizer
+    vocab_size = 151936
     return Qwen3Model.Config(
         vocab_size=vocab_size,
         dim=dim,
