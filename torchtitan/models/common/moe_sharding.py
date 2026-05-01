@@ -6,29 +6,22 @@
 
 """Config-based sharding helpers for MoE submodules.
 
-Mirrors the dense helpers in ``decoder_sharding.py`` for the MoE family.
-Each MoE submodule's ``sharding_config`` mirrors the imperative legacy
-plan (``apply_moe_ep_tp``) one-to-one:
+Mirrors the dense helpers in ``decoder_sharding.py`` for the MoE family:
 
-- ``moe`` (wrapper): dense ``LocalMapConfig`` over ``{TP}``. Replaces
-  ``PrepareModuleInputOutput(...)`` + ``MoE.forward``'s manual
-  ``to_local(grad_placements=(Partial(),))`` at the dense<->local boundary.
-- ``moe.router.gate``: ``Replicate`` weight, ``local_output_grad_placements
-  ={TP: Partial()}``. Mirrors ``NoParallel(local_output_grad_placements=
-  (Partial(),))``.
-- ``moe.shared_experts.{w1,w3}``: colwise (``Shard(0)`` weight),
-  ``local_input_grad_placements={"input": {TP: Partial()}}``,
-  ``local_output_grad_placements`` set to make the wrapper return a local
-  tensor (matching ``ColwiseParallelWithGradPlacement(use_local_output=
-  True, local_input_grad_placements=(Partial(),))``).
-- ``moe.shared_experts.w2``: rowwise (``Shard(1)`` weight),
-  ``out_dst_shardings={TP: Partial()}`` and ``local_output_grad_placements
-  ={TP: Partial()}``. Mirrors ``RowwiseParallel(output_layouts=Partial())``
-  -- avoids the Partial->Replicate all-reduce in w2; the boundary collapse
-  happens at the MoE wrapper.
+- ``moe`` (wrapper): dense ``LocalMapConfig`` over ``{TP}`` -- redistributes
+  input across SP, runs the body on a local tensor, wraps the body's
+  Partial-on-TP output, then redistributes Partial -> sp_layout at the exit.
+- ``moe.router.gate``: ``Replicate`` weight; ``local_output_grad_placements
+  = {TP: Partial()}`` so backward d_input flows as Partial on TP.
+- ``moe.shared_experts.{w1,w3}``: colwise (``Shard(0)`` weight) with
+  ``local_input_grad_placements = {TP: Partial()}`` and a local-tensor
+  output wrapping.
+- ``moe.shared_experts.w2``: rowwise (``Shard(1)`` weight) with
+  ``out_dst_shardings = {TP: Partial()}`` -- skips the Partial->Replicate
+  all-reduce; the boundary collapse happens at the MoE wrapper.
 - ``moe.experts`` (``GroupedExperts``): sparse ``{EP}`` placements
   when EP is enabled; falls back to dense ``{TP}`` placements when EP=1
-  but TP>1 (today's ``TensorParallel`` path).
+  but TP>1.
 
 Family purity per Module is invariant: a Module's ``sharding_config``
 references either dense ``{dp_replicate, dp_shard, cp, tp}`` axes or sparse
@@ -212,8 +205,7 @@ def set_moe_sharding_config(
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
 
-    Replaces the imperative ``apply_moe_ep_tp``. Branches dense vs sparse
-    family per Module:
+    Branches dense vs sparse family per Module:
 
     - ``moe`` (wrapper): dense-family ``LocalMapConfig`` over ``{TP}``.
       Always set when ``tp_enabled`` -- even with EP, the wrapper's

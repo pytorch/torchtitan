@@ -79,9 +79,6 @@ def parallelize_llama(
             parallel_dims.get_mesh("cp"),
         )
 
-    # ``model.parallelize`` walks every ``Module`` and applies its
-    # ``sharding_config`` (dense + MoE). Fires under TP or EP; the helper
-    # filters disabled axes per-Module.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:

@@ -145,8 +145,7 @@ class GroupedExperts(Module):
         After the base ``Module.parallelize`` distributes ``w1``/``w2``/
         ``w3`` per ``state_shardings``, install the EP / TP meshes on the
         non-Module ``token_dispatcher`` child via ``_wire_meshes`` so its
-        ``dispatch`` / ``combine`` see the right meshes at run time. This
-        replaces the legacy sideways assignment from ``apply_moe_ep_tp``.
+        ``dispatch`` / ``combine`` see the right meshes at run time.
         """
         super().parallelize(parallel_dims)
         if hasattr(self.token_dispatcher, "_wire_meshes"):

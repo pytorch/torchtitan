@@ -155,8 +155,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
-    ``ep_mesh`` and ``tp_mesh`` are wired by the owning
-    ``GroupedExperts.parallelize`` override via ``_wire_meshes``.
+    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
+    by the owning ``GroupedExperts.parallelize`` override via
+    ``_wire_meshes``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -167,13 +168,15 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         # DeviceMesh (not ProcessGroup) so that CooR precompile can use
         # torch.ops._dtensor.mesh_get_process_group to keep the FX graph
-        # rank-agnostic. Wired by GroupedExperts.parallelize via
-        # _wire_meshes; remains None when EP=1 so dispatch falls back to
-        # the LocalTokenDispatcher path.
+        # rank-agnostic. None when EP=1 so dispatch falls back to the
+        # LocalTokenDispatcher path.
         self.ep_mesh: DeviceMesh | None = None
-        # TP mesh used for sequence-parallel token splitting (sp_size /
-        # sp_rank). None when TP=1; remains None until _wire_meshes runs.
-        self.tp_mesh: DeviceMesh | None = None
+        # Sequence-parallel split coordinates derived from tp_mesh.
+        # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
+        # ``SymInt`` under CooR precompile, keeping the FX graph
+        # rank-agnostic. Defaults are the TP=1 values.
+        self.sp_size: int = 1
+        self.sp_rank: int | torch.SymInt = 0
 
     def _wire_meshes(
         self,
@@ -181,31 +184,16 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         ep_mesh: DeviceMesh | None,
         tp_mesh: DeviceMesh | None,
     ) -> None:
-        """Install the EP / TP meshes used by dispatch / combine.
+        """Install the EP mesh and SP coordinates used by dispatch / combine.
 
-        Called once from ``GroupedExperts.parallelize`` (the owning Module)
-        in place of the legacy sideways assignment from
-        ``apply_moe_ep_tp``. Both arguments may be ``None`` when the
-        corresponding parallelism dimension is disabled; ``dispatch`` /
-        ``combine`` handle the disabled cases internally.
+        Both arguments may be ``None`` when the corresponding parallelism
+        dimension is disabled; ``dispatch`` / ``combine`` handle the
+        disabled cases internally.
         """
         self.ep_mesh = ep_mesh
-        self.tp_mesh = tp_mesh
-
-    @property
-    def sp_size(self) -> int:
-        """Sequence-parallel size: TP degree, or 1 when TP is disabled."""
-        return self.tp_mesh.size() if self.tp_mesh is not None else 1
-
-    @property
-    def sp_rank(self) -> int | torch.SymInt:
-        """Sequence-parallel rank.
-
-        Uses ``DeviceMesh._sym_get_coordinate`` so the rank is a ``SymInt``
-        under CooR precompile, keeping the FX graph rank-agnostic.
-        Returns 0 when TP is disabled.
-        """
-        return self.tp_mesh._sym_get_coordinate(0) if self.tp_mesh is not None else 0
+        if tp_mesh is not None:
+            self.sp_size = tp_mesh.size()
+            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
@@ -258,10 +246,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         ep_size = self.ep_mesh.size()
 
         if self.sp_size > 1:
-            assert self.tp_mesh is not None, (
-                "tp_mesh must be wired before sequence-parallel dispatch. "
-                "GroupedExperts.parallelize should call _wire_meshes(tp_mesh=...)."
-            )
             # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
             # shape (batch_size * seq_len // ep_size, top_k)
             x, top_scores, selected_experts_indices = self._split_along_sp(
