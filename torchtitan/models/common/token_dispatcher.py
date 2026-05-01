@@ -438,26 +438,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             self.ep_mesh,
         )
 
-        # Recover the dispatch-time padded length so scatter_add into
-        # pad-token indices stays in-bounds; pad rows are sliced off below.
-        original_num_tokens = metadata.original_num_tokens
-        if self.sp_size > 1:
-            padded_num_tokens = original_num_tokens + (
-                (-original_num_tokens) % self.sp_size
-            )
-        else:
-            padded_num_tokens = original_num_tokens
-        pad = padded_num_tokens - original_num_tokens
-
         # shared_experts overlaps with the async a2a (NCCL stream).
         # Score application + scatter_add forces the a2a to sync.
-        if shared_experts is not None:
-            shared_out = shared_experts(x)
-            out = F.pad(shared_out, (0, 0, 0, pad)) if pad > 0 else shared_out
-        elif pad > 0:
-            out = x.new_zeros(padded_num_tokens, x.shape[-1])
-        else:
-            out = torch.zeros_like(x)
+        out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
 
         if not self.score_before_experts:
             routed_output = (
@@ -468,11 +451,22 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # When sequence_parallel is active, dispatch splits tokens to a local
         # shard, so token_indices_experts_sorted are 0-based local indices.
         # Offset them to global positions so scatter_add into full x is correct.
+        original_num_tokens = metadata.original_num_tokens
         if self.sp_size > 1:
+            padded_num_tokens = original_num_tokens + (
+                (-original_num_tokens) % self.sp_size
+            )
             local_num_tokens = padded_num_tokens // self.sp_size
             token_indices_experts_sorted = (
                 metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
             )
+            # Drop pad-row entries: their global indices fall in
+            # [original_num_tokens, padded_num_tokens), out of `out`'s range.
+            # scatter_add itself is not padded; `out` matches x's shape.
+            if padded_num_tokens != original_num_tokens:
+                mask = token_indices_experts_sorted < original_num_tokens
+                token_indices_experts_sorted = token_indices_experts_sorted[mask]
+                routed_output = routed_output[mask]
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted
 
@@ -482,8 +476,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
             routed_output,
         )
-        if pad > 0:
-            out = out[:original_num_tokens]
         return out
 
 
