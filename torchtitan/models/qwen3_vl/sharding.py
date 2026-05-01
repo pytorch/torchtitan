@@ -39,7 +39,6 @@ def set_qwen3_vl_sharding_config(
     loss_parallel: bool,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3-VL sub-configs.
 
@@ -58,7 +57,6 @@ def set_qwen3_vl_sharding_config(
             layer_cfg,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
         )
 
     # Vision encoder.
@@ -71,7 +69,6 @@ def _set_qwen3_vl_layer_sharding(
     *,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Set sharding on one Qwen3-VL decoder layer (mirrors qwen3 with enable_sp=False)."""
     attention = layer_cfg.attention
@@ -107,7 +104,6 @@ def _set_qwen3_vl_layer_sharding(
             layer_cfg.moe,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
             enable_sp=False,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )

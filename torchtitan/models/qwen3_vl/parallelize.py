@@ -148,20 +148,13 @@ def parallelize_qwen3_vl(
             parallel_dims, parallelism.full_dtensor
         )
     else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+        assert dp_mesh is not None
         dp_mesh_dims = None
         edp_mesh = None
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
-            edp_mesh_names = (
-                ["dp_replicate", "efsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["efsdp"]
-            )
-            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+            edp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "efsdp"])
 
     # FSDP the vision encoder as a single unit
     if model.vision_encoder is not None:

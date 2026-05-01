@@ -569,7 +569,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     token dispatch and combine. For the DeepEP backend, combine is asynchronous
     — callers must call sync_combine() before using the result.
 
-    ep_mesh is set by ExpertParallel / ExpertTensorParallel._apply().
+    ep_mesh is set by ExpertParallel._apply().
     """
 
     @dataclass(kw_only=True, slots=True)

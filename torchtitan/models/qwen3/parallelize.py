@@ -69,7 +69,7 @@ def parallelize_qwen3(
         # ``model.parallelize`` walks every ``Module`` and applies its
         # ``sharding_config``. Fires under TP or EP -- dense plans live on
         # ``{TP}`` axes (no-op when TP=1), MoE-expert plans live on
-        # ``{EP, ETP}`` (no-op when EP=1). Dispatcher meshes are wired by
+        # ``{EP}`` (no-op when EP=1). Dispatcher meshes are wired by
         # ``GroupedExperts.parallelize``'s override.
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             model.parallelize(parallel_dims)
@@ -102,20 +102,13 @@ def parallelize_qwen3(
             parallel_dims, parallelism.full_dtensor
         )
     else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+        assert dp_mesh is not None
         dp_mesh_dims = None
         edp_mesh = None
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
-            edp_mesh_names = (
-                ["dp_replicate", "efsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["efsdp"]
-            )
-            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+            edp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "efsdp"])
 
     apply_fsdp(
         model,

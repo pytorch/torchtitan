@@ -61,20 +61,6 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # Check if using DeepEP/HybridEP for MoE communication
-    comm_backend = parallelism.expert_parallel_comm_backend
-    if comm_backend in ("deepep", "hybridep"):
-        if not parallel_dims.ep_enabled:
-            raise ValueError(
-                f"{comm_backend.upper()} requires expert parallelism (ep_degree > 1). "
-                "Please set expert_parallel_degree > 1 or use standard communication backend."
-            )
-        if parallel_dims.etp_enabled:
-            raise NotImplementedError(
-                f"{comm_backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
-                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
-            )
-
     if parallelism.full_dtensor:
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
@@ -117,20 +103,13 @@ def parallelize_llama(
             parallel_dims, parallelism.full_dtensor
         )
     else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+        assert dp_mesh is not None
         dp_mesh_dims = None
         edp_mesh = None
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
-            edp_mesh_names = (
-                ["dp_replicate", "efsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["efsdp"]
-            )
-            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+            edp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "efsdp"])
 
     apply_fsdp(
         model,
