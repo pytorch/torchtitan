@@ -73,10 +73,6 @@ def parallelize_qwen3(
 
     annotate_qwen3(model)
 
-    # Config-based sharding: ShardingConfig is populated on the model config
-    # in ``Qwen3Model.update_from_config`` (dense + MoE);
-    # ``Module.parallelize`` applies it. Replaces the imperative
-    # ``apply_moe_ep_tp`` call.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:

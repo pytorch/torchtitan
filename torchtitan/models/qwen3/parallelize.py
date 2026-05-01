@@ -58,11 +58,6 @@ def parallelize_qwen3(
             parallel_dims.get_mesh("cp"),
         )
 
-    # ``model.parallelize`` walks every ``Module`` and applies its
-    # ``sharding_config``. Fires under TP or EP -- dense plans live on
-    # ``{TP}`` axes (no-op when TP=1), MoE-expert plans live on
-    # ``{EP}`` (no-op when EP=1). Dispatcher meshes are wired by
-    # ``GroupedExperts.parallelize``'s override.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:

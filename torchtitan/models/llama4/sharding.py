@@ -67,9 +67,8 @@ def _set_llama4_layer_sharding(
     """Set sharding on one Llama4 transformer layer.
 
     Attention and norms are sharded on all blocks (MoE and non-MoE).
-    Dense FFN is only sharded on non-MoE blocks; MoE FFN is now routed
-    through ``set_moe_sharding_config``, replacing the imperative
-    ``apply_moe_ep_tp`` call.
+    Dense FFN is only sharded on non-MoE blocks; MoE FFN is routed
+    through ``set_moe_sharding_config``.
     """
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm

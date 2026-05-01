@@ -53,9 +53,6 @@ def parallelize_gptoss(
             parallel_dims.get_mesh("cp"),
         )
 
-    # ``model.parallelize`` walks every ``Module`` and applies its
-    # ``sharding_config`` (dense + MoE). Replaces the imperative
-    # ``apply_moe_ep_tp`` call.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
 
