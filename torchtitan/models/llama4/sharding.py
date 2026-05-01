@@ -36,7 +36,6 @@ def set_llama4_sharding_config(
     enable_sp: bool,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Llama4 sub-configs.
 
@@ -55,7 +54,6 @@ def set_llama4_sharding_config(
             enable_sp=enable_sp,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
         )
 
 
@@ -65,7 +63,6 @@ def _set_llama4_layer_sharding(
     enable_sp: bool,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Set sharding on one Llama4 transformer layer.
 
@@ -96,7 +93,6 @@ def _set_llama4_layer_sharding(
             layer_cfg.moe,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
