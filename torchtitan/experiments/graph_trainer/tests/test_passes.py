@@ -87,7 +87,6 @@ class TestReassignToPgPass(FSDPTest):
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=self.world_size,
         )
 
@@ -482,7 +481,6 @@ class TestBucketingPrefetchOrder(FSDPTest):
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=self.world_size,
         )
 
