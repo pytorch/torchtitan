@@ -698,13 +698,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                # Stop-gap: under non-full_dtensor + disable_loss_parallel,
-                # config-based sharding leaves `pred` as a DTensor but the
-                # loss path (plain cross_entropy) does not accept DTensor,
-                # so we unwrap here. Remove once either (a) full_dtensor is
-                # the only path or (b) upstream cross_entropy accepts
-                # DTensor end-to-end. full_dtensor and the loss_parallel
-                # path both already consume DTensor directly.
+                # Plain cross_entropy doesn't accept DTensor; unwrap when
+                # the loss path is neither full_dtensor nor loss_parallel.
+                # Remove once non-full_dtensor is no longer supported.
                 if (
                     isinstance(pred, DTensor)
                     and not self.config.parallelism.full_dtensor
