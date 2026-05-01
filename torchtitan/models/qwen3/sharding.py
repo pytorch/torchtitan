@@ -45,7 +45,6 @@ def set_qwen3_sharding_config(
     enable_sp: bool,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3 sub-configs.
 
@@ -67,7 +66,6 @@ def set_qwen3_sharding_config(
             enable_sp=enable_sp,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
         )
 
 
@@ -77,7 +75,6 @@ def _set_qwen3_layer_sharding(
     enable_sp: bool,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
 ) -> None:
     """Set sharding on one Qwen3 transformer layer."""
     attention = layer_cfg.attention
@@ -116,7 +113,6 @@ def _set_qwen3_layer_sharding(
             layer_cfg.moe,
             tp_enabled=tp_enabled,
             ep_enabled=ep_enabled,
-            etp_enabled=etp_enabled,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )

@@ -26,13 +26,13 @@ plan (``apply_moe_ep_tp``) one-to-one:
   ={TP: Partial()}``. Mirrors ``RowwiseParallel(output_layouts=Partial())``
   -- avoids the Partial->Replicate all-reduce in w2; the boundary collapse
   happens at the MoE wrapper.
-- ``moe.experts`` (``GroupedExperts``): sparse ``{EP, ETP}`` placements
+- ``moe.experts`` (``GroupedExperts``): sparse ``{EP}`` placements
   when EP is enabled; falls back to dense ``{TP}`` placements when EP=1
   but TP>1 (today's ``TensorParallel`` path).
 
 Family purity per Module is invariant: a Module's ``sharding_config``
 references either dense ``{dp_replicate, dp_shard, cp, tp}`` axes or sparse
-``{dp_replicate, efsdp, ep, etp}`` axes, never both. The dense<->sparse
+``{dp_replicate, efsdp, ep}`` axes, never both. The dense<->sparse
 transition is the dispatcher's plain-tensor a2a, sitting *between* Modules
 (``MoE`` exits dense, ``GroupedExperts`` enters sparse).
 """
@@ -52,31 +52,25 @@ DP_SHARD = MeshAxisName.DP_SHARD
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 EP = MeshAxisName.EP
-ETP = MeshAxisName.ETP
 EFSDP = MeshAxisName.EFSDP
 
 
-def expert_param_placement_sparse(*, etp_placement: Placement) -> NamedPlacement:
+def expert_param_placement_sparse() -> NamedPlacement:
     """Sparse-family placement for routed-expert weights (EP enabled).
 
     Insertion order matches canonical mesh order ``DP_REPLICATE -> EFSDP ->
-    EP -> ETP`` so ``_needed_axes``'s first-insertion axis order resolves
+    EP`` so ``_needed_axes``'s first-insertion axis order resolves
     to the sparse_mesh.
 
     DP_REPLICATE / EFSDP are FSDP storage axes: ``Replicate`` at
     ``distribute_tensor`` time, FSDP reshards ``EFSDP`` post-parallelize.
     EP always shards on dim 0 (the expert dim of ``(num_experts, *, *)``
-    weights). ETP shards on the in/out dim per colwise/rowwise convention.
-
-    ``etp_placement`` is the placement on the ETP axis: ``Shard(1)`` for
-    colwise weights, ``Shard(2)`` for rowwise, ``Replicate()`` when ETP
-    isn't used (the "EP only" case) or for replicated bias terms.
+    weights).
     """
     return {
         DP_REPLICATE: Replicate(),
         EFSDP: Replicate(),
         EP: Shard(0),
-        ETP: etp_placement,
     }
 
 
@@ -213,7 +207,6 @@ def set_moe_sharding_config(
     *,
     tp_enabled: bool,
     ep_enabled: bool,
-    etp_enabled: bool,
     enable_sp: bool,
     expert_param_layout: dict[str, Placement],
 ) -> None:
@@ -229,14 +222,14 @@ def set_moe_sharding_config(
     - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP plan with
       Partial-flow grad annotations (when ``moe_cfg.shared_experts is not
       None``).
-    - ``moe.experts`` (``GroupedExperts``): sparse-family ``{EP, ETP}``
+    - ``moe.experts`` (``GroupedExperts``): sparse-family ``{EP}``
       placements when ``ep_enabled``; dense-family ``{TP}`` placements
       when ``ep_enabled is False`` and ``tp_enabled``.
 
     ``expert_param_layout`` maps each routed-expert parameter name to its
-    in/out-dim placement: ``Shard(1)`` for colwise, ``Shard(2)`` for
-    rowwise, ``Replicate()`` for replicated bias. The shared
-    ``GroupedExperts`` (qwen3, llama4, deepseek_v3) passes
+    dense in/out-dim placement (used when EP=1 + TP>1): ``Shard(1)`` for
+    colwise, ``Shard(2)`` for rowwise, ``Replicate()`` for replicated
+    bias. The shared ``GroupedExperts`` (qwen3, llama4, deepseek_v3) passes
     ``{"w1": Shard(1), "w2": Shard(2), "w3": Shard(1)}``;
     ``GptOssGroupedExperts`` passes its mlp1/mlp2 layout.
 
@@ -244,12 +237,10 @@ def set_moe_sharding_config(
         moe_cfg: The ``MoE.Config`` instance to populate.
         tp_enabled: Whether tensor parallelism is enabled.
         ep_enabled: Whether expert parallelism is enabled.
-        etp_enabled: Whether expert tensor parallelism is enabled.
-            Ignored when ``ep_enabled`` is False.
         enable_sp: Whether sequence parallelism is enabled (affects the
             wrapper's enter/exit TP layout).
-        expert_param_layout: ``{param_name: tp_or_etp_placement}`` for the
-            routed experts' weight params.
+        expert_param_layout: ``{param_name: tp_placement}`` for the
+            routed experts' weight params (used in the EP=1 + TP>1 path).
     """
     # MoE wrapper boundary. Set whenever TP is enabled (with or without
     # SP) -- the wrapper still needs to convert DTensor inputs to local.
@@ -268,14 +259,10 @@ def set_moe_sharding_config(
 
     # Routed experts: branch on EP enablement to select the family.
     if ep_enabled:
-        # Sparse family: {EP, ETP}. ETP=Replicate when ETP is disabled
-        # (pure EP); otherwise the colwise/rowwise dim from the layout.
-        state_shardings: dict[str, NamedPlacement] = {}
-        for name, placement in expert_param_layout.items():
-            etp_placement = placement if etp_enabled else Replicate()
-            state_shardings[name] = expert_param_placement_sparse(
-                etp_placement=etp_placement,
-            )
+        # Sparse family: {EP}. Expert weights shard on the expert dim.
+        state_shardings: dict[str, NamedPlacement] = {
+            name: expert_param_placement_sparse() for name in expert_param_layout
+        }
         moe_cfg.experts.sharding_config = ShardingConfig(
             state_shardings=state_shardings,
         )

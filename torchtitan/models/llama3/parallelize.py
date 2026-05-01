@@ -103,12 +103,8 @@ def parallelize_llama(
                 model, parallel_dims, parallelism.full_dtensor
             )
         else:
-            names = (
-                ["dp_replicate", "fsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["fsdp"]
-            )
-            dp_mesh = parallel_dims.get_mesh(names)
+            dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+            assert dp_mesh is not None
             dp_mesh_dims = None
 
         apply_fsdp(

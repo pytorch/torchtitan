@@ -112,7 +112,7 @@ class TestApplyCompileValidation(unittest.TestCase):
         )
         parallelism = ParallelismConfig()
         parallel_dims = ParallelDims(
-            dp_shard=2, dp_replicate=1, cp=1, tp=1, pp=1, ep=1, etp=1, world_size=2
+            dp_shard=2, dp_replicate=1, cp=1, tp=1, pp=1, ep=1, world_size=2
         )
         return dict(
             model=torch.nn.Linear(4, 4),
@@ -161,7 +161,6 @@ class _StubParallelDims:
     tp: int = 2
     pp: int = 2
     ep: int = 1
-    etp: int = 1
 
 
 def _make_stub_model(params=None, buffers=None):

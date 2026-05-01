@@ -149,6 +149,19 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
+                    comm_backend = getattr(
+                        layer_cfg.moe.experts.token_dispatcher,
+                        "comm_backend",
+                        "standard",
+                    )
+                    if (
+                        comm_backend in ("deepep", "hybridep")
+                        and parallelism.expert_parallel_degree == 1
+                    ):
+                        raise ValueError(
+                            f"{comm_backend.upper()} requires expert parallelism "
+                            "(expert_parallel_degree > 1)."
+                        )
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -177,7 +190,6 @@ class Llama4Model(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 tp_enabled=parallelism.tensor_parallel_degree > 1,
                 ep_enabled=parallelism.expert_parallel_degree > 1,
-                etp_enabled=parallelism.expert_tensor_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(
