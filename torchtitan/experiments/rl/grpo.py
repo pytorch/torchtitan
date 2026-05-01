@@ -418,25 +418,11 @@ class RLTrainer(Configurable):
             generator_dtype=config.generator.model_dtype,
         )
 
-        # When EP is enabled on the generator, rebuild the model spec with
-        # AllToAllTokenDispatcher (moe_comm_backend="standard") since the
-        # shared model_spec uses LocalTokenDispatcher (for EP=1 trainer).
-        gen_ep = config.generator.parallelism.expert_parallel_degree
-        gen_model_spec = config.model_spec
-        if gen_ep > 1 and hasattr(config.model_spec, "flavor"):
-            from torchtitan.models.qwen3 import model_registry as qwen3_registry
-
-            gen_model_spec = qwen3_registry(
-                config.model_spec.flavor,
-                attn_backend="varlen",
-                moe_comm_backend="standard",
-            )
-
         self.generator = generator_mesh.spawn(
             "generator",
             VLLMGenerator,
             config.generator,
-            model_spec=gen_model_spec,
+            model_spec=config.model_spec,
             model_path=config.hf_assets_path,
         )
 
