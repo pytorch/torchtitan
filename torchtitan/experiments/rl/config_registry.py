@@ -221,47 +221,6 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     )
 
 
-def rl_grpo_qwen3_moe_debug() -> RLTrainer.Config:
-    """Debug MoE config for quick iteration -- small MoE model, few steps (2 GPUs: 1 gen + 1 train)."""
-    return RLTrainer.Config(
-        model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
-        num_steps=5,
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=8e-4),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(),
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=1,
-                data_parallel_replicate_degree=1,
-            ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
-            loss=GRPOLoss.Config(),
-        ),
-        generator=VLLMGenerator.Config(
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=1,
-                data_parallel_replicate_degree=1,
-            ),
-            sampling=SamplingConfig(
-                temperature=1.0,
-                top_p=0.95,
-                max_tokens=50,
-            ),
-        ),
-    )
-
-
 def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
     """Debug MoE config with EP+TP on generator (4 GPUs: 2 gen + 2 train).
 
