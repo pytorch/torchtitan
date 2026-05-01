@@ -162,6 +162,19 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
                 )
+            # vLLM ties EP to TP (enable_expert_parallel=True reuses the TP
+            # group as the EP group), so the only valid values are EP=1
+            # (disabled) or EP=TP.
+            if (
+                p.expert_parallel_degree != 1
+                and p.expert_parallel_degree != p.tensor_parallel_degree
+            ):
+                raise ValueError(
+                    f"Generator requires expert_parallel_degree to be 1 or "
+                    f"equal to tensor_parallel_degree (vLLM reuses the TP "
+                    f"group for EP), got ep={p.expert_parallel_degree}, "
+                    f"tp={p.tensor_parallel_degree}"
+                )
 
     def __init__(
         self,
