@@ -20,9 +20,12 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
 ) -> ModelSpec:
     base = deepseekv3_configs[flavor](
-        attn_backend=attn_backend, moe_comm_backend=moe_comm_backend
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
     config = GraphTrainerDeepSeekV3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
