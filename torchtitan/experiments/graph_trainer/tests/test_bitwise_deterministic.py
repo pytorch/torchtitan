@@ -14,6 +14,7 @@ Requires a CUDA GPU. Run with:
 """
 
 import copy
+import gc
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -113,6 +114,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
     def tearDown(self):
         FlexAttention.inductor_configs = self._orig_inductor_configs
         FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
+        # Clear Dynamo compile caches accumulated during this test to
+        # prevent memory buildup across tests.
+        torch._dynamo.reset()
 
     def _run_steps(
         self, model: nn.Module, trainer_cls: type, *, enable_passes: bool = True
@@ -142,7 +146,17 @@ class BitwiseDeterministicBase(unittest.TestCase):
             )
             optimizer.step()
 
-        return loss.detach().clone(), hash_model(model), hash_gradient(model)
+        result = loss.detach().clone(), hash_model(model), hash_gradient(model)
+
+        # Free GPU memory held by the model, optimizer, and trainer before
+        # returning. Without this, subsequent runs (e.g. the GraphTrainer
+        # traced path after an eager run) may OOM during compilation on
+        # lower-memory GPUs like A100.
+        del optimizer, trainer, model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        return result
 
     def _run_steps_with_precompile(
         self, model: nn.Module, *, enable_passes: bool = True
@@ -236,7 +250,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 passes,
             )
 
-        # Step 4: Run training steps using the loaded artifact
+        # Step 5: Run training steps using the loaded artifact
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
@@ -260,7 +274,13 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 param.grad = grad
             optimizer.step()
 
-        return loss.detach().clone(), hash_model(model), hash_gradient(model)
+        result = loss.detach().clone(), hash_model(model), hash_gradient(model)
+
+        del optimizer, loaded_result, traced_result, model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        return result
 
     def _assert_runs_match(
         self,
@@ -449,11 +469,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             """16c5442f06bc283431e48c4bcd2498fa3c849351815668b72ce1c76095f22277""",
         )
 
-    # TODO: OOMs during flex_attention compilation on A100 GPUs.
-    # Revisit when GraphTrainer addresses peak memory during compilation.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on A100"
-    )
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace with passes and eager produce bitwise identical results."""
         run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
