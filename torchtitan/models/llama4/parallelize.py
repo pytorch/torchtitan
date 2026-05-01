@@ -381,15 +381,16 @@ def apply_moe_ep_tp(
                     input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
                     use_local_input=False,
-                    # TP-sharded experts or SP token splitting produce
-                    # Partial outputs that need reduce-scatter. EP without
-                    # SP produces Replicate (all-to-all combine already
-                    # returns the full result on every rank).
-                    output_layouts=(
-                        Replicate()
-                        if (not enable_sp and ep_mesh is not None)
-                        else Partial(),
-                    ),
+                    # MoE always runs SP-style token splitting on the TP mesh
+                    # whenever a TP mesh exists (the dispatcher's
+                    # ``_split_along_sp`` runs whenever ``sp_size > 1``,
+                    # independent of ``enable_sp``). Each rank's combine output
+                    # is therefore its SP chunk inside a full-sized buffer with
+                    # zeros elsewhere — i.e. ``Partial`` — and the conversion
+                    # to ``desired_output_layouts`` is reduce-scatter (when
+                    # dense uses SP) or all-reduce (when dense doesn't).
+                    # ``enable_sp`` only controls the dense part's layout.
+                    output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
                     # Keep MoE output as DTensor so the residual add
                     # ``h + self.moe(...)`` composes with config-based
