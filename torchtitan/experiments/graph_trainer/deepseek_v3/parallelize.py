@@ -90,10 +90,6 @@ def parallelize_deepseekv3(
     if comm_backend == "hybridep":
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
-    # Config-based sharding: ShardingConfig is populated on the model config
-    # in ``DeepSeekV3Model.update_from_config`` (dense + MoE);
-    # ``Module.parallelize`` applies it. Replaces the imperative
-    # ``apply_moe_ep_tp`` call.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:

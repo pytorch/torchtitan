@@ -354,7 +354,7 @@ class TestNeededAxes(unittest.TestCase):
 
     def test_collects_from_all_fields(self):
         # _needed_axes scans every NamedPlacement-bearing field and asserts
-        # they all reference the same axes (family-purity since PR6). This
+        # they all reference the same axes (family-purity). This
         # fixture exercises every field with a single shared axis set.
         axes = {MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD, MeshAxisName.TP}
 

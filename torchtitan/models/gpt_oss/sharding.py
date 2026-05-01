@@ -72,9 +72,8 @@ def _set_gpt_oss_layer_sharding(
 ) -> None:
     """Set sharding on one GPT-OSS transformer layer.
 
-    All GPT-OSS blocks are MoE; MoE FFN is now routed through
-    ``set_moe_sharding_config``, replacing the imperative
-    ``apply_moe_ep_tp`` call.
+    All GPT-OSS blocks are MoE; MoE FFN is routed through
+    ``set_moe_sharding_config``.
     """
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)

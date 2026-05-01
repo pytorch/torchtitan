@@ -105,9 +105,7 @@ def _set_qwen3_layer_sharding(
             enable_sp=enable_sp,
         )
 
-    # MoE FFN (MoE-enabled layers only). Replaces the imperative
-    # ``apply_moe_ep_tp`` call; per-Module ``sharding_config`` carries the
-    # plan and ``Module.parallelize`` applies it.
+    # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None and (tp_enabled or ep_enabled):
         set_moe_sharding_config(
             layer_cfg.moe,

@@ -84,8 +84,6 @@ def parallelize_llama(
                 [block.attention.inner_attention for block in model.layers.values()],
                 parallel_dims.get_mesh("cp"),
             )
-        # ``model.parallelize`` walks every ``Module`` and applies its
-        # ``sharding_config`` (dense + MoE). Fires under TP or EP.
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
