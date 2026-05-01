@@ -597,7 +597,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
             skip_rocm_test=True,
         ),
-        # TODO: re-enable this test once ChunkedCELoss+TP+compile+torchcomms PG resolution failure fixed
         OverrideDefinitions(
             [
                 [
@@ -611,7 +610,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
-            disabled=True,
         ),
         OverrideDefinitions(
             [
