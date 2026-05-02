@@ -65,30 +65,8 @@ jobs:
         uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v45.0.6
 
       - name: Lint modified files
-        env:
-          # External-link checking via lychee is flaky on transient network
-          # failures and runs in the nightly Link Check workflow. We still run
-          # lychee on PRs in the next step, but in --offline mode for in-repo
-          # link validation only.
-          SKIP: lychee-link-checker
         run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
 
-      - name: Check in-repo links with Lychee (offline)
-        shell: bash -eo pipefail {0}
-        env:
-          ALL_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+      - name: Check links with Lychee
         run: |
-          FILES=""
-          for f in $ALL_FILES; do
-            case "$f" in
-              *.md|*.py) FILES="$FILES $f" ;;
-            esac
-          done
-          if [ -z "$FILES" ]; then
-            echo "No modified markdown/python files; skipping lychee."
-            exit 0
-          fi
-          # --offline checks only filesystem links; no network requests, so
-          # no external flakiness. The nightly Link Check workflow covers
-          # external links.
-          lychee --offline --no-progress --root-dir=. $FILES
+          pre-commit run lychee-link-checker --all-files
