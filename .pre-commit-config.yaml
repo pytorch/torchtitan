@@ -99,6 +99,7 @@ repos:
       args:
         - "--quiet"
         - "--no-progress"
+        - "--cache"
         - "--exclude-path=(^|/)\\.[^/]+/"
         - "--root-dir=."
         - "--accept=100..399,400,401,402,403,405..999" # Fail only on 404
