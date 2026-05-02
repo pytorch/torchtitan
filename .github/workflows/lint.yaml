@@ -65,8 +65,13 @@ jobs:
         uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v45.0.6
 
       - name: Lint modified files
+        env:
+          # Lychee will checks all links in .md and .py files in the next step
+          SKIP: lychee-link-checker
         run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
 
       - name: Check links with Lychee
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pre-commit run lychee-link-checker --all-files
