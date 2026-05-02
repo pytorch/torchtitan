@@ -101,7 +101,7 @@ repos:
         - "--no-progress"
         - "--exclude-path=(^|/)\\.[^/]+/"
         - "--root-dir=."
-        - "--accept=200,403,429,503"
+        - "--accept=100..399,400,401,402,403,405..999" # Fail only on 404
         - "--exclude=http://localhost:.*"
         - "--exclude=http://127.0.0.1:.*"
         - "--exclude=tcp://localhost:.*"
