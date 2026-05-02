@@ -47,6 +47,13 @@ jobs:
           # Verify installation
           lychee --version
 
+      - name: Restore Lychee cache
+        uses: actions/cache@v5
+        with:
+          path: .lycheecache
+          key: cache-lychee-${{ github.sha }}
+          restore-keys: cache-lychee-
+
       - name: Install dependencies and lint utilities
         run: |
           python -m pip install -r requirements.txt -r requirements-dev.txt
