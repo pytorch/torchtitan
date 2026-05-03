@@ -812,6 +812,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         with config.profiler.build(
             global_step=self.step,
             base_folder=config.dump_folder,
+            model=self.model_parts[0],
         ) as profiler:
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():

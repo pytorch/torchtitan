@@ -444,6 +444,7 @@ def run_traced(
     traced_result: TracedResult,
     state: Any,
     *args: Any,
+    interpreter_cls: type | None = None,
 ) -> Any:
     """Execute a traced graph with fresh parameters read from the live module.
 
@@ -466,7 +467,10 @@ def run_traced(
     flat_inputs, _ = _unwrap_subclasses(all_args)
 
     with torch.no_grad():
-        flat_outputs = traced_result.gm(*flat_inputs)
+        if interpreter_cls is not None:
+            flat_outputs = interpreter_cls(traced_result.gm).run(*flat_inputs)
+        else:
+            flat_outputs = traced_result.gm(*flat_inputs)
     wrapped = _wrap_subclasses(
         flat_outputs,
         traced_result.num_flat_outputs,
@@ -504,6 +508,7 @@ def run_traced_train_step(
     module: nn.Module,
     *args: Any,
     validate_module_fqns: bool = False,
+    interpreter_cls: type | None = None,
 ) -> Any:
     """Reference implementation for executing a traced whole train step."""
 
@@ -526,4 +531,4 @@ def run_traced_train_step(
             f"  Traced: {traced_result.state_fqns}\n"
             f"  Got:    {list(state.keys())}"
         )
-    return run_traced(traced_result, state, *args)
+    return run_traced(traced_result, state, *args, interpreter_cls=interpreter_cls)
