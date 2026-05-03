@@ -27,6 +27,9 @@ from torch.nn.attention.flex_attention import flex_attention
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.experiments.graph_trainer.common_utils import (
+    maybe_register_blockmask_pytree_node,
+)
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
@@ -115,6 +118,27 @@ class BitwiseDeterministicBase(unittest.TestCase):
         FlexAttention.inductor_configs = self._orig_inductor_configs
         FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
+    def _get_extra_kwargs(self, model: nn.Module) -> dict[str, object]:
+        """Build extra_kwargs matching what post_dataloading_process produces.
+
+        For FlexAttention models, this generates the BlockMask attention
+        masks. For SDPA models, returns an empty dict.
+        """
+        from torchtitan.models.common.attention import FlexAttention as FlexAttnModule
+        from torchtitan.models.common.decoder import Decoder
+
+        if not isinstance(self.model_config, Decoder.Config):
+            return {}
+        layer = self.model_config.layers[0]
+        inner_attention = getattr(layer.attention, "inner_attention", None)
+        if not isinstance(inner_attention, FlexAttnModule.Config):
+            return {}
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+        attention_masks = model.get_attention_masks(
+            input_batch=self.inputs, tokenizer=tokenizer,
+        )
+        return {"attention_masks": attention_masks}
+
     def _run_steps(
         self,
         model: nn.Module,
@@ -185,7 +209,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
         )
         extra_inputs: dict[str, torch.Tensor] = {}
-        extra_kwargs: dict[str, torch.Tensor] = {}
+        extra_kwargs: dict[str, object] = self._get_extra_kwargs(model)
+        maybe_register_blockmask_pytree_node()
 
         # Step 1: Trace the graph
         traced_result = trace_train_step(fwd_bwd_fn)(
@@ -444,8 +469,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: numerics mismatch between precompile and trace with FlexAttention
-    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -513,8 +536,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: numerics mismatch between precompile and trace with FlexAttention
-    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -639,8 +660,6 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: numerics mismatch between precompile and trace with FlexAttention
-    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
