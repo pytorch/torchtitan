@@ -369,15 +369,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if not config.checkpoint.create_seed_checkpoint:
                 # Skip parallelize_fn for seed checkpoints — nothing from
                 # it is needed (AC, compile, nD parallelism, mixed precision, etc.).
-                model = model_spec.parallelize_fn(
-                    model,
-                    parallel_dims=parallel_dims,
-                    training=config.training,
-                    parallelism=config.parallelism,
-                    compile_config=config.compile,
-                    ac_config=config.activation_checkpoint,
-                    dump_folder=config.dump_folder,
-                )
+                parallelize_kwargs = {
+                    "parallel_dims": parallel_dims,
+                    "training": config.training,
+                    "parallelism": config.parallelism,
+                    "compile_config": config.compile,
+                    "ac_config": config.activation_checkpoint,
+                    "dump_folder": config.dump_folder,
+                }
+                if getattr(config.compile, "autoparallel", False):
+                    parallelize_kwargs["loss_fn"] = self.loss_fn
+                model = model_spec.parallelize_fn(model, **parallelize_kwargs)
 
             model.to_empty(device=init_device)
             with torch.no_grad():

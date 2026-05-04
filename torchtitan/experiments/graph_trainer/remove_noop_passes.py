@@ -16,6 +16,7 @@ cudagraph compatibility).
 import sys
 
 import torch
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from torchtitan.tools.logging import logger
 
@@ -58,6 +59,24 @@ _IDENTITY_VIEW_TARGETS = {
 }
 
 
+def _same_shape_statically_known(
+    lhs: torch.Size | tuple,
+    rhs: torch.Size | tuple,
+) -> bool:
+    return len(lhs) == len(rhs) and all(
+        statically_known_true(lhs_dim == rhs_dim)
+        for lhs_dim, rhs_dim in zip(lhs, rhs, strict=True)
+    )
+
+
+def _has_symbolic_shape(shape: torch.Size | tuple) -> bool:
+    return any(isinstance(dim, torch.SymInt) for dim in shape)
+
+
+def _is_concrete_slice_arg(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def remove_identity_view_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
@@ -90,7 +109,13 @@ def remove_identity_view_pass(
         ):
             continue
 
-        if inp_val.shape == out_val.shape:
+        # This is only a graph cleanup pass. If either shape has symbolic
+        # dimensions, leave the view in place rather than proving equality
+        # with symbolic expressions or installing shape guards.
+        if _has_symbolic_shape(inp_val.shape) or _has_symbolic_shape(out_val.shape):
+            continue
+
+        if _same_shape_statically_known(inp_val.shape, out_val.shape):
             node.replace_all_uses_with(inp)
             gm.graph.erase_node(node)
             count += 1
@@ -132,17 +157,34 @@ def remove_identity_slice_pass(
         end = args[3] if len(args) > 3 else sys.maxsize
         step = args[4] if len(args) > 4 else 1
 
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+
+        # Only remove slices when the no-op proof is fully concrete. AP DSv3
+        # can produce dynamic slice bounds as FX nodes, and fake tensor shapes
+        # can contain SymInts. This pass is an optional cleanup, so uncertain
+        # symbolic cases are left intact for downstream compilers to handle.
+        if not all(_is_concrete_slice_arg(arg) for arg in (dim, start, end, step)):
+            continue
         if start != 0 or step != 1:
             continue
 
         # Use fake tensor metadata to determine the actual dimension size.
         # Skip nodes without metadata (e.g. from hand-built test graphs).
         val = input_node.meta.get("val")
-        if val is None:
+        if val is None or not isinstance(val, torch.Tensor):
             continue
 
         shape = val.shape
+        if not isinstance(dim, int):
+            continue
+        if dim < 0:
+            dim += len(shape)
+        if dim < 0 or dim >= len(shape):
+            continue
         dim_size = shape[dim]
+        if isinstance(dim_size, torch.SymInt):
+            continue
 
         if end >= dim_size:
             node.replace_all_uses_with(input_node)

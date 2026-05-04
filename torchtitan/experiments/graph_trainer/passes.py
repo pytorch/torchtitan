@@ -22,6 +22,7 @@ import operator
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch._inductor.compile_fx import compile_fx_inner
@@ -66,6 +67,10 @@ from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+    from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
@@ -148,25 +153,28 @@ def compile_time_passes(
     )
     from torchtitan.models.common.attention import FlexAttention
 
+    passes: list[Callable] = cleanup_passes()
+    passes.extend(
+        [
+            functools.partial(
+                tag_with_memory_policy_pass,
+                config=config,
+            ),
+            # TODO: currently either SAC or CPU offload is used, not both at the
+            # same time. Composability between these two passes is untested.
+            apply_cpu_offload_pass,
+        ]
+    )
     n_layers = len(config.model_spec.model.layers)
-    passes: list[Callable] = [
-        remove_detach_pass,
-        remove_identity_view_pass,
-        remove_identity_slice_pass,
-        normalize_view_ops_as_reshape,
-        functools.partial(
-            tag_with_memory_policy_pass,
-            config=config,
-        ),
-        # TODO: currently either SAC or CPU offload is used, not both at the
-        # same time. Composability between these two passes is untested.
-        apply_cpu_offload_pass,
-        selective_activation_remat_pass,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
-        ),
-    ]
+    passes.extend(
+        [
+            selective_activation_remat_pass,
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            ),
+        ]
+    )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
@@ -214,6 +222,16 @@ def compile_time_passes(
     return passes
 
 
+def cleanup_passes() -> list[Callable]:
+    """Trace cleanup and canonicalization shared by aot_fx_trace compile modes."""
+    return [
+        remove_detach_pass,
+        remove_identity_view_pass,
+        remove_identity_slice_pass,
+        normalize_view_ops_as_reshape,
+    ]
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -226,7 +244,18 @@ def construct_default_graph_passes(
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.
     """
+    from torchtitan.experiments.graph_trainer.configs import (
+        is_autoparallel_backend_mode,
+    )
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
+
+    if is_autoparallel_backend_mode(config.compile):
+        logger.info(
+            "Using AutoParallel backend policy: applying shared cleanup passes, "
+            "skipping graph_trainer policy passes, and compiling the traced "
+            "train step with AutoParallel's full-Inductor policy."
+        )
+        return cleanup_passes() + [autoparallel_backend_full_inductor_compilation_pass]
 
     use_cudagraph = config.compile.enable_cudagraph and is_cudagraph_compatible(
         traced_result.gm
@@ -875,6 +904,45 @@ def fsdp_reshard_after_fwd_pass(
     return gm
 
 
+def _apply_inductor_decompositions(
+    gm: torch.fx.GraphModule, example_inputs: tuple
+) -> torch.fx.GraphModule:
+    """Retrace with ``select_decomp_table()`` before full Inductor compile."""
+    from torch._inductor.decomposition import select_decomp_table
+    from torch._subclasses.fake_tensor import FakeTensor
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    decomp_table = select_decomp_table()
+
+    fake_mode = None
+    for inp in example_inputs:
+        if isinstance(inp, FakeTensor):
+            fake_mode = inp.fake_mode
+            break
+
+    if fake_mode is not None:
+        with fake_mode:
+            gm = make_fx(
+                gm,
+                decomposition_table=decomp_table,
+                _allow_non_fake_inputs=True,
+            )(*example_inputs)
+
+    return gm
+
+
+def _install_compiled_forward(
+    gm: torch.fx.GraphModule, output_code
+) -> torch.fx.GraphModule:
+    """Adapt Inductor's boxed output code to GraphTrainer's positional call path."""
+
+    def _compiled_forward(*args):
+        return output_code(list(args))
+
+    gm.forward = _compiled_forward
+    return gm
+
+
 def full_inductor_compilation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple
 ) -> torch.fx.GraphModule:
@@ -889,45 +957,41 @@ def full_inductor_compilation_pass(
     ``custom_codegen_pass``, ``insert_kernel_annotations_pass``) can
     run after this because the FX graph is no longer authoritative.
     """
-
-    def _apply_decompositions(
-        gm: torch.fx.GraphModule, example_inputs: tuple
-    ) -> torch.fx.GraphModule:
-        """Retrace with ``select_decomp_table()`` so that ops like ``aten.t``
-        are decomposed before ``compile_fx_inner``."""
-        from torch._inductor.decomposition import select_decomp_table
-        from torch._subclasses.fake_tensor import FakeTensor
-        from torch.fx.experimental.proxy_tensor import make_fx
-
-        decomp_table = select_decomp_table()
-
-        fake_mode = None
-        for inp in example_inputs:
-            if isinstance(inp, FakeTensor):
-                fake_mode = inp.fake_mode
-                break
-
-        if fake_mode is not None:
-            with fake_mode:
-                gm = make_fx(
-                    gm,
-                    decomposition_table=decomp_table,
-                    _allow_non_fake_inputs=True,
-                )(*example_inputs)
-
-        return gm
-
-    gm = _apply_decompositions(gm, example_inputs)
+    gm = _apply_inductor_decompositions(gm, example_inputs)
     output_code = compile_fx_inner(gm, example_inputs)
+    return _install_compiled_forward(gm, output_code)
 
-    # compile_fx_inner returns OutputCode with boxed calling convention
-    # (single list arg). Adapt to positional args so the graph trainer's
-    # execution path (gm(*flat_inputs)) works unchanged.
-    def _compiled_forward(*args):
-        return output_code(list(args))
 
-    gm.forward = _compiled_forward
-    return gm
+def autoparallel_backend_full_inductor_compilation_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> torch.fx.GraphModule:
+    """Compile with AutoParallel's backend policy inside GraphTrainer.
+
+    AutoParallel's torch.compile backend configures an AOTAutograd joint pass
+    and Inductor distributed overlap scheduling before calling Inductor. In
+    GraphTrainer the train-step graph has already been traced, so the exported
+    AP joint pass is applied directly to that graph and the AP Inductor policy
+    is used around ``compile_fx_inner``.
+    """
+    import torch._functorch.config
+    import torch._inductor.config
+
+    from autoparallel.compile import get_autoparallel_backend_policy_helpers
+
+    functorch_patches, inductor_patches = get_autoparallel_backend_policy_helpers()
+    joint_custom_pass = functorch_patches.pop("joint_custom_pass", None)
+
+    if joint_custom_pass is not None:
+        gm = joint_custom_pass(gm, example_inputs)
+
+    gm = _apply_inductor_decompositions(gm, example_inputs)
+    with (
+        torch._functorch.config.patch(functorch_patches),
+        torch._inductor.config.patch(inductor_patches),
+    ):
+        output_code = compile_fx_inner(gm, example_inputs)
+    return _install_compiled_forward(gm, output_code)
 
 
 def reassign_to_pg_pass(

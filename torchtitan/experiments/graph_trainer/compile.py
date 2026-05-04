@@ -32,7 +32,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    validate_autoparallel_backend_config,
+)
 from torchtitan.experiments.graph_trainer.graph_utils import (
     CompiledModule,
     get_compiler_passes_from_config,
@@ -232,6 +235,7 @@ def apply_compile(
         parallel_dims: Parallel dimensions
         dump_folder: Folder for dumping debug graphs
     """
+    validate_autoparallel_backend_config(compile_config)
     if not compile_config.enable:
         return model
 

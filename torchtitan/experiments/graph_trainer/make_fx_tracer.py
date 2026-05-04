@@ -20,6 +20,8 @@ from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 
+from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+
 # Tensors and make_fx-safe primitives are allowed as pytree leaves in args.
 # Everything else (callables, custom objects) should be registered as pytree
 # nodes/constants or captured in fn's closure.
@@ -211,6 +213,17 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
     def _is_backward(node: torch.fx.Node) -> bool:
         return node.meta.get("autograd_backward", False)
 
+    def _metadata_score(node: torch.fx.Node) -> int:
+        custom = node.meta.get("custom") or {}
+        return sum(
+            (
+                _MODULE_FQN in custom,
+                bool(custom),
+                node.meta.get("nn_module_stack") is not None,
+                node.meta.get("stack_trace") is not None,
+            )
+        )
+
     seq_nr_to_fwd_node: dict[int, torch.fx.Node] = {}
 
     for submod in fx_g.modules():
@@ -224,7 +237,10 @@ def _copy_fwd_metadata_to_bw_nodes(fx_g: torch.fx.GraphModule) -> None:
             ):
                 continue
             seq_nr = node.meta["seq_nr"]
-            if seq_nr not in seq_nr_to_fwd_node:
+            existing_node = seq_nr_to_fwd_node.get(seq_nr)
+            if existing_node is None or _metadata_score(node) > _metadata_score(
+                existing_node
+            ):
                 seq_nr_to_fwd_node[seq_nr] = node
 
     for submod in fx_g.modules():
