@@ -6,15 +6,17 @@
 
 import os
 import unittest
-
 from copy import deepcopy
 
 import torch
 from datasets import Dataset
-
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatDataLoader, ChatDataset
+from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
+    get_document_mask_mod,
+)
 
 # Path to the test tokenizer and fixture data
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -38,42 +40,16 @@ def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
 
 
-class TestChatDatasetLabelMasking(unittest.TestCase):
-    """Prompt tokens should be masked (IGNORE_INDEX), assistant tokens should not."""
-
-    def test_prompt_masked_response_unmasked(self):
-        tokenizer = _load_tokenizer()
-        ds = _load_dataset()
-        chat_ds = ChatDataset(
-            dataset=ds,
-            tokenizer=tokenizer,
-            sample_processor=_process_sample,
-            seq_len=2048,
-            infinite=False,
-        )
-
-        batch, labels = next(iter(chat_ds))
-        input_ids = batch["input"]
-        label_ids = labels
-
-        self.assertEqual(input_ids.shape, label_ids.shape)
-        self.assertEqual(input_ids.shape[0], 2048)
-
-        # Some labels at the start should be IGNORE_INDEX (prompt masking)
-        masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
-        unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
-        self.assertGreater(len(masked), 0, "Expected some masked prompt labels")
-        self.assertGreater(len(unmasked), 0, "Expected some unmasked response labels")
-
-        # All masked positions should precede all unmasked non-padding positions.
-        # The unmasked region is the response, then padding follows with IGNORE_INDEX.
-        # Find first unmasked position and last contiguous unmasked position.
-        first_unmasked = unmasked[0].item()
-        self.assertGreater(first_unmasked, 0, "First token label should be masked")
+def _get_full_tokens(tokenizer, messages):
+    full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+    return full_tokens
 
 
 class TestChatDatasetShiftedTokens(unittest.TestCase):
-    """input_ids = tokens[:-1], label_ids = tokens[1:]."""
+    """input_ids = tokens[:-1], assistant labels align with tokens[1:]."""
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
@@ -93,9 +69,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         # dataset internally at init, and ChatDataset._original_data is the post-shuffle dataset.
         sample = chat_ds._original_data[0]
         messages = _process_sample(sample)
-        full_text = tokenizer.apply_chat_template(messages)
-        # Chat templates already include end tokens, so no add_eos
-        full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        full_tokens = _get_full_tokens(tokenizer, messages)
 
         expected_input = full_tokens[:-1]
         expected_label = full_tokens[1:]
@@ -106,24 +80,22 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             input_ids[:seq_len_actual].tolist(),
             expected_input,
         )
-        # The non-masked, non-padded portion of label_ids that corresponds to
-        # the response should come from full_tokens[1:]
-        # Just verify the response portion matches
+
         prompt_text = tokenizer.apply_chat_template(
             messages[:1], add_generation_prompt=True
         )
         prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
         response_start = len(prompt_tokens) - 1
         self.assertGreaterEqual(response_start, 0)
-        self.assertNotEqual(
-            label_ids[response_start].item(),
-            IGNORE_INDEX,
-            "First assistant token should not be masked",
+        self.assertTrue(
+            torch.all(label_ids[:response_start] == IGNORE_INDEX).item(),
+            "Prompt tokens should be masked",
         )
         self.assertEqual(
             label_ids[response_start:seq_len_actual].tolist(),
             expected_label[response_start:],
         )
+        self.assertTrue(torch.all(label_ids[seq_len_actual:] == IGNORE_INDEX).item())
 
 
 class TestChatDatasetGreedyPacking(unittest.TestCase):
@@ -216,9 +188,10 @@ class TestChatDatasetDropOnOverflow(unittest.TestCase):
 
 
 class TestChatDatasetMessageValidation(unittest.TestCase):
-    """Non-[user, assistant] messages raise ValueError."""
+    """Invalid conversation structures raise ValueError."""
 
-    def test_wrong_first_role(self):
+    def test_system_then_assistant_only(self):
+        """system + assistant without user should raise."""
         tokenizer = _load_tokenizer()
 
         def bad_processor(sample):
@@ -236,7 +209,7 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             infinite=False,
         )
 
-        with self.assertRaises(ValueError, msg="system role should raise"):
+        with self.assertRaises(ValueError):
             next(iter(chat_ds))
 
     def test_wrong_second_role(self):
@@ -260,7 +233,8 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
         with self.assertRaises(ValueError, msg="two user messages should raise"):
             next(iter(chat_ds))
 
-    def test_three_messages(self):
+    def test_ends_with_user(self):
+        """Conversation ending with user (odd turns) should raise."""
         tokenizer = _load_tokenizer()
 
         def bad_processor(sample):
@@ -279,8 +253,75 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             infinite=False,
         )
 
-        with self.assertRaises(ValueError, msg="3 messages should raise"):
+        with self.assertRaises(ValueError, msg="ending with user should raise"):
             next(iter(chat_ds))
+
+    def test_single_message(self):
+        tokenizer = _load_tokenizer()
+
+        def bad_processor(sample):
+            return [{"role": "user", "content": "hi"}]
+
+        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=bad_processor,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        with self.assertRaises(ValueError, msg="single message should raise"):
+            next(iter(chat_ds))
+
+    def test_valid_multiturn(self):
+        """Multi-turn [user, assistant, user, assistant] should NOT raise."""
+        tokenizer = _load_tokenizer()
+
+        def good_processor(sample):
+            return [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"},
+                {"role": "assistant", "content": "goodbye"},
+            ]
+
+        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=good_processor,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        # Should not raise
+        batch, labels = next(iter(chat_ds))
+        self.assertEqual(batch["input"].shape[0], 2048)
+
+    def test_valid_system_prefix(self):
+        """[system, user, assistant] should NOT raise."""
+        tokenizer = _load_tokenizer()
+
+        def good_processor(sample):
+            return [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ]
+
+        ds = Dataset.from_list([{"question": "hi", "answer": "bye"}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=good_processor,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        # Should not raise
+        batch, labels = next(iter(chat_ds))
+        self.assertEqual(batch["input"].shape[0], 2048)
 
 
 class TestChatDatasetCheckpointing(unittest.TestCase):
@@ -437,6 +478,264 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
         batches = [next(it) for _ in range(20)]
         self.assertEqual(len(batches), 20)
         self.assertGreaterEqual(chat_ds._epoch, 1)
+
+
+class TestChatDatasetAssistantOnlyTemplates(unittest.TestCase):
+    def _get_supervised_output(
+        self,
+        *,
+        chat_template: str,
+        messages: list[dict[str, str]],
+    ) -> tuple[HuggingFaceTokenizer, list[int], str]:
+        tokenizer = _load_tokenizer()
+        tokenizer.set_chat_template(chat_template)
+
+        chat_ds = ChatDataset(
+            dataset=Dataset.from_list([{"id": 1}]),
+            tokenizer=tokenizer,
+            sample_processor=lambda sample, messages=messages: messages,
+            seq_len=512,
+            infinite=False,
+        )
+
+        _, labels = next(iter(chat_ds))
+        supervised_token_ids = [
+            token for token in labels.tolist() if token != IGNORE_INDEX
+        ]
+        supervised_text = tokenizer.decode(
+            supervised_token_ids, skip_special_tokens=False
+        )
+        return tokenizer, supervised_token_ids, supervised_text
+
+    def _get_supervised_text(
+        self,
+        *,
+        chat_template: str,
+        messages: list[dict[str, str]],
+    ) -> str:
+        _, _, supervised_text = self._get_supervised_output(
+            chat_template=chat_template,
+            messages=messages,
+        )
+
+        return supervised_text
+
+    def test_debugmodel_template_supervises_content_only(self):
+        tokenizer, supervised_token_ids, supervised_text = self._get_supervised_output(
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{{ msg.role }}\n{{ msg.content }}{{ eos_token }}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertEqual(supervised_text, "4<|end_of_text|>")
+        self.assertEqual(supervised_token_ids[-1], tokenizer.eos_id)
+        self.assertNotIn("assistant\n", supervised_text)
+
+    def test_gpt_oss_template_supervises_assistant_message_content_only(self):
+        assistant_text = (
+            "<|channel|>analysis<|message|>Simple arithmetic.<|end|>\n"
+            "<|start|>assistant<|channel|>final<|message|>2 + 2 = 4.<|return|>"
+        )
+        tokenizer, supervised_token_ids, supervised_text = self._get_supervised_output(
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{% if msg.role == 'user' %}"
+                "<|start|>user<|message|>{{ msg.content }}<|end|>"
+                "{% else %}"
+                "{{ msg.content }}"
+                "{% endif %}"
+                "{{ eos_token }}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "What is 2 + 2?"},
+                {"role": "assistant", "content": assistant_text},
+            ],
+        )
+
+        self.assertIn(
+            "<|channel|>analysis<|message|>",
+            supervised_text,
+        )
+        self.assertIn(
+            "Simplearithmetic.<|end|>",
+            supervised_text,
+        )
+        self.assertIn(
+            "<|start|>assistant<|channel|>final<|message|>",
+            supervised_text,
+        )
+        self.assertIn(
+            "2+2=4.<|return|>",
+            supervised_text,
+        )
+        self.assertEqual(supervised_token_ids[-1], tokenizer.eos_id)
+        self.assertNotIn("What is 2 + 2?", supervised_text)
+
+    def test_qwen3_template_supervises_assistant_content_only(self):
+        supervised_text = self._get_supervised_text(
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{% if msg.role == 'user' %}"
+                "<|im_start|>user\n{{ msg.content }}<|im_end|>\n"
+                "{% else %}"
+                "<|im_start|>assistant\n"
+                "{% if msg.reasoning_content is defined %}"
+                "<think>\n{{ msg.reasoning_content }}\n</think>\n\n"
+                "{% endif %}"
+                "{{ msg.content }}<|im_end|>\n"
+                "{% endif %}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q1?"},
+                {
+                    "role": "assistant",
+                    "content": "4",
+                },
+                {"role": "user", "content": "Q2?"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "calc2",
+                    "content": "6",
+                },
+            ],
+        )
+
+        self.assertIn("4", supervised_text)
+        self.assertIn("calc2", supervised_text)
+        self.assertIn("6", supervised_text)
+        self.assertNotIn("<|im_start|>assistant", supervised_text)
+        self.assertNotIn("<|im_end|>", supervised_text)
+        self.assertNotIn("<|im_start|>userQ1?<|im_end|>", supervised_text)
+        self.assertNotIn("<|im_start|>userQ2?<|im_end|>", supervised_text)
+
+    def test_llama3_template_supervises_assistant_content_only(self):
+        supervised_text = self._get_supervised_text(
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "<|start_header_id|>{{ msg.role }}<|end_header_id|>\n\n"
+                "{{ msg.content }}<|eot_id|>"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertEqual(supervised_text, "4")
+        self.assertNotIn(
+            "<|start_header_id|>assistant<|end_header_id|>", supervised_text
+        )
+        self.assertNotIn("<|eot_id|>", supervised_text)
+        self.assertNotIn(
+            "<|start_header_id|>user<|end_header_id|>Q?<|eot_id|>",
+            supervised_text,
+        )
+
+    def test_llama4_template_supervises_assistant_content_only(self):
+        supervised_text = self._get_supervised_text(
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "<|header_start|>{{ msg.role }}<|header_end|>\n\n"
+                "{{ msg.content }}<|eot|>"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertEqual(supervised_text, "4")
+        self.assertNotIn("<|header_start|>assistant<|header_end|>", supervised_text)
+        self.assertNotIn("<|eot|>", supervised_text)
+        self.assertNotIn(
+            "<|header_start|>user<|header_end|>Q?<|eot|>",
+            supervised_text,
+        )
+
+    def test_deepseek_v3_template_supervises_assistant_content_only(self):
+        supervised_text = self._get_supervised_text(
+            chat_template=(
+                "{{ bos_token }}{% for msg in messages %}"
+                "{% if msg.role == 'user' %}"
+                "<｜User｜>{{ msg.content }}"
+                "{% else %}"
+                "<｜Assistant｜>{{ msg.content }}<｜end▁of▁sentence｜>"
+                "{% endif %}"
+                "{% endfor %}"
+            ),
+            messages=[
+                {"role": "user", "content": "Q?"},
+                {"role": "assistant", "content": "4"},
+            ],
+        )
+
+        self.assertEqual(supervised_text, "4")
+        self.assertNotIn("<Assistant>", supervised_text)
+        self.assertNotIn("<endofsentence>", supervised_text)
+        self.assertNotIn("<User>Q?", supervised_text)
+
+
+class TestChatDatasetPositionBoundaries(unittest.TestCase):
+    def test_positions_keep_turns_together_and_packed_conversations_apart(self):
+        tokenizer = _load_tokenizer()
+        messages = [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+            {"role": "user", "content": "And 3+3?"},
+            {"role": "assistant", "content": "6"},
+        ]
+
+        full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+        full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != tokenizer.eos_id:
+            full_tokens.append(tokenizer.eos_id)
+        sample_len = len(full_tokens) - 1
+
+        ds = Dataset.from_list([{"id": 1}, {"id": 2}])
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=lambda sample: messages,
+            seq_len=sample_len * 2,
+            infinite=False,
+        )
+        spans = chat_ds._get_assistant_spans(messages, full_tokens)
+
+        batch, _ = next(iter(chat_ds))
+        positions = batch["positions"].unsqueeze(0)
+        doc_mask = get_document_mask_mod(positions=positions)
+
+        self.assertTrue(
+            doc_mask(
+                torch.tensor(0),
+                torch.tensor(0),
+                torch.tensor(spans[1][0]),
+                torch.tensor(spans[0][0]),
+            ).item(),
+            "Assistant turn 2 should attend to turn 1 within the same conversation",
+        )
+        self.assertFalse(
+            doc_mask(
+                torch.tensor(0),
+                torch.tensor(0),
+                torch.tensor(sample_len + spans[0][0]),
+                torch.tensor(spans[0][0]),
+            ).item(),
+            "Packed conversations should not attend across position resets",
+        )
+
+        metadata = create_varlen_metadata_for_document(positions=positions)
+        self.assertEqual(metadata.cu_seq_q.tolist(), [0, sample_len, sample_len * 2])
 
 
 if __name__ == "__main__":

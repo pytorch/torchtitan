@@ -11,7 +11,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -205,18 +204,21 @@ class Llama4Model(Decoder):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
+        positions = extra_inputs.get("positions") if extra_inputs else None
         attn_config = self.config.layers[0].attention
         match attn_config.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
-                assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
                 B = input_batch.shape[0]
+                if positions is None:
+                    raise ValueError(
+                        "block_causal attention requires positions in extra_inputs"
+                    )
+                mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"

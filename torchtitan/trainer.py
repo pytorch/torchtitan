@@ -401,17 +401,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
-                    self.model_parts[
-                        -1
-                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                    self.model_parts[-1]._skip_lm_head = (
+                        True  # pyrefly: ignore[bad-argument-type]
+                    )
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
                 assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
-                self.model_parts[
-                    0
-                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[0]._skip_lm_head = (
+                    True  # pyrefly: ignore[bad-argument-type]
+                )
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -613,14 +613,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if isinstance(
                 inner_attention, (FlexAttention.Config, VarlenAttention.Config)
             ):
-                assert (
-                    self.tokenizer is not None
-                ), "tokenizer is required for flex/varlen attention"
                 model = cast(Decoder, self.model_parts[0])
+                mask_inputs = (
+                    {**extra_inputs, "positions": positions}
+                    if positions is not None
+                    else extra_inputs
+                )
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
                     input_batch=inputs,
-                    tokenizer=self.tokenizer,
-                    extra_inputs=extra_inputs,
+                    extra_inputs=mask_inputs,
                 )
 
         if self.parallel_dims.cp_enabled:

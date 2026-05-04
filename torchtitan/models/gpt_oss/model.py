@@ -12,7 +12,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -253,7 +252,6 @@ class GptOssModel(Decoder):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         basic_mask_mods = []
@@ -262,16 +260,18 @@ class GptOssModel(Decoder):
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(attn_cfg.sliding_window_size)
         ]
+        positions = extra_inputs.get("positions") if extra_inputs else None
         match attn_cfg.mask_type:
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
             case "block_causal":
                 B = input_batch.shape[0]
-                assert tokenizer.eos_id is not None
-                basic_mask_mods.append(
-                    get_document_mask_mod(input_batch, tokenizer.eos_id)
-                )
+                if positions is None:
+                    raise ValueError(
+                        "block_causal attention requires positions in extra_inputs"
+                    )
+                basic_mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(f"Unknown attention mask type: {attn_cfg.mask_type}")
 

@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -152,18 +151,22 @@ class Decoder(BaseModel):
     def _get_flex_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
         attn_config: BaseAttention.Config,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
+        positions = extra_inputs.get("positions") if extra_inputs else None
 
         match attn_config.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
-                assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                if positions is None:
+                    raise ValueError(
+                        "block_causal attention requires positions in extra_inputs"
+                    )
+                mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"
@@ -182,21 +185,26 @@ class Decoder(BaseModel):
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         attn_config = self.config.layers[0].attention
         inner_attn = attn_config.inner_attention
         if isinstance(inner_attn, FlexAttention.Config):
-            return self._get_flex_attention_masks(input_batch, tokenizer, attn_config)
+            return self._get_flex_attention_masks(
+                input_batch, attn_config, extra_inputs
+            )
         elif isinstance(inner_attn, VarlenAttention.Config):
             if attn_config.mask_type != "block_causal":
                 raise ValueError(
                     f"varlen attention is only supported with block_causal "
                     f"attention mask type, got {attn_config.mask_type}"
                 )
-            assert tokenizer.eos_id is not None
-            return create_varlen_metadata_for_document(input_batch, tokenizer.eos_id)
+            positions = extra_inputs.get("positions") if extra_inputs else None
+            if positions is None:
+                raise ValueError(
+                    "block_causal varlen attention requires positions in extra_inputs"
+                )
+            return create_varlen_metadata_for_document(positions=positions)
         else:
             raise TypeError(
                 f"Only VarlenAttention and FlexAttention support attention masks, "

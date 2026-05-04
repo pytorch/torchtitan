@@ -18,7 +18,7 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
@@ -284,11 +284,11 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 
 
 class ChatDataset(IterableDataset, Stateful):
-    """Dataset for single-turn chat/instruction-tuning.
+    """Dataset for single-turn and multi-turn chat/instruction-tuning.
 
-    Tokenizes [user, assistant] message pairs, masks prompt tokens with
-    IGNORE_INDEX in labels, and uses greedy sequence packing with
-    per-document positions. Implements Stateful for checkpointing.
+    Tokenizes conversations with alternating user/assistant turns and uses
+    greedy sequence packing with per-document positions. Labels supervise only
+    assistant content spans. Implements Stateful for checkpointing.
     """
 
     def __init__(
@@ -296,6 +296,7 @@ class ChatDataset(IterableDataset, Stateful):
         dataset: Dataset,
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
+        *,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -319,6 +320,13 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
+        self._assistant_end_token_ids = {self._eos_id}
+        if isinstance(tokenizer, HuggingFaceTokenizer):
+            self._assistant_end_token_ids.update(
+                token_id
+                for token_id, token in tokenizer.tokenizer.get_added_tokens_decoder().items()
+                if token.special
+            )
 
         self._dataset_id = f"{dataset.info.dataset_name}/{dataset.split}"
 
@@ -343,43 +351,121 @@ class ChatDataset(IterableDataset, Stateful):
 
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
-        """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO: expand this to multi-turn
-        if len(messages) != 2:
+        """Validate conversation structure.
+
+        Allows an optional leading 'system' message, then requires
+        alternating user/assistant turns ending with 'assistant'.
+        """
+        if len(messages) < 2:
             raise ValueError(
-                f"Expected single-turn [user, assistant], got {len(messages)} messages"
+                f"Expected at least 2 messages (user + assistant), got {len(messages)}"
             )
-        if messages[0]["role"] != "user":
+
+        # Determine where the user/assistant alternation starts
+        start = 0
+        if messages[0]["role"] == "system":
+            start = 1
+
+        turns = messages[start:]
+        if len(turns) < 2 or len(turns) % 2 != 0:
             raise ValueError(
-                f"First message must be 'user', got '{messages[0]['role']}'"
+                f"After optional system message, expected an even number of "
+                f"alternating user/assistant messages (>= 2), got {len(turns)}"
             )
-        if messages[1]["role"] != "assistant":
-            raise ValueError(
-                f"Second message must be 'assistant', got '{messages[1]['role']}'"
-            )
+
+        for i, msg in enumerate(turns):
+            expected = "user" if i % 2 == 0 else "assistant"
+            if msg["role"] != expected:
+                raise ValueError(
+                    f"Message {start + i} should be '{expected}', got '{msg['role']}'"
+                )
+
+    def _render_conversation(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        ensure_final_eos: bool = True,
+    ) -> tuple[str, list[int]]:
+        full_text = self._tokenizer.apply_chat_template(messages)
+        full_text = full_text.rstrip("\n")
+        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if ensure_final_eos and full_tokens[-1] != self._eos_id:
+            full_tokens.append(self._eos_id)
+        return full_text, full_tokens
+
+    def _get_assistant_spans(
+        self,
+        messages: list[dict[str, Any]],
+        full_tokens: list[int],
+    ) -> list[tuple[int, int]]:
+        """Find token spans for each assistant turn's rendered content."""
+        spans = []
+
+        for assistant_idx, message in enumerate(messages):
+            if message["role"] != "assistant":
+                continue
+
+            # Same conversation structure, just empty content for this turn.
+            # Strips extra fields (e.g. reasoning_content) so template
+            # conditionals like Qwen3's <think> insertion also differ.
+            blanked_messages = [
+                {"role": msg["role"], "content": ""} if idx == assistant_idx else msg
+                for idx, msg in enumerate(messages)
+            ]
+
+            _, dummy_tokens = self._render_conversation(blanked_messages)
+
+            # Scan from front to find where they diverge.
+            start = 0
+            max_prefix = min(len(full_tokens), len(dummy_tokens))
+            while start < max_prefix and full_tokens[start] == dummy_tokens[start]:
+                start += 1
+
+            # Scan from back to find where they reconverge.
+            end = len(full_tokens)
+            dummy_end = len(dummy_tokens)
+            while (
+                end > start
+                and dummy_end > start
+                and full_tokens[end - 1] == dummy_tokens[dummy_end - 1]
+            ):
+                end -= 1
+                dummy_end -= 1
+
+            if end <= start:
+                raise ValueError("Blanked assistant turn did not produce a token diff")
+
+            # Heuristic: if the next token is a special token, include it so
+            # assistant-only supervision can cover turn terminators such as
+            # EOS or model-specific end-of-turn markers.
+            if (
+                end < len(full_tokens)
+                and full_tokens[end] in self._assistant_end_token_ids
+            ):
+                end += 1
+
+            spans.append((start, end))
+
+        return spans
 
     def _tokenize_sample(
         self, sample: dict[str, Any]
     ) -> tuple[list[int], list[int]] | None:
-        """Tokenize a single-turn sample and create input/label pairs.
+        """Tokenize a chat sample and create input/label pairs.
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
-        label_ids = tokens[1:] with prompt tokens masked as IGNORE_INDEX.
-        Returns None if the sample exceeds seq_len (dropped to avoid
-        training on truncated responses).
-
-        Uses incremental prefix re-tokenization to find the prompt/response
-        token boundary, avoiding BPE merge errors.
+        label_ids = tokens[1:]. Assistant-only supervision keeps rendered
+        assistant spans and masks everything else with IGNORE_INDEX by diffing
+        the rendered conversation against versions with each assistant turn
+        blanked. We extend each assistant span by one token when the next
+        token is EOS or another special token, allowing supervision of
+        end-of-turn markers. Returns None if the sample exceeds seq_len
+        (dropped to avoid training on truncated responses).
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
 
-        full_text = self._tokenizer.apply_chat_template(messages)
-        # Strip extra newline and ensure the sequence ends with EOS without duplicates
-        full_text = full_text.rstrip("\n")
-        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
-        if full_tokens[-1] != self._eos_id:
-            full_tokens.append(self._eos_id)
+        full_text, full_tokens = self._render_conversation(messages)
 
         if not self._logged_first_sample:
             logger.info(f"[ChatDataset] First sample full:\n{full_text}")
@@ -396,29 +482,40 @@ class ChatDataset(IterableDataset, Stateful):
         input_ids = full_tokens[:-1]
         label_ids = full_tokens[1:]
 
-        # Find prompt/response boundary by tokenizing just the user message
-        # with add_generation_prompt=True.
-        prompt_text = self._tokenizer.apply_chat_template(
-            messages[:1], add_generation_prompt=True
-        )
-        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        prompt_len = len(prompt_tokens)
+        # Find assistant spans and unmask only those in labels.
+        # Labels are shifted by 1: label_ids[j] = full_tokens[j+1], so
+        # an assistant span (start, end) in full_tokens maps to
+        # label indices [start-1, end-1) when supervising assistant content.
+        spans = self._get_assistant_spans(messages, full_tokens)
 
-        # Labels are shifted by one token, so the first assistant token is
-        # predicted at index prompt_len - 1 and must remain unmasked.
-        mask_end = min(max(prompt_len - 1, 0), len(label_ids))
-        label_ids[:mask_end] = [IGNORE_INDEX] * mask_end
+        # Start with everything masked
+        masked_labels = [IGNORE_INDEX] * len(label_ids)
 
-        return input_ids, label_ids
+        for start, end in spans:
+            # In label space: first supervised position is start - 1
+            # (predicting full_tokens[start] from position start-1),
+            # and last supervised position is end - 2
+            # (predicting full_tokens[end-1] from position end-2).
+            label_start = max(start - 1, 0)
+            label_end = min(end - 1, len(label_ids))
+            if label_start >= label_end:
+                logger.warning(
+                    f"Sample {self._sample_idx}: assistant span has zero "
+                    f"supervised tokens, skipping sample"
+                )
+                return None
+            masked_labels[label_start:label_end] = label_ids[label_start:label_end]
+
+        return input_ids, masked_labels
 
     def __iter__(self):
         yield from self._iter_greedy_packed()
 
     def _iter_greedy_packed(self):
         """Greedy packing: pack examples sequentially until seq_len is full.
-        Document boundaries are marked by EOS tokens between packed examples.
-        The model's flex/varlen attention mask uses these EOS positions to
-        prevent cross-document attention.
+        Packed examples reset positions to 0 at each conversation boundary.
+        The model's block-causal flex/varlen attention mask uses these
+        position resets to prevent cross-conversation attention.
         """
         # resume from ckpt edge case
         if self._pending_input_ids:

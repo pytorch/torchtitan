@@ -757,8 +757,13 @@ class TestTraceModels(unittest.TestCase):
         # Insert EOS tokens to create document boundaries for block_causal mask
         tokens[:, 15::16] = 1
         labels = torch.randint(0, vocab_size, (1, seq_len), device=self.DEVICE)
+        # Per-document positions resetting at each 16-token boundary (matching
+        # the EOS placement above), as expected by ``get_document_mask_mod``.
+        positions = (torch.arange(seq_len, device=self.DEVICE) % 16).unsqueeze(0)
         block_mask = create_attention_mask(
-            and_masks(get_causal_mask_mod(), get_document_mask_mod(tokens, eos_id=1)),
+            and_masks(
+                get_causal_mask_mod(), get_document_mask_mod(positions=positions)
+            ),
             B=1,
             H=None,
             Q_LEN=seq_len,

@@ -28,7 +28,6 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
@@ -36,7 +35,6 @@ from torchtitan.models.common.rope import (
     apply_rotary_emb_cos_sin,
 )
 from torchtitan.protocols.module import Module
-
 
 __all__ = [
     "FlexAttention",
@@ -312,27 +310,24 @@ def get_causal_mask_mod() -> _mask_mod_signature:
     return _causal_mask
 
 
-def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signature:
-    """Creates a document mask that prevents attention across document boundaries.
+def get_document_mask_mod(*, positions: torch.Tensor) -> _mask_mod_signature:
+    """Creates a document mask from position resets.
 
     Args:
-        batch: Input batch tensor with shape [b, s, h, d]
-        eos_id: End-of-sequence token ID that marks document boundaries
+        positions: Position tensor with shape [b, s]. A new document/chunk
+            begins wherever positions reset, i.e. `positions[i] <= positions[i-1]`.
 
     Returns:
         A mask modifier function that implements document-level masking.
     """
-    # batch is [b, s, h, d] shape
-    eos_mask = batch == eos_id
-    eos_mask[:, -1] = True
-    cumulative_mask = torch.cumsum(torch.where(eos_mask, 1, 0), dim=1)
-    sequence_indices = torch.zeros_like(cumulative_mask, dtype=torch.int32)
-    sequence_indices[:, 1:] = cumulative_mask[:, :-1]
+    boundaries = torch.zeros_like(positions, dtype=torch.bool)
+    boundaries[:, 1:] = positions[:, 1:] <= positions[:, :-1]
+    document_ids = torch.cumsum(boundaries.int(), dim=1)
 
     def document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
+        return document_ids[b, q_idx] == document_ids[b, kv_idx]
 
     return document_mask
 
@@ -402,32 +397,33 @@ def create_attention_mask(*args, **kwargs):
     return _compiled_create_block_mask(*args, **kwargs)
 
 
-def create_varlen_metadata_for_document(
-    input_batch: torch.Tensor, eos_id: int
-) -> VarlenMetadata:
+def create_varlen_metadata_for_document(*, positions: torch.Tensor) -> VarlenMetadata:
     """
     Creates cumulative sequence length indices needed for variable length attention
 
     Args:
-        input_batch
-        eos_id: the EOS id marker
+        positions: Position tensor with shape [b, s]. Position resets define
+            document/chunk boundaries.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
     """
-    batch_size, seq_len = input_batch.shape
-    device = input_batch.device
+    batch_size, seq_len = positions.shape
+    device = positions.device
     cu_seqlens_list, all_seq_lengths = [], []
     offset = 0
     max_seqlen = 0
 
     for b in range(batch_size):
-        tokens = input_batch[b]
-        eos_positions = (tokens == eos_id).nonzero(as_tuple=True)[0].to(torch.int32)
+        sample_positions = positions[b]
+        boundaries = (sample_positions[1:] <= sample_positions[:-1]).nonzero(
+            as_tuple=True
+        )[0].to(torch.int32) + 1
+
         sample_cu_seqlens = torch.cat(
             [
                 torch.tensor([0], dtype=torch.int32, device=device),
-                eos_positions + 1,
+                boundaries,
                 torch.tensor([seq_len], dtype=torch.int32, device=device),
             ]
         )
