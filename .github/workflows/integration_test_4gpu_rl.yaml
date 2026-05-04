@@ -91,6 +91,9 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
+        # Disable FlashInfer JIT sampler — CI image lacks nvcc
+        export VLLM_USE_FLASHINFER_SAMPLER=0
+
         # Run default E2E RL integration tests (TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
