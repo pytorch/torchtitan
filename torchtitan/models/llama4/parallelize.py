@@ -87,7 +87,7 @@ def parallelize_llama(
         and compile_config.enable
         and "model" in compile_config.components
     )
-    if ac_config is not None:
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(
             model,
             ac_config,

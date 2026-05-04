@@ -228,7 +228,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model = self.train_spec.parallelize_fn(
                 model,
                 parallel_dims=parallel_dims,
-                training=config.training,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,

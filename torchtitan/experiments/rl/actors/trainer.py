@@ -233,7 +233,6 @@ class PolicyTrainer(Actor, Configurable):
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
-            training=config.training,
             parallelism=config.parallelism,
             compile_config=self.compile_config,
             ac_config=config.ac_config,

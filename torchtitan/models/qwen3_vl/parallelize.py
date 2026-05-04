@@ -326,7 +326,7 @@ def parallelize_qwen3_vl(
         )
 
     # Apply activation checkpointing
-    if ac_config is not None:
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(
             model,
             ac_config,

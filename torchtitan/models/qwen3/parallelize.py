@@ -61,7 +61,7 @@ def parallelize_qwen3(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
         )
 
-    if ac_config is not None:
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(
             model,
             ac_config,

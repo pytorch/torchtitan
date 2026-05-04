@@ -70,7 +70,7 @@ def parallelize_gptoss(
             enable_sp=True,
         )
 
-    if ac_config is not None:
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(
             model,
             ac_config,

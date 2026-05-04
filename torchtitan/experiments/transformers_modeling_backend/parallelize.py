@@ -66,7 +66,7 @@ def parallelize_hf_transformers(
         and "model" in compile_config.components
     )
 
-    if ac_config is not None:
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(model, ac_config)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP

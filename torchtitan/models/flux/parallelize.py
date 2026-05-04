@@ -36,7 +36,7 @@ def parallelize_flux(
     ac_config: ActivationCheckpointConfig | None = None,
     dump_folder: str = "",
 ):
-    if ac_config is not None:
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(model, ac_config)
 
     if parallel_dims.cp_enabled:
