@@ -321,9 +321,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert self.gradient_accumulation_steps > 0
 
         # Validate sequence length is compatible with parallelism dimensions
-        assert (
-            config.training.seq_len % parallel_dims.seq_len_divisor == 0
-        ), (
+        assert config.training.seq_len % parallel_dims.seq_len_divisor == 0, (
             f"Sequence length {config.training.seq_len} must be divisible by "
             f"the product of TP degree ({parallel_dims.tp}) and "
             f"2 * CP degree ({parallel_dims.cp})."

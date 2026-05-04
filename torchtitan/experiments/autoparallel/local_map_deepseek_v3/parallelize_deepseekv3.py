@@ -12,10 +12,7 @@ from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 from autoparallel.compile import autoparallel_backend
 
 from torch.distributed.tensor.placement_types import Shard
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-)
+from torchtitan.config import ActivationCheckpointConfig, ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 

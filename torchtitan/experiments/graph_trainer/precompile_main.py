@@ -43,7 +43,6 @@ import torch.distributed as dist
 
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
     parallelize_inputs,
     register_blockmask_pytree_node,
@@ -65,6 +64,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -407,9 +407,6 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
-    from torchtitan.experiments.graph_trainer.bucketing import (
-        joint_transformer_block_bucketing_reordering_pass,
-    )
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,

@@ -81,7 +81,9 @@ def parallelize_qwen3(
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
-    model = apply_simple_fsdp(model, parallel_dims=parallel_dims, parallelism=parallelism)
+    model = apply_simple_fsdp(
+        model, parallel_dims=parallel_dims, parallelism=parallelism
+    )
 
     # Apply compilation based on mode
     model = apply_compile(
