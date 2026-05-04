@@ -423,7 +423,7 @@ def apply_moe_ep_tp(
 
         experts_mesh, experts_plan = None, None
         # EP disabled: shard routed expert weights across TP mesh
-        # (input Replicate, produces Partial output all-reduced to Replicate by PrepareModuleOutput)
+        # (input Replicate, produces Partial output all-reduced to Replicate at RoutedExperts boundary)
         if ep_mesh is None:
             experts_mesh = tp_mesh
             experts_plan = TensorParallel()

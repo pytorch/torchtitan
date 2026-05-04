@@ -369,25 +369,24 @@ class MoE(Module):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
-        # Router stays on DTensor (handled by NoParallel via parallelize_module).
+        # top_scores and selected_experts_indices shape (bs*slen, top_k)
+        # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
             selected_experts_indices,
             num_tokens_per_expert,
         ) = self.router(x, self.expert_bias)
 
+        # tokens_per_expert will be used to update the expert bias for load balancing.
+        # and also to count the expert usage
         # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
-        # Routed experts convert to local tensor at GroupedExperts boundary.
         shared_out = self.shared_experts(x) if self.shared_experts is not None else None
-
         routed_out = self.experts(x, top_scores, selected_experts_indices)
-
         out = routed_out if shared_out is None else routed_out + shared_out
         return out.reshape(bs, slen, dim)
 

@@ -643,6 +643,9 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
             # pyrefly: ignore [bad-argument-type]
             routed_output = combine_tokens(routed_output, metadata.state)
 
+        # Sync the combine operation before using routed_output.
+        # This inserts a CUDA stream wait, ensuring combine is complete before
+        # the subsequent addition or reshape operations read routed_output.
         from torchtitan.distributed.deepep.deepep import sync_combine
 
         sync_combine()
