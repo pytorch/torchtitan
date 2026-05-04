@@ -476,6 +476,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             token_indices_experts_sorted = (
                 metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
             )
+            assert isinstance(token_indices_experts_sorted, torch.Tensor)
             # Drop pad-row entries: their global indices fall in
             # [original_num_tokens, padded_num_tokens), out of `out`'s range.
             # scatter_add itself is not padded; `out` matches x's shape.
@@ -485,8 +486,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 routed_output = routed_output[mask]
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted
-
-        assert isinstance(token_indices_experts_sorted, torch.Tensor)
         out = deterministic_scatter_add(
             out,
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
