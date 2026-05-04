@@ -114,6 +114,13 @@ def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=No
         ):
             continue
 
+        # Skip the test for XPU
+        if (
+            getattr(args, "gpu_arch_type", "cuda") == "xpu"
+            and test_flavor.skip_xpu_test
+        ):
+            continue
+
         # Check if we have enough GPUs
         if args.ngpu < test_flavor.ngpu:
             logger.info(

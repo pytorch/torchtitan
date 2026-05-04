@@ -387,7 +387,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "jit_fsdp+ep",
             ngpu=8,
             disabled=_JIT_AOT_DISABLED,
-        ),
+        ),_``
         OverrideDefinitions(
             [
                 [
@@ -417,6 +417,8 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "jit_deepseekv3_auto_bucketing",
             ngpu=8,
+
+
         ),
         # === AOT mode tests ===
         OverrideDefinitions(
@@ -598,8 +600,8 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda", "rocm", "xpu"],
+        help="GPU architecture type. Must be specified as either 'cuda', 'rocm', 'xpu' .",
     )
     parser.add_argument(
         "--test_suite",

@@ -306,10 +306,73 @@ def autobucketing_reordering_pass(
     This pass applies schedule_overlap_bucketing with collective_bucketing enabled
     to optimize comm/compute overlap patterns in the graph.
     """
-    schedule_overlap_bucketing(gm, collective_bucketing=True)
-    gm.recompile()
-    return gm
+    acc = torch.accelerator.current_accelerator(check_available=True)
+    acc_type = acc.type if acc is not None else None
 
+    if acc_type == "cuda":
+        schedule_overlap_bucketing(gm, collective_bucketing=True)
+        gm.recompile()
+        return gm
+
+    import torch._inductor.fx_passes.node_runtime_estimation as node_runtime_estimation
+    import torch._inductor.fx_passes.overlap_scheduling as overlap_scheduling
+
+    original_estimate_roofline_runtime_ms = getattr(
+        overlap_scheduling, "estimate_roofline_runtime_ms", None
+    )
+    original_estimate_runtime_analytical = getattr(
+        overlap_scheduling, "estimate_runtime_analytical", None
+    )
+    original_log_compute_estimations = getattr(
+        node_runtime_estimation, "_log_compute_estimations", None
+    )
+    scheduler_cls = getattr(overlap_scheduling, "OverlapScheduler", None)
+    original_align = None
+    if scheduler_cls is not None:
+        original_align = getattr(
+            scheduler_cls,
+            "_align_compute_nodes_runtime_estimations_across_all_distributed_ranks",
+            None,
+        )
+
+    try:
+        if original_estimate_roofline_runtime_ms is not None:
+            overlap_scheduling.estimate_roofline_runtime_ms = lambda node: 1e-3
+        if original_estimate_runtime_analytical is not None:
+            overlap_scheduling.estimate_runtime_analytical = lambda node: 1e-3
+        if original_log_compute_estimations is not None:
+            node_runtime_estimation._log_compute_estimations = (
+                lambda compute_nodes, benchmarked_estimations, analytical_estimations: None
+            )
+        if scheduler_cls is not None and original_align is not None:
+            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
+                lambda self: None
+            )
+
+        schedule_overlap_bucketing(
+            gm,
+            collective_bucketing=True,
+            collective_estimator="analytical",
+        )
+        gm.recompile()
+        return gm
+    finally:
+        if original_estimate_roofline_runtime_ms is not None:
+            overlap_scheduling.estimate_roofline_runtime_ms = (
+                original_estimate_roofline_runtime_ms
+            )
+        if original_estimate_runtime_analytical is not None:
+            overlap_scheduling.estimate_runtime_analytical = (
+                original_estimate_runtime_analytical
+            )
+        if original_log_compute_estimations is not None:
+            node_runtime_estimation._log_compute_estimations = (
+                original_log_compute_estimations
+            )
+        if scheduler_cls is not None and original_align is not None:
+            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
+                original_align
+            )
 
 def transformer_block_bucketing_reordering_pass(
     gm: torch.fx.GraphModule,
@@ -320,11 +383,74 @@ def transformer_block_bucketing_reordering_pass(
     """
     Apply aten-level manual bucketing and reordering optimization.
     """
-    manual_overlap_bucketing(
-        gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+    acc = torch.accelerator.current_accelerator(check_available=True)
+    acc_type = acc.type if acc is not None else None
+
+    if acc_type == "cuda":
+        manual_overlap_bucketing(
+            gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+        )
+        gm.recompile()
+        return gm
+
+    import torch._inductor.fx_passes.node_runtime_estimation as node_runtime_estimation
+    import torch._inductor.fx_passes.overlap_scheduling as overlap_scheduling
+
+    original_estimate_roofline_runtime_ms = getattr(
+        overlap_scheduling, "estimate_roofline_runtime_ms", None
     )
-    gm.recompile()
-    return gm
+    original_estimate_runtime_analytical = getattr(
+        overlap_scheduling, "estimate_runtime_analytical", None
+    )
+    original_log_compute_estimations = getattr(
+        node_runtime_estimation, "_log_compute_estimations", None
+    )
+    scheduler_cls = getattr(overlap_scheduling, "OverlapScheduler", None)
+    original_align = None
+    if scheduler_cls is not None:
+        original_align = getattr(
+            scheduler_cls,
+            "_align_compute_nodes_runtime_estimations_across_all_distributed_ranks",
+            None,
+        )
+
+    try:
+        if original_estimate_roofline_runtime_ms is not None:
+            overlap_scheduling.estimate_roofline_runtime_ms = lambda node: 1e-3
+        if original_estimate_runtime_analytical is not None:
+            overlap_scheduling.estimate_runtime_analytical = lambda node: 1e-3
+        if original_log_compute_estimations is not None:
+            node_runtime_estimation._log_compute_estimations = (
+                lambda compute_nodes, benchmarked_estimations, analytical_estimations: None
+            )
+        if scheduler_cls is not None and original_align is not None:
+            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
+                lambda self: None
+            )
+
+        manual_overlap_bucketing(
+            gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+        )
+        gm.recompile()
+        return gm
+    finally:
+        if original_estimate_roofline_runtime_ms is not None:
+            overlap_scheduling.estimate_roofline_runtime_ms = (
+                original_estimate_roofline_runtime_ms
+            )
+        if original_estimate_runtime_analytical is not None:
+            overlap_scheduling.estimate_runtime_analytical = (
+                original_estimate_runtime_analytical
+            )
+        if original_log_compute_estimations is not None:
+            node_runtime_estimation._log_compute_estimations = (
+                original_log_compute_estimations
+            )
+        if scheduler_cls is not None and original_align is not None:
+            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
+                original_align
+            )
+
 
 
 def _ops_filter_with_distributed(name: str) -> bool:
