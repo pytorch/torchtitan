@@ -27,12 +27,24 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch and TorchStore from main:
+1. Install Monarch and TorchStore:
 ```bash
 uv pip install torchmonarch==0.4.1
-uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@8b41ecc52bccff73e762cbe38c6871efdfc5db36"
 uv pip install pygtrie portpicker
 ```
+
+> **NOTE:** torchstore is pinned to `8b41ecc` because the next commit
+> ([`6b2dd81`](https://github.com/meta-pytorch/torchstore/commit/6b2dd81622a159b4a7ff2335a0b9f89c8df4cbdb),
+> "drop SSHJob from SPMD init; use host_mesh_from_store") calls
+> `monarch._src.spmd.host_mesh.host_mesh_from_store`, which is only
+> available in monarch nightlies. With `torchmonarch==0.4.1`,
+> `ts.initialize()` aborts the trainer actor's worker during pickle
+> replay with `ModuleNotFoundError: No module named
+> 'torch._C._distributed_c10d'; 'torch._C' is not a package`.
+> Alternatively, install `torchmonarch==0.3.0` (what the
+> `integration_test_4gpu_rl` workflow uses) to keep torchstore on
+> `main`.
 
 2. Install Flash Attention 3 kernels:
 ```bash
