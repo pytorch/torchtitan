@@ -6,13 +6,18 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
+
+if TYPE_CHECKING:
+    from .trainer import GraphTrainer
+
+AUTOPARALLEL_BACKEND = "autoparallel_backend"
 
 
 @dataclass(kw_only=True, slots=True)
@@ -54,7 +59,9 @@ class GraphTrainerCompileConfig(CompileConfig):
             Work in progress — for development and testing only.
     """
 
-    inductor_compilation: Literal["regional", "full"] = "regional"
+    inductor_compilation: Literal[
+        "regional", "full", "autoparallel_backend"
+    ] = "regional"
     """
     Inductor compilation strategy. Mutually exclusive options:
         regional: compile tagged regions (e.g. FlexAttention HOPs) with
@@ -78,6 +85,56 @@ class GraphTrainerCompileConfig(CompileConfig):
     here to skip compilation. For multi-node setups use a shared filesystem
     path.
     """
+
+    autoparallel: bool = False
+    """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
+    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
+
+
+def is_autoparallel_backend_mode(compile_config: GraphTrainerCompileConfig) -> bool:
+    return (
+        compile_config.autoparallel
+        and compile_config.inductor_compilation == AUTOPARALLEL_BACKEND
+        and compile_config.mode == "aot_fx_trace"
+    )
+
+
+def validate_autoparallel_backend_config(
+    compile_config: GraphTrainerCompileConfig,
+) -> None:
+    if compile_config.inductor_compilation != AUTOPARALLEL_BACKEND:
+        return
+    if not compile_config.autoparallel:
+        raise ValueError(
+            "--compile.inductor_compilation autoparallel_backend requires "
+            "--compile.autoparallel."
+        )
+    if compile_config.mode != "aot_fx_trace":
+        raise ValueError(
+            "--compile.inductor_compilation autoparallel_backend requires "
+            "--compile.mode aot_fx_trace."
+        )
+    if not compile_config.enable_passes:
+        raise ValueError(
+            "--compile.inductor_compilation autoparallel_backend requires "
+            "--compile.enable_passes because the AutoParallel backend is "
+            "installed as a GraphTrainer graph pass."
+        )
+    if compile_config.passes:
+        raise ValueError(
+            "--compile.passes is not supported with "
+            "--compile.inductor_compilation autoparallel_backend."
+        )
+    if compile_config.joint_passes:
+        raise ValueError(
+            "--compile.joint_passes is not supported with "
+            "--compile.inductor_compilation autoparallel_backend."
+        )
+    if compile_config.precompile_artifact_dir:
+        raise ValueError(
+            "--compile.precompile_artifact_dir is not supported with "
+            "--compile.inductor_compilation autoparallel_backend."
+        )
 
 
 def to_graph_trainer_config(

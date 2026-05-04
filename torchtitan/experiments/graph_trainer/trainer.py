@@ -8,12 +8,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+import torch.fx.traceback as fx_traceback
 import torch.nn as nn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    validate_autoparallel_backend_config,
+)
 from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced_train_step,
@@ -43,7 +47,10 @@ def make_fwd_bwd_step(loss_fn):
             for _, p in model.named_parameters(remove_duplicate=False)
             if p.requires_grad
         ]
-        grads = torch.autograd.grad(loss, params)
+        # Upstream remat uses this user annotation to identify the single
+        # logical backward region; GraphTrainer passes use autograd_backward.
+        with fx_traceback.annotate({"phase": "backward"}):
+            grads = torch.autograd.grad(loss, params)
         return [loss] + list(grads)
 
     return fwd_bwd_step
@@ -63,6 +70,16 @@ class GraphTrainer(Trainer):
             raise ValueError(
                 "aot_fx_trace compile mode does not support Pipeline Parallel"
             )
+
+        if (
+            self.config.compile.autoparallel
+            and self.config.compile.mode != "aot_fx_trace"
+        ):
+            raise ValueError(
+                "AutoParallel graph_trainer integration only supports "
+                "--compile.mode aot_fx_trace"
+            )
+        validate_autoparallel_backend_config(self.config.compile)
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None

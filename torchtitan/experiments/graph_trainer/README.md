@@ -5,6 +5,7 @@
 
 This experiment demonstrates graph-based distributed training in torchtitan through toolkit-style usage of PyTorch's compiler technologies, including:
 - [SimpleFSDP](https://arxiv.org/abs/2411.00284) as a compiler-friendly fully sharded data parallel implementation
+- [AutoParallel](AUTOPARALLEL_README.md) integration for automatic model placement in `aot_fx_trace` mode
 - Dynamo and AOTAutograd as the joint graph capture frontend
 - Provenance-tracking infrastructure as the user annotation backbone
 - Graph optimization via FX graph passes

@@ -580,15 +580,91 @@ def _build_async_tp_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_autoparallel_tests() -> list[OverrideDefinitions]:
+    """AutoParallel integration tests (requires 4 GPUs)."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.autoparallel",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "autoparallel llama3 FSDP+TP",
+            "autoparallel_llama3_fsdp_tp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.autoparallel",
+                    "--compile.inductor_compilation autoparallel_backend",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "autoparallel backend llama3 FSDP+TP",
+            "autoparallel_backend_llama3_fsdp_tp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.autoparallel",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.disable_loss_parallel",
+                ],
+            ],
+            "autoparallel deepseek_v3 EFSDP+EP",
+            "autoparallel_deepseek_v3_efsdp_ep",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.autoparallel",
+                    "--compile.inductor_compilation autoparallel_backend",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.disable_loss_parallel",
+                ],
+            ],
+            "autoparallel backend deepseek_v3 EFSDP+EP",
+            "autoparallel_backend_deepseek_v3_efsdp_ep",
+            ngpu=4,
+        ),
+    ]
+
+
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
     """DeepSeek-v3 + Qwen3 + async_tp tests (for H100 machines)."""
     return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
+
+
+def build_graph_trainer_autoparallel_test_list() -> list[OverrideDefinitions]:
+    """AutoParallel tests (requires 4 GPUs)."""
+    return _build_autoparallel_tests()
 
 
 _TEST_SUITES_FUNCTION = {
     "graph_trainer": build_graph_trainer_test_list,
     "graph_trainer_default": build_graph_trainer_default_test_list,
     "graph_trainer_h100": build_graph_trainer_h100_test_list,
+    "graph_trainer_autoparallel": build_graph_trainer_autoparallel_test_list,
 }
 
 
