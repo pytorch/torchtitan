@@ -131,7 +131,7 @@ class GroupedExperts(Module):
         # Convert DTensor to local tensor for routed expert dispatch/compute.
         # grad_placements=(Partial(),) ensures x_local.grad is Partial on
         # the tp_mesh in backward, so gradient reduction happens once at
-        # the MoE boundary.
+        # the GroupedExperts boundary.
         if isinstance(x, DTensor):
             x = x.to_local(grad_placements=(Partial(),))
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
@@ -309,9 +309,13 @@ class MoE(Module):
     2. Shared experts run on DTensor (handled by ColwiseParallel/RowwiseParallel)
     3. GroupedExperts.forward() converts DTensor to local, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
-          With EP, also performs all-to-all communication.
+          With EP, also performs all-to-all communication to send tokens
+          to expert-owning ranks.
        b. expert computation (local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
+          - AllToAll: all-to-all communication, then scatter_add.
+          - DeepEP/HybridEP: combine_tokens, then sync_combine.
+          - LocalTokenDispatcher (no EP): scatter_add only, no communication is needed.
     4. Routed and shared expert outputs are summed.
     """
 

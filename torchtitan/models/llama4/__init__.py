@@ -181,8 +181,8 @@ def _build_llama4_layers(
 
 
 def _debugmodel(
-    attn_backend: str,
-    moe_comm_backend: str,
+    attn_backend: str = "flex",
+    moe_comm_backend: str = "standard",
 ) -> Llama4Model.Config:
     dim = 256
     n_heads = 16
@@ -227,8 +227,8 @@ def _debugmodel(
 
 
 def _17bx16e(
-    attn_backend: str,
-    moe_comm_backend: str,
+    attn_backend: str = "flex",
+    moe_comm_backend: str = "standard",
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
@@ -284,8 +284,8 @@ def _17bx16e(
 
 
 def _17bx128e(
-    attn_backend: str,
-    moe_comm_backend: str,
+    attn_backend: str = "flex",
+    moe_comm_backend: str = "standard",
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
