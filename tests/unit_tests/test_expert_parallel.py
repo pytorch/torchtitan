@@ -7,6 +7,7 @@
 import unittest
 
 import torch
+import torch.nn.functional as F
 
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
@@ -139,6 +140,51 @@ class TestPermute(unittest.TestCase):
             set(permuted_indices.tolist()),
             set(range(total)),
         )
+
+
+class TestSPPaddingRoundTrip(unittest.TestCase):
+    """Verify AllToAllTokenDispatcher's SP padding/unpadding recovers the
+    original tokens for an uneven ``bs * slen`` (not divisible by ``sp_size``).
+
+    See docs/moe_sp_padding.md. Like TestPermute above, this runs on CPU by
+    only exercising the pure-tensor helper ``_split_along_sp`` rather than
+    going through dispatch()/combine() (which need CUDA + a real EP mesh).
+    """
+
+    def test_round_trip_recovers_original(self):
+        original_num_tokens = 7  # not divisible by sp_size=4
+        sp_size = 4
+        dim = 3
+
+        cfg = AllToAllTokenDispatcher.Config(
+            num_experts=4, top_k=1, score_before_experts=True
+        )
+        dispatcher = AllToAllTokenDispatcher(cfg)
+        dispatcher.sp_size = sp_size
+
+        x = torch.randn(original_num_tokens, dim)
+
+        # Pad (matches what dispatch() does on entry).
+        pad = (-original_num_tokens) % sp_size
+        x_padded = F.pad(x, (0, 0, 0, pad))
+        self.assertEqual(x_padded.shape, (8, dim))
+
+        # Split per rank, then reassemble (this is what the EP all-to-all
+        # gathers back in real distributed training).
+        local_num_tokens = x_padded.shape[0] // sp_size
+        per_rank_slices = []
+        for rank in range(sp_size):
+            dispatcher.sp_rank = rank
+            (slice_,) = dispatcher._split_along_sp(x_padded)
+            torch.testing.assert_close(
+                slice_,
+                x_padded[rank * local_num_tokens : (rank + 1) * local_num_tokens],
+            )
+            per_rank_slices.append(slice_)
+        reassembled = torch.cat(per_rank_slices, dim=0)
+
+        # Unpad to recover original prefix bitwise.
+        torch.testing.assert_close(reassembled[:original_num_tokens], x)
 
 
 if __name__ == "__main__":
