@@ -309,14 +309,16 @@ def tag_all_offloadable_activations(
     candidates.sort(key=lambda t: t[1], reverse=True)
     tagged = 0
     total_bytes = 0
+    selected_sizes: list[int] = []
     for node, nbytes in candidates:
         if budget_bytes > 0 and total_bytes + nbytes > budget_bytes:
             continue
         node.meta["recompute"] = CheckpointPolicy.MUST_CPU_OFFLOAD
         tagged += 1
         total_bytes += nbytes
+        selected_sizes.append(nbytes)
 
-    sizes_mb = sorted([nb / (1024 * 1024) for _, nb in candidates[:tagged]])
+    sizes_mb = sorted([nb / (1024 * 1024) for nb in selected_sizes])
     if sizes_mb:
         logger.info(
             f"CPU offload: tagged {tagged}/{len(candidates)} activations for offload "
