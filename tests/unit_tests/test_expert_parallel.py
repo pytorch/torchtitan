@@ -7,6 +7,8 @@
 import unittest
 
 import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
@@ -139,6 +141,77 @@ class TestPermute(unittest.TestCase):
             set(permuted_indices.tolist()),
             set(range(total)),
         )
+
+
+class TestAllToAllDispatcherOddTokens(unittest.TestCase):
+    """Verify ``AllToAllTokenDispatcher`` handles an odd ``bs * slen`` not
+    divisible by ``sp_size`` via the SP pad/unpad path (see
+    ``docs/moe_sp_padding.md``).
+
+    Drives dispatch + identity-expert + combine on a single-rank EP mesh once
+    per ``sp_rank``; summing the per-rank outputs must recover the original
+    tokens (the pad row at the tail is masked out by combine).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest(
+                "AllToAllTokenDispatcher.dispatch uses torch.histc on the "
+                "expert indices, which is not implemented for Long on CPU."
+            )
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl",
+                init_method="tcp://localhost:12361",
+                world_size=1,
+                rank=0,
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    def test_dispatch_combine_odd_tokens(self):
+        original_num_tokens = 7  # not divisible by sp_size=4
+        sp_size = 4
+        num_experts = 4
+        top_k = 1
+        dim = 3
+
+        device = torch.device("cuda")
+        ep_mesh = init_device_mesh("cuda", (1,), mesh_dim_names=("ep",))
+
+        torch.manual_seed(0)
+        x = torch.randn(original_num_tokens, dim, device=device)
+        top_scores = torch.ones(original_num_tokens, top_k, device=device)
+        # Route every token to expert 0 — keeps the per-rank scatter target
+        # deterministic so summing across SP ranks reconstructs x cleanly.
+        selected_experts_indices = torch.zeros(
+            original_num_tokens, top_k, dtype=torch.long, device=device
+        )
+
+        cfg = AllToAllTokenDispatcher.Config(
+            num_experts=num_experts, top_k=top_k, score_before_experts=True
+        )
+
+        summed = torch.zeros_like(x)
+        for sp_rank in range(sp_size):
+            dispatcher = AllToAllTokenDispatcher(cfg)
+            dispatcher.ep_mesh = ep_mesh
+            dispatcher.sp_size = sp_size
+            dispatcher.sp_rank = sp_rank
+
+            routed_input, _, metadata = dispatcher.dispatch(
+                x.clone(), top_scores.clone(), selected_experts_indices.clone()
+            )
+            # Identity expert.
+            out = dispatcher.combine(routed_input, metadata, x, shared_experts=None)
+            self.assertEqual(out.shape, x.shape)
+            summed = summed + out
+
+        torch.testing.assert_close(summed, x)
 
 
 if __name__ == "__main__":
