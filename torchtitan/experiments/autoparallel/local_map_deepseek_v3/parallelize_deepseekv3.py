@@ -12,11 +12,7 @@ from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 from autoparallel.compile import autoparallel_backend
 
 from torch.distributed.tensor.placement_types import Shard
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import ActivationCheckpointConfig, ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 
@@ -36,11 +32,10 @@ def parallelize_deepseekv3(
     model,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: AutoParallelCompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
+    compile_config: AutoParallelCompileConfig | None = None,
+    ac_config: ActivationCheckpointConfig | None = None,
+    dump_folder: str = "",
 ):
     """
     Apply Autoparallel to the model

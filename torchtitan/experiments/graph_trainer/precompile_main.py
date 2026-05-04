@@ -168,7 +168,6 @@ def _common_setup(config):
     model = model_spec.parallelize_fn(
         model,
         parallel_dims=parallel_dims,
-        training=config.training,
         parallelism=parallelism,
         compile_config=parallelize_compile_config,
         ac_config=config.activation_checkpoint,
@@ -408,9 +407,6 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
-    from torchtitan.experiments.graph_trainer.bucketing import (
-        joint_transformer_block_bucketing_reordering_pass,
-    )
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,

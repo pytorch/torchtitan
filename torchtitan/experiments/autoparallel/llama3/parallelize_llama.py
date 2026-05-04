@@ -16,7 +16,6 @@ from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
-    TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
@@ -28,11 +27,10 @@ def parallelize_llama(
     model,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: AutoParallelCompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
+    compile_config: AutoParallelCompileConfig | None = None,
+    ac_config: ActivationCheckpointConfig | None = None,
+    dump_folder: str = "",
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -94,8 +92,8 @@ def parallelize_llama(
         logger.info("Forcing bf16 on model")
         model = model.bfloat16()
 
-    param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
-    reduce_dtype = TORCH_DTYPE_MAP[training.mixed_precision_reduce]
+    param_dtype = TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_param]
+    reduce_dtype = TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_reduce]
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,

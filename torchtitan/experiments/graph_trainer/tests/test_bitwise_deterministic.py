@@ -135,7 +135,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
             return {}
         tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
         attention_masks = model.get_attention_masks(
-            input_batch=self.inputs, tokenizer=tokenizer,
+            input_batch=self.inputs,
+            tokenizer=tokenizer,
         )
         return {"attention_masks": attention_masks}
 

@@ -190,12 +190,16 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
 
 
 def maybe_enable_async_tp(
-    parallelism: ParallelismConfig, compile_config: CompileConfig, tp_mesh: DeviceMesh
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig | None,
+    tp_mesh: DeviceMesh,
 ):
     if not parallelism.enable_async_tensor_parallel:
         return
 
-    if not (compile_config.enable and "model" in compile_config.components):
+    if compile_config is None or not (
+        compile_config.enable and "model" in compile_config.components
+    ):
         raise RuntimeError(
             "Async TP requires 'model' in --compile.components and --compile.enable"
         )

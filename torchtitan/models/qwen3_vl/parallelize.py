@@ -32,7 +32,6 @@ from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
-    TrainingConfig,
 )
 
 from torchtitan.distributed import ParallelDims
@@ -273,11 +272,10 @@ def parallelize_qwen3_vl(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
+    compile_config: CompileConfig | None = None,
+    ac_config: ActivationCheckpointConfig | None = None,
+    dump_folder: str = "",
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -290,7 +288,9 @@ def parallelize_qwen3_vl(
         raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
 
     model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
+        compile_config is not None
+        and compile_config.enable
+        and "model" in compile_config.components
     )
 
     if parallel_dims.tp_enabled:
@@ -326,7 +326,7 @@ def parallelize_qwen3_vl(
         )
 
     # Apply activation checkpointing
-    if ac_config.mode != "none":
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(
             model,
             ac_config,
@@ -344,6 +344,7 @@ def parallelize_qwen3_vl(
 
     # Apply torch.compile after AC wrapping and before FSDP
     if model_compile_enabled:
+        assert compile_config is not None
         apply_compile(model, compile_config)
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
@@ -371,8 +372,8 @@ def parallelize_qwen3_vl(
             # pyrefly: ignore [bad-argument-type]
             model.vision_encoder,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=parallel_dims.pp_enabled,
         )
@@ -381,10 +382,10 @@ def parallelize_qwen3_vl(
     apply_fsdp(
         model,
         dp_mesh,
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        param_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_reduce],
         pp_enabled=parallel_dims.pp_enabled,
-        cpu_offload=training.enable_cpu_offload,
+        cpu_offload=parallelism.enable_fsdp_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
@@ -392,7 +393,7 @@ def parallelize_qwen3_vl(
 
     logger.info("Applied fully_shard to the Qwen3-VL model")
 
-    if training.enable_cpu_offload:
+    if parallelism.enable_fsdp_cpu_offload:
         logger.info("Applied CPU Offloading to the Qwen3-VL model")
 
     return model

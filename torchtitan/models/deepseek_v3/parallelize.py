@@ -9,7 +9,6 @@ from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
-    TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -26,18 +25,11 @@ def parallelize_deepseekv3(
     model: DeepSeekV3Model,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
+    compile_config: CompileConfig | None = None,
+    ac_config: ActivationCheckpointConfig | None = None,
+    dump_folder: str = "",
 ):
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
 
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic
     # runs inside the local_map boundary on local tensors.
@@ -62,10 +54,12 @@ def parallelize_deepseekv3(
         )
 
     model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
+        compile_config is not None
+        and compile_config.enable
+        and "model" in compile_config.components
     )
 
-    if ac_config.mode != "none":
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(
             model,
             ac_config,
@@ -74,6 +68,7 @@ def parallelize_deepseekv3(
         )
 
     if model_compile_enabled:
+        assert compile_config is not None
         apply_compile(model, compile_config)
 
     dp_mesh_names = (
@@ -93,10 +88,10 @@ def parallelize_deepseekv3(
     apply_fsdp(
         model,
         dp_mesh,
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        param_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[parallelism.fsdp_mixed_precision_reduce],
         pp_enabled=parallel_dims.pp_enabled,
-        cpu_offload=training.enable_cpu_offload,
+        cpu_offload=parallelism.enable_fsdp_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
@@ -104,7 +99,7 @@ def parallelize_deepseekv3(
 
     logger.info("Applied fully_shard to the model")
 
-    if training.enable_cpu_offload:
+    if parallelism.enable_fsdp_cpu_offload:
         logger.info("Applied CPU Offloading to the model")
 
     return model
