@@ -190,6 +190,13 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
+        # Performance passes that may change numerics.
+        if config.compile.numerics_changing_optim:
+            from torchtitan.experiments.graph_trainer.performance_passes import (
+                annotate_rmsnorm_for_regional_inductor_pass,
+            )
+
+            passes.append(annotate_rmsnorm_for_regional_inductor_pass)
         passes.append(regional_inductor_pass)
         if use_cudagraph:
             # Must run before custom_codegen_pass (last in pre_passes)

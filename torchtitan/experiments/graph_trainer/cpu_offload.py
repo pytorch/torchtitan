@@ -484,57 +484,71 @@ def defer_offload_waits(
     wait_offload_map: dict[Node, Node],
     n_layers: int = 1,
 ) -> int:
-    """Defer each forward wait_tensor N layers past the last consumer.
+    """Defer each forward wait_tensor N regions past the last consumer.
 
     Each forward wait_tensor synchronizes the D2H transfer and frees GPU
-    storage. Deferring it past the last consumer gives extra layers of
-    compute to overlap with the D2H copy.
+    storage. Deferring it past the last consumer gives extra compute
+    to overlap with the D2H copy.
+
+    Regions are contiguous groups of forward compute nodes with the same
+    layer_id. Non-layer segments (embeddings, lm_head, loss) form their
+    own regions, so waits can be deferred across layer boundaries.
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
         wait_offload_map: Mapping from offloaded node to its wait_tensor node.
-        n_layers: Number of layers to defer past the last consumer.
+        n_layers: Number of regions to defer past the last consumer.
 
     Returns the number of wait nodes deferred.
     """
-    # Find the last forward compute node per layer (excluding AO ops).
-    layer_last_fwd_node: dict[int, Node] = {}
-    for n in gm.graph.nodes:
-        if n.op == "call_function" and not _is_backward_node(n):
-            lid = _get_layer_id(n)
-            if lid != _NOT_IN_LAYERS and n.target not in _AO_OPS:
-                layer_last_fwd_node[lid] = n
+    # Build forward region anchors (last compute node per contiguous region)
+    # and a mapping from each forward compute node to its region index.
+    # Stop at the first backward node: non-backward utility ops (e.g.
+    # _get_submesh) can appear after the backward section and must not
+    # be treated as forward anchors.
+    fwd_anchors: list[Node] = []
+    node_to_region_idx: dict[Node, int] = {}
+    current_layer = None
+    region_idx = -1
+    last_node = None
 
-    # Build next-layer map for cross-layer deferral.
-    sorted_layers = sorted(layer_last_fwd_node.keys())
-    next_layer_map: dict[int, int] = {}
-    for i in range(len(sorted_layers) - 1):
-        next_layer_map[sorted_layers[i]] = sorted_layers[i + 1]
+    for n in gm.graph.nodes:
+        if n.op == "call_function" and _is_backward_node(n):
+            break
+        if n.op != "call_function":
+            continue
+        if n.target in _AO_OPS:
+            continue
+        lid = _get_layer_id(n)
+        if lid != current_layer:
+            if last_node is not None:
+                fwd_anchors.append(last_node)
+            region_idx += 1
+            current_layer = lid
+        node_to_region_idx[n] = region_idx
+        last_node = n
+
+    if last_node is not None:
+        fwd_anchors.append(last_node)
 
     deferred = 0
     for node, wait_node in wait_offload_map.items():
-        layer_id = _get_layer_id(node)
-        if layer_id == _NOT_IN_LAYERS:
+        consumer_idx = node_to_region_idx.get(node)
+        if consumer_idx is None:
             continue
 
-        # If storage chain extends to a later layer (cross-layer views),
-        # use the latest consumer layer as the base.
+        # If storage chain extends to a later region (cross-layer views),
+        # use the latest consumer region.
         chain_nodes, _ = _get_storage_chain(node)
         real_consumers = {n for n in chain_nodes if n.target not in _AO_OPS}
-        consumer_layer = layer_id
         for c in real_consumers:
-            cl = _get_layer_id(c)
-            if cl != _NOT_IN_LAYERS:
-                consumer_layer = max(consumer_layer, cl)
+            idx = node_to_region_idx.get(c)
+            if idx is not None:
+                consumer_idx = max(consumer_idx, idx)
 
-        # Defer N layers past consumer layer if possible.
-        defer_layer = consumer_layer
-        for _ in range(n_layers):
-            defer_layer = next_layer_map.get(defer_layer, defer_layer)
-        if defer_layer not in layer_last_fwd_node:
-            continue
-
-        anchor = layer_last_fwd_node[defer_layer]
+        # Defer N regions past the consumer.
+        target_idx = min(consumer_idx + n_layers, len(fwd_anchors) - 1)
+        anchor = fwd_anchors[target_idx]
         wait_node.args = (*wait_node.args[:2], anchor)
         anchor.append(wait_node)
         deferred += 1
@@ -548,12 +562,44 @@ def prefetch_reloads(
 ) -> None:
     """Move ao.reload nodes N layers earlier in the backward for prefetching.
 
-    For each ao.reload serving layer L's backward, moves it to just before
-    layer (L + n_layers)'s first backward node. The corresponding
-    ao.wait_tensor stays in place, so synchronization still happens just
-    before the data is needed. This overlaps the H2D transfer with N layers
-    of backward compute.
+    Counts by layer transitions rather than raw regions, because
+    _NOT_IN_LAYERS gradient accumulation nodes are interleaved between
+    layer-specific backward nodes, creating many micro-regions per layer.
+
+    Non-layer segments (loss backward, lm_head backward) are reachable
+    when the target goes past all layers — e.g. prefetching the last
+    layer's reloads into loss backward.
+
+    The corresponding ao.wait_tensor stays in place, so synchronization
+    still happens just before the data is needed.
     """
+    # Build backward region anchors: first compute node per contiguous region.
+    bwd_anchors: list[Node] = []
+    layer_to_bwd_idx: dict[int, int] = {}
+    current_layer = None
+
+    for n in gm.graph.nodes:
+        if n.op != "call_function" or not _is_backward_node(n):
+            continue
+        if n.target in _AO_OPS:
+            continue
+        lid = _get_layer_id(n)
+        if lid != current_layer:
+            bwd_anchors.append(n)
+            if lid != _NOT_IN_LAYERS and lid not in layer_to_bwd_idx:
+                layer_to_bwd_idx[lid] = len(bwd_anchors) - 1
+            current_layer = lid
+
+    if not bwd_anchors:
+        return
+
+    # Build layer order for counting by layer transitions.
+    # Sorted by bwd_idx ascending = backward execution order (descending layer ID).
+    bwd_layer_order = sorted(
+        layer_to_bwd_idx.keys(), key=lambda lid: layer_to_bwd_idx[lid]
+    )
+    layer_pos_in_bwd = {lid: i for i, lid in enumerate(bwd_layer_order)}
+
     reload_info: list[tuple[Node, int]] = []
     for node in gm.graph.nodes:
         if not (
@@ -562,35 +608,31 @@ def prefetch_reloads(
             and _is_backward_node(node)
         ):
             continue
-
         layer_id = _get_reload_layer(node)
-        if layer_id != _NOT_IN_LAYERS:
+        if layer_id in layer_to_bwd_idx:
             reload_info.append((node, layer_id))
 
     if not reload_info:
         return
 
-    # Find first backward compute node per layer (skip ao ops so we
-    # anchor to real compute, not previously-inserted reload/wait nodes).
-    layer_first_bwd: dict[int, Node] = {}
-    for node in gm.graph.nodes:
-        if node.op != "call_function" or not _is_backward_node(node):
-            continue
-        if node.target in _AO_OPS:
-            continue
-        lid = _get_layer_id(node)
-        if lid != _NOT_IN_LAYERS and lid not in layer_first_bwd:
-            layer_first_bwd[lid] = node
-
-    max_layer = max(layer_first_bwd.keys())
-
     moved = 0
     for reload_node, layer_id in reload_info:
-        target_layer = min(layer_id + n_layers, max_layer)
-        if target_layer == layer_id or target_layer not in layer_first_bwd:
+        pos = layer_pos_in_bwd[layer_id]
+        target_layer_pos = pos - n_layers
+
+        if target_layer_pos < 0:
+            # Gone past all layers — use the first backward region
+            # (e.g. loss_bw), enabling cross-layer-boundary prefetch.
+            target_idx = 0
+        else:
+            target_layer = bwd_layer_order[target_layer_pos]
+            target_idx = layer_to_bwd_idx[target_layer]
+
+        current_idx = layer_to_bwd_idx[layer_id]
+        if target_idx >= current_idx:
             continue
 
-        layer_first_bwd[target_layer].prepend(reload_node)
+        bwd_anchors[target_idx].prepend(reload_node)
         moved += 1
 
     if moved > 0:

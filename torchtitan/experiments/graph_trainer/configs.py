@@ -65,6 +65,10 @@ class GraphTrainerCompileConfig(CompileConfig):
             bitwise numerics compared to regional/interpreted execution.
     """
 
+    numerics_changing_optim: bool = False
+    """Enable passes that improve performance but may change numerics
+    compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
+
     enable_cudagraph: bool = True
     """When False, skip the cudagraph pass even if the graph is compatible."""
 
