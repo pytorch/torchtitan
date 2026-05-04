@@ -344,6 +344,7 @@ def parallelize_qwen3_vl(
 
     # Apply torch.compile after AC wrapping and before FSDP
     if model_compile_enabled:
+        assert compile_config is not None
         apply_compile(model, compile_config)
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]

@@ -97,6 +97,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
+        assert compile_config is not None
         apply_compile(model, compile_config)
 
     dp_mesh_names = (
