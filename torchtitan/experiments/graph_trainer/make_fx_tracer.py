@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import copy
+from collections import defaultdict
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -260,6 +262,215 @@ def extract_module_state(mod: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
+def extract_train_state(
+    module: nn.Module | None = None,
+    optimizer: "torch.optim.Optimizer | None" = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, Any] | None]:
+    """Return ``(model_state, optim_state)`` for ``minimal_fx_tracer``.
+
+    ``model_state`` is the merged parameter/buffer dict (empty if ``module``
+    is ``None``). ``optim_state`` is ``optimizer.state_dict()`` (``None`` if
+    ``optimizer`` is ``None``). Both are sampled from the live module/optimizer,
+    so callers can reuse this helper to refresh state at runtime.
+    """
+    model_state = extract_module_state(module) if module is not None else {}
+    optim_state = optimizer.state_dict() if optimizer is not None else None
+    return model_state, optim_state
+
+
+def _prepare_optimizer_reparametrization(
+    optimizer: "torch.optim.Optimizer",
+    parameters_and_buffers: dict[str, torch.Tensor],
+    optimizer_state_dict: dict[str, Any],
+):
+    """Validate and normalize optimizer state for ``_reparametrize_optimizer``.
+
+    This follows the same structural assumptions as DCP-compatible optimizers,
+    but consumes the raw ``optimizer.state_dict()`` format: ``state`` is keyed
+    by packed parameter ids and each param group contains the live optimizer
+    group fields plus a packed ``params`` list whose order matches
+    ``optimizer.param_groups``.
+
+    TODO: remove this local copy and switch to the upstream
+    ``torch.nn.utils._reparametrize_optimizer`` helper once
+    https://github.com/pytorch/pytorch/pull/181643 lands.
+    """
+    if not optimizer.state:
+        raise RuntimeError(
+            "_reparametrize_optimizer requires initialized optimizer state."
+        )
+    if not isinstance(optimizer_state_dict, dict):
+        raise RuntimeError(
+            "_reparametrize_optimizer requires a DCP-style optimizer state_dict."
+        )
+
+    state = optimizer_state_dict.get("state")
+    param_groups = optimizer_state_dict.get("param_groups")
+    if not isinstance(state, dict) or not isinstance(param_groups, list):
+        raise RuntimeError(
+            "_reparametrize_optimizer requires an optimizer.state_dict()-style "
+            "state_dict with 'state' and 'param_groups' entries."
+        )
+    if any(isinstance(name, torch.Tensor) for name in state):
+        raise RuntimeError(
+            "_reparametrize_optimizer requires optimizer.state_dict()-style "
+            "state keyed by packed parameter ids."
+        )
+    if len(optimizer.param_groups) != len(param_groups):
+        raise RuntimeError(
+            "optimizer_state_dict has a different number of parameter groups than "
+            "the live optimizer."
+        )
+
+    group_rebind_infos = []
+    # Raw optimizer state_dicts address parameters by packed integer ids, so we
+    # align explicit parameter tensors with optimizer.param_groups by order.
+    # Example: if param_groups[*]["params"] is [[0, 1], [2]] and
+    # parameters_and_buffers.values() is [fake_p0, fake_p1, fake_p2], then the
+    # first optimizer group is rebound to [fake_p0, fake_p1] and the second to
+    # [fake_p2].
+    flat_parameters = list(parameters_and_buffers.values())
+    flat_param_offset = 0
+    packed_param_ids: set[int] = set()
+    for idx, (group, saved_group) in enumerate(
+        zip(optimizer.param_groups, param_groups, strict=True)
+    ):
+        if not isinstance(saved_group, dict):
+            raise RuntimeError(
+                "_reparametrize_optimizer requires each optimizer param group "
+                "to be a dictionary."
+            )
+        names = saved_group.get("params")
+        if not isinstance(names, list) or not all(
+            isinstance(param_id, int) for param_id in names
+        ):
+            raise RuntimeError(
+                "_reparametrize_optimizer requires optimizer.state_dict()-style "
+                "param_groups[*]['params'] entries keyed by packed parameter ids."
+            )
+        if len(group["params"]) != len(names):
+            raise RuntimeError(
+                "optimizer_state_dict param group does not match the size of "
+                f"live optimizer param group {idx}."
+            )
+        next_offset = flat_param_offset + len(names)
+        if next_offset > len(flat_parameters):
+            raise RuntimeError(
+                "_reparametrize_optimizer requires the explicit parameter state to "
+                "match optimizer.param_groups ordering."
+            )
+        # Slice out the explicit tensors that should back this optimizer group.
+        rebind_params = flat_parameters[flat_param_offset:next_offset]
+        flat_param_offset = next_offset
+
+        for param_id in names:
+            packed_param_ids.add(param_id)
+            param_state = state.get(param_id, {})
+            if not isinstance(param_state, dict):
+                raise RuntimeError(
+                    "_reparametrize_optimizer requires per-parameter optimizer "
+                    "state entries to be dictionaries."
+                )
+
+        missing_group_keys = [
+            key for key in saved_group if key != "params" and key not in group
+        ]
+        if missing_group_keys:
+            raise RuntimeError(
+                "_reparametrize_optimizer requires optimizer.state_dict()-style "
+                "param group keys to match the live optimizer group keys. "
+                f"Missing live keys for group {idx}: {missing_group_keys}"
+            )
+
+        group_rebind_infos.append(
+            (
+                group,  # live optimizer group to mutate
+                saved_group,  # serialized group values to install temporarily
+                rebind_params,  # explicit tensors that replace group["params"]
+                {
+                    key: group[key] for key in saved_group if key != "params"
+                },  # restore data
+            )
+        )
+
+    if flat_param_offset != len(flat_parameters):
+        raise RuntimeError(
+            "_reparametrize_optimizer requires the explicit parameter state to "
+            "match optimizer.param_groups ordering."
+        )
+
+    if any(key not in packed_param_ids for key in state):
+        raise RuntimeError(
+            "_reparametrize_optimizer requires optimizer.state_dict()-style state "
+            "to contain only per-parameter entries keyed by packed parameter ids."
+        )
+    return state, group_rebind_infos
+
+
+@contextlib.contextmanager
+def _reparametrize_optimizer(
+    optimizer: "torch.optim.Optimizer",
+    parameters_and_buffers: dict[str, torch.Tensor],
+    optimizer_state_dict: dict[str, Any],
+):
+    """Temporarily rebind an optimizer to explicit parameter tensors.
+
+    ``optimizer_state_dict`` must be in the raw ``optimizer.state_dict()``
+    format. This helper assumes a DCP-compatible optimizer structure, but it
+    consumes the optimizer-native packed-param-id representation rather than
+    DCP's FQN-keyed exported state. Tensor values in the per-parameter
+    optimizer state are shared (not cloned), so in-place ops on existing
+    entries (e.g. ``exp_avg.add_(...)``) propagate back to
+    ``optimizer_state_dict``. The per-parameter state dicts themselves are
+    shallow-copied, so structural changes made during the trace (new keys,
+    re-bound tensors) stay local and do not pollute ``optimizer_state_dict``.
+
+    TODO: remove this local copy and switch to the upstream
+    ``torch.nn.utils._reparametrize_optimizer`` helper once
+    https://github.com/pytorch/pytorch/pull/181643 lands.
+    """
+    state, group_rebind_infos = _prepare_optimizer_reparametrization(
+        optimizer, parameters_and_buffers, optimizer_state_dict
+    )
+
+    original_state = optimizer.state
+    original_group_params = [group["params"] for group in optimizer.param_groups]
+
+    try:
+        rebind_state: defaultdict[torch.Tensor, Any] = defaultdict(dict)
+
+        for group, saved_group, rebind_params, _ in group_rebind_infos:
+            # Rebind the live optimizer group to the explicit tensors and saved
+            # group metadata for the trace region.
+            group["params"] = rebind_params
+            for key, value in saved_group.items():
+                if key == "params":
+                    continue
+                group[key] = value
+
+            for rebind_param, param_id in zip(
+                group["params"], saved_group["params"], strict=True
+            ):
+                # Re-key per-parameter optimizer state from packed ids to the
+                # rebound parameter tensors. Shallow-copy the per-param dict so
+                # tensor values are shared (in-place ops propagate) but
+                # structural mutations during the trace stay local.
+                rebind_state[rebind_param] = dict(state.get(param_id, {}))
+
+        optimizer.state = rebind_state
+        yield
+    finally:
+        # Restore the original live optimizer object exactly.
+        for group, params in zip(
+            optimizer.param_groups, original_group_params, strict=True
+        ):
+            group["params"] = params
+        for group, _, _, saved_values in group_rebind_infos:
+            for key, value in saved_values.items():
+                group[key] = value
+        optimizer.state = original_state
+
+
 @dataclass
 class TracedResult:
     """Execution metadata returned by :func:`minimal_fx_tracer`.
@@ -267,7 +478,7 @@ class TracedResult:
     Attributes:
         gm: The traced FX graph as a pure function of flat tensors.
         example_inputs: Trace-time fake flat inputs used by downstream graph passes.
-        state_fqns: Trace-time state keys.
+        state_fqns: Trace-time module parameter/buffer FQNs.
         num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
         input_subclass_layouts: Subclass unwrap/rewrap metadata for inputs.
         num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
@@ -290,8 +501,11 @@ class TracedResult:
         """Number of leading graph inputs with stable tensor addresses.
 
         Parameters and buffers (the state entries) have fixed addresses across
-        training steps.  Each may expand to multiple plain tensors after
-        subclass unwrapping (e.g. DTensor -> inner tensors).
+        training steps. Each may expand to multiple plain tensors after
+        subclass unwrapping (e.g. DTensor -> inner tensors). Optimizer state
+        tensors (when an optimizer is passed to ``minimal_fx_tracer``) are
+        also stable across steps but are not included here, so cudagraph
+        copies them once per step rather than reusing stable addresses.
         """
         num_state = len(self.state_fqns)
         return sum(
@@ -302,30 +516,66 @@ class TracedResult:
         )
 
 
-def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
-    """Return a tracer for a stateless ``fn`` with explicit ``state`` input.
+def minimal_fx_tracer(
+    fn: Callable,
+    module: nn.Module | None = None,
+    optimizer: "torch.optim.Optimizer | None" = None,
+) -> Callable[..., TracedResult]:
+    """Return a tracer that captures ``fn`` with implicit module/optimizer state.
 
-    ``fn`` must be a plain callable (not an ``nn.Module``). The returned
-    callable expects ``state`` as the first positional argument, followed by
-    the traced user inputs::
+    The returned callable takes only the user-facing ``*args`` for ``fn``;
+    module parameters/buffers and optimizer state are extracted from the live
+    objects and threaded through the graph as static inputs::
 
-        traced_result = minimal_fx_tracer(train_step)(state, tokens, labels)
-        result = run_traced(traced_result, state, tokens, labels)
+        # Stateless function: no module, no optimizer.
+        traced = minimal_fx_tracer(fn)(*args)
 
-    The trace-time ``state`` and ``args`` must satisfy these constraints:
-    - ``state`` must be a ``dict[str, Tensor]`` of parameters/buffers
+        # Module-only: parameters/buffers extracted from `module` and
+        # reparametrized via stateless._reparametrize_module while tracing.
+        traced = minimal_fx_tracer(fn, module=model)(*args)
+
+        # Module + optimizer: optimizer state must already be initialized
+        # before tracing. The optimizer is reparametrized while tracing so
+        # `optimizer.step()` / `zero_grad()` calls inside `fn` are captured.
+        traced = minimal_fx_tracer(fn, module=model, optimizer=opt)(*args)
+
+    ``fn`` should reference ``module`` and ``optimizer`` from its enclosing
+    closure — passing them explicitly through ``args`` is invalid because
+    ``nn.Module`` and ``Optimizer`` instances are not pytree-able.
+
+    The trace-time ``args`` must satisfy these constraints:
+
     - all pytree leaves must be tensors or make_fx-safe primitives
       (``int``, ``float``, ``bool``, ``str``, ``None``)
-    - there must be no ``nn.Module`` instances in ``state`` or ``args``
+    - there must be no ``nn.Module`` instances in ``args``
 
     Tensor subclasses (for example ``DTensor``) are recursively unwrapped into
     plain tensors for tracing, and the layouts needed to rewrap them are stored
     in the returned :class:`TracedResult`.
     """
+    if optimizer is not None and module is None:
+        raise ValueError(
+            "minimal_fx_tracer: when 'optimizer' is provided, 'module' must "
+            "also be provided so optimizer parameters align with the module's "
+            "parameters."
+        )
 
-    def _trace_with_args(state: Any, *args: Any) -> TracedResult:
-        state_fqns = list(state.keys())
-        state_flat = list(state.values())
+    def _trace_with_args(*args: Any) -> TracedResult:
+        model_state, optim_state = extract_train_state(module, optimizer)
+        state_fqns = list(model_state.keys())
+
+        # Flatten state and user args into a single tensor list. The state
+        # pytree spec lets us reconstruct the dicts inside the trace function
+        # so we can hand them to the reparametrize context managers. When no
+        # optimizer is provided, only flatten model_state — pytree treats
+        # ``None`` as a leaf, which would otherwise emit a non-tensor graph
+        # input that the cudagraph wrapper rejects.
+        state_tree: Any = (
+            model_state if optim_state is None else (model_state, optim_state)
+        )
+        state_flat, state_spec = pytree.tree_flatten(state_tree)
+        num_state_inputs = len(state_flat)
+
         user_args = list(args)
         user_args_flat, user_args_spec = pytree.tree_flatten(user_args)
 
@@ -334,8 +584,8 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             if isinstance(leaf, nn.Module):
                 raise ValueError(
                     "minimal_fx_tracer requires explicit tensor state, not nn.Module "
-                    "instances. Use trace_train_step(...) for the reference "
-                    "train-step wrapper."
+                    "instances. Capture nn.Modules in fn's closure or pass them "
+                    "via the 'module' kwarg."
                 )
             if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
                 raise ValueError(
@@ -373,13 +623,36 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
             output_layouts = {}
 
             wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
-            state_wrapped = wrapped[: len(state_flat)]
-            user_flat = wrapped[len(state_flat) :]
+            state_wrapped = wrapped[:num_state_inputs]
+            user_flat = wrapped[num_state_inputs:]
 
-            state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
+            state_t = pytree.tree_unflatten(list(state_wrapped), state_spec)
+            if optimizer is None:
+                model_state_t, optim_state_t = state_t, None
+            else:
+                model_state_t, optim_state_t = state_t
             user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
-            with torch.compiler._patch_engine_backward():
-                result = fn(state_for_fn, *user_list)
+
+            with contextlib.ExitStack() as stack:
+                if module is not None:
+                    stack.enter_context(
+                        stateless._reparametrize_module(module, model_state_t)
+                    )
+                if optimizer is not None:
+                    # _reparametrize_optimizer aligns parameters_and_buffers
+                    # values with optimizer.param_groups by order, so pass only
+                    # parameters (in module.named_parameters() order).
+                    params_for_optim = {
+                        name: model_state_t[name]
+                        for name, _ in module.named_parameters(remove_duplicate=False)
+                    }
+                    stack.enter_context(
+                        _reparametrize_optimizer(
+                            optimizer, params_for_optim, optim_state_t
+                        )
+                    )
+                stack.enter_context(torch.compiler._patch_engine_backward())
+                result = fn(*user_list)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
             num_flat_outputs = len(flat_outs)
@@ -442,25 +715,44 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
 def run_traced(
     traced_result: TracedResult,
-    state: Any,
     *args: Any,
+    module: nn.Module | None = None,
+    optimizer: "torch.optim.Optimizer | None" = None,
+    validate_module_fqns: bool = False,
 ) -> Any:
-    """Execute a traced graph with fresh parameters read from the live module.
+    """Execute a traced graph against the live module/optimizer state.
 
-    This is a reference implementation of traced-graph execution. It keeps the
-    state handling, subclass unwrapping, and output reconstruction logic
-    explicit instead of baking those semantics into ``TracedResult`` itself.
-    Runs under ``torch.no_grad()`` because the graph already contains explicit
-    backward ops (from ``torch.autograd.grad`` traced by make_fx). Without
-    this, PyTorch would build a redundant autograd graph on top, keeping all
-    forward intermediates alive via ``grad_fn`` references.
+    Mirrors :func:`minimal_fx_tracer`'s state extraction: parameters/buffers
+    are sampled from ``module`` and the optimizer state is sampled from
+    ``optimizer.state_dict()``. Runs under ``torch.no_grad()`` because the
+    graph already contains explicit backward ops (from ``torch.autograd.grad``
+    traced by make_fx). Without this, PyTorch would build a redundant autograd
+    graph on top, keeping all forward intermediates alive via ``grad_fn``
+    references.
     """
-    state_flat = list(state.values())
+    if optimizer is not None and module is None:
+        raise ValueError(
+            "run_traced: when 'optimizer' is provided, 'module' must also be "
+            "provided so optimizer parameters align with the module's parameters."
+        )
+
+    model_state, optim_state = extract_train_state(module, optimizer)
+    if validate_module_fqns and list(model_state.keys()) != traced_result.state_fqns:
+        raise ValueError(
+            "module has different parameter/buffer names than during tracing.\n"
+            f"  Traced: {traced_result.state_fqns}\n"
+            f"  Got:    {list(model_state.keys())}"
+        )
+    # Mirror the trace-time state-tree shape: skip optim_state when no
+    # optimizer was used, otherwise pytree would emit None as a leaf.
+    state_tree: Any = model_state if optim_state is None else (model_state, optim_state)
+    state_flat, _ = pytree.tree_flatten(state_tree)
+
     user_args_flat, _ = pytree.tree_flatten(list(args))
     if any(isinstance(leaf, nn.Module) for leaf in [*state_flat, *user_args_flat]):
         raise ValueError(
             "run_traced requires explicit tensor state, not nn.Module instances. "
-            "Use run_traced_train_step(...) for the reference train-step wrapper."
+            "Capture nn.Modules in fn's closure or pass them via the 'module' kwarg."
         )
     all_args = list(state_flat) + list(user_args_flat)
     flat_inputs, _ = _unwrap_subclasses(all_args)
@@ -473,57 +765,3 @@ def run_traced(
         traced_result.output_subclass_layouts,
     )
     return pytree.tree_unflatten(wrapped, traced_result.output_spec)
-
-
-def trace_train_step(fn: Callable) -> Callable[..., TracedResult]:
-    """Reference implementation for capturing a whole train step via the core API."""
-
-    def _trace_with_module(module: nn.Module, *args: Any) -> TracedResult:
-        if not isinstance(module, nn.Module):
-            raise ValueError(
-                "trace_train_step requires args[0] to be an nn.Module, "
-                f"got {type(module).__name__}."
-            )
-        if any(isinstance(arg, nn.Module) for arg in args):
-            raise ValueError(
-                "trace_train_step supports exactly one nn.Module at args[0]. "
-                "Additional nn.Module instances found in args[1:]."
-            )
-
-        def _stateless_fn(state: dict[str, torch.Tensor], *user_args: Any) -> Any:
-            with stateless._reparametrize_module(module, state):
-                return fn(module, *user_args)
-
-        return minimal_fx_tracer(_stateless_fn)(extract_module_state(module), *args)
-
-    return _trace_with_module
-
-
-def run_traced_train_step(
-    traced_result: TracedResult,
-    module: nn.Module,
-    *args: Any,
-    validate_module_fqns: bool = False,
-) -> Any:
-    """Reference implementation for executing a traced whole train step."""
-
-    if not isinstance(module, nn.Module):
-        raise ValueError(
-            "run_traced_train_step requires args[0] to be an nn.Module, "
-            f"got {type(module).__name__}."
-        )
-    if any(isinstance(arg, nn.Module) for arg in args):
-        raise ValueError(
-            "run_traced_train_step supports exactly one nn.Module at args[0]. "
-            "Additional nn.Module instances found in args[1:]."
-        )
-
-    # TODO: Consider stronger state validation once the long-term state API settles.
-    state = extract_module_state(module)
-    if validate_module_fqns and list(state.keys()) != traced_result.state_fqns:
-        raise ValueError(
-            "module has different parameter/buffer names than during tracing.\n"
-            f"  Traced: {traced_result.state_fqns}\n"
-            f"  Got:    {list(state.keys())}"
-        )
-    return run_traced(traced_result, state, *args)

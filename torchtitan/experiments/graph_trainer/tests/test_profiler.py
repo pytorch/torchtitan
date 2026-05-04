@@ -27,8 +27,8 @@ from torchtitan.experiments.graph_trainer.cudagraph import (
     get_cudagraph_annotations,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    run_traced_train_step,
-    trace_train_step,
+    minimal_fx_tracer,
+    run_traced,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
@@ -42,7 +42,7 @@ class TestKernelAnnotationsE2E(TestCase):
     """E2E test: trace fwd+bwd → insert annotations → cudagraph → profile → check trace."""
 
     def test_profiler_trace_has_module_fqn_annotations(self):
-        """After the full pipeline (trace_train_step → insert_kernel_annotations
+        """After the full pipeline (minimal_fx_tracer → insert_kernel_annotations
         → cudagraph → profile), the profiler trace should contain
         ``module_fqn`` fields on graphed kernel events."""
         if _is_tools_id_unavailable():
@@ -72,15 +72,15 @@ class TestKernelAnnotationsE2E(TestCase):
         x = torch.randn(4, 16, device="cuda")
         labels = torch.randn(4, 16, device="cuda")
 
-        # Trace fwd + loss + bwd via trace_train_step.
-        def fwd_bwd_step(model, inputs, labels):
+        # Trace fwd + loss + bwd via minimal_fx_tracer.
+        def fwd_bwd_step(inputs, labels):
             pred = model(inputs)
             loss = torch.nn.functional.mse_loss(pred, labels)
             params = [p for p in model.parameters() if p.requires_grad]
             grads = torch.autograd.grad(loss, params)
             return [loss] + list(grads)
 
-        traced = trace_train_step(fwd_bwd_step)(model, x, labels)
+        traced = minimal_fx_tracer(fwd_bwd_step, module=model)(x, labels)
 
         # Verify module_fqn metadata survived tracing.
         fqns_in_graph = set()
@@ -96,8 +96,8 @@ class TestKernelAnnotationsE2E(TestCase):
         traced.gm = apply_graph_passes(traced.gm, traced.example_inputs, passes)
 
         # Run: warmup + capture + replay.
-        run_traced_train_step(traced, model, x, labels)  # warmup + capture
-        run_traced_train_step(traced, model, x, labels)  # replay
+        run_traced(traced, x, labels, module=model)  # warmup + capture
+        run_traced(traced, x, labels, module=model)  # replay
 
         # Check annotations were captured.
         annotations = get_cudagraph_annotations()
@@ -118,7 +118,7 @@ class TestKernelAnnotationsE2E(TestCase):
                 torch.profiler.ProfilerActivity.CUDA,
             ],
         ) as prof:
-            run_traced_train_step(traced, model, x, labels)
+            run_traced(traced, x, labels, module=model)
             torch.cuda.synchronize()
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -132,7 +132,7 @@ class TestKernelAnnotationsE2E(TestCase):
         self.assertGreater(count, 0, "annotate_trace matched 0 events")
 
         # Verify module_fqn fields appear on graphed kernel events.
-        # Since trace_train_step traces fwd+bwd into a single graph,
+        # Since minimal_fx_tracer traces fwd+bwd into a single graph,
         # backward kernels (e.g. layer_norm_backward) should also carry
         # annotations from _copy_fwd_metadata_to_bw_nodes.
         fqns_in_trace = set()
