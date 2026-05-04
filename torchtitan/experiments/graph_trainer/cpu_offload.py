@@ -14,7 +14,7 @@ them around saved activations to reduce GPU memory.
 Offload pattern (forward):
     cpu = ao.offload(gpu_tensor)
     ... forward consumers use gpu_tensor ...
-    cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor, dep=last_consumer)
+    cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor)
     # wait_tensor frees gpu_tensor's storage after D2H completes
 
 Reload pattern (backward):
@@ -348,16 +348,17 @@ def apply_cpu_offload_pass(
     Reads ``node.meta["recompute"] is CheckpointPolicy.MUST_CPU_OFFLOAD`` (set by
     ``tag_all_offloadable_activations``) and inserts:
       Forward:  cpu = ao.offload(gpu_tensor)
-                cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor, dep=last_consumer)
+                cpu = ao.wait_tensor(cpu, keepalive=gpu_tensor)
       Backward: gpu = ao.reload(cpu, device)
                 gpu = ao.wait_tensor(gpu)
     Then redirects backward consumers to use the reloaded tensors.
 
     GPU storage is freed inside ``ao.wait_tensor`` when ``keepalive`` is
     provided: after the D2H sync completes, the keepalive tensor's storage
-    is released back to the allocator. The ``dep`` argument creates an
-    explicit scheduling dependency that prevents graph reordering passes
-    from moving the wait before the last forward consumer.
+    is released back to the allocator. The ``defer_offload_waits`` pass
+    physically moves each wait after the last consumer via
+    ``anchor.append()``, which is preserved by the stable topological
+    sort in the bucketing pass.
 
     Args:
         gm: The GraphModule containing the full fwd+bwd graph.
@@ -551,7 +552,6 @@ def defer_offload_waits(
         # Defer N regions past the consumer.
         target_idx = min(consumer_idx + n_layers, len(fwd_anchors) - 1)
         anchor = fwd_anchors[target_idx]
-        wait_node.args = (*wait_node.args[:2], anchor)
         anchor.append(wait_node)
         deferred += 1
 
