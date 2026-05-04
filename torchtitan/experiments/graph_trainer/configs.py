@@ -44,14 +44,19 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "cpu_offload_all"] = "default"
+    memory_policy: str = "default"
     """
-    Memory optimization policy for activation management (SAC, offload).
+    Memory optimization policy for activation management (SAC, offload, etc.).
+
+    Built-in policies:
         default: save all compute-intensive ops and FSDP all_gathers.
         eager: alternate mm ops between save/recompute, matching the eager
             AC policy in torchtitan.distributed.activation_checkpoint.
         cpu_offload_all: offload all eligible activations to CPU.
             Work in progress — for development and testing only.
+
+    Experiments can register additional policies via
+    ``AVAILABLE_MEMORY_POLICIES`` in ``graph_trainer/passes.py``.
     """
 
     inductor_compilation: Literal["regional", "full"] = "regional"

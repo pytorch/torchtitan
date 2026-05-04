@@ -796,39 +796,63 @@ def apply_sac_pass(
     return gm
 
 
+def _default_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that saves all compute-intensive ops and FSDP all_gathers."""
+    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        config.parallelism.fsdp_reshard_after_forward,
+        pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    )
+    policy_fn = _make_default_memory_policy(
+        fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+    )
+    apply_sac_pass(gm, policy_fn=policy_fn)
+    return gm
+
+
+def _eager_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that alternates mm ops between save/recompute."""
+    apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
+    return gm
+
+
+def _cpu_offload_all_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Tag all eligible activations for CPU offload."""
+    tag_all_offloadable_activations(gm)
+    return gm
+
+
 def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
-    """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
+    """Tag forward nodes with a memory management policy.
 
-    The ``config.compile.memory_policy`` selects the tagging strategy:
-        default: SAC with all compute-intensive ops saved.
-        eager: SAC alternating mm ops between save/recompute.
-        cpu_offload_all: tag all eligible activations for CPU offload.
-
-    Other memory policies combining SAC and CPU offload can be added here.
+    Dispatches to a registered policy function based on
+    ``config.compile.memory_policy``.  Policies are registered in
+    ``AVAILABLE_MEMORY_POLICIES`` — experiments can add their own
+    without modifying this function.
     """
     memory_policy = config.compile.memory_policy
-    if memory_policy == "default":
-        fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-            config.parallelism.fsdp_reshard_after_forward,
-            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    if memory_policy not in AVAILABLE_MEMORY_POLICIES:
+        raise ValueError(
+            f"Unknown memory_policy: {memory_policy!r}. "
+            f"Available: {sorted(AVAILABLE_MEMORY_POLICIES)}"
         )
-        default_policy_fn = functools.partial(
-            _make_default_memory_policy,
-            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-        )
-        apply_sac_pass(gm, policy_fn=default_policy_fn())
-    elif memory_policy == "eager":
-        apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
-    elif memory_policy == "cpu_offload_all":
-        tag_all_offloadable_activations(gm)
-    else:
-        raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
-
+    gm = AVAILABLE_MEMORY_POLICIES[memory_policy](gm, config=config)
     log_activation_memory_policy(gm)
     return gm
 
@@ -1016,4 +1040,15 @@ AVAILABLE_COMPILER_PASSES = {
 AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
+}
+
+# Registry for memory policies dispatched by tag_with_memory_policy_pass.
+# Experiments can register custom policies without modifying this file:
+#   from torchtitan.experiments.graph_trainer.passes import AVAILABLE_MEMORY_POLICIES
+#   AVAILABLE_MEMORY_POLICIES["my_policy"] = my_policy_fn
+# Each policy is a callable: (gm, *, config) -> gm
+AVAILABLE_MEMORY_POLICIES: dict[str, Callable] = {
+    "default": _default_memory_policy_pass,
+    "eager": _eager_memory_policy_pass,
+    "cpu_offload_all": _cpu_offload_all_memory_policy_pass,
 }
