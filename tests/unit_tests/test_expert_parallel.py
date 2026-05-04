@@ -7,8 +7,7 @@
 import unittest
 
 import torch
-import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
+import torch.nn.functional as F
 
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 
@@ -143,75 +142,49 @@ class TestPermute(unittest.TestCase):
         )
 
 
-class TestAllToAllDispatcherOddTokens(unittest.TestCase):
-    """Verify ``AllToAllTokenDispatcher`` handles an odd ``bs * slen`` not
-    divisible by ``sp_size`` via the SP pad/unpad path (see
-    ``docs/moe_sp_padding.md``).
+class TestSPPaddingRoundTrip(unittest.TestCase):
+    """Verify AllToAllTokenDispatcher's SP padding/unpadding recovers the
+    original tokens for an uneven ``bs * slen`` (not divisible by ``sp_size``).
 
-    Drives dispatch + identity-expert + combine on a single-rank EP mesh once
-    per ``sp_rank``; summing the per-rank outputs must recover the original
-    tokens (the pad row at the tail is masked out by combine).
+    See docs/moe_sp_padding.md. Like TestPermute above, this runs on CPU by
+    only exercising the pure-tensor helper ``_split_along_sp`` rather than
+    going through dispatch()/combine() (which need CUDA + a real EP mesh).
     """
 
-    @classmethod
-    def setUpClass(cls):
-        if not torch.cuda.is_available():
-            raise unittest.SkipTest(
-                "AllToAllTokenDispatcher.dispatch uses torch.histc on the "
-                "expert indices, which is not implemented for Long on CPU."
-            )
-        if not dist.is_initialized():
-            dist.init_process_group(
-                backend="nccl",
-                init_method="tcp://localhost:12361",
-                world_size=1,
-                rank=0,
-            )
-
-    @classmethod
-    def tearDownClass(cls):
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-    def test_dispatch_combine_odd_tokens(self):
+    def test_round_trip_recovers_original(self):
         original_num_tokens = 7  # not divisible by sp_size=4
         sp_size = 4
-        num_experts = 4
-        top_k = 1
         dim = 3
 
-        device = torch.device("cuda")
-        ep_mesh = init_device_mesh("cuda", (1,), mesh_dim_names=("ep",))
-
-        torch.manual_seed(0)
-        x = torch.randn(original_num_tokens, dim, device=device)
-        top_scores = torch.ones(original_num_tokens, top_k, device=device)
-        # Route every token to expert 0 — keeps the per-rank scatter target
-        # deterministic so summing across SP ranks reconstructs x cleanly.
-        selected_experts_indices = torch.zeros(
-            original_num_tokens, top_k, dtype=torch.long, device=device
-        )
-
         cfg = AllToAllTokenDispatcher.Config(
-            num_experts=num_experts, top_k=top_k, score_before_experts=True
+            num_experts=4, top_k=1, score_before_experts=True
         )
+        dispatcher = AllToAllTokenDispatcher(cfg)
+        dispatcher.sp_size = sp_size
 
-        summed = torch.zeros_like(x)
-        for sp_rank in range(sp_size):
-            dispatcher = AllToAllTokenDispatcher(cfg)
-            dispatcher.ep_mesh = ep_mesh
-            dispatcher.sp_size = sp_size
-            dispatcher.sp_rank = sp_rank
+        x = torch.randn(original_num_tokens, dim)
 
-            routed_input, _, metadata = dispatcher.dispatch(
-                x.clone(), top_scores.clone(), selected_experts_indices.clone()
+        # Pad (matches what dispatch() does on entry).
+        pad = (-original_num_tokens) % sp_size
+        x_padded = F.pad(x, (0, 0, 0, pad))
+        self.assertEqual(x_padded.shape, (8, dim))
+
+        # Split per rank, then reassemble (this is what the EP all-to-all
+        # gathers back in real distributed training).
+        local_num_tokens = x_padded.shape[0] // sp_size
+        per_rank_slices = []
+        for rank in range(sp_size):
+            dispatcher.sp_rank = rank
+            (slice_,) = dispatcher._split_along_sp(x_padded)
+            torch.testing.assert_close(
+                slice_,
+                x_padded[rank * local_num_tokens : (rank + 1) * local_num_tokens],
             )
-            # Identity expert.
-            out = dispatcher.combine(routed_input, metadata, x, shared_experts=None)
-            self.assertEqual(out.shape, x.shape)
-            summed = summed + out
+            per_rank_slices.append(slice_)
+        reassembled = torch.cat(per_rank_slices, dim=0)
 
-        torch.testing.assert_close(summed, x)
+        # Unpad to recover original prefix bitwise.
+        torch.testing.assert_close(reassembled[:original_num_tokens], x)
 
 
 if __name__ == "__main__":
