@@ -51,12 +51,13 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP",
-            "deepseek_v3_fsdp+ep_no_sp",
+            "DeepSeek V3 HSDP+EP",
+            "deepseek_v3_hsdp+ep_no_sp",
             ngpu=4,
         ),
         OverrideDefinitions(
@@ -117,21 +118,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "Qwen3 FSDP+TP+CP",
             "qwen3_fsdp+tp+cp",
             ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module qwen3 --config qwen3_moe_debug",
-                    "--parallelism.data_parallel_replicate_degree 2",
-                    "--parallelism.data_parallel_shard_degree 1",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--training.steps 1",
-                ],
-            ],
-            "Qwen3 MoE HSDP+TP+EP",
-            "qwen3_moe_hsdp+tp+ep",
-            ngpu=4,
         ),
         # Integration Test Cases for Llama 4
         # TODO: re-enable compile after fixing
