@@ -43,7 +43,6 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
     )
-    config.parallelism.expert_parallel_comm_backend = "hybridep"
     return config
 
 
