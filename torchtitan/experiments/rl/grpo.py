@@ -124,6 +124,8 @@ class Provisioner:
 
         def _bootstrap():
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+            # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
+            import torch  # noqa: F401
 
         return _bootstrap
 
