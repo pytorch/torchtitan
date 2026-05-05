@@ -73,7 +73,6 @@ class PolicyTrainer(Actor, Configurable):
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
-        compile: CompileConfig = field(default_factory=CompileConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: Configurable.Config = field(default_factory=Configurable.Config)
         ac_config: ActivationCheckpointConfig = field(
@@ -87,6 +86,7 @@ class PolicyTrainer(Actor, Configurable):
         config: Config,
         *,
         model_spec: ModelSpec,
+        compile_config: CompileConfig,
         hf_assets_path: str = "",
         generator_dtype: str = "",
     ):
@@ -94,6 +94,7 @@ class PolicyTrainer(Actor, Configurable):
         init_logger()
 
         self.config = config
+        self.compile_config = compile_config
         self.loss_fn = config.loss.build()
 
         # Only cast if generator dtype differs from training dtype, otherwise
@@ -240,7 +241,7 @@ class PolicyTrainer(Actor, Configurable):
             parallel_dims=self.parallel_dims,
             training=config.training,
             parallelism=config.parallelism,
-            compile_config=config.compile,
+            compile_config=self.compile_config,
             ac_config=config.ac_config,
             dump_folder=config.dump_folder,
         )

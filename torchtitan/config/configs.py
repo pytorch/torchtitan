@@ -376,3 +376,9 @@ class DebugConfig:
 
     save_config_file: str | None = None
     """Path to save job config into"""
+
+    enable_structured_logging: bool = True
+    """Whether to enable the structured per-rank trace logger (see
+    ``torchtitan.observability.structured_logger``). When False, all
+    ``log_trace_span`` / ``log_trace_instant`` / ``log_trace_scalar`` calls
+    are no-ops. Disable to fully eliminate trace overhead."""

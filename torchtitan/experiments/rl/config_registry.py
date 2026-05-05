@@ -19,11 +19,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.experiments.rl.actors.generator import (
-    GeneratorCompileConfig,
-    SamplingConfig,
-    VLLMGenerator,
-)
+from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
@@ -39,6 +35,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         num_steps=10,
         num_prompts_per_step=5,
         num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -55,15 +52,10 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
@@ -87,6 +79,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         num_steps=10,
         num_prompts_per_step=5,
         num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -103,15 +96,10 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
@@ -136,6 +124,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         num_steps=10,
         num_prompts_per_step=5,
         num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -152,15 +141,10 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 tensor_parallel_degree=8,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
@@ -183,6 +167,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
         num_steps=5,
         num_prompts_per_step=5,
         num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -199,14 +184,9 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
@@ -398,6 +378,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         num_steps=10,
         num_prompts_per_step=5,
         num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -417,16 +398,11 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             debug=batch_invariant_config,
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
