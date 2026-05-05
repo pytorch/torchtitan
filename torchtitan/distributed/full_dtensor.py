@@ -52,8 +52,25 @@ def validate_config(
                 "Use FlexAttention + CP or disable CP."
             )
 
+    spmd_size = (
+        parallel_dims.dp_replicate
+        * parallel_dims.dp_shard
+        * parallel_dims.cp
+        * parallel_dims.tp
+        * parallel_dims.ep
+    )
+    if spmd_size == 1:
+        raise NotImplementedError(
+            "full_dtensor requires at least one SPMD-axis "
+            "(dp_replicate / dp_shard / cp / tp / ep) > 1. "
+            "PP-only configurations are not supported under full_dtensor "
+            "because all dense SPMD axes collapse to size 1, leaving "
+            "Shard placements on degenerate axes that DTensor reshape / "
+            "flatten ops reject. Disable full_dtensor for PP-only runs."
+        )
 
-def get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
+
+def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
     """Build ``DataParallelMeshDims`` for dense (non-MoE) parameters."""
     shard_axes: list[str] = []
     if parallel_dims.dp_shard_enabled:
@@ -114,7 +131,7 @@ def resolve_fsdp_mesh(
             or parallel_dims.dp_replicate_enabled
             or parallel_dims.cp_enabled
         )
-        dp_mesh_axes = get_dp_mesh_axes(parallel_dims) if any_dp_storage else None
+        dp_mesh_axes = _get_dp_mesh_axes(parallel_dims) if any_dp_storage else None
         return spmd_mesh, dp_mesh_axes
     else:
         dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
