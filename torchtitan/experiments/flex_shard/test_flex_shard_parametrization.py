@@ -267,6 +267,121 @@ class TestDistributedParametrization(unittest.TestCase):
 
         torch.testing.assert_close(output, ref_output)
 
+    def test_eager_missing_batched_hook_raises(self):
+        """Eager Shard buckets must not fall back to per-param functional AG."""
+        from torchtitan.experiments.flex_shard import BucketSpec
+
+        class TwoLinears(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = nn.Linear(8, 8, bias=False, device="cuda")
+                self.b = nn.Linear(8, 8, bias=False, device="cuda")
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        mesh = self._init_mesh()
+        model = TwoLinears()
+        for param in model.parameters():
+            torch.distributed.broadcast(param.data, src=0)
+
+        self._flex_shard(
+            model,
+            mesh,
+            buckets=[BucketSpec(["a.*", "b.*"], reshard_after_forward=True)],
+        )
+
+        x = torch.randn(2, 8, device="cuda")
+        torch.distributed.broadcast(x, src=0)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "fall back to per-parameter _c10d_functional collectives",
+        ):
+            model(x)
+
+    def test_eager_buckets_share_root_comm_context(self):
+        """All eager Shard buckets share one root-owned AG/RS stream context."""
+        from torchtitan.experiments.flex_shard import BucketSpec
+
+        class TwoLinears(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = nn.Linear(8, 8, bias=False, device="cuda")
+                self.b = nn.Linear(8, 8, bias=False, device="cuda")
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        mesh = self._init_mesh()
+        model = TwoLinears()
+        for param in model.parameters():
+            torch.distributed.broadcast(param.data, src=0)
+
+        self._flex_shard(
+            model,
+            mesh,
+            buckets=[
+                BucketSpec(["a.*"], reshard_after_forward=True),
+                BucketSpec(["b.*"], reshard_after_forward=True),
+            ],
+        )
+
+        self.assertEqual(len(model.eager_comm_contexts), 1)
+        context = next(iter(model.eager_comm_contexts.values()))
+        self.assertEqual(len(context.buckets), 2)
+        self.assertIs(context.buckets[0].storage._module, model)
+        self.assertIs(context.buckets[1].storage._module, model)
+
+        x = torch.randn(2, 8, device="cuda")
+        torch.distributed.broadcast(x, src=0)
+        model(x).sum().backward()
+
+    def test_eager_reshard_after_forward_uses_functional_bucket(self):
+        """RAF eager buckets return non-leaf full params and autograd RS grads."""
+        from torchtitan.experiments.flex_shard import BucketSpec
+
+        class UsesWeight(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.randn(4, 8, device="cuda"))
+                self.weight_was_leaf = True
+                self.weight_had_grad_fn = False
+
+            def forward(self, x):
+                weight = self.weight
+                self.weight_was_leaf = weight.is_leaf
+                self.weight_had_grad_fn = weight.grad_fn is not None
+                return x @ weight.t()
+
+        mesh = self._init_mesh()
+        model = UsesWeight()
+        torch.distributed.broadcast(model.weight.data, src=0)
+
+        self._flex_shard(
+            model,
+            mesh,
+            buckets=[BucketSpec(["*"], reshard_after_forward=True)],
+        )
+
+        x = torch.randn(2, 8, device="cuda")
+        torch.distributed.broadcast(x, src=0)
+        output = model(x)
+        self.assertFalse(model.weight_was_leaf)
+        self.assertTrue(model.weight_had_grad_fn)
+
+        output.sum().backward()
+        expected_full_grad = torch.ones_like(output).t() @ x
+        expected_local_grad = self._expected_chunk(
+            expected_full_grad,
+            self.world_size,
+            0,
+            self.rank,
+        )
+        torch.testing.assert_close(
+            model._parameters["weight"].grad,
+            expected_local_grad,
+        )
+
     def test_global_spmd_mesh_param_access(self):
         """Global SPMD mesh path derives the DP mesh and rewraps DTensor params."""
         from torch.distributed.device_mesh import init_device_mesh
