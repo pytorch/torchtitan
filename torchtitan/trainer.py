@@ -698,8 +698,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             assert len(model_parts) == 1
             with self.train_context():
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                # Plain cross_entropy doesn't accept DTensor; unwrap when
-                # the loss path is neither full_dtensor nor loss_parallel.
+                # Under non-full_dtensor, labels stay as plain tensors. See
+                # ``cross_entropy_loss`` for why pred must also be plain.
                 # Remove once non-full_dtensor is no longer supported.
                 if (
                     isinstance(pred, DTensor)

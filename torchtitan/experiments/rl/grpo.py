@@ -35,6 +35,7 @@ from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.config import Configurable, ParallelismConfig
+from torchtitan.config.configs import CompileConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
@@ -193,6 +194,9 @@ class RLTrainer(Configurable):
 
         log_samples: bool = False
         """Log first completion per episode during training and validation."""
+
+        compile: CompileConfig = field(default_factory=CompileConfig)
+        """torch.compile config shared by trainer and generator."""
 
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
@@ -414,6 +418,7 @@ class RLTrainer(Configurable):
             model_spec=config.model_spec,
             hf_assets_path=config.hf_assets_path,
             generator_dtype=config.generator.model_dtype,
+            compile_config=config.compile,
         )
 
         self.generator = generator_mesh.spawn(
@@ -422,6 +427,11 @@ class RLTrainer(Configurable):
             config.generator,
             model_spec=config.model_spec,
             model_path=config.hf_assets_path,
+            compile_config=config.compile,
+            max_num_seqs=max(
+                config.num_prompts_per_step * config.generator.sampling.n,
+                config.num_validation_samples,
+            ),
         )
 
         # Initialize TorchStore for weight sync between trainer and generator.
