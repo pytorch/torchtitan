@@ -14,6 +14,7 @@ TorchTitan models for vLLM.
 import dataclasses
 
 import torch
+import torch._dynamo
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed._tensor import DTensor, Replicate
@@ -23,6 +24,7 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
@@ -59,6 +61,7 @@ _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 # whose repr() uses unqualified class names not available in the generated
 # code's exec namespace (which only has `import torch`).
 _original_node_ref = _codegen._node_ref
+
 
 # TODO: Followup with core vLLM fix
 # https://github.com/pytorch/torchtitan/issues/3067
@@ -179,6 +182,7 @@ class TorchTitanVLLMModelWrapper(Module):
         model_spec: ModelSpec,
         vllm_config: VllmConfig,
         prefix: str = "",
+        compile_config: CompileConfig,
     ):
         super().__init__()
 
@@ -250,18 +254,25 @@ class TorchTitanVLLMModelWrapper(Module):
         self.rope_config = self.config.rope
 
         # Apply parallelism using the model's own parallelize function.
-        from torchtitan.config import (
-            ActivationCheckpointConfig,
-            CompileConfig,
-            TrainingConfig,
-        )
+        # AC is disabled; skip_dp=True skips FSDP. compile_config is passed
+        # through so apply_compile runs per-layer after TP.
+        from torchtitan.config import ActivationCheckpointConfig
 
-        self.parallelize_fn(
-            self.model,
+        # With TP, collectives may return AsyncCollectiveTensor (overlap
+        # path) or plain Tensor (sync path) depending on timing.  Dynamo
+        # specializes on tensor type, so each switch triggers a
+        # recompile.  Because of this, the default recompile_limit (8) is
+        # too low; exceeding it fails under
+        # fullgraph=True so set to 10 for now
+        if compile_config.enable:
+            torch._dynamo.config.recompile_limit = 10
+
+        self.model = self.parallelize_fn(
+            model=self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
             parallelism=parallelism,
-            compile_config=CompileConfig(enable=False),
+            compile_config=compile_config,
             ac_config=ActivationCheckpointConfig(mode="none"),
             dump_folder="",
             skip_dp=True,
