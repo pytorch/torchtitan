@@ -114,11 +114,10 @@ class LocalTokenDispatcher(Configurable):
         metadata: LocalDispatchMetadata,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Reverse dispatch: score routed outputs and return scatter metadata.
+        """Score routed outputs and return with scatter metadata.
 
         Returns the scored routed output and scatter indices for the caller
-        to perform deterministic_scatter_add. This allows MoE.forward to
-        control the scatter_add initial buffer (e.g. shared_experts output).
+        to perform deterministic_scatter_add.
 
         Args:
             routed_output: (num_tokens * top_k, dim) expert outputs

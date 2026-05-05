@@ -400,11 +400,12 @@ class MoE(Module):
         )
 
         # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
+        # Called after self.experts to preserve the autograd temporal order.
         out = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x)
         if scatter_indices is not None:
             out = deterministic_scatter_add(out, scatter_indices, scored_output)
         else:
-            # DeepEP: un-routing handled internally, just add shared_out.
+            # DeepEP: un-routing handled internally
             out += scored_output
 
         return out.reshape(bs, slen, dim)

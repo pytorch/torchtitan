@@ -211,7 +211,7 @@ class GptOssGroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Dispatch tokens to experts, compute, and combine."""
         if isinstance(x, DTensor):
             x = x.to_local(grad_placements=(Partial(),))

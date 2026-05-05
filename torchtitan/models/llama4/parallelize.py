@@ -387,9 +387,6 @@ def apply_moe_ep_tp(
                     use_local_input=False,
                     output_layouts=(Replicate(),),
                     desired_output_layouts=(sp_layout,),
-                    # Keep MoE output as DTensor so the residual add
-                    # ``h + self.moe(...)`` composes with config-based
-                    # attention (which flows DTensors).
                     use_local_output=False,
                 ),
                 # replicate computation for the router
@@ -397,13 +394,12 @@ def apply_moe_ep_tp(
                     local_output_grad_placements=(Partial(),),
                 ),
                 # All-reduce routed expert output from Partial to Replicate
-                # on the TP mesh. GroupedExperts returns a local tensor
-                # (Partial across TP ranks); this wraps it as DTensor and
-                # reduces so it matches the shared_experts Replicate output.
+                # on the TP mesh. GroupedExperts returns (scored_output, scatter_indices);
+                # scored_output is Partial and needs all-reduce, scatter_indices passes through.
                 "moe.experts": PrepareModuleOutput(
-                    output_layouts=Partial(),
-                    desired_output_layouts=Replicate(),
-                    use_local_output=False,
+                    output_layouts=(Partial(), None),
+                    desired_output_layouts=(Replicate(), None),
+                    # use_local_output=False,
                 ),
             }
             # pyrefly: ignore [missing-attribute]
