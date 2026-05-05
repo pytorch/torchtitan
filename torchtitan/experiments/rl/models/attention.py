@@ -168,14 +168,14 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
                 num_seqs + 1, dtype=torch.int32, device=query.device
             )
             cu_seqlens_k[1:] = torch.cumsum(seqused_k, dim=0)
-        # FA3 + batch-invariant: fix num_splits=1 to prevent non-deterministic
-        # split-k reductions. FA2 is automatically batch-invariant and does
-        # not accept num_splits.
         extra_kwargs = {}
 
-        # Disable split_kv in Flash Attention to ensure bitwise identical output.
-        # see https://github.com/pytorch/pytorch/pull/176905
-        if is_in_batch_invariant_mode() and current_flash_attention_impl() == "FA3":
+        # Fix num_splits=1 to prevent non-deterministic split-k reductions
+        # and avoid NaN from the split-KV heuristic with paged KV.
+        # After pytorch/pytorch#179760, FA2 also accepts num_splits and
+        # auto-selects num_splits>1 for paged KV, which can produce NaN.
+        # Always set num_splits=1 for FA2 with paged KV.
+        if is_in_batch_invariant_mode() or current_flash_attention_impl() != "FA3":
             extra_kwargs["num_splits"] = 1
 
         if self.enable_gqa:
