@@ -296,12 +296,13 @@ class Module(nn.Module, Configurable):
             return fn
 
         lm = sharding_config.local_map
-        mesh, mesh_axis_names = resolve_shared_mesh(
+        resolved_mesh, mesh_axis_names = resolve_shared_mesh(
             lm.in_placements + lm.out_placements + lm.in_grad_placements,
             parallel_dims,
         )
-        if mesh is None:
+        if resolved_mesh is None:
             return fn
+        mesh = resolved_mesh  # narrow for closure capture
 
         def _resolve(p):
             if p is None:
