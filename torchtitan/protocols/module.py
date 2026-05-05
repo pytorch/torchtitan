@@ -17,7 +17,6 @@ from torch.distributed.tensor.experimental import local_map
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.protocols.sharding import (
-    demote_degenerate_shards,
     resolve_mesh,
     resolve_placements,
     resolve_shared_mesh,
@@ -241,9 +240,7 @@ class Module(nn.Module, Configurable):
             mesh, mesh_axis_names = resolve_mesh(axes, parallel_dims)
             if mesh is None:
                 continue
-            placements = demote_degenerate_shards(
-                resolve_placements(named_placements, mesh_axis_names), mesh
-            )
+            placements = resolve_placements(named_placements, mesh_axis_names)
             if isinstance(param, DTensor):
                 if tuple(param.placements) != tuple(placements):
                     raise ValueError(
@@ -267,9 +264,7 @@ class Module(nn.Module, Configurable):
             mesh, mesh_axis_names = resolve_mesh(axes, parallel_dims)
             if mesh is None:
                 continue
-            placements = demote_degenerate_shards(
-                resolve_placements(named_placements, mesh_axis_names), mesh
-            )
+            placements = resolve_placements(named_placements, mesh_axis_names)
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
@@ -302,14 +297,11 @@ class Module(nn.Module, Configurable):
         )
         if resolved_mesh is None:
             return fn
-        mesh = resolved_mesh  # narrow for closure capture
 
         def _resolve(p):
             if p is None:
                 return None
-            return demote_degenerate_shards(
-                resolve_placements(p, mesh_axis_names), mesh
-            )
+            return resolve_placements(p, mesh_axis_names)
 
         in_placements = tuple(_resolve(p) for p in lm.in_placements)
         out_placements = tuple(_resolve(p) for p in lm.out_placements)
@@ -319,7 +311,7 @@ class Module(nn.Module, Configurable):
             in_placements=in_placements,
             out_placements=out_placements,
             in_grad_placements=in_grad_placements,
-            device_mesh=mesh,
+            device_mesh=resolved_mesh,
             # Under full_dtensor, callers feed DTensors sharded on the full
             # SPMD mesh; local_map redistributes to the per-arg placements
             # declared above. Legacy path keeps the strict default so
@@ -374,14 +366,11 @@ class Module(nn.Module, Configurable):
                 continue
 
             if not isinstance(value, DTensor) and src_named_placements is not None:
-                layout = demote_degenerate_shards(
-                    resolve_placements(src_named_placements, mesh_axis_names), mesh
-                )
+                layout = resolve_placements(src_named_placements, mesh_axis_names)
                 grad_placements: tuple | None = None
                 if grad_named_placements is not None:
-                    grad_placements = demote_degenerate_shards(
-                        resolve_placements(grad_named_placements, mesh_axis_names),
-                        mesh,
+                    grad_placements = resolve_placements(
+                        grad_named_placements, mesh_axis_names
                     )
                 value = DTensor.from_local(
                     value,
@@ -392,9 +381,7 @@ class Module(nn.Module, Configurable):
                 )
 
             if dst_named_placements is not None and isinstance(value, DTensor):
-                desired = demote_degenerate_shards(
-                    resolve_placements(dst_named_placements, mesh_axis_names), mesh
-                )
+                desired = resolve_placements(dst_named_placements, mesh_axis_names)
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 
@@ -424,9 +411,7 @@ class Module(nn.Module, Configurable):
             return outputs
 
         if out_named_placements is not None:
-            desired = demote_degenerate_shards(
-                resolve_placements(out_named_placements, mesh_axis_names), mesh
-            )
+            desired = resolve_placements(out_named_placements, mesh_axis_names)
             if isinstance(outputs, DTensor) and outputs.placements != desired:
                 outputs = outputs.redistribute(placements=desired, async_op=True)
 
@@ -436,8 +421,8 @@ class Module(nn.Module, Configurable):
         # upstream local d_output is wrapped back as a DTensor with the
         # declared placement (e.g. Partial to skip a downstream all-reduce).
         if out_grad_named_placements is not None and isinstance(outputs, DTensor):
-            grad_placements = demote_degenerate_shards(
-                resolve_placements(out_grad_named_placements, mesh_axis_names), mesh
+            grad_placements = resolve_placements(
+                out_grad_named_placements, mesh_axis_names
             )
             outputs = outputs.to_local(grad_placements=grad_placements)
         return outputs

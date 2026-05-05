@@ -388,15 +388,15 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertTrue(parallel_dims.dp_shard_enabled)
 
 
-class TestSpmdMeshesAndModuleMeshLegacy(DTensorTestBase):
-    """spmd_meshes() and get_module_mesh() under non-full_dtensor."""
+class TestSpmdMeshesLegacy(DTensorTestBase):
+    """spmd_meshes() under non-full_dtensor."""
 
     @property
     def world_size(self):
         return 8
 
     @with_comms
-    def test_legacy_spmd_meshes_and_get_module_mesh(self):
+    def test_legacy_spmd_meshes(self):
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
@@ -418,28 +418,23 @@ class TestSpmdMeshesAndModuleMeshLegacy(DTensorTestBase):
             meshes = pd.spmd_meshes()
             flat = {axis for m in meshes for axis in (m.mesh_dim_names or ())}
             self.assertNotIn("dp_shard", flat)
-            # Dense mesh: dp_replicate and tp enabled; cp disabled (size 1).
+            # Dense mesh names ``fsdp`` (the storage axis) instead of
+            # ``dp_shard`` / ``cp`` under legacy.
             dense = next(m for m in meshes if "tp" in (m.mesh_dim_names or ()))
-            self.assertEqual(set(dense.mesh_dim_names), {"dp_replicate", "tp"})
-
-            # get_module_mesh under non-full_dtensor filters to {tp, ep}.
-            # A DP-only request is filtered out -> None.
-            self.assertIsNone(pd.get_module_mesh(["dp_replicate"]))
-            # Mixed request: TP survives, dp_replicate filtered out -> 1D TP mesh.
-            mesh = pd.get_module_mesh(["dp_replicate", "tp"])
-            self.assertIsNotNone(mesh)
-            self.assertEqual(mesh.mesh_dim_names, ("tp",))
+            self.assertEqual(
+                set(dense.mesh_dim_names), {"dp_replicate", "fsdp", "tp"}
+            )
 
 
-class TestSpmdMeshesAndModuleMeshFullDTensor(DTensorTestBase):
-    """spmd_meshes() and get_module_mesh() under full_dtensor."""
+class TestSpmdMeshesFullDTensor(DTensorTestBase):
+    """spmd_meshes() under full_dtensor."""
 
     @property
     def world_size(self):
         return 8
 
     @with_comms
-    def test_full_dtensor_spmd_meshes_and_get_module_mesh(self):
+    def test_full_dtensor_spmd_meshes(self):
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
@@ -460,13 +455,6 @@ class TestSpmdMeshesAndModuleMeshFullDTensor(DTensorTestBase):
             meshes = pd.spmd_meshes()
             dense = next(m for m in meshes if "tp" in (m.mesh_dim_names or ()))
             self.assertEqual(dense.mesh_dim_names, ("dp_replicate", "dp_shard", "tp"))
-
-            # get_module_mesh keeps DP/CP axes under full_dtensor.
-            mesh = pd.get_module_mesh(["dp_replicate", "dp_shard", "tp"])
-            self.assertIsNotNone(mesh)
-            self.assertEqual(mesh.mesh_dim_names, ("dp_replicate", "dp_shard", "tp"))
-            # Resolved mesh under full_dtensor must be one of the SPMD meshes.
-            self.assertIn(mesh, meshes)
 
 
 class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
