@@ -275,7 +275,7 @@ def apply_graph_passes(
             and before/after graphs to tlparse for each pass.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
-    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced")
+    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
     for pass_fn in passes:
         pass_name = (
             pass_fn.func.__name__
@@ -283,7 +283,7 @@ def apply_graph_passes(
             else pass_fn.__name__
         )
         if debug:
-            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}")
+            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
             before_snapshot = snapshot_graph(gm)
             start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
@@ -293,7 +293,7 @@ def apply_graph_passes(
         if debug:
             elapsed = time.perf_counter() - start
             logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
-            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}")
+            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
             after_snapshot = snapshot_graph(gm)
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
     return gm
@@ -979,6 +979,7 @@ def tlparse_log_graph_pass(
     example_inputs: tuple | None = None,
     *,
     graph_name: str,
+    debug: bool = False,
 ) -> torch.fx.GraphModule:
     """Log the transformed graph to tlparse via trace_structured.
 
@@ -990,10 +991,15 @@ def tlparse_log_graph_pass(
         example_inputs: The example inputs (unused, required by protocol).
         graph_name: The name for this graph artifact
             (e.g. "aot_forward_graph_transformed").
+        debug: When True, include additional metadata in the printed nodes.
 
     Returns:
         The graph module unchanged.
     """
+    additional_meta = ["autograd_backward"]
+    if debug:
+        additional_meta.append("seq_nr")
+
     trace_structured(
         "artifact",
         metadata_fn=lambda: {
@@ -1005,7 +1011,7 @@ def tlparse_log_graph_pass(
             include_stride=True,
             include_device=True,
             expanded_def=True,
-            additional_meta=["autograd_backward"],
+            additional_meta=additional_meta,
         ),
         expect_trace_id=False,
     )
