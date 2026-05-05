@@ -70,7 +70,10 @@ def _set_qwen3_vl_layer_sharding(
     tp_enabled: bool,
     ep_enabled: bool,
 ) -> None:
-    """Set sharding on one Qwen3-VL decoder layer (mirrors qwen3 with enable_sp=False)."""
+    """Set sharding on one Qwen3-VL decoder layer.
+
+    Mirrors qwen3 with enable_sp=False.
+    """
     attention = layer_cfg.attention
     assert isinstance(attention, GQAttention.Config)
 

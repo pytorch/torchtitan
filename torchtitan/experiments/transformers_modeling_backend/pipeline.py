@@ -26,7 +26,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
+from torchtitan.distributed.pipeline_parallel import _build_pipeline_schedule
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -399,7 +399,7 @@ def pipeline_hf_transformers(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
-    pp_schedule = build_pipeline_schedule(
+    pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
         local_batch_size=training.local_batch_size,
         stages=stages,

@@ -56,6 +56,15 @@ class LocalTokenDispatcher(Configurable):
         self.top_k = config.top_k
         self.score_before_experts = config.score_before_experts
 
+    def wire_meshes(
+        self,
+        *,
+        ep_mesh: DeviceMesh | None,
+        tp_mesh: DeviceMesh | None,
+    ) -> None:
+        """No-op for the EP=1 dispatcher. Subclasses override."""
+        del ep_mesh, tp_mesh
+
     def dispatch(
         self,
         x: torch.Tensor,
@@ -157,7 +166,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
     by the owning ``GroupedExperts.parallelize`` override via
-    ``_wire_meshes``.
+    ``wire_meshes``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -178,7 +187,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         self.sp_size: int = 1
         self.sp_rank: int | torch.SymInt = 0
 
-    def _wire_meshes(
+    def wire_meshes(
         self,
         *,
         ep_mesh: DeviceMesh | None,
@@ -600,7 +609,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         self.comm_backend = config.comm_backend
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
-        # Wired by GroupedExperts.parallelize via _wire_meshes.
+        # Wired by GroupedExperts.parallelize via wire_meshes.
         self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs
@@ -610,7 +619,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         else:
             from torchtitan.distributed.deepep import deepep  # noqa: F401
 
-    def _wire_meshes(
+    def wire_meshes(
         self,
         *,
         ep_mesh: DeviceMesh | None,
@@ -619,7 +628,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         """Install the EP mesh used by DeepEP dispatch / combine.
 
         ``tp_mesh`` is accepted for API parity with
-        ``AllToAllTokenDispatcher._wire_meshes`` but ignored -- DeepEP does
+        ``AllToAllTokenDispatcher.wire_meshes`` but ignored -- DeepEP does
         not use sequence-parallel token splitting.
         """
         del tp_mesh
