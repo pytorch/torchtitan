@@ -131,7 +131,7 @@ class GroupedExperts(Module):
         # Convert DTensor to local tensor for routed expert dispatch/compute.
         # grad_placements=(Partial(),) ensures x_local.grad is Partial on
         # the tp_mesh in backward, so gradient reduction happens once at
-        # the GroupedExperts boundary.
+        # the MoE boundary.
         if isinstance(x, DTensor):
             x = x.to_local(grad_placements=(Partial(),))
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
@@ -385,8 +385,12 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
+        # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
+        # Routed experts convert to local tensor at GroupedExperts boundary.
         shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+
         routed_out = self.experts(x, top_scores, selected_experts_indices)
+
         out = routed_out if shared_out is None else routed_out + shared_out
         return out.reshape(bs, slen, dim)
 

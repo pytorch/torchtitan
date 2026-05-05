@@ -35,7 +35,10 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.distributed.tensor_parallel import (
+    maybe_enable_async_tp,
+    NoParallel,
+)
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
@@ -423,7 +426,7 @@ def apply_moe_ep_tp(
 
         experts_mesh, experts_plan = None, None
         # EP disabled: shard routed expert weights across TP mesh
-        # (input Replicate, produces Partial output all-reduced to Replicate at RoutedExperts boundary)
+        # (input Replicate, Partial output all-reduced to Replicate by moe.experts PrepareModuleOutput above)
         if ep_mesh is None:
             experts_mesh = tp_mesh
             experts_plan = TensorParallel()
