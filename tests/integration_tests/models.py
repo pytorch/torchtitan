@@ -118,6 +118,21 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_fsdp+tp+cp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3 --config qwen3_moe_debug",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.data_parallel_shard_degree 1",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--training.steps 1",
+                ],
+            ],
+            "Qwen3 MoE HSDP+TP+EP",
+            "qwen3_moe_hsdp+tp+ep",
+            ngpu=4,
+        ),
         # Integration Test Cases for Llama 4
         # TODO: re-enable compile after fixing
         # https://github.com/pytorch/torchtitan/issues/2771
