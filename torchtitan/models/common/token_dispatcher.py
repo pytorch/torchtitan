@@ -7,7 +7,6 @@
 from dataclasses import dataclass
 
 import torch
-from torch import nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
     all_to_all_single_autograd,
@@ -115,24 +114,21 @@ class LocalTokenDispatcher(Configurable):
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
         x: torch.Tensor,
-        shared_experts: nn.Module | None = None,
+        initial_output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Score, scatter_add, and optionally overlap shared_experts.
-
-        For EP=1, no communication is needed. shared_experts runs before
-        scatter_add (no async overlap benefit here, but keeps the interface
-        uniform with AllToAllTokenDispatcher).
+        """Score and scatter_add routed expert outputs.
 
         Args:
             routed_output: (num_tokens * top_k, dim) expert outputs
             metadata: LocalDispatchMetadata from dispatch()
             x: (num_tokens, dim) original input tokens
-            shared_experts: optional shared expert module to overlap
+            initial_output: buffer for scatter_add (e.g. shared_experts output).
+                If None, scatter_add accumulates into zeros.
 
         Returns:
-            (num_tokens, dim) combined output with shared_experts added.
+            (num_tokens, dim) combined output.
         """
-        out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
+        out = initial_output if initial_output is not None else torch.zeros_like(x)
 
         if not self.score_before_experts:
             routed_output = (
@@ -229,10 +225,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 "sp_rank must be set before use. "
                 "apply_moe_ep_tp() should set it from tp_mesh._sym_get_coordinate()."
             )
-            # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
-            # shape (batch_size * seq_len // ep_size, top_k)
-            x, top_scores, selected_experts_indices = self._split_along_sp(
-                x, top_scores, selected_experts_indices
+            # x is already the local SP shard (from DTensor Shard to_local
+            # in GroupedExperts.forward). Only split scores/indices to match,
+            # since the router (NoParallel) computed them on all tokens.
+            top_scores, selected_experts_indices = self._split_along_sp(
+                top_scores, selected_experts_indices
             )
 
         # TODO: Extract this local reordering block (histc, argsort, score
@@ -388,36 +385,33 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         routed_output: torch.Tensor,
         metadata: AllToAllDispatchMetadata,
         x: torch.Tensor,
-        shared_experts: nn.Module | None = None,
+        initial_output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
-        shared_experts overlaps with the async all-to-all combine — it runs
-        while the a2a is in flight on the NCCL stream. scatter_add forces sync.
-
         When sp_size > 1 (sequence parallel), dispatch uses local token
-        indices. Combine offsets them to global positions so scatter_add
-        into full x is correct.
+        indices. Combine offsets them based on the scatter buffer size:
+        full-size buffer needs SP offset, shard-size buffer does not.
 
         Args:
             routed_output: (R, dim) expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
             x: (num_tokens, dim) original input tokens
-            shared_experts: optional shared expert module to overlap
+            initial_output: buffer for scatter_add (e.g. shared_experts output).
+                If None, scatter_add accumulates into zeros_like(x).
 
         Returns:
-            (num_tokens, dim) combined output with shared_experts added.
+            combined output (same size as the scatter buffer).
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().combine(routed_output, metadata, x, shared_experts)
+            return super().combine(routed_output, metadata, x, initial_output)
 
         # Reverse expert-major reordering
         routed_output = self._unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
         )
-        # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
-        # on the NCCL stream and won't block until the tensor is accessed.
+        # All-to-all combine
         routed_output = all_to_all_single_autograd(
             routed_output,
             metadata.input_splits,
@@ -425,9 +419,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             self.ep_mesh,
         )
 
-        # shared_experts overlaps with the async a2a (NCCL stream).
-        # Score application + scatter_add forces the a2a to sync.
-        out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
+        out = initial_output if initial_output is not None else torch.zeros_like(x)
 
         if not self.score_before_experts:
             routed_output = (
@@ -437,11 +429,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         # When sequence_parallel is active, dispatch splits tokens to a local
         # shard, so token_indices_experts_sorted are 0-based local indices.
-        # Offset them to global positions so scatter_add into full x is correct.
+        # Offset them to global positions when the scatter buffer is full-size
+        # (Replicate path). When the buffer is shard-size (EP+SP Shard path),
+        # indices are already 0-based — no offset needed.
         if self.sp_size > 1:
-            local_num_tokens = x.shape[0] // self.sp_size
             token_indices_experts_sorted = (
-                metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
+                metadata.token_indices_experts_sorted + x.shape[0] * self.sp_rank
             )
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted
@@ -449,7 +442,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         assert isinstance(token_indices_experts_sorted, torch.Tensor)
         out = deterministic_scatter_add(
             out,
-            token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
+            token_indices_experts_sorted.reshape(-1, 1).expand(-1, out.shape[-1]),
             routed_output,
         )
         return out
@@ -642,13 +635,9 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         routed_output: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
         x: torch.Tensor,
-        shared_experts: nn.Module | None = None,
+        initial_output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP/HybridEP, overlapping shared_experts.
-
-        For the deepep backend, combine is async — shared_experts runs while
-        the combine is in flight, then sync_combine() waits before the addition.
-        """
+        """Combine tokens via DeepEP/HybridEP."""
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep
 
@@ -663,17 +652,10 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
             # pyrefly: ignore [bad-argument-type]
             routed_output = combine_tokens(routed_output, metadata.state)
 
-        # shared_experts runs in parallel with combine communication.
-        # This is the key optimization - we overlap compute with communication.
-        shared_out = shared_experts(x) if shared_experts is not None else None
-
-        # Sync the combine operation before using routed_output.
-        # This inserts a CUDA stream wait, ensuring combine is complete before
-        # the subsequent addition or reshape operations read routed_output.
         from torchtitan.distributed.deepep.deepep import sync_combine
 
         sync_combine()
 
-        if shared_out is not None:
-            routed_output = routed_output + shared_out
+        if initial_output is not None:
+            routed_output = routed_output + initial_output
         return routed_output

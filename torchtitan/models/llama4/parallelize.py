@@ -12,8 +12,10 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
     parallelize_module,
     PrepareModuleInputOutput,
+    PrepareModuleOutput,
     RowwiseParallel,
 )
 
@@ -34,7 +36,6 @@ from torchtitan.distributed.fsdp import (
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import (
-    ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
     NoParallel,
 )
@@ -376,46 +377,48 @@ def apply_moe_ep_tp(
             continue
 
         if tp_mesh is not None:
+            # TP-only: all-gather to Replicate (dispatch needs full token set).
+            # EP+SP: keep Shard (each rank has its token shard, dispatch via A2A).
+            # Output is always Partial (shared_experts Partial + routed Partial),
+            # reduced at MoE boundary via reduce-scatter to SP layout.
+            moe_desired_input_layouts = Replicate() if ep_mesh is None else sp_layout
+
             moe_layer_plan = {
-                # With SP: all-gather (Shard→Replicate) for input,
-                # reduce-scatter (Partial→Shard) for output.
-                # Without SP: input is already Replicate,
-                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
-                    desired_input_layouts=(Replicate(),),
+                    desired_input_layouts=(moe_desired_input_layouts,),
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
-                    # Keep MoE output as DTensor so the residual add
-                    # ``h + self.moe(...)`` composes with config-based
-                    # attention (which flows DTensors).
                     use_local_output=False,
                 ),
-                # replicate computation for the router
+                # GroupedExperts output placement on the TP mesh.
+                "moe.experts": PrepareModuleOutput(
+                    output_layouts=Partial(),
+                    desired_output_layouts=Partial(),
+                ),
+                # Replicate computation for the router. NoParallel keeps
+                # gate weights Replicate and all-gathers input if needed
+                # (Shard→Replicate for EP+SP, no-op for TP-only).
+                # Output converted to local for dispatch compatibility.
                 "moe.router.gate": NoParallel(
+                    input_layout=moe_desired_input_layouts,
                     local_output_grad_placements=(Partial(),),
                 ),
             }
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # Use ColwiseParallelWithGradPlacement to keep d_x as Partial in
-                # backward (avoids the all-reduce that from_local(Replicate)
-                # would otherwise trigger). For w2, output_layouts=Partial()
-                # skips the Partial→Replicate all-reduce in forward. The
-                # reduction happens once at the MoE output boundary
-                # (PrepareModuleInputOutput).
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
+                        "moe.shared_experts.w1": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
                         ),
                         "moe.shared_experts.w2": RowwiseParallel(
                             output_layouts=Partial(),
                         ),
-                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
+                        "moe.shared_experts.w3": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
                         ),
                     }
                 )
@@ -428,7 +431,8 @@ def apply_moe_ep_tp(
             )
 
         experts_mesh, experts_plan = None, None
-        # EP disabled: shard routed expert weights across TP mesh (input Replicate, produces Partial output reduced at MoE boundary)
+        # EP disabled: shard routed expert weights across TP mesh
+        # (input Replicate, produces Partial output reduced at MoE boundary)
         if ep_mesh is None:
             experts_mesh = tp_mesh
             experts_plan = TensorParallel()
