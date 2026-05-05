@@ -14,6 +14,9 @@ from torchtitan.hf_datasets.text_datasets import (
     DATASETS,
     HuggingFaceTextDataLoader,
     HuggingFaceTextDataset,
+    HFDataSource,
+    HuggingFaceTextDataLoader,
+    InterleavedHuggingFaceTextDataLoader,
 )
 
 
@@ -65,20 +68,6 @@ class TestDatasetCheckpointing(unittest.TestCase):
                             expected_input_ids["positions"],
                         )
                         assert torch.equal(labels, expected_labels)
-
-    def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
-        tokenizer_config = HuggingFaceTokenizer.Config()
-        dl_config = HuggingFaceTextDataLoader.Config(
-            dataset=dataset_name, infinite=True
-        )
-
-        return dl_config.build(
-            dp_world_size=world_size,
-            dp_rank=rank,
-            tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
-            seq_len=seq_len,
-            local_batch_size=batch_size,
-        )
 
     def test_map_style_shuffle_on_reloop(self):
         """Re-looping a map-style (``Dataset``) source should change order every
@@ -147,3 +136,98 @@ class TestDatasetCheckpointing(unittest.TestCase):
         ds_legacy.load_state_dict(legacy_state)
         assert ds_legacy._epoch == 0
         assert ds_legacy._data is ds_legacy._original_data
+
+    def test_interleaved_resumption(self):
+        """Checkpointing across re-loops works correctly for interleaved sources."""
+        for world_size in [2, 4]:
+            for rank in range(world_size):
+                batch_size = 1
+                seq_len = 1024
+
+                dl = self._build_interleaved_dataloader(
+                    batch_size, seq_len, world_size, rank
+                )
+
+                it = iter(dl)
+                # consume enough to trigger re-looping in at least one source
+                for _ in range(2050):
+                    next(it)
+                state = dl.state_dict()
+
+                dl_resumed = self._build_interleaved_dataloader(
+                    batch_size, seq_len, world_size, rank
+                )
+                dl_resumed.load_state_dict(state)
+                it_resumed = iter(dl_resumed)
+
+                for _ in range(500):
+                    expected_input_ids, expected_labels = next(it)
+                    input_ids, labels = next(it_resumed)
+                    assert torch.equal(input_ids["input"], expected_input_ids["input"])
+                    assert torch.equal(
+                        input_ids["positions"], expected_input_ids["positions"]
+                    )
+                    assert torch.equal(labels, expected_labels)
+
+    def test_interleaved_resumption_mid_epoch(self):
+        """Checkpointing mid-epoch (before any source exhausts) resumes correctly."""
+        batch_size = 1
+        seq_len = 512
+
+        dl = self._build_interleaved_dataloader(
+            batch_size, seq_len, world_size=1, rank=0
+        )
+        it = iter(dl)
+
+        # Consume a small number of batches — well within a single epoch
+        for _ in range(10):
+            next(it)
+        state = dl.state_dict()
+
+        dl_resumed = self._build_interleaved_dataloader(
+            batch_size, seq_len, world_size=1, rank=0
+        )
+        dl_resumed.load_state_dict(state)
+        it_resumed = iter(dl_resumed)
+
+        for _ in range(50):
+            expected_input_ids, expected_labels = next(it)
+            input_ids, labels = next(it_resumed)
+            assert torch.equal(input_ids["input"], expected_input_ids["input"])
+            assert torch.equal(input_ids["positions"], expected_input_ids["positions"])
+            assert torch.equal(labels, expected_labels)
+
+    def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
+        tokenizer_config = HuggingFaceTokenizer.Config()
+        dl_config = HuggingFaceTextDataLoader.Config(dataset=dataset_name)
+
+        return dl_config.build(
+            dp_world_size=world_size,
+            dp_rank=rank,
+            tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
+            seq_len=seq_len,
+            local_batch_size=batch_size,
+        )
+
+    def _build_interleaved_dataloader(self, batch_size, seq_len, world_size, rank):
+        tokenizer_config = HuggingFaceTokenizer.Config()
+        dl_config = InterleavedHuggingFaceTextDataLoader.Config(
+            sources=[
+                HFDataSource(dataset="c4_test", weight=1.0, infinite=True),
+                HFDataSource(dataset="c4_test_streaming", weight=2.0, infinite=True),
+            ],
+            seed=42,
+            num_workers=0,
+        )
+
+        return dl_config.build(
+            dp_world_size=world_size,
+            dp_rank=rank,
+            tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
+            seq_len=seq_len,
+            local_batch_size=batch_size,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

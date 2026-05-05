@@ -14,7 +14,11 @@ from datasets import Dataset
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets.text_datasets import ChatDataLoader, ChatDataset
+from torchtitan.hf_datasets.text_datasets import (
+    ChatDataset,
+    ChatDataSource,
+    InterleavedChatDataLoader,
+)
 
 # Path to the test tokenizer and fixture data
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -437,6 +441,145 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
         batches = [next(it) for _ in range(20)]
         self.assertEqual(len(batches), 20)
         self.assertGreaterEqual(chat_ds._epoch, 1)
+
+
+class TestInterleavedChatDataLoader(unittest.TestCase):
+    """Tests for InterleavedChatDataLoader config validation, construction, and checkpointing."""
+
+    def _make_config(self, **kwargs) -> InterleavedChatDataLoader.Config:
+        defaults = dict(
+            sources=[
+                ChatDataSource(
+                    dataset_path="json",
+                    load_dataset_kwargs={"data_files": _DATA_PATH, "split": "train"},
+                    sample_processor=_process_sample,
+                    weight=1.0,
+                    infinite=True,
+                ),
+                ChatDataSource(
+                    dataset_path="json",
+                    load_dataset_kwargs={"data_files": _DATA_PATH, "split": "train"},
+                    sample_processor=_process_sample,
+                    weight=2.0,
+                    infinite=True,
+                ),
+            ],
+            seed=42,
+            num_workers=0,
+        )
+        defaults.update(kwargs)
+        return InterleavedChatDataLoader.Config(**defaults)
+
+    def _build_dataloader(
+        self, config, batch_size=1, seq_len=256, world_size=1, rank=0
+    ):
+        tokenizer_config = HuggingFaceTokenizer.Config()
+        return config.build(
+            dp_world_size=world_size,
+            dp_rank=rank,
+            tokenizer=tokenizer_config.build(tokenizer_path=_TOKENIZER_PATH),
+            seq_len=seq_len,
+            local_batch_size=batch_size,
+        )
+
+    def test_rejects_empty_sources(self):
+        with self.assertRaises(ValueError) as ctx:
+            InterleavedChatDataLoader.Config(sources=[], seed=42)
+        self.assertIn("At least one source", str(ctx.exception))
+
+    def test_rejects_mixed_infinite(self):
+        with self.assertRaises(ValueError) as ctx:
+            InterleavedChatDataLoader.Config(
+                sources=[
+                    ChatDataSource(
+                        dataset_path="json",
+                        load_dataset_kwargs={
+                            "data_files": _DATA_PATH,
+                            "split": "train",
+                        },
+                        sample_processor=_process_sample,
+                        weight=1.0,
+                        infinite=True,
+                    ),
+                    ChatDataSource(
+                        dataset_path="json",
+                        load_dataset_kwargs={
+                            "data_files": _DATA_PATH,
+                            "split": "train",
+                        },
+                        sample_processor=_process_sample,
+                        weight=1.0,
+                        infinite=False,
+                    ),
+                ],
+                seed=42,
+            )
+        self.assertIn("infinite", str(ctx.exception))
+
+    def test_construction_batch_size_and_num_workers(self):
+        config = self._make_config(num_workers=2)
+        dl = self._build_dataloader(config, batch_size=4)
+        self.assertEqual(dl.batch_size, 4)
+        self.assertEqual(dl.num_workers, 2)
+
+    def test_yields_input_positions_and_labels(self):
+        """Batches must contain 'input' and 'positions' keys with correct shapes."""
+        seq_len = 256
+        config = self._make_config()
+        dl = self._build_dataloader(config, batch_size=2, seq_len=seq_len)
+        batch_input, batch_label = next(iter(dl))
+        self.assertIn("input", batch_input)
+        self.assertIn("positions", batch_input)
+        self.assertEqual(batch_input["input"].shape, (2, seq_len))
+        self.assertEqual(batch_input["positions"].shape, (2, seq_len))
+        self.assertEqual(batch_label.shape, (2, seq_len))
+
+    def test_resumption_mid_epoch(self):
+        """Checkpoint taken before any source exhausts resumes correctly."""
+        config = self._make_config()
+        dl = self._build_dataloader(config)
+        it = iter(dl)
+
+        for _ in range(5):
+            next(it)
+        state = deepcopy(dl.state_dict())
+
+        dl_resumed = self._build_dataloader(self._make_config())
+        dl_resumed.load_state_dict(state)
+        it_resumed = iter(dl_resumed)
+
+        for _ in range(10):
+            expected_input, expected_labels = next(it)
+            input_ids, labels = next(it_resumed)
+            self.assertTrue(torch.equal(input_ids["input"], expected_input["input"]))
+            self.assertTrue(
+                torch.equal(input_ids["positions"], expected_input["positions"])
+            )
+            self.assertTrue(torch.equal(labels, expected_labels))
+
+    def test_resumption_across_reloop(self):
+        """Checkpoint taken after sources have re-looped resumes correctly."""
+        config = self._make_config()
+        dl = self._build_dataloader(config)
+        it = iter(dl)
+
+        # Consume enough to guarantee at least one source has re-looped
+        for _ in range(30):
+            next(it)
+        state = deepcopy(dl.state_dict())
+
+        dl_resumed = self._build_dataloader(self._make_config())
+        dl_resumed.load_state_dict(state)
+        it_resumed = iter(dl_resumed)
+
+        for _ in range(20):
+            expected_input, expected_labels = next(it)
+            input_ids, labels = next(it_resumed)
+            self.assertTrue(torch.equal(input_ids["input"], expected_input["input"]))
+            self.assertTrue(
+                torch.equal(input_ids["positions"], expected_input["positions"])
+            )
+            self.assertTrue(torch.equal(labels, expected_labels))
 
 
 if __name__ == "__main__":

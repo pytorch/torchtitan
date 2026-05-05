@@ -20,6 +20,7 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.hf_datasets.interleave import InterleavedDataset
 from torchtitan.tools.logging import logger
 
 
@@ -277,6 +278,79 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 
         super().__init__(
             hf_ds,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            **dataloader_kwargs,
+        )
+
+
+@dataclass(kw_only=True, slots=True)
+class HFDataSource(HuggingFaceTextDataLoader.Config):
+    """Represent one dataset source and its sampling weight"""
+
+    weight: float = 1
+    """Data Source sampling weight"""
+
+
+class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
+    """Configurable text dataloader that wraps multiple HuggingFaceTextDataset."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ParallelAwareDataloader.Config):
+        sources: list[HFDataSource] = field(default_factory=lambda: [HFDataSource()])
+        """List of datasources to interleave"""
+
+        seed: int = 42
+        """Interleaving seed"""
+
+        def __post_init__(self) -> None:
+            if not self.sources:
+                raise ValueError("At least one source should be defined.")
+            infinite_values = [source.infinite for source in self.sources]
+            if len(set(infinite_values)) > 1:
+                raise ValueError(
+                    f"All data sources must have the same 'infinite' setting, "
+                    f"got: {[(s.dataset, s.infinite) for s in self.sources]}"
+                )
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dp_world_size: int,
+        dp_rank: int,
+        tokenizer: BaseTokenizer,
+        seq_len: int,
+        local_batch_size: int,
+        **kwargs,
+    ):
+        ds = InterleavedDataset(
+            datasets=[
+                HuggingFaceTextDataset(
+                    dataset_name=source.dataset,
+                    dataset_path=source.dataset_path,
+                    tokenizer=tokenizer,
+                    seq_len=seq_len,
+                    dp_rank=dp_rank,
+                    dp_world_size=dp_world_size,
+                    infinite=source.infinite,
+                )
+                for source in config.sources
+            ],
+            weights=[source.weight for source in config.sources],
+            seed=config.seed,
+        )
+
+        dataloader_kwargs = {
+            "num_workers": config.num_workers,
+            "persistent_workers": config.persistent_workers,
+            "pin_memory": config.pin_memory,
+            "prefetch_factor": config.prefetch_factor,
+            "batch_size": local_batch_size,
+        }
+
+        super().__init__(
+            ds,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             **dataloader_kwargs,
@@ -563,6 +637,13 @@ class ChatDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Whether to loop the dataset infinitely. Might hang on multi-GPU."""
 
+        def __post_init__(self) -> None:
+            if not self.dataset_path:
+                raise ValueError(
+                    "Config requires dataset_path to be set "
+                    "(e.g., 'openai/gsm8k' or 'json')."
+                )
+
     def __init__(
         self,
         config: Config,
@@ -574,13 +655,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         local_batch_size: int,
         **kwargs,
     ):
-        if not config.dataset_path:
-            raise ValueError(
-                "ChatDataLoader requires dataset_path to be set "
-                "(e.g., 'openai/gsm8k' or 'json')."
-            )
-
-        dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)
+        dataset = load_dataset(config.dataset_path, **config.load_dataset_kwargs)  # type: ignore[arg-type]
 
         chat_ds = ChatDataset(
             dataset=dataset,
@@ -602,6 +677,81 @@ class ChatDataLoader(ParallelAwareDataloader):
 
         super().__init__(
             chat_ds,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            **dataloader_kwargs,
+        )
+
+
+@dataclass(kw_only=True, slots=True)
+class ChatDataSource(ChatDataLoader.Config):
+    """Represent one chat dataset source and its sampling weight"""
+
+    weight: float = 1
+    """Data Source sampling weight"""
+
+
+class InterleavedChatDataLoader(ParallelAwareDataloader):
+    """Configurable chat dataloader that wraps multiple ChatDataset."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ParallelAwareDataloader.Config):
+        sources: list[ChatDataSource] = field(default_factory=list)
+        """List of datasources to interleave"""
+
+        seed: int = 42
+        """Interleaving seed"""
+
+        def __post_init__(self) -> None:
+            if not self.sources:
+                raise ValueError("At least one source should be defined.")
+            infinite_values = [source.infinite for source in self.sources]
+            if len(set(infinite_values)) > 1:
+                raise ValueError(
+                    f"All data sources must have the same 'infinite' setting, "
+                    f"got: {[(s.dataset_path, s.infinite) for s in self.sources]}"
+                )
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dp_world_size: int,
+        dp_rank: int,
+        tokenizer: BaseTokenizer,
+        seq_len: int,
+        local_batch_size: int,
+        **kwargs,
+    ):
+        ds = InterleavedDataset(
+            datasets=[
+                ChatDataset(
+                    dataset=load_dataset(  # type: ignore[arg-type]
+                        source.dataset_path, **source.load_dataset_kwargs
+                    ),
+                    tokenizer=tokenizer,
+                    sample_processor=source.sample_processor,
+                    seq_len=seq_len,
+                    dp_rank=dp_rank,
+                    dp_world_size=dp_world_size,
+                    infinite=source.infinite,
+                )
+                for source in config.sources
+            ],
+            weights=[source.weight for source in config.sources],
+            seed=config.seed,
+        )
+
+        dataloader_kwargs = {
+            "num_workers": config.num_workers,
+            "persistent_workers": config.persistent_workers,
+            "pin_memory": config.pin_memory,
+            "prefetch_factor": config.prefetch_factor,
+            "batch_size": local_batch_size,
+        }
+
+        super().__init__(
+            ds,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             **dataloader_kwargs,
