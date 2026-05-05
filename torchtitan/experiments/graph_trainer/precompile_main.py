@@ -418,19 +418,6 @@ def _precompile_aot_fx_trace(
 
     passes = compile_time_passes(traced_result, config)
 
-    # TODO: Remove this filter once upstream manual_overlap_bucketing
-    # supports make_fx-traced graphs where collective group_name args
-    # are FX Node references instead of string literals. The bucketing
-    # and comm_analysis code crashes with
-    # "AttributeError: 'Node' object has no attribute 'size'" or
-    # "assert isinstance(group_name, str)".
-    passes = [
-        p
-        for p in passes
-        if getattr(p, "func", p)
-        is not joint_transformer_block_bucketing_reordering_pass
-    ]
-
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
     )
