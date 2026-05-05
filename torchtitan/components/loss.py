@@ -336,57 +336,17 @@ class ChunkedCELoss(BaseLoss):
                 h_chunk.grad = None
 
         if fsdp_enabled:
-            lm_head.set_reshard_after_forward(True)
             lm_head.set_reshard_after_backward(True)
             lm_head.set_requires_gradient_sync(True, recurse=False)
-            lm_head.reshard()
         if not requires_grad:
             return total_loss
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        # Return a differentiable loss via _DecoderOutputGradientBackProp. When
-        # .backward() is called (by the trainer or PP schedule), autograd
-        # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
-        # as the gradient for hidden_states, propagating through the decoder.
-        return _DecoderOutputGradientBackProp.apply(
-            hidden_states, accumulated_grad, total_loss
-        )
-
-
-class _DecoderOutputGradientBackProp(torch.autograd.Function):
-    """Bridges chunked lm_head backward with decoder backward via autograd.
-
-    Forward takes hidden_states (connected to decoder graph), the accumulated
-    gradient from chunked lm_head backward, and the loss value. Returns the
-    loss value as a differentiable tensor.
-
-    Backward returns accumulated_grad as the gradient for hidden_states.
-    Autograd then propagates this through the decoder layers automatically —
-    no explicit hidden_states.backward() needed.
-    """
-
-    @staticmethod
-    # pyrefly: ignore [bad-override]
-    def forward(
-        ctx,
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
-        loss: torch.Tensor,
-    ) -> torch.Tensor:
-        ctx.save_for_backward(accumulated_grad)
-        # Return a tensor with the correct loss value. We clone to avoid
-        # in-place issues, and the grad_fn comes from this Function.
-        return loss.detach().clone()
-
-    @staticmethod
-    def backward(  # pyrefly: ignore[bad-override]
-        ctx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None]:
-        (accumulated_grad,) = ctx.saved_tensors
-        # Return accumulated_grad as the gradient for hidden_states.
-        # Autograd then propagates this through hidden_states' existing
-        # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
-        # but expressed as a return value so autograd handles the traversal
-        # in a single pass (no "backward through graph twice" error).
-        return accumulated_grad, None, None
+        # Return the correct scalar loss value while attaching the accumulated
+        # chunk gradient to hidden_states for the outer backward pass. This is
+        # equivalent to a custom autograd Function that returns accumulated_grad
+        # as the hidden_states gradient, but avoids saving that gradient inside
+        # a custom Function, which is fragile with FSDP/DTensor tensors.
+        grad_bridge = torch.sum(hidden_states * accumulated_grad)
+        return total_loss.detach() + grad_bridge - grad_bridge.detach()

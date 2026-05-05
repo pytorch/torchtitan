@@ -323,6 +323,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         assert self.gradient_accumulation_steps > 0
 
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            # Some model parallelization paths need to avoid placing the final
+            # norm and lm_head in the same FSDP unit because ChunkedCELoss runs
+            # lm_head backward before the decoder backward.
+            model._use_chunked_ce_loss = True
+
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:

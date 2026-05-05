@@ -16,6 +16,20 @@ from torchtitan.components.loss import (
 )
 
 
+class _LegacyDecoderOutputGradientBackProp(torch.autograd.Function):
+    """Legacy ChunkedCELoss gradient bridge kept for equivalence testing."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, accumulated_grad, loss):
+        ctx.save_for_backward(accumulated_grad)
+        return loss.detach().clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (accumulated_grad,) = ctx.saved_tensors
+        return accumulated_grad, None, None
+
+
 class TestLoss(unittest.TestCase):
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
@@ -310,6 +324,30 @@ class TestChunkedCELoss(unittest.TestCase):
                 places=5,
                 msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
             )
+
+    def test_gradient_bridge_matches_legacy_custom_autograd(self):
+        """The zero-value bridge must match the old custom autograd bridge."""
+        torch.manual_seed(42)
+        hidden_states = torch.randn(2, 8, 32, requires_grad=True)
+        accumulated_grad = torch.randn_like(hidden_states)
+        total_loss = hidden_states.new_tensor(3.25)
+
+        hidden_legacy = hidden_states.detach().clone().requires_grad_(True)
+        hidden_bridge = hidden_states.detach().clone().requires_grad_(True)
+
+        legacy_loss = _LegacyDecoderOutputGradientBackProp.apply(
+            hidden_legacy, accumulated_grad, total_loss
+        )
+        grad_bridge = torch.sum(hidden_bridge * accumulated_grad)
+        bridged_loss = total_loss.detach() + grad_bridge - grad_bridge.detach()
+
+        torch.testing.assert_close(bridged_loss, legacy_loss)
+
+        legacy_loss.backward()
+        bridged_loss.backward()
+
+        torch.testing.assert_close(hidden_bridge.grad, hidden_legacy.grad)
+        torch.testing.assert_close(hidden_bridge.grad, accumulated_grad)
 
 
 if __name__ == "__main__":

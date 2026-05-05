@@ -179,6 +179,7 @@ def apply_fsdp(
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
     )
+    use_chunked_ce_loss = getattr(model, "_use_chunked_ce_loss", False)
 
     if getattr(model, "enable_weight_tying", False):
         modules = [
@@ -203,12 +204,29 @@ def apply_fsdp(
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
         if model.norm is not None and model.lm_head is not None:
-            # pyrefly: ignore [no-matching-overload]
-            fully_shard(
-                [model.norm, model.lm_head],
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
-            )
+            if use_chunked_ce_loss:
+                # ChunkedCELoss backprops through lm_head before the decoder
+                # backward reaches norm, so these modules must not share one
+                # FSDP unit.
+                # pyrefly: ignore [no-matching-overload]
+                fully_shard(
+                    model.norm,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward_policy == "always",
+                )
+                # pyrefly: ignore [no-matching-overload]
+                fully_shard(
+                    model.lm_head,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward_policy == "always",
+                )
+            else:
+                # pyrefly: ignore [no-matching-overload]
+                fully_shard(
+                    [model.norm, model.lm_head],
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward_policy == "always",
+                )
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
