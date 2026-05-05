@@ -398,7 +398,7 @@ def apply_moe_ep_tp(
                 # scored_output is Partial and needs all-reduce, scatter_indices passes through.
                 "moe.experts": PrepareModuleOutput(
                     output_layouts=(Partial(), None),
-                    desired_output_layouts=(Replicate(), None),
+                    desired_output_layouts=(Partial(), None),
                     # use_local_output=False,
                 ),
             }
@@ -408,7 +408,7 @@ def apply_moe_ep_tp(
                 moe_layer_plan.update(
                     {
                         "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(),
+                        "moe.shared_experts.w2": RowwiseParallel(output_layouts=Partial(),),
                         "moe.shared_experts.w3": ColwiseParallel(),
                     }
                 )
