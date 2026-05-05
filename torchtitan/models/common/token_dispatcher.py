@@ -14,6 +14,7 @@ from torch.distributed._functional_collectives import (
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
+from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -113,21 +114,22 @@ class LocalTokenDispatcher(Configurable):
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Score routed outputs and return with scatter metadata.
-
-        Returns the scored routed output and scatter indices for the caller
-        to perform deterministic_scatter_add.
+        initial_output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Score and scatter_add routed expert outputs.
 
         Args:
             routed_output: (num_tokens * top_k, dim) expert outputs
             metadata: LocalDispatchMetadata from dispatch()
             x: (num_tokens, dim) original input tokens
+            initial_output: buffer for scatter_add (e.g. shared_experts output).
+                If None, scatter_add accumulates into zeros.
 
         Returns:
-            scored_routed_output: (num_tokens * top_k, dim) scored expert outputs
-            scatter_indices: (num_tokens * top_k, dim) indices for scatter_add
+            (num_tokens, dim) combined output.
         """
+        out = initial_output if initial_output is not None else torch.zeros_like(x)
+
         if not self.score_before_experts:
             routed_output = (
                 routed_output.to(torch.float32)
@@ -135,10 +137,12 @@ class LocalTokenDispatcher(Configurable):
             ).to(routed_output.dtype)
 
         dim = x.shape[-1]
-        scatter_indices = metadata.token_indices_experts_sorted.reshape(
-            -1, 1
-        ).expand(-1, dim)
-        return routed_output, scatter_indices
+        out = deterministic_scatter_add(
+            out,
+            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
+        )
+        return out
 
 
 class AllToAllTokenDispatcher(LocalTokenDispatcher):
@@ -221,10 +225,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 "sp_rank must be set before use. "
                 "apply_moe_ep_tp() should set it from tp_mesh._sym_get_coordinate()."
             )
-            # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
-            # shape (batch_size * seq_len // ep_size, top_k)
-            x, top_scores, selected_experts_indices = self._split_along_sp(
-                x, top_scores, selected_experts_indices
+            # x is already the local SP shard (from DTensor Shard to_local
+            # in GroupedExperts.forward). Only split scores/indices to match,
+            # since the router (NoParallel) computed them on all tokens.
+            top_scores, selected_experts_indices = self._split_along_sp(
+                top_scores, selected_experts_indices
             )
 
         # TODO: Extract this local reordering block (histc, argsort, score
@@ -380,25 +385,27 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         routed_output: torch.Tensor,
         metadata: AllToAllDispatchMetadata,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Reverse dispatch: unpermute + all-to-all + score, return scatter metadata.
+        initial_output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
         When sp_size > 1 (sequence parallel), dispatch uses local token
-        indices. Combine offsets them to global positions so scatter_add
-        into full x is correct.
+        indices. Combine offsets them based on the scatter buffer size:
+        full-size buffer needs SP offset, shard-size buffer does not.
 
         Args:
             routed_output: (R, dim) expert outputs in expert-major order
             metadata: AllToAllDispatchMetadata from dispatch()
             x: (num_tokens, dim) original input tokens
+            initial_output: buffer for scatter_add (e.g. shared_experts output).
+                If None, scatter_add accumulates into zeros_like(x).
 
         Returns:
-            scored_routed_output: scored expert outputs ready for scatter_add
-            scatter_indices: indices for scatter_add
+            combined output (same size as the scatter buffer).
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().combine(routed_output, metadata, x)
+            return super().combine(routed_output, metadata, x, initial_output)
 
         # Reverse expert-major reordering
         routed_output = self._unpermute(
@@ -412,6 +419,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             self.ep_mesh,
         )
 
+        out = initial_output if initial_output is not None else torch.zeros_like(x)
+
         if not self.score_before_experts:
             routed_output = (
                 routed_output.to(torch.float32)
@@ -420,20 +429,24 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         # When sequence_parallel is active, dispatch splits tokens to a local
         # shard, so token_indices_experts_sorted are 0-based local indices.
-        # Offset them to global positions so scatter_add into full x is correct.
-        if self.sp_size > 1:
-            local_num_tokens = x.shape[0] // self.sp_size
+        # Offset them to global positions when the scatter buffer is full-size
+        # (Replicate path). When the buffer is shard-size (EP+SP Shard path),
+        # indices are already 0-based — no offset needed.
+        num_local_tokens = metadata.token_indices_experts_sorted.shape[0] // self.top_k
+        if self.sp_size > 1 and out.shape[0] > num_local_tokens:
             token_indices_experts_sorted = (
-                metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
+                metadata.token_indices_experts_sorted + num_local_tokens * self.sp_rank
             )
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted
 
         assert isinstance(token_indices_experts_sorted, torch.Tensor)
-        scatter_indices = token_indices_experts_sorted.reshape(-1, 1).expand(
-            -1, x.shape[-1]
+        out = deterministic_scatter_add(
+            out,
+            token_indices_experts_sorted.reshape(-1, 1).expand(-1, out.shape[-1]),
+            routed_output,
         )
-        return routed_output, scatter_indices
+        return out
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
@@ -623,12 +636,9 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         routed_output: torch.Tensor,
         metadata: DeepEPDispatchMetadata,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, None]:
-        """Combine tokens via DeepEP/HybridEP.
-
-        DeepEP handles token un-routing internally (no scatter_add needed),
-        so scatter_indices is None.
-        """
+        initial_output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Combine tokens via DeepEP/HybridEP."""
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep
 
@@ -647,4 +657,6 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         sync_combine()
 
-        return routed_output, None
+        if initial_output is not None:
+            routed_output = routed_output + initial_output
+        return routed_output

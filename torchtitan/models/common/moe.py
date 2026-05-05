@@ -10,12 +10,10 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor import DTensor, Partial, Shard
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.ops.scatter_add import deterministic_scatter_add
-
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -127,27 +125,27 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Dispatch tokens to experts, compute, and combine.
+        initial_output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        Returns the scored routed output and scatter indices so the caller
-        (MoE.forward) can perform scatter_add with the desired initial
-        buffer (e.g. shared_experts output).
-
-        For DeepEP, scatter_indices is None (un-routing is handled
-        internally by combine_tokens).
+        Args:
+            initial_output: buffer for scatter_add (e.g. shared_experts output).
+                If None, scatter_add accumulates into zeros.
         """
         # Convert DTensor to local tensor for routed expert dispatch/compute.
-        # grad_placements=(Partial(),) ensures x_local.grad is Partial on
-        # the tp_mesh in backward, so gradient reduction happens once at
-        # the MoE boundary.
+        # Replicate x → Partial grad (TP-sharded weights produce partial sums).
+        # Shard x → Shard grad (each rank has its token shard's gradient).
         if isinstance(x, DTensor):
-            x = x.to_local(grad_placements=(Partial(),))
+            is_sharded = isinstance(x.placements[0], Shard)
+            x = x.to_local(grad_placements=x.placements if is_sharded else (Partial(),))
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x)
+        return self.token_dispatcher.combine(
+            routed_output, metadata, x, initial_output
+        )
 
 
 class TokenChoiceTopKRouter(Module):
@@ -394,19 +392,14 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Routed experts convert to local tensor at GroupedExperts boundary.
-        scored_output, scatter_indices = self.experts(
-            x, top_scores, selected_experts_indices
-        )
+        # Convert to local for combine's scatter_add compatibility.
+        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+        if shared_out is not None and isinstance(shared_out, DTensor):
+            shared_out = shared_out.to_local()
 
-        # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
-        # Called after self.experts to preserve the autograd temporal order.
-        out = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x)
-        if scatter_indices is not None:
-            out = deterministic_scatter_add(out, scatter_indices, scored_output)
-        else:
-            # DeepEP: un-routing handled internally
-            out += scored_output
+        # Routed experts convert to local tensor at GroupedExperts boundary.
+        # shared_out is passed to combine() as the scatter_add initial buffer.
+        out = self.experts(x, top_scores, selected_experts_indices, shared_out)
 
         return out.reshape(bs, slen, dim)
 

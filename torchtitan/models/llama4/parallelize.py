@@ -377,39 +377,54 @@ def apply_moe_ep_tp(
             continue
 
         if tp_mesh is not None:
+            # TP-only: all-gather to Replicate (dispatch needs full token set).
+            # EP+SP: keep Shard (each rank has its token shard, dispatch via A2A).
+            # Output is always Partial (shared_experts Partial + routed Partial),
+            # reduced at MoE boundary via reduce-scatter to SP layout.
+            moe_desired_input_layouts = Replicate() if ep_mesh is None else sp_layout
+
             moe_layer_plan = {
-                # With SP: all-gather (Shard→Replicate) for input,
-                # slice (Replicate→Shard) for output.
-                # Without SP: input/output are both Replicate (no-op).
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
-                    desired_input_layouts=(Replicate(),),
+                    desired_input_layouts=(moe_desired_input_layouts,),
                     use_local_input=False,
-                    output_layouts=(Replicate(),),
+                    output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
                     use_local_output=False,
                 ),
-                # replicate computation for the router
-                "moe.router.gate": NoParallel(
-                    local_output_grad_placements=(Partial(),),
-                ),
-                # All-reduce routed expert output from Partial to Replicate
-                # on the TP mesh. GroupedExperts returns (scored_output, scatter_indices);
-                # scored_output is Partial and needs all-reduce, scatter_indices passes through.
+                # GroupedExperts output placement on the TP mesh.
                 "moe.experts": PrepareModuleOutput(
-                    output_layouts=(Partial(), None),
-                    desired_output_layouts=(Partial(), None),
-                    # use_local_output=False,
+                    output_layouts=Partial(),
+                    desired_output_layouts=Partial(),
+                ),
+                # Replicate computation for the router. NoParallel keeps
+                # gate weights Replicate and all-gathers input if needed
+                # (Shard→Replicate for EP+SP, no-op for TP-only).
+                # Output converted to local for dispatch compatibility.
+                "moe.router.gate": NoParallel(
+                    input_layout=moe_desired_input_layouts,
+                    local_output_grad_placements=(Partial(),),
                 ),
             }
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
+                # ColwiseParallel shards w1/w3 columns, RowwiseParallel
+                # shards w2 rows. For EP+SP, ColwiseParallel all-gathers
+                # Shard input internally. Output is Partial (not all-reduced),
+                # combined with Partial routed output and reduced once
+                # at the MoE boundary.
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(output_layouts=Partial(),),
-                        "moe.shared_experts.w3": ColwiseParallel(),
+                        "moe.shared_experts.w1": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
+                        ),
+                        "moe.shared_experts.w2": RowwiseParallel(
+                            output_layouts=Partial(),
+                        ),
+                        "moe.shared_experts.w3": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
+                        ),
                     }
                 )
             parallelize_module(
@@ -422,7 +437,7 @@ def apply_moe_ep_tp(
 
         experts_mesh, experts_plan = None, None
         # EP disabled: shard routed expert weights across TP mesh
-        # (input Replicate, produces Partial output all-reduced to Replicate by PrepareModuleOutput)
+        # (input Replicate, produces Partial output reduced at MoE boundary)
         if ep_mesh is None:
             experts_mesh = tp_mesh
             experts_plan = TensorParallel()
