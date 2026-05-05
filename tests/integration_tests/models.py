@@ -51,12 +51,13 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module deepseek_v3 --config deepseek_v3_debugmodel_ep",
-                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                 ],
             ],
-            "DeepSeek V3 FSDP+EP",
-            "deepseek_v3_fsdp+ep_no_sp",
+            "DeepSeek V3 HSDP+EP",
+            "deepseek_v3_hsdp+ep_no_sp",
             ngpu=4,
         ),
         OverrideDefinitions(
