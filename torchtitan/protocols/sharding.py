@@ -122,20 +122,15 @@ def resolve_mesh(
 ) -> tuple[DeviceMesh | None, tuple[str, ...]]:
     """Resolve the device mesh for a set of mesh axis names.
 
-    Used per call site (per ``state_shardings`` entry, per LocalMapConfig,
-    per input/output boundary) instead of aggregating across the whole
-    ``ShardingConfig``: a single Module's contract may legitimately span
-    multiple mesh vocabularies (dense vs sparse) under future spmd_types
-    adoption, where each NamedPlacement carries its own mesh.
+    Given the axes, query ``parallel_dims`` for the corresponding SPMD
+    mesh (dense or sparse).
 
-    Under non-``full_dtensor``, only ``tp`` and ``ep`` participate in
-    ``distribute_tensor``; DP / CP are handled out-of-band by FSDP and
-    ``apply_cp_to_forward``. Other axes are filtered out before
-    delegating to ``get_enabled_mesh``.
+    Under non-``full_dtensor``, we trim the axes since not all enabled
+    axes participate in the computation.
 
-    Returns ``(None, ())`` when every axis is filtered out (legacy non-
-    ``full_dtensor`` path with no TP / EP) or all requested axes are
-    disabled; callers treat this as a no-op for the boundary.
+    Returns ``(None, ())`` when no axis is enabled under non-``full_dtensor``.
+    Raises ``ValueError`` under ``full_dtensor`` if the resolved mesh is
+    not one of ``parallel_dims.spmd_meshes()``.
     """
     axes_list = list(axes)
     if not parallel_dims.full_dtensor:
