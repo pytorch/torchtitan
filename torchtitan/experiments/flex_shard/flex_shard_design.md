@@ -942,19 +942,18 @@ removing the detached-leaf full parameter from the eager path.
 ### Target Semantics
 
 The real change is: for `reshard_after_forward=True`, make the eager bucket path
-functional end-to-end, keep full parameters as non-leaf views of a gathered
-bucket tensor, avoid `_unsharded_for_reduce`, and let autograd drive the
-reduce-scatter. The main implementation work is padding/offset handling for
-uneven bucket sizes, clearing Python refs after forward, and preserving
-stream/prefetch behavior.
+autograd-owned end-to-end, keep full parameters as non-leaf outputs of a bucket
+all-gather boundary, avoid `_unsharded_for_reduce`, and use the custom backward
+to schedule bucketed reduce-scatter. The main implementation work is
+padding/offset handling for uneven bucket sizes, clearing Python refs after
+forward, and preserving stream/prefetch behavior.
 
 - `reshard_after_forward=True` releases full parameter storage after each bucket
   or bucket execution unit in eager mode.
 - No `storage.resize_(0)` or equivalent manual storage mutation.
-- Eager keeps one functional all-gather and one autograd-generated
-  reduce-scatter per bucket.
-- Full parameters are non-leaf tensors derived from a functional gathered bucket
-  tensor, not detached leaves.
+- Eager keeps one bucket all-gather and one bucket reduce-scatter per bucket.
+- Full parameters are non-leaf tensors produced by the eager bucket autograd
+  boundary, not detached leaves.
 - Compiled modes are unchanged: the property getter falls through to
   `parametrization.forward()`, so `_c10d_functional` collectives stay visible to
   FX and graph passes.
@@ -964,41 +963,35 @@ stream/prefetch behavior.
 
 ### Design
 
-1. **Build a differentiable packed bucket tensor.**
-   For each eager `reshard_after_forward=True` bucket, concatenate local shards
-   into one flat bucket tensor while grad is enabled:
+1. **Build a bucket autograd boundary.**
+   For each eager `reshard_after_forward=True` bucket, pass the local sharded
+   parameters as inputs to a custom bucket autograd Function:
 
    ```python
-   local_bucket = torch.cat([local_shard.reshape(-1) for local_shard in local_shards])
+   full_params = _EagerBucketAllGather.apply(runtime, *local_shards)
    ```
 
-   For uneven shards, pad each rank to the same bucket length before the
-   collective and record per-rank/per-param offsets. Padding must be part of the
-   differentiable graph so backward trims it naturally before gradients return
-   to the original local shards.
+   The Function forward consumes either a prefetched raw all-gather result or
+   launches one on demand. The Function backward packs full-parameter gradients
+   and schedules one bucket reduce-scatter.
 
-2. **Use bucketed `_c10d_functional.all_gather_into_tensor`.**
-   Replace the eager `dist.all_gather(...)` path for these buckets with a single
-   functional collective on the packed bucket:
+2. **Prefetch raw AG state, then create non-leaf outputs at consumption.**
+   The one-bucket-ahead prefetch path uses imperative AG into raw buffers:
 
    ```python
-   full_bucket = torch.ops._c10d_functional.all_gather_into_tensor(
-       local_bucket,
-       world_size,
-       group_name,
-   )
-   full_bucket = torch.ops._c10d_functional.wait_tensor(full_bucket)
+   pending = Shard.begin_unshard(next_local_shards, next_infos, mesh, ag_stream)
    ```
 
-   This makes the all-gather visible to autograd in eager mode. The backward of
-   the functional all-gather produces the matching reduce-scatter for the bucket
-   gradient, instead of relying on `AccumulateGrad` hooks.
+   The pending state contains raw buffers/events only. The consuming bucket calls
+   `_EagerBucketAllGather.apply(...)`, waits/copy-outs the raw result, and
+   returns full parameters as non-leaf outputs owned by that bucket's
+   checkpoint/recompute context.
 
 3. **Carve full parameters as non-leaf views or view-like tensors.**
-   Unpack `full_bucket` into full parameter tensors in bucket order. For
-   `Shard(0)`, this is offset slicing plus `view`/`reshape`. For `Shard(dim !=
-   0)` and uneven shards, it also requires chunking, concatenating along the
-   logical shard dimension, and narrowing away padding.
+   Unpack the gathered bucket into full parameter tensors in bucket order. For
+   `Shard(0)`, this is offset slicing plus `view`/`reshape` and `cat`. For
+   `Shard(dim != 0)` and uneven shards, it also requires chunking,
+   concatenating along the logical shard dimension, and narrowing away padding.
 
    The returned full parameters must keep their autograd connection to
    `full_bucket`. The property getter returns these tensors directly:
@@ -1012,17 +1005,20 @@ stream/prefetch behavior.
    It must not call `detach().requires_grad_(True)` for
    `reshard_after_forward=True`, and it must not store `_unsharded_for_reduce`.
 
-4. **Let autograd own the reduce-scatter.**
-   Since the module compute consumes full parameters derived from
-   `_c10d_functional.all_gather_into_tensor`, autograd sends full-parameter grads
-   back through the unpacking ops, into `full_bucket`, and through the functional
-   collective. That produces one reduce-scatter for the packed bucket and then
-   propagates local shard grads through `cat`/padding back to the original
-   sharded parameters.
+4. **Let the custom Function schedule the reduce-scatter.**
+   Since the module compute consumes full parameters produced by
+   `_EagerBucketAllGather`, autograd sends full-parameter grads to the Function
+   backward. The backward packs grads in bucket order, launches one
+   reduce-scatter on the shared FlexShard reduce-scatter stream, records the
+   pending state, and returns `None` for the original sharded parameter inputs.
+   The local sharded `param.grad` tensors are assigned/accumulated from the
+   pending reduce-scatter state.
 
-   This preserves standard autograd behavior for accumulation, parameter hooks,
-   AMP, and `zero_grad(set_to_none=True)` because FlexShard no longer mutates
-   `param.grad` manually for these buckets.
+   This is intentionally closer to the old imperative grad path than a pure
+   autograd-returned local-grad path. Waiting before returning local grads is
+   correct but prevents RS/default-stream overlap; async pending RS state gives
+   overlap while preserving `zero_grad(set_to_none=True)` and normal optimizer
+   consumption after the final wait.
 
 5. **Keep checkpoint as the lifetime boundary.**
    The bucket/module execution unit remains wrapped with non-reentrant
@@ -1035,23 +1031,26 @@ stream/prefetch behavior.
    document the performance fallback explicitly.
 
 6. **Preserve eager stream and prefetch behavior.**
-   Copy-in and packing stay on the default stream. The functional all-gather
-   should launch on the shared FlexShard all-gather stream when graph capture is
-   inactive, with the default stream waiting only when the bucket full params
-   are consumed. Existing eager prefetch order and reverse recompute order still
-   apply, but the pending object now carries a functional `full_bucket` and its
-   unpacked full-param tensors instead of detached tensors.
+   Copy-in and packing stay on the default stream. Eager RAF all-gather launches
+   on the shared FlexShard all-gather stream when graph capture is inactive,
+   with the default stream waiting only when the bucket full params are
+   consumed.
 
-   Backward reduce-scatter scheduling should use the functional collective's
-   autograd path while preserving the current boundary rule: outstanding
-   reduce-scatter work must be waited/cleared at the next bucket/module boundary
-   and by the final autograd callback before `optimizer.step()`.
+   Prefetch uses raw imperative AG state instead of a functional `full_bucket`.
+   Prefetching a functional `full_bucket` directly from bucket `N` would create
+   bucket `N+1`'s autograd/checkpoint tensor inside bucket `N`'s execution unit,
+   which makes checkpoint ownership and backward recomputation ambiguous.
+
+   Backward reduce-scatter scheduling uses the custom Function backward and the
+   shared FlexShard reduce-scatter stream. Pending RS state is waited/cleared at
+   the next bucket boundary and by the queued final autograd callback before
+   optimizer work is allowed to consume gradients.
 
 7. **Preserve compile behavior.**
-   The bucketed functional eager path is only used when graph capture is
-   inactive. Under `torch.compiler.is_compiling()` or `make_fx` tracing, hooks do
-   not set `_pre_gathered`, so the getter continues to call the existing
-   per-parameter parametrization path:
+   The bucketed eager hook path is only used when graph capture is inactive.
+   Under `torch.compiler.is_compiling()` or `make_fx` tracing, hooks do not set
+   `_pre_gathered`, so the getter continues to call the existing per-parameter
+   parametrization path:
 
    ```python
    return parametrization(self._parameters[name])
@@ -1062,15 +1061,15 @@ stream/prefetch behavior.
 
 ### Implementation Phases
 
-1. **Phase 1: `Shard(0)` CUDA functional buckets.**
-   Implement the packed-bucket `_c10d_functional.all_gather_into_tensor` path for
-   homogeneous `Shard(0)` buckets without mixed precision or CPU offload. Replace
-   the detached-leaf eager path for `reshard_after_forward=True` buckets only.
+1. **Phase 1: `Shard(0)` CUDA autograd buckets.**
+   Implement the custom bucket autograd Function path for homogeneous `Shard(0)`
+   buckets without mixed precision or CPU offload. Replace the detached-leaf
+   eager path for `reshard_after_forward=True` buckets only.
 
 2. **Phase 2: checkpoint and memory validation.**
    Verify that non-reentrant checkpoint drops full parameters after forward and
-   recomputes the functional bucket all-gather in backward. Confirm memory
-   snapshots show no live full-parameter storage after each completed
+   recomputes the custom bucket all-gather in backward. Confirm memory snapshots
+   show no live full-parameter storage after each completed
    `reshard_after_forward=True` bucket.
 
 3. **Phase 3: stream and prefetch validation.**
@@ -1085,28 +1084,201 @@ stream/prefetch behavior.
 
 5. **Phase 5: remove the old eager leaf reduce path for RAF buckets.**
    Delete the `_unsharded_for_reduce` / `AccumulateGrad` hook path for
-   `reshard_after_forward=True` buckets handled by the functional bucket path.
+   `reshard_after_forward=True` buckets handled by the custom bucket path.
    Keep the existing eager detached path only for `reshard_after_forward=False`,
    where full parameters are intentionally retained through backward.
 
 ### Current Status
 
 - Done: eager CUDA `Shard` buckets with `reshard_after_forward=True` now use a
-  packed bucket tensor and `_c10d_functional.all_gather_into_tensor`, return
-  non-leaf full parameters from the getter, avoid `_unsharded_for_reduce`, and
-  rely on autograd-generated reduce-scatter for local shard gradients.
+  custom bucket autograd Function. The Function consumes either a prefetched raw
+  all-gather result or launches AG on demand, returns non-leaf full parameters
+  from the getter, avoids `_unsharded_for_reduce`, and schedules bucketed
+  reduce-scatter from backward.
 - Done: the storage-resize experiment is removed from the eager RAF path.
 - Done: focused distributed coverage checks that RAF eager buckets return
   non-leaf full parameters and produce correct local shard gradients.
-- TODO: functional eager prefetch is disabled for now to avoid crossing
-  checkpoint execution-unit boundaries with tensors produced for a later bucket.
-  Re-enable it only after the pending bucket state is made checkpoint-aware.
-- TODO: functional reduce-scatter currently follows the autograd functional
-  collective path. Explicit reduce-scatter stream control needs lower-level
-  support or a custom autograd wrapper.
-- TODO: extend the functional bucket path beyond CUDA `Shard` buckets to mixed
+- Done: one-bucket-ahead raw AG prefetch is enabled for eager RAF buckets. The
+  pending state contains raw imperative AG buffers, not autograd/checkpoint
+  tensors, and the consuming bucket creates the autograd boundary with
+  `_EagerBucketAllGather.apply(...)`.
+- Done: eager RAF reduce-scatter is launched from the custom Function backward
+  via `Shard.begin_reduce_grad(...)` on the shared FlexShard reduce-scatter
+  stream. The backward now stashes pending RS state, assigns/accumulates
+  `param.grad` on the RS stream, and returns without waiting on the default
+  stream.
+- Done: a Transformer profiler smoke trace shows forward all-gather kernels on
+  the shared AG stream and reduce-scatter kernels on the shared RS stream, with
+  layer AG and backward RS overlapping default-stream GEMM compute.
+- TODO: validate recompute-side prefetch and checkpointed memory behavior with
+  profiler and memory snapshots. The implementation uses the existing reverse
+  bucket order during checkpoint recompute, but broader trace validation is
+  still needed.
+- TODO: extend the custom bucket path beyond CUDA `Shard` buckets to mixed
   precision, CPU offload, `Shard(dim != 0)`, uneven shards, `FlatShard`,
   `RaggedShard`, and `Owned`.
+
+### Plan: Eager RAF All-Gather Prefetch
+
+The implemented prefetch direction is a two-stage design with a bucket custom
+autograd Function. The earlier pure `_c10d_functional` eager path proved the
+correctness baseline, but it could not safely prefetch the next functional
+`full_bucket` because that tensor would be created in the wrong
+checkpoint/module execution unit.
+
+#### Target Semantics
+
+- While bucket `N` computes on the default stream, bucket `N+1` all-gather can
+  run on the shared FlexShard all-gather stream.
+- Copy-in/packing for the prefetched bucket still happens on the default stream.
+- The autograd-visible full parameters for bucket `N+1` are created only when
+  bucket `N+1`'s hook runs, so checkpoint can drop/recompute them correctly.
+- Full parameters remain non-leaf tensors and no storage resize is used.
+- Backward reduce-scatter uses FlexShard's explicit reduce-scatter stream and
+  pending-state `param.grad` accumulation instead of returning local shard grads
+  through autograd.
+
+#### Design
+
+1. **Prefetch raw communication state, not autograd tensors.**
+   After the current bucket has launched or finished its own AG, schedule the
+   next bucket's raw all-gather:
+
+   - default stream: pack local shards into `local_bucket`
+   - record a copy-in event
+   - all-gather stream: wait on the copy-in event and launch imperative NCCL
+     all-gather into a raw `full_bucket` buffer
+   - record an AG-done event
+
+   The pending object owns only raw buffers, offsets, events, and bucket
+   metadata. It must not expose `full_bucket` views directly to module compute.
+
+2. **Create the autograd boundary at the consuming bucket.**
+   In bucket `N+1`'s pre-forward hook, call a custom Function:
+
+   ```python
+   full_params = _EagerBucketAllGather.apply(runtime, *local_shards)
+   ```
+
+   `runtime` contains the pending raw all-gather state if prefetch completed, or
+   enough metadata to launch the same raw all-gather on demand. The Function
+   forward waits on the pending event, unpacks the raw `full_bucket`, and returns
+   full-parameter tensors as non-leaf outputs. Since `Function.apply()` happens
+   inside bucket `N+1`'s hook, checkpoint ownership belongs to bucket `N+1`.
+
+3. **Keep backward bucketed and stream-controlled.**
+   `_EagerBucketAllGather.backward()` receives one full-parameter grad per
+   bucket output. It packs grads in bucket order, launches one reduce-scatter on
+   the shared FlexShard reduce-scatter stream, stores the pending state, and
+   schedules `param.grad` assignment/accumulation on the RS stream. The backward
+   returns `None` for the original sharded parameter inputs so it does not wait
+   for RS before autograd continues.
+
+   This removes the eager RAF dependency on `_unsharded_for_reduce`,
+   `AccumulateGrad` hooks, and autograd-generated functional reduce-scatter,
+   while keeping optimizer-visible gradients on the original sharded
+   parameters.
+
+4. **Make pending state execution-context aware.**
+   Pending raw AG state must be keyed by bucket and training phase:
+
+   - forward prefetch order uses the configured forward bucket order
+   - checkpoint recomputation uses reverse bucket order when applicable
+   - forward pending state must not be consumed by recompute, and recompute
+     pending state must not escape into the outer forward
+   - stale pending state is cleared if a bucket is skipped, an exception is
+     raised, or graph capture starts
+
+   First bucket in an execution phase has no previous compute to overlap, so it
+   launches on demand. Last bucket has no next bucket to prefetch.
+
+5. **Preserve optimizer and stream safety.**
+   Before the first copy-in of the next iteration, the all-gather stream must
+   wait on the current/default stream so optimizer CUDA kernels have completed.
+   Before `optimizer.step()` returns to user code, any outstanding reduce-scatter
+   states must be waited and cleared. Raw AG buffers should call `record_stream`
+   on the AG stream and be released when consumed.
+
+#### Implementation Phases
+
+1. **Phase 1: custom Function without prefetch.**
+   Replace the pure functional eager RAF bucket path with
+   `_EagerBucketAllGather.apply(...)` but launch AG on demand. This proves the
+   custom autograd boundary, memory lifetime, and explicit RS stream behavior
+   without adding pending-state complexity. **Status: done.**
+
+2. **Phase 2: one-bucket-ahead forward prefetch.**
+   Add pending raw AG state for forward execution only. Verify traces show AG for
+   bucket `N+1` overlapping default-stream compute for bucket `N`, and that
+   bucket `N+1` only waits/copy-outs at its own boundary. **Status: done for the
+   Transformer profiler smoke trace.**
+
+3. **Phase 3: checkpoint recompute prefetch.**
+   Add recompute-aware pending state and reverse-order prefetch. Verify
+   checkpoint replay creates Function outputs in the recomputed bucket's context
+   and does not retain forward full params. **Status: implemented using the
+   existing recompute-order signal; profiler validation remains.**
+
+4. **Phase 4: coverage expansion.**
+   Extend beyond CUDA `Shard(0)` to mixed precision, CPU offload,
+   `Shard(dim != 0)`, uneven shards, and other placements after the core
+   prefetch path is stable. **Status: TODO.**
+
+#### Validation
+
+- Profiler traces show `FlexShard::all_gather (bucket N+1)` on the AG stream
+  overlapping default-stream compute for bucket `N`. **Smoke validated on the
+  Transformer trace.**
+- `FlexShard::all_gather_copy_in` remains on the default stream.
+- Reduce-scatter launches on the shared FlexShard reduce-scatter stream, not an
+  autograd worker per-thread default stream, and does not immediately block the
+  default stream before later backward compute can run. **Smoke validated on the
+  Transformer trace.**
+- Memory snapshots still show no live full-parameter storage after each
+  `reshard_after_forward=True` bucket forward. **TODO for checkpoint-enabled
+  validation; non-checkpointed forward still retains tensors required by
+  backward.**
+- Distributed numerics match the current pure functional RAF baseline for loss,
+  local shard grads, and optimizer-updated parameters.
+- Error handling clears stale pending raw buffers and does not leak references
+  after exceptions.
+
+### Plan: Eager RAF Reduce-Scatter Overlap
+
+The previous custom Function backward launched RS on the shared RS stream but
+immediately called `finish_reduce_grad()`. That was stream-safe because it
+returned local shard grads to autograd only after RS completed, but it forced the
+default stream to wait and eliminated useful overlap.
+
+The implemented overlap design is:
+
+1. **Launch RS asynchronously from custom backward.**
+   `_EagerBucketAllGather.backward()` packs full-parameter grads on the current
+   stream, records a copy-in event, launches `Shard.begin_reduce_grad(...)` on
+   the shared RS stream, and does not call `finish_reduce_grad()`.
+
+2. **Stash pending RS state.**
+   The returned `EagerReduceScatterResult` is appended to the eager comm
+   context's `reduce_scatter_states`, keeping the send/receive buffers and
+   completion event alive until the boundary/final wait.
+
+3. **Assign/accumulate `param.grad` on the RS stream.**
+   The custom backward uses the runtime bucket entries to map each reduced local
+   shard back to its original sharded parameter. It casts as needed and assigns
+   or accumulates `param.grad` inside the RS stream context, then records the
+   result event after the grad write-out.
+
+4. **Return no local input grads to autograd.**
+   The Function returns `None` for the original sharded parameter inputs. This is
+   the key tradeoff: the sharded parameter gradients are visible through
+   `param.grad`, but they are not produced by autograd's returned input-gradient
+   path. This avoids an immediate default-stream wait.
+
+5. **Preserve boundary and optimizer safety.**
+   Before the next bucket launches RS, FlexShard waits and clears any prior
+   pending RS state. The queued final autograd callback waits any tail pending
+   RS state before `loss.backward()` returns to user code, so `optimizer.step()`
+   sees fully reduced gradients.
 
 ### Validation
 
@@ -1117,7 +1289,7 @@ stream/prefetch behavior.
 - Confirm AG and RS launch counts remain bucketed in eager mode.
 - Confirm AG copy-in is on the default stream and AG communication is on the
   shared all-gather stream.
-- Confirm optimizer safety: pending functional reduce-scatters are complete
+- Confirm optimizer safety: pending eager reduce-scatters are complete
   before `optimizer.step()`, and the next iteration's copy-in waits for prior
   optimizer CUDA work.
 - Confirm compiled JIT/AOT graphs still contain `_c10d_functional` unshard

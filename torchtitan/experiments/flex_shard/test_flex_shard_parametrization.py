@@ -17,6 +17,7 @@ Usage:
 """
 
 import unittest
+import weakref
 
 import torch
 import torch.nn as nn
@@ -336,7 +337,7 @@ class TestDistributedParametrization(unittest.TestCase):
         torch.distributed.broadcast(x, src=0)
         model(x).sum().backward()
 
-    def test_eager_reshard_after_forward_uses_functional_bucket(self):
+    def test_eager_reshard_after_forward_uses_autograd_bucket(self):
         """RAF eager buckets return non-leaf full params and autograd RS grads."""
         from torchtitan.experiments.flex_shard import BucketSpec
 
@@ -381,6 +382,61 @@ class TestDistributedParametrization(unittest.TestCase):
             model._parameters["weight"].grad,
             expected_local_grad,
         )
+
+    def test_eager_reshard_after_forward_prefetches_next_bucket(self):
+        """RAF eager buckets prefetch the next bucket as raw AG state."""
+        from torchtitan.experiments.flex_shard import BucketSpec
+
+        class InspectLinear(nn.Module):
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+                self.weight = nn.Parameter(torch.randn(8, 8, device="cuda"))
+                self.pending_debug_fqn = None
+
+            def forward(self, x):
+                root = self._root_ref()
+                context = next(iter(root.eager_comm_contexts.values()))
+                pending = context.pending
+                self.pending_debug_fqn = (
+                    pending.bucket.debug_fqn if pending is not None else None
+                )
+                return x @ self.weight.t()
+
+        class TwoLinears(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = InspectLinear("a")
+                self.b = InspectLinear("b")
+                self.a._root_ref = weakref.ref(self)
+                self.b._root_ref = weakref.ref(self)
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        mesh = self._init_mesh()
+        model = TwoLinears()
+        for param in model.parameters():
+            torch.distributed.broadcast(param.data, src=0)
+
+        self._flex_shard(
+            model,
+            mesh,
+            buckets=[
+                BucketSpec(["a.*"], reshard_after_forward=True),
+                BucketSpec(["b.*"], reshard_after_forward=True),
+            ],
+        )
+
+        x = torch.randn(2, 8, device="cuda")
+        torch.distributed.broadcast(x, src=0)
+        output = model(x)
+        self.assertEqual(model.a.pending_debug_fqn, "b")
+        self.assertIsNone(model.b.pending_debug_fqn)
+        context = next(iter(model.eager_comm_contexts.values()))
+        self.assertIsNone(context.pending)
+
+        output.sum().backward()
 
     def test_global_spmd_mesh_param_access(self):
         """Global SPMD mesh path derives the DP mesh and rewraps DTensor params."""

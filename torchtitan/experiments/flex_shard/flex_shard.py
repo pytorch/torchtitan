@@ -48,7 +48,7 @@ class EagerAllGatherBucket:
     entries: list[tuple[nn.Module, str, nn.Module, ParamInfo]]
     infos: list[ParamInfo]
     debug_fqn: str | None
-    use_functional_unshard: bool
+    use_autograd_unshard: bool
 
 
 @dataclass
@@ -56,7 +56,8 @@ class PendingEagerAllGather:
     """The single one-bucket-ahead eager all-gather in flight."""
 
     bucket: EagerAllGatherBucket
-    result: EagerAllGatherResult | EagerFunctionalAllGatherResult
+    result: EagerAllGatherResult
+    recompute: bool
 
 
 @dataclass
@@ -73,16 +74,14 @@ class EagerAllGatherResult:
 
 
 @dataclass
-class EagerFunctionalAllGatherResult:
-    """State needed to finish a differentiable bucket all-gather."""
+class EagerBucketAllGatherRuntime:
+    """Runtime metadata passed to eager RAF bucket autograd."""
 
-    full_bucket: torch.Tensor
+    prefetched_result: EagerAllGatherResult | None
     infos: list[ParamInfo]
+    param_refs: list[tuple[nn.Module, str]]
     mesh: DeviceMesh
-    padded_bucket_numel: int
-    per_rank_param_offsets: list[list[int]]
-    event: torch.Event | None
-    local_bucket: torch.Tensor
+    context: EagerAllGatherContext
     debug_fqn: str | None
 
 
@@ -437,143 +436,6 @@ class Shard(Placement):
             torch.cuda.current_stream(device).wait_event(result.event)
 
     @classmethod
-    def begin_functional_unshard(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-        all_gather_stream: torch.Stream | None,
-        debug_fqn: str | None = None,
-    ) -> EagerFunctionalAllGatherResult:
-        ws = mesh.size()
-        device = tensors[0].device
-
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
-        ):
-            local_bucket = torch.cat([t.reshape(-1) for t in tensors])
-
-            per_rank_sizes: list[int] = []
-            per_rank_param_offsets: list[list[int]] = []
-            for r in range(ws):
-                offset = 0
-                offsets_r: list[int] = []
-                for info in infos:
-                    offsets_r.append(offset)
-                    offset += info.placements[0].compute_local_numel(
-                        info.global_shape, r, ws
-                    )
-                per_rank_sizes.append(offset)
-                per_rank_param_offsets.append(offsets_r)
-
-            padded_bucket_numel = max(per_rank_sizes)
-            pad_size = padded_bucket_numel - local_bucket.numel()
-            if pad_size > 0:
-                local_bucket = torch.cat(
-                    [local_bucket, local_bucket.new_zeros(pad_size)]
-                )
-
-        group_name = mesh.get_group().group_name
-
-        def _run_all_gather() -> torch.Tensor:
-            label = _with_fqn("FlexShard::all_gather", debug_fqn)
-            with dist.record_comm(label):
-                full_bucket = torch.ops._c10d_functional.all_gather_into_tensor(
-                    local_bucket,
-                    ws,
-                    group_name,
-                )
-                full_bucket = torch.ops._c10d_functional.wait_tensor(full_bucket)
-            full_bucket = _set_tensor_reshard_after_forward(full_bucket, True)
-            if full_bucket.requires_grad and torch.is_grad_enabled():
-                full_bucket.register_hook(lambda grad: grad / ws)
-            return full_bucket
-
-        if all_gather_stream is None or device.type != "cuda":
-            full_bucket = _run_all_gather()
-            event = None
-            if device.type == "cuda":
-                event = torch.cuda.Event()
-                event.record(torch.cuda.current_stream(device))
-            return EagerFunctionalAllGatherResult(
-                full_bucket=full_bucket,
-                infos=infos,
-                mesh=mesh,
-                padded_bucket_numel=padded_bucket_numel,
-                per_rank_param_offsets=per_rank_param_offsets,
-                event=event,
-                local_bucket=local_bucket,
-                debug_fqn=debug_fqn,
-            )
-
-        copy_in_done = torch.cuda.Event()
-        copy_in_done.record(torch.cuda.current_stream(device))
-        with torch.cuda.stream(all_gather_stream):
-            all_gather_stream.wait_event(copy_in_done)
-            full_bucket = _run_all_gather()
-            event = torch.cuda.Event()
-            event.record(all_gather_stream)
-        local_bucket.record_stream(all_gather_stream)
-        full_bucket.record_stream(all_gather_stream)
-        return EagerFunctionalAllGatherResult(
-            full_bucket=full_bucket,
-            infos=infos,
-            mesh=mesh,
-            padded_bucket_numel=padded_bucket_numel,
-            per_rank_param_offsets=per_rank_param_offsets,
-            event=event,
-            local_bucket=local_bucket,
-            debug_fqn=debug_fqn,
-        )
-
-    @classmethod
-    def finish_functional_unshard(
-        cls,
-        result: EagerFunctionalAllGatherResult,
-    ) -> list[torch.Tensor]:
-        cls.wait_for_functional_unshard(result)
-        ws = result.mesh.size()
-        device = result.full_bucket.device
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_out", result.debug_fqn)
-        ):
-            results: list[torch.Tensor] = []
-            for i, info in enumerate(result.infos):
-                p = info.placements[0]
-                per_rank_shards: list[torch.Tensor] = []
-                for r in range(ws):
-                    numel = p.compute_local_numel(info.global_shape, r, ws)
-                    shape = p.compute_local_shape(info.global_shape, r, ws)
-                    if numel > 0:
-                        off = (
-                            r * result.padded_bucket_numel
-                            + result.per_rank_param_offsets[r][i]
-                        )
-                        per_rank_shards.append(
-                            result.full_bucket[off : off + numel].view(shape)
-                        )
-                    else:
-                        per_rank_shards.append(
-                            torch.empty(shape, dtype=info.dtype, device=device)
-                        )
-                full_param = p.assemble_from_shards(
-                    per_rank_shards,
-                    info.global_shape,
-                    info.dtype,
-                )
-                results.append(_set_tensor_reshard_after_forward(full_param, True))
-            return results
-
-    @classmethod
-    def wait_for_functional_unshard(
-        cls,
-        result: EagerFunctionalAllGatherResult,
-    ) -> None:
-        device = result.full_bucket.device
-        if device.type == "cuda" and result.event is not None:
-            torch.cuda.current_stream(device).wait_event(result.event)
-
-    @classmethod
     def reduce_grad(
         cls,
         tensors: list[torch.Tensor],
@@ -702,6 +564,98 @@ class Shard(Placement):
         device = result.recv_buf.device
         if device.type == "cuda" and result.event is not None:
             torch.cuda.current_stream(device).wait_event(result.event)
+
+
+class _EagerBucketAllGather(torch.autograd.Function):
+    """Autograd boundary for eager RAF bucket all-gather.
+
+    Forward consumes a raw all-gather result, either prefetched by the previous
+    bucket or launched on demand. Backward packs full-parameter gradients and
+    launches one explicit bucket reduce-scatter.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        runtime: EagerBucketAllGatherRuntime,
+        *local_shards: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        ctx.runtime = runtime
+        ctx.num_inputs = len(local_shards)
+
+        result = runtime.prefetched_result
+        if result is None:
+            result = Shard.begin_unshard(
+                [shard.detach() for shard in local_shards],
+                runtime.infos,
+                runtime.mesh,
+                runtime.context.all_gather_stream,
+                debug_fqn=runtime.debug_fqn,
+            )
+        full_params = Shard.finish_unshard(result)
+        return tuple(
+            _set_tensor_reshard_after_forward(full_param, True)
+            for full_param in full_params
+        )
+
+    @staticmethod
+    def backward(
+        ctx: Any,
+        *full_param_grads: torch.Tensor | None,
+    ) -> tuple[Any, ...]:
+        runtime: EagerBucketAllGatherRuntime = ctx.runtime
+        grads: list[torch.Tensor] = []
+        valid_infos: list[ParamInfo] = []
+        valid_param_refs: list[tuple[nn.Module, str]] = []
+        for grad, info, param_ref in zip(
+            full_param_grads,
+            runtime.infos,
+            runtime.param_refs,
+            strict=True,
+        ):
+            if grad is None:
+                continue
+            grads.append(grad.contiguous())
+            valid_infos.append(info)
+            valid_param_refs.append(param_ref)
+
+        if grads:
+            with torch.no_grad():
+                _wait_and_clear_reduce_scatter_states(
+                    runtime.context,
+                    runtime.debug_fqn,
+                )
+                result = Shard.begin_reduce_grad(
+                    grads,
+                    valid_infos,
+                    runtime.mesh,
+                    runtime.context.reduce_scatter_stream,
+                    debug_fqn=runtime.debug_fqn,
+                )
+                stored_grads: list[torch.Tensor] = []
+                with torch.cuda.stream(runtime.context.reduce_scatter_stream):
+                    for (leaf, name), grad in zip(
+                        valid_param_refs,
+                        result.sharded_grads,
+                        strict=True,
+                    ):
+                        param = leaf._parameters[name]
+                        if grad.dtype != param.dtype:
+                            grad = grad.to(param.dtype)
+                        stored_grads.append(grad)
+                        if param.grad is None:
+                            param.grad = grad
+                        else:
+                            param.grad += grad
+                    result.sharded_grads = stored_grads
+                    result.event = torch.cuda.Event()
+                    result.event.record(runtime.context.reduce_scatter_stream)
+                runtime.context.reduce_scatter_states.append(result)
+                _queue_reduce_scatter_wait(runtime.context)
+
+        # Gradients are accumulated into the original sharded parameters above
+        # so the autograd input grads can stay empty and avoid blocking here.
+        return (None, *([None] * ctx.num_inputs))
 
 
 @dataclass
@@ -943,7 +897,7 @@ _EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
 _PARAM_FQN_ATTR = "_flex_shard_param_fqn"
 _BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
-_EAGER_FUNCTIONAL_BUCKET_UNSHARD_ATTR = "_flex_shard_eager_functional_bucket_unshard"
+_EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR = "_flex_shard_eager_autograd_bucket_unshard"
 
 
 @dataclass(frozen=True)
@@ -1569,7 +1523,7 @@ def _register_parametrization(
                 p._pre_gathered = None
                 param_dtype = getattr(p, "param_dtype", None)
                 reduce_dtype = getattr(p, "reduce_dtype", None)
-                if getattr(p, _EAGER_FUNCTIONAL_BUCKET_UNSHARD_ATTR, False):
+                if getattr(p, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
                     if param_dtype is not None or reduce_dtype is not None:
                         pre = _MixedPrecisionCast.apply(pre, param_dtype, reduce_dtype)
                     return pre
@@ -2877,8 +2831,8 @@ def _storage_requires_eager_batched_unshard(storage: DStorage) -> bool:
     )
 
 
-def _storage_uses_eager_functional_unshard(storage: DStorage) -> bool:
-    """Return whether eager RAF should use differentiable bucket collectives."""
+def _storage_uses_eager_autograd_unshard(storage: DStorage) -> bool:
+    """Return whether eager RAF should use the custom bucket autograd path."""
     infos = list(storage._param_infos.values())
     if not infos:
         return False
@@ -3446,7 +3400,7 @@ def flex_shard(
 
     for s in storages:
         requires_eager_batched_unshard = _storage_requires_eager_batched_unshard(s)
-        uses_eager_functional_unshard = _storage_uses_eager_functional_unshard(s)
+        uses_eager_autograd_unshard = _storage_uses_eager_autograd_unshard(s)
         bucket_fqn = _get_storage_debug_fqn(s)
         for fqn, info in s._param_infos.items():
             mp = fqn_to_mp_policy.get(fqn)
@@ -3482,8 +3436,8 @@ def flex_shard(
             )
             setattr(
                 p,
-                _EAGER_FUNCTIONAL_BUCKET_UNSHARD_ATTR,
-                uses_eager_functional_unshard,
+                _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
+                uses_eager_autograd_unshard,
             )
             setattr(p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
             setattr(p, _PARAM_FQN_ATTR, fqn)
@@ -3756,9 +3710,9 @@ def _install_batched_allgather_hooks(
                 entries=param_entries,
                 infos=infos,
                 debug_fqn=_get_storage_debug_fqn(storage),
-                use_functional_unshard=_storage_uses_eager_functional_unshard(storage),
+                use_autograd_unshard=_storage_uses_eager_autograd_unshard(storage),
             )
-        use_functional_unshard = _storage_uses_eager_functional_unshard(storage)
+        use_autograd_unshard = _storage_uses_eager_autograd_unshard(storage)
 
         def make_hooks(
             s,
@@ -3766,28 +3720,15 @@ def _install_batched_allgather_hooks(
             pt,
             all_gather_context,
             all_gather_bucket,
-            use_functional_bucket,
+            use_autograd_bucket,
         ):
             # Collected grads from AccumulateGrad hooks (indexed by position)
             collected_grads: dict[int, torch.Tensor] = {}
 
             def _begin_bucket_unshard(bucket):
                 local_shards = [
-                    (
-                        leaf._parameters[name]
-                        if bucket.use_functional_unshard
-                        else leaf._parameters[name].data
-                    )
-                    for leaf, name, _, _ in bucket.entries
+                    leaf._parameters[name].data for leaf, name, _, _ in bucket.entries
                 ]
-                if bucket.use_functional_unshard:
-                    return Shard.begin_functional_unshard(
-                        local_shards,
-                        bucket.infos,
-                        bucket.storage._mesh,
-                        all_gather_context.all_gather_stream,
-                        debug_fqn=bucket.debug_fqn,
-                    )
                 return Shard.begin_unshard(
                     local_shards,
                     bucket.infos,
@@ -3797,15 +3738,10 @@ def _install_batched_allgather_hooks(
                 )
 
             def _wait_bucket_unshard(result):
-                if isinstance(result, EagerFunctionalAllGatherResult):
-                    Shard.wait_for_functional_unshard(result)
-                else:
-                    Shard.wait_for_unshard(result)
+                Shard.wait_for_unshard(result)
 
             def _prefetch_next_bucket():
                 if all_gather_context.pending is not None:
-                    return
-                if use_functional_bucket:
                     return
                 prefetch_order = all_gather_context.buckets
                 if _reshard_checkpoint_recompute.get():
@@ -3819,12 +3755,25 @@ def _install_batched_allgather_hooks(
                 if next_idx >= len(prefetch_order):
                     return
                 next_bucket = prefetch_order[next_idx]
-                if next_bucket.use_functional_unshard:
-                    return
                 all_gather_context.pending = PendingEagerAllGather(
                     bucket=next_bucket,
                     result=_begin_bucket_unshard(next_bucket),
+                    recompute=_reshard_checkpoint_recompute.get(),
                 )
+
+            def _take_pending_for_current_bucket():
+                pending = all_gather_context.pending
+                if pending is None:
+                    return None
+                if (
+                    pending.bucket is all_gather_bucket
+                    and pending.recompute == _reshard_checkpoint_recompute.get()
+                ):
+                    all_gather_context.pending = None
+                    return pending.result
+                _wait_bucket_unshard(pending.result)
+                all_gather_context.pending = None
+                return None
 
             def _reduce_fn():
                 """Batched reduce-scatter using collected grads."""
@@ -3895,7 +3844,7 @@ def _install_batched_allgather_hooks(
                 local_shards = [
                     (
                         leaf._parameters[name]
-                        if use_functional_bucket
+                        if use_autograd_bucket
                         else leaf._parameters[name].data
                     )
                     for leaf, name, _, _ in entries
@@ -3906,37 +3855,24 @@ def _install_batched_allgather_hooks(
                     and all_gather_bucket is not None
                     and pt is Shard
                 ):
-                    if use_functional_bucket:
-                        pending = all_gather_context.pending
-                        if pending is not None and pending.bucket is all_gather_bucket:
-                            result = pending.result
-                            all_gather_context.pending = None
-                        else:
-                            if pending is not None:
-                                _wait_bucket_unshard(pending.result)
-                                all_gather_context.pending = None
-                            result = Shard.begin_functional_unshard(
-                                local_shards,
-                                entry_infos,
-                                s._mesh,
-                                all_gather_context.all_gather_stream,
-                                debug_fqn=all_gather_bucket.debug_fqn,
-                            )
-                        full_params = Shard.finish_functional_unshard(result)
+                    if use_autograd_bucket:
+                        prefetched_result = _take_pending_for_current_bucket()
+                        runtime = EagerBucketAllGatherRuntime(
+                            prefetched_result=prefetched_result,
+                            infos=entry_infos,
+                            param_refs=[(leaf, name) for leaf, name, _, _ in entries],
+                            mesh=s._mesh,
+                            context=all_gather_context,
+                            debug_fqn=all_gather_bucket.debug_fqn,
+                        )
+                        full_params = list(
+                            _EagerBucketAllGather.apply(runtime, *local_shards)
+                        )
                         _prefetch_next_bucket()
                     else:
                         with torch.no_grad():
-                            pending = all_gather_context.pending
-                            if (
-                                pending is not None
-                                and pending.bucket is all_gather_bucket
-                            ):
-                                result = pending.result
-                                all_gather_context.pending = None
-                            else:
-                                if pending is not None:
-                                    _wait_bucket_unshard(pending.result)
-                                    all_gather_context.pending = None
+                            result = _take_pending_for_current_bucket()
+                            if result is None:
                                 result = Shard.begin_unshard(
                                     local_shards,
                                     entry_infos,
@@ -3959,7 +3895,7 @@ def _install_batched_allgather_hooks(
                     return
                 for _, _, param_p, _ in entries:
                     param_p._pre_gathered = None
-                if use_functional_bucket:
+                if use_autograd_bucket:
                     return
 
                 # Register AccumulateGrad hooks on detached leaf params.
@@ -3999,7 +3935,7 @@ def _install_batched_allgather_hooks(
             ptype,
             ag_context,
             ag_bucket,
-            use_functional_unshard,
+            use_autograd_unshard,
         )
 
         # Register hooks on the bucket's child module (not root) so they
