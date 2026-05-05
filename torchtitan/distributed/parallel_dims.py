@@ -28,6 +28,12 @@ class ParallelDims:
     ep: int
     world_size: int
     full_dtensor: bool = False
+    # Cache the meshes we create -- DeviceMesh equality is by identity, so
+    # recreating a mesh would break ``mesh in spmd_meshes()`` checks.
+    # 1. _single_axis_meshes stores 1D meshes.
+    # 2. _multi_axis_meshes stores nD submeshes.
+    # 3. _spmd_meshes stores the full SPMD meshes; today: spmd_dense and
+    #    spmd_sparse.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _multi_axis_meshes: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
@@ -77,12 +83,6 @@ class ParallelDims:
         if name == "fsdp":
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
-            return True
-        if name == "dp_shard" and self.full_dtensor:
-            # Under full_dtensor there is no flattened ``fsdp`` axis;
-            # ``dp_shard`` plays the same role. Keep it always-available
-            # so ``fully_shard`` can install MixedPrecisionPolicy at
-            # degree 1 (e.g. PP-only configs).
             return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
@@ -171,18 +171,26 @@ class ParallelDims:
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
         if self.full_dtensor:
-            dense_mesh = unflatten_mesh(
+            # Under full_dtensor, ``dp_shard`` and ``cp`` cannot be folded
+            # together: activations carry a ``cp`` dimension, so parameters
+            # need a ``cp`` axis as well. ``fully_shard`` folds ``dp_shard``
+            # and ``cp`` internally at initialization time.
+            spmd_dense_axes = ["dp_replicate", "dp_shard", "cp", "tp"]
+            full_dense_mesh = unflatten_mesh(
                 self._world_mesh,
-                ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
+                tuple(["pp"] + spmd_dense_axes),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
             )
         else:
-            dense_mesh = unflatten_mesh(
+            # Legacy path folds ``dp_shard`` and ``cp`` into ``fsdp``.
+            spmd_dense_axes = ["dp_replicate", "fsdp", "tp"]
+            full_dense_mesh = unflatten_mesh(
                 self._world_mesh,
                 ("pp", "dp_replicate", "fsdp", "tp"),
                 (self.pp, self.dp_replicate, fsdp, self.tp),
             )
-        sparse_mesh = unflatten_mesh(
+
+        full_sparse_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "efsdp", "ep"),
             (self.pp, self.dp_replicate, efsdp, self.ep),
@@ -191,42 +199,32 @@ class ParallelDims:
         self._global_meshes = {
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
-            "dense": dense_mesh,
-            "sparse": sparse_mesh,
+            "dense": full_dense_mesh,
+            "sparse": full_sparse_mesh,
         }
 
         self._single_axis_meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
-            "dp_replicate": dense_mesh["dp_replicate"],
+            "dp_replicate": full_dense_mesh["dp_replicate"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
-            "ep": sparse_mesh["ep"],
-            "efsdp": sparse_mesh["efsdp"],
+            "ep": full_sparse_mesh["ep"],
+            "efsdp": full_sparse_mesh["efsdp"],
         }
         if self.full_dtensor:
-            self._single_axis_meshes["dp_shard"] = dense_mesh["dp_shard"]
+            self._single_axis_meshes["dp_shard"] = full_dense_mesh["dp_shard"]
         else:
-            self._single_axis_meshes["fsdp"] = dense_mesh["fsdp"]
+            self._single_axis_meshes["fsdp"] = full_dense_mesh["fsdp"]
 
-        # Validate mesh sizes
         self._validate_meshes()
 
-        # Under full_dtensor, ``dp_shard`` and ``cp`` are first-class single-axis
-        # meshes that participate in ``distribute_tensor``; under the legacy
-        # path they are folded into ``fsdp`` and handled by FSDP /
-        # ``apply_cp_to_forward`` out-of-band, so the SPMD dense mesh excludes
-        # them. (Including ``cp`` in the legacy axis list breaks HSDP+CP
-        # because no global mesh contains both ``dp_replicate`` and ``cp``.)
-        dense_axes = (
-            ["dp_replicate", "dp_shard", "cp", "tp"]
-            if self.full_dtensor
-            else ["dp_replicate", "tp"]
-        )
-        dense_mesh = self.get_enabled_mesh(dense_axes)
-        sparse_mesh = self.get_enabled_mesh(["dp_replicate", "efsdp", "ep"])
-        self._spmd_meshes = [m for m in (dense_mesh, sparse_mesh) if m is not None]
+        spmd_dense_mesh = self.get_enabled_mesh(spmd_dense_axes)
+        spmd_sparse_mesh = self.get_enabled_mesh(["dp_replicate", "efsdp", "ep"])
+        self._spmd_meshes = [
+            m for m in (spmd_dense_mesh, spmd_sparse_mesh) if m is not None
+        ]
 
         logger.info(
             f"Successfully created meshes with active dimensions: "
@@ -375,25 +373,6 @@ class ParallelDims:
             and self.get_optional_mesh(axis) is not None
         ]
         return self.get_optional_mesh(axes) if axes else None
-
-    def get_module_mesh(self, axes: list[str]) -> DeviceMesh | None:
-        """Return the mesh a ``Module`` should use for ``distribute_tensor``.
-
-        TODO(fegin): This is a WORKAROUND to bridge ``full_dtensor`` and legacy
-        modes during the transition. Once all models support ``full_dtensor`` and
-        the legacy path is removed, this method goes away — callers should use
-        ``get_enabled_mesh(axes)`` directly.
-
-        - ``full_dtensor=True``: identical to ``get_enabled_mesh(axes)``.
-        - ``full_dtensor=False``: filters ``axes`` to ``{tp, ep}`` first
-          (the axes that participate in ``distribute_tensor`` under the
-          legacy path; DP/CP are handled by FSDP / LocalMapConfig
-          out-of-band) before delegating to ``get_enabled_mesh``.
-        """
-        if not self.full_dtensor:
-            in_band = {"tp", "ep"}
-            axes = [axis for axis in axes if axis in in_band]
-        return self.get_enabled_mesh(axes)
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
