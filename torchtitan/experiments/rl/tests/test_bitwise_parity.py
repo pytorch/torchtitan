@@ -440,6 +440,12 @@ class TestBitwiseParity(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
+        # Test runs trainer and generator in the same process group,
+        # so override TP to use all available GPUs (pure TP, no FSDP).
+        world_size = dist.get_world_size()
+        config.trainer.parallelism.tensor_parallel_degree = world_size
+        config.generator.parallelism.tensor_parallel_degree = world_size
+
         register_model_to_vllm_model_registry(
             config.model_spec,
             compile_config=config.compile,
