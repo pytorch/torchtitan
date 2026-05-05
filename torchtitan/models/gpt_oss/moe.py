@@ -219,10 +219,7 @@ class GptOssGroupedExperts(Module):
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        scored_output, scatter_indices = self.token_dispatcher.combine(
-            routed_output, metadata, x
-        )
-        return scored_output, scatter_indices, x
+        return self.token_dispatcher.combine(routed_output, metadata, x)
 
 
 class GptOssMoE(MoE):

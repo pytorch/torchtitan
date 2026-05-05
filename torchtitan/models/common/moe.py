@@ -127,12 +127,12 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Dispatch tokens to experts, compute, and combine.
 
-        Returns the scored routed output, scatter indices, and original x
-        so the caller (MoE.forward) can perform scatter_add with the
-        desired initial buffer (e.g. shared_experts output).
+        Returns the scored routed output and scatter indices so the caller
+        (MoE.forward) can perform scatter_add with the desired initial
+        buffer (e.g. shared_experts output).
 
         For DeepEP, scatter_indices is None (un-routing is handled
         internally by combine_tokens).
@@ -147,10 +147,7 @@ class GroupedExperts(Module):
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        scored_output, scatter_indices = self.token_dispatcher.combine(
-            routed_output, metadata, x
-        )
-        return scored_output, scatter_indices, x
+        return self.token_dispatcher.combine(routed_output, metadata, x)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -398,12 +395,12 @@ class MoE(Module):
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # Routed experts convert to local tensor at GroupedExperts boundary.
-        scored_output, scatter_indices, x_local = self.experts(
+        scored_output, scatter_indices = self.experts(
             x, top_scores, selected_experts_indices
         )
 
         # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
-        out = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x_local)
+        out = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x)
         if scatter_indices is not None:
             out = deterministic_scatter_add(out, scatter_indices, scored_output)
         else:
