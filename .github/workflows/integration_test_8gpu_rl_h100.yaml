@@ -88,7 +88,8 @@ jobs:
         HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
 
-        # Run batch-invariant E2E RL integration test (TP=2 on 4 GPUs)
+        # Run batch-invariant E2E RL integration tests (up to 8 GPUs).
+        # Includes the MoE TP=4 EP=4 batch-invariant bitwise-identity test.
         python -m torchtitan.experiments.rl.tests.integration_tests \
-          $RUNNER_TEMP/artifacts-to-be-uploaded --test_suite h100 --ngpu 4 \
+          $RUNNER_TEMP/artifacts-to-be-uploaded --test_suite h100 --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"

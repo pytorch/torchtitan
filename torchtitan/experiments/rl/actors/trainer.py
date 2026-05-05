@@ -188,7 +188,10 @@ class PolicyTrainer(Actor, Configurable):
         set_model_state_dict(
             model=model,
             model_state_dict=torchtitan_state_dict,
-            options=StateDictOptions(strict=True),
+            # strict=False: HF MoE checkpoints don't carry expert_bias buffers
+            # (used for aux-loss-free load balancing); they're initialized in
+            # the model and don't need to come from the HF checkpoint.
+            options=StateDictOptions(strict=False),
         )
         logger.info(
             f"Loaded initial weights from {checkpoint_path} "
@@ -244,8 +247,16 @@ class PolicyTrainer(Actor, Configurable):
         with torch.no_grad():
             model.init_weights(buffer_device=None)
 
-        # Load initial weights from HF
-        self._load_initial_hf_weights(model, hf_assets_path)
+        # Load initial weights from HF, unless debug.random_init is set, in
+        # which case we keep the freshly init_weights()-initialized model.
+        # The random init flows to the generator via the TorchStore push at
+        # startup, so trainer and generator end up with the same weights.
+        if config.debug.random_init:
+            logger.info(
+                "debug.random_init=True: skipping HF weight load, using model.init_weights()"
+            )
+        else:
+            self._load_initial_hf_weights(model, hf_assets_path)
 
         return model
 
@@ -343,6 +354,7 @@ class PolicyTrainer(Actor, Configurable):
             self.config.training.max_norm,
             foreach=True,
             pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+            ep_enabled=self.parallel_dims.ep_enabled,
         )
 
         self.optimizers.step()
