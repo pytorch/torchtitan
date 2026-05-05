@@ -162,7 +162,15 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
                         instance = base_cls.build(self, **kwargs)
                         recipe = MXFP8TrainingRecipe(recipe_name)
                         mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-                        quantize_(instance, config=mxfp8_op_config)
+                        # torchao's quantize_ defaults filter_fn to _is_linear,
+                        # which skips GroupedExperts. Pass a filter that matches
+                        # the built GroupedExperts instance so its nn.Parameters
+                        # (w1/w2/w3) get swapped to MXFP8 wrapper subclasses.
+                        quantize_(
+                            instance,
+                            config=mxfp8_op_config,
+                            filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+                        )
                         return instance
 
                 _converted_config_cache[base_cls] = MXFP8GroupedExpertsConfig
