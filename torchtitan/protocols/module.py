@@ -279,11 +279,8 @@ class Module(nn.Module, Configurable):
     ) -> Callable:
         """Wrap ``fn`` with ``local_map`` if ``sharding_config.local_map`` is set.
 
-        ``local_map`` takes a single ``device_mesh``, so all (non-``None``)
-        NamedPlacements within one LocalMapConfig must resolve to the same
-        mesh. ``resolve_shared_mesh`` enforces that and returns the
-        resolved mesh. ``None`` entries mark non-tensor args (e.g. ints,
-        lists) and pass through unchanged.
+        ``local_map`` takes a single ``device_mesh``, so all NamedPlacements within
+        one LocalMapConfig must resolve to the same mesh.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
