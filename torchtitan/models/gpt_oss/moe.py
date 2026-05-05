@@ -212,14 +212,17 @@ class GptOssGroupedExperts(Module):
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add."""
+        """Dispatch tokens to experts, compute, and combine."""
         if isinstance(x, DTensor):
             x = x.to_local(grad_placements=(Partial(),))
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x)
+        scored_output, scatter_indices = self.token_dispatcher.combine(
+            routed_output, metadata, x
+        )
+        return scored_output, scatter_indices, x
 
 
 class GptOssMoE(MoE):

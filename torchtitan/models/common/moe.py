@@ -14,6 +14,7 @@ from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 from torchtitan.protocols.module import Module
 
@@ -126,8 +127,16 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add."""
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """Dispatch tokens to experts, compute, and combine.
+
+        Returns the scored routed output, scatter indices, and original x
+        so the caller (MoE.forward) can perform scatter_add with the
+        desired initial buffer (e.g. shared_experts output).
+
+        For DeepEP, scatter_indices is None (un-routing is handled
+        internally by combine_tokens).
+        """
         # Convert DTensor to local tensor for routed expert dispatch/compute.
         # grad_placements=(Partial(),) ensures x_local.grad is Partial on
         # the tp_mesh in backward, so gradient reduction happens once at
@@ -138,7 +147,10 @@ class GroupedExperts(Module):
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x)
+        scored_output, scatter_indices = self.token_dispatcher.combine(
+            routed_output, metadata, x
+        )
+        return scored_output, scatter_indices, x
 
 
 class TokenChoiceTopKRouter(Module):
@@ -385,13 +397,19 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
         # Routed experts convert to local tensor at GroupedExperts boundary.
-        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+        scored_output, scatter_indices, x_local = self.experts(
+            x, top_scores, selected_experts_indices
+        )
 
-        routed_out = self.experts(x, top_scores, selected_experts_indices)
+        # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
+        out = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x_local)
+        if scatter_indices is not None:
+            out = deterministic_scatter_add(out, scatter_indices, scored_output)
+        else:
+            # DeepEP: un-routing handled internally, just add shared_out.
+            out += scored_output
 
-        out = routed_out if shared_out is None else routed_out + shared_out
         return out.reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
