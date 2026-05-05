@@ -4,31 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Config-based sharding helpers for MoE submodules.
-
-Mirrors the dense helpers in ``decoder_sharding.py`` for the MoE family:
-
-- ``moe`` (wrapper): dense ``LocalMapConfig`` over ``{TP}`` -- redistributes
-  input across SP, runs the body on a local tensor, wraps the body's
-  Partial-on-TP output, then redistributes Partial -> sp_layout at the exit.
-- ``moe.router.gate``: ``Replicate`` weight; ``local_output_grad_placements
-  = {TP: Partial()}`` so backward d_input flows as Partial on TP.
-- ``moe.shared_experts.{w1,w3}``: colwise (``Shard(0)`` weight) with
-  ``local_input_grad_placements = {TP: Partial()}`` and a local-tensor
-  output wrapping.
-- ``moe.shared_experts.w2``: rowwise (``Shard(1)`` weight) with
-  ``out_dst_shardings = {TP: Partial()}`` -- skips the Partial->Replicate
-  all-reduce; the boundary collapse happens at the MoE wrapper.
-- ``moe.experts`` (``GroupedExperts``): sparse ``{EP}`` placements
-  when EP is enabled; falls back to dense ``{TP}`` placements when EP=1
-  but TP>1.
-
-Family purity per Module is invariant: a Module's ``sharding_config``
-references either dense ``{dp_replicate, dp_shard, cp, tp}`` axes or sparse
-``{dp_replicate, efsdp, ep}`` axes, never both. The dense<->sparse
-transition is the dispatcher's plain-tensor a2a, sitting *between* Modules
-(``MoE`` exits dense, ``GroupedExperts`` enters sparse).
-"""
+"""Config-based sharding helpers for MoE submodules."""
 
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
@@ -68,11 +44,10 @@ def expert_param_placement_sparse() -> NamedPlacement:
 
 
 def expert_param_placement_dense(*, tp_placement: Placement) -> NamedPlacement:
-    """Dense-family placement for routed-expert weights (EP=1, TP>1).
+    """Dense-family placement for routed-expert weights (EP disabled, TP > 1).
 
     Used when expert parallelism is disabled but tensor parallelism shards
-    the experts on the dense TP axis (today's ``TensorParallel`` /
-    ``GptossTensorParallel`` path).
+    the experts on the dense TP axis.
 
     Insertion order matches canonical mesh order. ``tp_placement`` is the
     placement on the TP axis: ``Shard(1)`` for colwise, ``Shard(2)`` for
@@ -215,14 +190,15 @@ def set_moe_sharding_config(
       Partial-flow grad annotations (when ``moe_cfg.shared_experts is not
       None``).
     - ``moe.experts`` (``GroupedExperts``): sparse-family ``{EP}``
-      placements when ``ep_enabled``; dense-family ``{TP}`` placements
-      when ``ep_enabled is False`` and ``tp_enabled``.
+      placements when EP is enabled; dense-family ``{TP}`` placements
+      when EP is disabled and TP is enabled; no sharding when both are
+      disabled.
 
     ``expert_param_layout`` maps each routed-expert parameter name to its
-    dense in/out-dim placement (used when EP=1 + TP>1): ``Shard(1)`` for
-    colwise, ``Shard(2)`` for rowwise, ``Replicate()`` for replicated
-    bias. The shared ``GroupedExperts`` (qwen3, llama4, deepseek_v3) passes
-    ``{"w1": Shard(1), "w2": Shard(2), "w3": Shard(1)}``;
+    dense in/out-dim placement (used on the EP-disabled + TP-enabled path):
+    ``Shard(1)`` for colwise, ``Shard(2)`` for rowwise, ``Replicate()`` for
+    replicated bias. The shared ``GroupedExperts`` (qwen3, llama4,
+    deepseek_v3) passes ``{"w1": Shard(1), "w2": Shard(2), "w3": Shard(1)}``;
     ``GptOssGroupedExperts`` passes its mlp1/mlp2 layout.
 
     Args:
@@ -232,7 +208,8 @@ def set_moe_sharding_config(
         enable_sp: Whether sequence parallelism is enabled (affects the
             wrapper's enter/exit TP layout).
         expert_param_layout: ``{param_name: tp_placement}`` for the
-            routed experts' weight params (used in the EP=1 + TP>1 path).
+            routed experts' weight params (used on the EP-disabled +
+            TP-enabled path).
     """
     # MoE wrapper boundary. Set whenever TP is enabled (with or without
     # SP) -- the wrapper still needs to convert DTensor inputs to local.
@@ -259,7 +236,7 @@ def set_moe_sharding_config(
             state_shardings=state_shardings,
         )
     elif tp_enabled:
-        # Dense family: {TP}. EP=1 + TP>1 fallback (today's TensorParallel).
+        # Dense family: {TP}. EP disabled, TP shards routed-expert weights.
         state_shardings = {}
         for name, placement in expert_param_layout.items():
             state_shardings[name] = expert_param_placement_dense(
@@ -268,4 +245,5 @@ def set_moe_sharding_config(
         moe_cfg.experts.sharding_config = ShardingConfig(
             state_shardings=state_shardings,
         )
-    # else: EP=1 and TP=1 -- experts stay plain tensors, no sharding_config.
+    # else: EP and TP both disabled -- experts stay plain tensors,
+    # no sharding_config.
