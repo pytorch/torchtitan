@@ -5,12 +5,10 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
+      - '.github/workflows/integration_test_8gpu_rl_h100.yaml'
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
+    types: [labeled, synchronize]
+    branches: [ main ]
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -29,6 +27,7 @@ permissions:
 
 jobs:
   build-test:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.aws.h100.8

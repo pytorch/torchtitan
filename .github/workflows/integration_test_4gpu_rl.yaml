@@ -7,10 +7,8 @@ on:
       - 'torchtitan/experiments/rl/**'
       - '.github/workflows/integration_test_4gpu_rl.yaml'
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl.yaml'
+    types: [labeled, synchronize]
+    branches: [ main ]
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -37,6 +35,7 @@ jobs:
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
