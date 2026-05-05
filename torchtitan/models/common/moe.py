@@ -14,6 +14,7 @@ from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 from torchtitan.protocols.module import Module
 
@@ -126,18 +127,27 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        shared_experts: nn.Module | None = None,
-    ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add.
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Dispatch tokens to experts, compute, and combine.
 
-        shared_experts is passed to combine() where it overlaps with the async
-        combine all-to-all (NCCL stream) or async DeepEP combine.
+        Returns the scored routed output and scatter indices so the caller
+        (MoE.forward) can perform scatter_add with the desired initial
+        buffer (e.g. shared_experts output).
+
+        For DeepEP, scatter_indices is None (un-routing is handled
+        internally by combine_tokens).
         """
+        # Convert DTensor to local tensor for routed expert dispatch/compute.
+        # grad_placements=(Partial(),) ensures x_local.grad is Partial on
+        # the tp_mesh in backward, so gradient reduction happens once at
+        # the MoE boundary.
+        if isinstance(x, DTensor):
+            x = x.to_local(grad_placements=(Partial(),))
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+        return self.token_dispatcher.combine(routed_output, metadata, x)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -304,18 +314,18 @@ class MoE(Module):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
-    1. Router computes expert assignments
-    2. GroupedExperts.forward() handles:
+    1. Router computes expert assignments (stays on DTensor via NoParallel)
+    2. Shared experts run on DTensor (handled by ColwiseParallel/RowwiseParallel)
+    3. GroupedExperts.forward() converts DTensor to local, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
-       b. expert computation
+       b. expert computation (local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
-          With EP, starts async communication (NCCL all-to-all or DeepEP
-          combine), runs shared_experts in parallel, then forces sync
-          (scatter_add for NCCL AllToAll, sync_combine for DeepEP) and
-          produces final output.
-          Without EP (LocalTokenDispatcher), no communication is needed.
+          - AllToAll: all-to-all communication, then scatter_add.
+          - DeepEP/HybridEP: combine_tokens, then sync_combine.
+          - LocalTokenDispatcher (no EP): scatter_add only, no communication is needed.
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -365,29 +375,6 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
-        # in backward, so gradient reduction (reduce-scatter from Partial to
-        # Shard(1)) happens once at the MoE boundary rather than being
-        # duplicated inside the MoE.
-        #
-        # Why grad(x) is Partial on the tp_mesh across all parallelism:
-        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
-        #   w1/w3, Rowwise on w2) produce Partial output gradients.
-        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via sequence-parallel token splitting in AllToAllTokenDispatcher),
-        #   so grad(x) is non-zero only at each rank's token positions (Partial).
-        #
-        # This holds for all MoE components (router.gate, routed experts, shared
-        # experts) and regardless of score_before_experts.
-        if isinstance(x, DTensor):
-            assert (
-                x.device_mesh.ndim == 1
-            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            assert x.device_mesh.mesh_dim_names == (
-                "tp",
-            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
@@ -407,12 +394,18 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        out = self.experts(
-            x,
-            top_scores,
-            selected_experts_indices,
-            shared_experts=self.shared_experts,
+        # Routed experts convert to local tensor at GroupedExperts boundary.
+        scored_output, scatter_indices = self.experts(
+            x, top_scores, selected_experts_indices
         )
+
+        # Shared experts stay on DTensor (handled by ColwiseParallel/RowwiseParallel).
+        out = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x)
+        if scatter_indices is not None:
+            out = deterministic_scatter_add(out, scatter_indices, scored_output)
+        else:
+            # DeepEP: un-routing handled internally, just add shared_out.
+            out += scored_output
 
         return out.reshape(bs, slen, dim)
 
