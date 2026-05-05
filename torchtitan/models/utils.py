@@ -407,6 +407,8 @@ def get_dense_model_nparams_and_flops(
             nparams: Total number of model parameters.
             num_flops_per_token: Estimated number of floating point operations per token.
     """
+    # model.parameters() de-duplicates shared parameters, so tied input/output
+    # embeddings are counted once.
     nparams = sum(p.numel() for p in model.parameters())
     nparams_embedding = sum(
         sum(p.numel() for p in m.parameters())
@@ -425,9 +427,9 @@ def get_dense_model_nparams_and_flops(
     # With tied embeddings, PyTorch's parameter iterator already counts the
     # shared input/output parameter once. That parameter still participates in
     # the lm_head matmul, so do not subtract it for either size or FLOPs.
-    nparams_for_flops = nparams if enable_weight_tying else nparams - nparams_embedding
+    nparams_for_matmul = nparams if enable_weight_tying else nparams - nparams_embedding
     num_flops_per_token = (
-        6 * nparams_for_flops + 6 * n_layers * n_heads * head_dims * seq_len
+        6 * nparams_for_matmul + 6 * n_layers * n_heads * head_dims * seq_len
     )
 
     return nparams, num_flops_per_token
@@ -496,26 +498,15 @@ def get_moe_model_nparams_and_flops(
     # With tied embeddings, PyTorch's parameter iterator already counts the
     # shared input/output parameter once. That parameter still participates in
     # the lm_head matmul, so do not subtract it for either size or FLOPs.
-    nparams_embedding_for_flops = (
-        0
-        if (
-            hasattr(model_config, "enable_weight_tying")
-            and model_config.enable_weight_tying
+    if getattr(model_config, "enable_weight_tying", False):
+        nparams_for_matmul = nparams_dense + nparams_sparse_active
+    else:
+        nparams_for_matmul = (
+            nparams_dense - nparams_embedding + nparams_sparse_active
         )
-        else nparams_embedding
-    )
     num_flops_per_token = (
-        6 * (nparams_dense - nparams_embedding_for_flops + nparams_sparse_active)
+        6 * nparams_for_matmul
         + 6 * len(model_config.layers) * n_heads * head_dims * seq_len
     )
-
-    if (
-        hasattr(model_config, "enable_weight_tying")
-        and model_config.enable_weight_tying
-    ):
-        logger.info(
-            "Weight tying enabled; shared input/output embedding parameters "
-            "are counted once."
-        )
 
     return nparams, num_flops_per_token
