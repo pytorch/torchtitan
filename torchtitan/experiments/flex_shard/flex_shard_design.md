@@ -648,14 +648,20 @@ eager batched `Shard` buckets.
    completes, FlexShard unpacks/casts/accumulates sharded gradients on the
    reduce-scatter stream and records a completion event.
 
-4. **Backward returns only after outstanding reduce-scatter work is ordered.**
-   FlexShard queues one autograd final callback per eager communication context.
-   That callback waits the default stream on every outstanding reduce-scatter
-   completion event and clears the retained input/output buffers. This makes
-   `optimizer.step()` safe while still allowing reduce-scatter overlap during
-   backward.
+4. **Outstanding reduce-scatter state is bounded at bucket boundaries.**
+   Before launching a bucket's reduce-scatter, FlexShard waits the current
+   stream on any prior eager reduce-scatter completion events and clears the
+   retained input/output buffers. This matches composable FSDP's module-boundary
+   wait/clear pattern: prior reduce-scatter can overlap intervening backward
+   compute, but buffer retention does not grow until the end of backward.
 
-5. **Scope is eager `Shard` buckets first.** `FlatShard`, `RaggedShard`,
+5. **Backward returns only after tail reduce-scatter work is ordered.**
+   FlexShard queues one autograd final callback per eager communication context.
+   That callback waits the default stream on any remaining outstanding
+   reduce-scatter completion events and clears the retained input/output
+   buffers. This catches the final bucket and makes `optimizer.step()` safe.
+
+6. **Scope is eager `Shard` buckets first.** `FlatShard`, `RaggedShard`,
    `Owned`, CPU-offload, and compiled `_c10d_functional` paths remain on their
    existing synchronous/graph-managed behavior until separately migrated.
 
@@ -695,10 +701,12 @@ eager batched `Shard` buckets.
 
 4. In the eager batched `_reduce_fn()`:
 
+   - wait/clear prior reduce-scatter states at the next bucket boundary
    - call `begin_reduce_grad()` for CUDA `Shard` buckets
    - cast/accumulate `param.grad` on the reduce-scatter stream
    - record a final event after grad write-out
-   - retain the result state until the final post-backward callback
+   - retain the result state until the next bucket boundary or final
+     post-backward callback
 
 5. Add profiler and comm labels:
 
@@ -713,14 +721,15 @@ eager batched `Shard` buckets.
 
 The eager CUDA `Shard` bucket path implements the split reduce-scatter flow
 above. Copy-in remains on the current stream, NCCL reduce-scatter and sharded
-gradient write-out run on the shared FlexShard reduce-scatter stream, and a
-queued autograd final callback waits outstanding reduce-scatter events before
-backward returns.
+gradient write-out run on the shared FlexShard reduce-scatter stream. Each
+bucket waits/clears prior eager reduce-scatter state before launching its own
+reduce-scatter, and the queued autograd final callback waits any tail
+reduce-scatter event before backward returns.
 
 ### Open Follow-Ups
 
-1. Add an explicit concurrency throttle if traces show too many reduce-scatter
-   buffers retained until the final callback.
+1. Add a numeric concurrency throttle only if profiler traces show the
+   bucket-boundary wait/clear policy is still too loose for larger buckets.
 
 2. Migrate `FlatShard` and `RaggedShard` reduce paths after the `Shard` stream
    path is stable.
