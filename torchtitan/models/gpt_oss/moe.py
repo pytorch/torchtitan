@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor import DTensor, Partial, Shard
 
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
@@ -214,7 +214,8 @@ class GptOssGroupedExperts(Module):
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         if isinstance(x, DTensor):
-            x = x.to_local(grad_placements=(Partial(),))
+            is_sharded = isinstance(x.placements[0], Shard)
+            x = x.to_local(grad_placements=x.placements if is_sharded else (Partial(),))
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
