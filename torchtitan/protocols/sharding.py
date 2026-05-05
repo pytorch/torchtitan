@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Placement, Replicate, Shard
+from torch.distributed.tensor import Placement
 
 from torchtitan.protocols.types import MeshAxisName
 
@@ -98,26 +98,6 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_input_grad_placements: Per-input ``NamedPlacement`` declaring
-            the placement of the **input gradient** when the plain input is
-            wrapped via ``DTensor.from_local`` at the input boundary. Keyed
-            by ``forward()`` arg name. Mirrors
-            ``ColwiseParallelWithGradPlacement(local_input_grad_placements=...)``.
-            Only effective for inputs that arrive as plain tensors and have
-            an entry in ``in_src_shardings``.
-            e.g. ``{"x": {TP: Partial()}}`` to keep d_x as Partial in
-            backward instead of all-reducing to Replicate.
-            ``None`` means default ``from_local`` grad behavior.
-        local_output_grad_placements: ``NamedPlacement`` declaring the
-            placement of the **output gradient** when the DTensor output is
-            unwrapped via ``to_local(grad_placements=...)`` at the output
-            boundary. When set, the module's effective return type becomes
-            a local tensor (the wrapper calls ``to_local`` after any
-            ``out_dst_shardings`` redistribute). Mirrors
-            ``NoParallel(local_output_grad_placements=...)``.
-            e.g. ``{TP: Partial()}`` to receive the upstream local d_output
-            as Partial on TP in backward.
-            ``None`` leaves the output as DTensor.
         local_map: If set, wraps forward with ``local_map()``.
 
     TODO: add ``out_src_shardings`` to declare the output's source placement
@@ -129,8 +109,6 @@ class ShardingConfig:
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_dst_shardings: NamedPlacement | None = None
-    local_input_grad_placements: dict[str, NamedPlacement] | None = None
-    local_output_grad_placements: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
@@ -150,11 +128,20 @@ def resolve_mesh(
     multiple mesh vocabularies (dense vs sparse) under future spmd_types
     adoption, where each NamedPlacement carries its own mesh.
 
-    Returns ``(None, ())`` when ``parallel_dims.get_module_mesh`` filters
-    every axis out (legacy non-``full_dtensor`` path); callers should
-    treat this as a no-op for the corresponding boundary.
+    Under non-``full_dtensor``, only ``tp`` and ``ep`` participate in
+    ``distribute_tensor``; DP / CP are handled out-of-band by FSDP and
+    ``apply_cp_to_forward``. Other axes are filtered out before
+    delegating to ``get_enabled_mesh``.
+
+    Returns ``(None, ())`` when every axis is filtered out (legacy non-
+    ``full_dtensor`` path with no TP / EP) or all requested axes are
+    disabled; callers treat this as a no-op for the boundary.
     """
-    mesh = parallel_dims.get_module_mesh(list(axes))
+    axes_list = list(axes)
+    if not parallel_dims.full_dtensor:
+        in_band = ("tp", "ep")
+        axes_list = [axis for axis in axes_list if axis in in_band]
+    mesh = parallel_dims.get_enabled_mesh(axes_list)
     if mesh is None:
         return None, ()
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
@@ -194,26 +181,6 @@ def resolve_shared_mesh(
             f"{sorted(k.value for k in p.keys())}"
         )
     return resolve_mesh(axes, parallel_dims)
-
-
-def demote_degenerate_shards(
-    placements: tuple[Placement, ...],
-    mesh: DeviceMesh,
-) -> tuple[Placement, ...]:
-    """Convert ``Shard(d)`` to ``Replicate()`` for mesh axes of size 1.
-
-    On a 1-rank mesh axis, ``Shard(d)`` and ``Replicate()`` represent the
-    same local tensor, but downstream DTensor ops reject ``Shard(d)`` in
-    places where ``Replicate()`` would work (e.g. ``reshape`` / ``flatten``
-    on a sharded dim). Demoting at parallelize time avoids those false
-    positives without changing semantics. Applies whenever a degenerate
-    axis is held alive in the mesh on purpose -- e.g. ``dp_shard`` under
-    ``full_dtensor`` for MixedPrecisionPolicy with no real DP.
-    """
-    return tuple(
-        Replicate() if isinstance(p, Shard) and mesh.size(i) == 1 else p
-        for i, p in enumerate(placements)
-    )
 
 
 def resolve_placements(
