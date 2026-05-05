@@ -366,4 +366,5 @@ class VLLMGenerator(Actor, Configurable):
         """Cleanup vLLM engine."""
         if hasattr(self, "_engine"):
             del self._engine
-            torch.cuda.empty_cache()
+            if torch is not None:
+                torch.cuda.empty_cache()
