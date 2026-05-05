@@ -78,6 +78,12 @@ class ParallelDims:
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
+        if name == "dp_shard" and self.full_dtensor:
+            # Under full_dtensor there is no flattened ``fsdp`` axis;
+            # ``dp_shard`` plays the same role. Keep it always-available
+            # so ``fully_shard`` can install MixedPrecisionPolicy at
+            # degree 1 (e.g. PP-only configs).
+            return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
             # FSDP wrapping to help the MoE layers do mixed precision training.

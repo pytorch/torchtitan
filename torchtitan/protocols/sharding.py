@@ -12,11 +12,17 @@ and read by ``Module.parallelize(mesh)``.  All placements use
 self-documenting and support multi-dimensional meshes.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.protocols.types import MeshAxisName
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 # Placement per mesh axis, keyed by MeshAxisName.
@@ -130,6 +136,84 @@ class ShardingConfig:
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""
         return {"repr": repr(self)}
+
+
+def resolve_mesh(
+    axes: Iterable[MeshAxisName | str],
+    parallel_dims: "ParallelDims",
+) -> tuple[DeviceMesh | None, tuple[str, ...]]:
+    """Resolve the device mesh for a set of mesh axis names.
+
+    Used per call site (per ``state_shardings`` entry, per LocalMapConfig,
+    per input/output boundary) instead of aggregating across the whole
+    ``ShardingConfig``: a single Module's contract may legitimately span
+    multiple mesh vocabularies (dense vs sparse) under future spmd_types
+    adoption, where each NamedPlacement carries its own mesh.
+
+    Returns ``(None, ())`` when ``parallel_dims.get_module_mesh`` filters
+    every axis out (legacy non-``full_dtensor`` path); callers should
+    treat this as a no-op for the corresponding boundary.
+    """
+    mesh = parallel_dims.get_module_mesh(list(axes))
+    if mesh is None:
+        return None, ()
+    assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+    if parallel_dims.full_dtensor and mesh not in parallel_dims.spmd_meshes():
+        raise ValueError(
+            f"Resolved mesh {list(mesh.mesh_dim_names)} does not match any "
+            f"SPMD mesh. Valid meshes: "
+            f"{[list(m.mesh_dim_names or ()) for m in parallel_dims.spmd_meshes()]}."
+        )
+    return mesh, mesh.mesh_dim_names
+
+
+def resolve_shared_mesh(
+    placements: Iterable["NamedPlacement | None"],
+    parallel_dims: "ParallelDims",
+) -> tuple[DeviceMesh | None, tuple[str, ...]]:
+    """Resolve the mesh shared by a list of NamedPlacements.
+
+    All non-``None`` entries must reference the same axis keys (placement
+    values may differ -- "redistribute on the same mesh" is exactly the case
+    of same axes, different placements). ``None`` entries are skipped (e.g.
+    LocalMapConfig non-tensor args, optional in/dst/grad placements).
+
+    Returns ``(None, ())`` when every entry is ``None`` or when
+    ``resolve_mesh`` filters every axis out (legacy non-``full_dtensor``
+    path); callers should treat this as a no-op for the corresponding
+    boundary.
+    """
+    non_none = [p for p in placements if p is not None]
+    if not non_none:
+        return None, ()
+    axes = non_none[0].keys()
+    for p in non_none[1:]:
+        assert p.keys() == axes, (
+            f"Inconsistent mesh axes within a boundary: "
+            f"{sorted(k.value for k in axes)} vs "
+            f"{sorted(k.value for k in p.keys())}"
+        )
+    return resolve_mesh(axes, parallel_dims)
+
+
+def demote_degenerate_shards(
+    placements: tuple[Placement, ...],
+    mesh: DeviceMesh,
+) -> tuple[Placement, ...]:
+    """Convert ``Shard(d)`` to ``Replicate()`` for mesh axes of size 1.
+
+    On a 1-rank mesh axis, ``Shard(d)`` and ``Replicate()`` represent the
+    same local tensor, but downstream DTensor ops reject ``Shard(d)`` in
+    places where ``Replicate()`` would work (e.g. ``reshape`` / ``flatten``
+    on a sharded dim). Demoting at parallelize time avoids those false
+    positives without changing semantics. Applies whenever a degenerate
+    axis is held alive in the mesh on purpose -- e.g. ``dp_shard`` under
+    ``full_dtensor`` for MixedPrecisionPolicy with no real DP.
+    """
+    return tuple(
+        Replicate() if isinstance(p, Shard) and mesh.size(i) == 1 else p
+        for i, p in enumerate(placements)
+    )
 
 
 def resolve_placements(

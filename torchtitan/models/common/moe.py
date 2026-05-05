@@ -144,15 +144,14 @@ class GroupedExperts(Module):
 
         After the base ``Module.parallelize`` distributes ``w1``/``w2``/
         ``w3`` per ``state_shardings``, install the EP / TP meshes on the
-        non-Module ``token_dispatcher`` child via ``_wire_meshes`` so its
+        non-Module ``token_dispatcher`` child via ``wire_meshes`` so its
         ``dispatch`` / ``combine`` see the right meshes at run time.
         """
         super().parallelize(parallel_dims)
-        if hasattr(self.token_dispatcher, "_wire_meshes"):
-            self.token_dispatcher._wire_meshes(
-                ep_mesh=parallel_dims.get_optional_mesh("ep"),
-                tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            )
+        self.token_dispatcher.wire_meshes(
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
 
 
 class TokenChoiceTopKRouter(Module):

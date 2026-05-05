@@ -226,15 +226,14 @@ class GptOssGroupedExperts(Module):
         Mirrors ``GroupedExperts.parallelize``: after the base
         ``Module.parallelize`` distributes the expert weight params, install
         the EP / TP meshes on the non-Module ``token_dispatcher`` child via
-        ``_wire_meshes``. ``GptOssGroupedExperts`` inherits ``Module``
+        ``wire_meshes``. ``GptOssGroupedExperts`` inherits ``Module``
         directly (not ``GroupedExperts``) so it needs its own override.
         """
         super().parallelize(parallel_dims)
-        if hasattr(self.token_dispatcher, "_wire_meshes"):
-            self.token_dispatcher._wire_meshes(
-                ep_mesh=parallel_dims.get_optional_mesh("ep"),
-                tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            )
+        self.token_dispatcher.wire_meshes(
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
 
 
 class GptOssMoE(MoE):

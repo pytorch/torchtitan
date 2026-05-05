@@ -23,7 +23,24 @@ bound during pass construction in `construct_default_graph_passes` via
 parameters. The apply function is a generic pass runner and must not contain
 pass-specific arguments.
 
-## Flexible Memory Policy Framework
+## Pass Tiers
+
+Graph passes are structured into two tiers:
+
+1. **Default passes** (`passes.py`, `remove_noop_passes.py`, etc.) — always
+   applied. These are numerics-preserving: cleanup, memory policy, bucketing,
+   async TP, FlexAttention regional Inductor (required for bitwise match with
+   eager).
+
+2. **Performance passes** (`performance_passes.py`) — opt-in via
+   `--compile.numerics_changing_optim`. These improve performance but may change numerics
+   compared to the uncompiled path (e.g. RMSNorm Inductor fusion).
+
+When adding a new pass, put it in `performance_passes.py` if it changes
+numerics; otherwise put it in `passes.py` or a dedicated file like
+`remove_noop_passes.py`.
+
+## Memory Policy Framework
 
 PyTorch's module-level `torch.utils.checkpoint` and eager SAC make
 coarse save-or-recompute decisions for an entire module's output, and

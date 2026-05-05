@@ -5,9 +5,27 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import dataclasses
 import os
 
 from tests.integration_tests import OverrideDefinitions
+
+
+def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
+    """Inject ``--parallelism.full_dtensor`` into every variant.
+
+    All features.py tests run under full_dtensor; legacy non-full_dtensor
+    coverage lives in models.py. CP variants also switch to FlexAttention
+    config because full_dtensor + CP is not supported with SDPA / Varlen.
+    """
+    new_args = []
+    for variant in t.override_args:
+        prefix: list[str] = ["--parallelism.full_dtensor"]
+        if any("context_parallel_degree" in arg for arg in variant):
+            prefix.append("--module llama3 --config llama3_debugmodel_flex_attn")
+        new_args.append(tuple(prefix) + tuple(variant))
+    return dataclasses.replace(t, override_args=tuple(new_args))
+
 
 # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
 runner_temp = os.getenv("RUNNER_TEMP")
@@ -349,135 +367,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_dtensor",
-                ]
-            ],
-            "Full DTensor FSDP",
-            "full_dtensor_fsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                ]
-            ],
-            "Full DTensor HSDP",
-            "full_dtensor_hsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                ]
-            ],
-            "Full DTensor TP + FSDP",
-            "full_dtensor_tp_fsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                ]
-            ],
-            "Full DTensor CP + FSDP (FlexAttention)",
-            "full_dtensor_cp_fsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                ]
-            ],
-            "Full DTensor TP + CP + FSDP (FlexAttention)",
-            "full_dtensor_tp_cp_fsdp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                ]
-            ],
-            "Full DTensor TP + HSDP",
-            "full_dtensor_tp_hsdp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                ]
-            ],
-            "Full DTensor CP + HSDP (FlexAttention)",
-            "full_dtensor_cp_hsdp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--parallelism.pipeline_parallel_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                ]
-            ],
-            "Full DTensor PP + TP + FSDP",
-            "full_dtensor_pp_tp_fsdp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
-                    "--parallelism.pipeline_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_shard_degree=2",
-                ]
-            ],
-            "Full DTensor PP + CP + FSDP (FlexAttention)",
-            "full_dtensor_pp_cp_fsdp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.full_dtensor",
-                    "--module llama3 --config llama3_debugmodel_flex_attn",
-                    "--parallelism.pipeline_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                ]
-            ],
-            "Full DTensor PP + CP + TP (FlexAttention)",
-            "full_dtensor_pp_cp_tp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
@@ -765,4 +654,4 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return integration_tests_flavors
+    return [_enable_full_dtensor(t) for t in integration_tests_flavors]
