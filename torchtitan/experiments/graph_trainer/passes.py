@@ -64,6 +64,7 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
 )
 from torchtitan.experiments.graph_trainer.reshard_after_forward import (
     annotate_fsdp_all_gather,
+    is_wait_tensor_from_fsdp,
 )
 from torchtitan.tools.logging import logger
 
@@ -141,7 +142,13 @@ def compile_time_passes(
     they run at trace time via ``construct_default_graph_passes``.
 
     cudagraph is excluded because it needs to re-capture the graph into
-    an in-memory CUDA graph at runtime
+    an in-memory CUDA graph at runtime.
+
+    ``overlap_fsdp_ag_rs_pass`` runs immediately before
+    ``joint_transformer_block_bucketing_reordering_pass`` so that
+    forward+backward all-gathers end up on a separate CUDA stream from
+    reduce-scatters (enabling AG/RS overlap in backward). It is a no-op
+    when the graph contains no FSDP all-gathers.
     """
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
@@ -162,6 +169,7 @@ def compile_time_passes(
         # same time. Composability between these two passes is untested.
         apply_cpu_offload_pass,
         selective_activation_remat_pass,
+        overlap_fsdp_ag_rs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
@@ -188,6 +196,13 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
+        # Performance passes that may change numerics.
+        if config.compile.numerics_changing_optim:
+            from torchtitan.experiments.graph_trainer.performance_passes import (
+                annotate_rmsnorm_for_regional_inductor_pass,
+            )
+
+            passes.append(annotate_rmsnorm_for_regional_inductor_pass)
         passes.append(regional_inductor_pass)
         if use_cudagraph:
             # Must run before custom_codegen_pass (last in pre_passes)
@@ -266,7 +281,7 @@ def apply_graph_passes(
             and before/after graphs to tlparse for each pass.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
-    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced")
+    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
     for pass_fn in passes:
         pass_name = (
             pass_fn.func.__name__
@@ -274,7 +289,7 @@ def apply_graph_passes(
             else pass_fn.__name__
         )
         if debug:
-            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}")
+            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
             before_snapshot = snapshot_graph(gm)
             start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
@@ -284,7 +299,7 @@ def apply_graph_passes(
         if debug:
             elapsed = time.perf_counter() - start
             logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
-            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}")
+            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
             after_snapshot = snapshot_graph(gm)
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
     return gm
@@ -923,37 +938,71 @@ def full_inductor_compilation_pass(
     return gm
 
 
-def reassign_to_pg_pass(
+# Maps an FSDP group_name to an extra group_name created by this pass.
+# Each NCCL PG gets its own CUDA stream, so the extra PG is what enables
+# AG/RS overlap in backward.
+_EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
+
+
+def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
+    """Return the extra PG name for ``source_pg_name``, creating it once.
+
+    The extra PG is a new NCCL process group with the same ranks as the source
+    FSDP PG but a different communicator (and therefore a different CUDA stream).
+    """
+    import torch.distributed as dist
+
+    if source_pg_name in _EXTRA_FSDP_PG_REGISTRY:
+        return _EXTRA_FSDP_PG_REGISTRY[source_pg_name]
+
+    source_pg = dist.distributed_c10d._resolve_process_group(source_pg_name)
+    ranks = dist.get_process_group_ranks(source_pg)
+    extra_pg = dist.new_group(
+        ranks=ranks, group_desc="fsdp_extra", use_local_synchronization=True
+    )
+    _EXTRA_FSDP_PG_REGISTRY[source_pg_name] = extra_pg.group_name
+    logger.info(
+        f"Created extra FSDP PG (source: {source_pg_name}, "
+        f"extra: {extra_pg.group_name})"
+    )
+    return extra_pg.group_name
+
+
+def overlap_fsdp_ag_rs_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
-    *,
-    source_pg_name: str,
-    target_pg_name: str,
 ) -> torch.fx.GraphModule:
     """
-    Reassign all-gather nodes from one process group to another.
+    Reassign FSDP all-gather nodes to an extra NCCL process group for
+    AG/RS overlap in backward.
 
-    This pass rewrites all-gather nodes whose PG matches ``source_pg_name`` to use
-    ``target_pg_name`` instead.  Since each NCCL PG gets its own CUDA stream, this
-    can be used to separate AG and RS onto different streams (e.g. for AG/RS
-    overlap in the backward pass).
+    Discovers the FSDP PG by inspecting the graph, creates an extra
+    NCCL PG over the same ranks (giving it a separate CUDA stream),
+    and rewrites every all-gather using that source PG to the extra PG.
+    This separates all-gathers from reduce-scatters onto different streams,
+    enabling AG/RS overlap in backward.
 
-    Must be applied BEFORE bucketing passes so that bucketed all-gathers inherit
-    the new PG name.
-
-    Args:
-        gm: The graph module (forward or backward)
-        example_inputs: Example inputs (unused, required by pass interface)
-        source_pg_name: The group_name of the process group to match
-        target_pg_name: The group_name of the process group to assign
+    No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
+    bucketing passes so bucketed all-gathers inherit the new PG name.
     """
+    source_pg_name: str | None = None
+    for node in gm.graph.nodes:
+        if is_wait_tensor_from_fsdp(node):
+            ag_node = node.args[0]
+            source_pg_name = ag_node.args[2]
+            break
+
+    if source_pg_name is None:
+        return gm
+
+    target_pg_name = _get_or_create_extra_fsdp_pg(source_pg_name)
+
     count = 0
     for node in gm.graph.nodes:
-        if is_all_gather(node):
+        if is_all_gather(node) and node.args[2] == source_pg_name:
             # AG args: (input_tensor, group_size, group_name)
-            if node.args[2] == source_pg_name:
-                node.args = (node.args[0], node.args[1], target_pg_name)
-                count += 1
+            node.args = (node.args[0], node.args[1], target_pg_name)
+            count += 1
     if count > 0:
         logger.info(
             f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
@@ -968,6 +1017,7 @@ def tlparse_log_graph_pass(
     example_inputs: tuple | None = None,
     *,
     graph_name: str,
+    debug: bool = False,
 ) -> torch.fx.GraphModule:
     """Log the transformed graph to tlparse via trace_structured.
 
@@ -979,10 +1029,15 @@ def tlparse_log_graph_pass(
         example_inputs: The example inputs (unused, required by protocol).
         graph_name: The name for this graph artifact
             (e.g. "aot_forward_graph_transformed").
+        debug: When True, include additional metadata in the printed nodes.
 
     Returns:
         The graph module unchanged.
     """
+    additional_meta = ["autograd_backward"]
+    if debug:
+        additional_meta.append("seq_nr")
+
     trace_structured(
         "artifact",
         metadata_fn=lambda: {
@@ -994,7 +1049,7 @@ def tlparse_log_graph_pass(
             include_stride=True,
             include_device=True,
             expanded_def=True,
-            additional_meta=["autograd_backward"],
+            additional_meta=additional_meta,
         ),
         expect_trace_id=False,
     )
