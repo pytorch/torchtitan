@@ -470,9 +470,7 @@ def apply_moe_ep_tp(
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
             if tp_mesh is not None and isinstance(dispatcher, AllToAllTokenDispatcher):
-                # ``sp_size``/``sp_rank`` are read-only properties off
-                # ``tp_mesh``; install via ``_wire_meshes`` (PR7-era contract).
-                dispatcher._wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
+                dispatcher.wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
 
         parallelize_module(
             # pyrefly: ignore [missing-attribute]

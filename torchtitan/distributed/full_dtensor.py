@@ -98,12 +98,23 @@ def resolve_fsdp_mesh(
     """Select the FSDP mesh and optional DataParallelMeshDims.
 
     In full DTensor mode, returns the SPMD mesh and DataParallelMeshDims.
+    When no DP-storage axis is enabled (e.g. PP-only with ``dp_shard=1``,
+    no ``dp_replicate``, no ``cp``), the SPMD mesh is the always-alive
+    1-element ``dp_shard`` slice (see ``ParallelDims._mesh_exist``) and
+    ``DataParallelMeshDims`` is ``None`` (no DP axes to flatten);
+    ``fully_shard`` still installs the MixedPrecisionPolicy on the
+    1-element mesh.
     In non-full DTensor mode, returns the conventional dp_mesh and None.
     """
     if full_dtensor:
         spmd_mesh = parallel_dims.get_enabled_mesh(_DENSE_SPMD_AXES)
         assert spmd_mesh is not None
-        dp_mesh_axes = get_dp_mesh_axes(parallel_dims)
+        any_dp_storage = (
+            parallel_dims.dp_shard_enabled
+            or parallel_dims.dp_replicate_enabled
+            or parallel_dims.cp_enabled
+        )
+        dp_mesh_axes = get_dp_mesh_axes(parallel_dims) if any_dp_storage else None
         return spmd_mesh, dp_mesh_axes
     else:
         dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
@@ -153,15 +164,20 @@ def parallelize_inputs(
     """
     mesh = parallel_dims.get_enabled_mesh(_DENSE_SPMD_AXES)
     assert mesh is not None
-    placements: list[Placement] = []
+    assert mesh.mesh_dim_names is not None
+    # Per-axis input placements; mesh axes not listed here default to
+    # ``Replicate`` (e.g. ``dp_shard`` under PP-only is in the mesh as a
+    # 1-element axis but doesn't actually shard the batch).
+    input_shardings: dict[str, Placement] = {}
     if parallel_dims.dp_replicate_enabled:
-        placements.append(Shard(0))
+        input_shardings["dp_replicate"] = Shard(0)
     if parallel_dims.dp_shard_enabled:
-        placements.append(Shard(0))
+        input_shardings["dp_shard"] = Shard(0)
     if parallel_dims.cp_enabled:
-        placements.append(Shard(1))
-    if parallel_dims.tp_enabled:
-        placements.append(Replicate())
+        input_shardings["cp"] = Shard(1)
+    placements: list[Placement] = [
+        input_shardings.get(name, Replicate()) for name in mesh.mesh_dim_names
+    ]
 
     new_extra_kwargs: dict[str, Any] = {
         k: (
