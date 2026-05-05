@@ -1196,8 +1196,10 @@ checkpoint/module execution unit.
    Before the first copy-in of the next iteration, the all-gather stream must
    wait on the current/default stream so optimizer CUDA kernels have completed.
    Before `optimizer.step()` returns to user code, any outstanding reduce-scatter
-   states must be waited and cleared. Raw AG buffers should call `record_stream`
-   on the AG stream and be released when consumed.
+   states must be waited and cleared. Raw AG/RS buffers are held in pending
+   result state and released only after the relevant completion event has been
+   waited, avoiding allocator `record_stream()` bookkeeping in the steady-state
+   eager path.
 
 #### Implementation Phases
 
@@ -1279,6 +1281,50 @@ The implemented overlap design is:
    pending RS state. The queued final autograd callback waits any tail pending
    RS state before `loss.backward()` returns to user code, so `optimizer.step()`
    sees fully reduced gradients.
+
+### Plan: Remove `record_stream()` from Eager Buffer Lifetime
+
+The FSDP2 stream-handoff patches replace allocator `record_stream()` calls with
+explicit tensor ownership: keep the cross-stream buffer alive in Python until a
+producer/consumer completion event is known, then drop the final reference on a
+chosen release stream. FlexShard can use the same idea without importing FSDP2
+internals.
+
+1. **Add a local stream handoff helper.**
+   `StreamHandoff` owns a tensor, a ready event, and a release stream. Releasing
+   waits the release stream on the event and drops the tensor reference inside
+   that stream context, so the CUDA caching allocator does not need a
+   `record_stream()` side record.
+
+2. **All-gather buffers.**
+   `EagerAllGatherResult` keeps the AG send buffer and gathered outputs alive
+   while AG runs on the shared AG stream and while copy-out is queued on the
+   current/default stream. `finish_unshard()` waits the AG event, queues
+   copy-out, records a current-stream release event, and releases the raw AG
+   buffers through `StreamHandoff`. Stale pending AG state follows the same wait
+   and release path before being discarded.
+
+3. **Reduce-scatter buffers.**
+   `EagerReduceScatterResult` keeps the RS send/receive buffers and reduced grad
+   tensors alive while RS runs on the shared RS stream. Boundary waits and the
+   final autograd callback wait the RS event, then release transient buffers.
+   `param.grad` remains the persistent owner of reduced shard gradients needed
+   by `optimizer.step()`.
+
+4. **Keep existing pipeline structure.**
+   FlexShard already has a single pending AG slot and a list of pending RS
+   results. Those provide the same single-slot and drain-all structure that
+   FSDP2 wraps in `PipelinedBuffer`, so this patch keeps the existing
+   FlexShard-specific containers and changes only the buffer lifetime mechanism.
+
+5. **Validate.**
+   `rg record_stream torchtitan/experiments/flex_shard/flex_shard.py` should be
+   empty. Focused distributed RAF tests should still pass. A profiler trace
+   should no longer show `record_stream` ranges from FlexShard eager AG/RS, and
+   memory snapshots should still show no live full-parameter AG buffers after
+   `reshard_after_forward=True` forward/backward boundaries.
+
+**Status: implemented for the eager CUDA AG/RS steady-state path.**
 
 ### Validation
 
