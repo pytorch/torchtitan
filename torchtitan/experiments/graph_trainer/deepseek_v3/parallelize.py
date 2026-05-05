@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
 from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp
+from torchtitan.tools.logging import logger
 
 
 def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
@@ -84,7 +85,14 @@ def parallelize_deepseekv3(
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
         model.parallelize(tp_mesh)
 
-    comm_backend = parallelism.expert_parallel_comm_backend
+    # Read comm_backend from the model's token dispatcher config
+    # (set by moe_comm_backend in model_registry / config factories).
+    moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
+    comm_backend = (
+        getattr(moe_config.experts.token_dispatcher, "comm_backend", "standard")
+        if moe_config is not None
+        else "standard"
+    )
     if comm_backend == "hybridep":
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
@@ -94,7 +102,6 @@ def parallelize_deepseekv3(
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             enable_sp=parallelism.enable_sequence_parallel,
-            comm_backend=comm_backend,
         )
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a

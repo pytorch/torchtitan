@@ -17,17 +17,17 @@ python scripts/download_hf_assets.py --repo_id deepseek-ai/deepseek-moe-16b-base
 
 ```bash
 # Quick debug run with small model
-MODEL=deepseek_v3 CONFIG=deepseek_v3_debugmodel ./run_train.sh
+MODULE=deepseek_v3 CONFIG=deepseek_v3_debugmodel ./run_train.sh
 ```
 
 ```bash
 # 16B parameter model: adapted from older 16B parameter model from https://huggingface.co/deepseek-ai/deepseek-moe-16b-base
-MODEL=deepseek_v3 CONFIG=deepseek_v3_16b ./run_train.sh
+MODULE=deepseek_v3 CONFIG=deepseek_v3_16b ./run_train.sh
 ```
 
 ```bash
 # 671B parameter model
-MODEL=deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh
+MODULE=deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh
 ```
 
 
