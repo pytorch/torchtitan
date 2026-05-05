@@ -297,8 +297,7 @@ class ParallelDims:
         if len(dims) == 1:
             return self._single_axis_meshes[dims[0]]
 
-        # Cache because some downstream users (e.g., FSDP2) compare mesh
-        # equality by object identity across multiple calls.
+        # Cache to ensure mesh equality by object identity.
         key = tuple(dims)
         if key in self._multi_axis_meshes:
             return self._multi_axis_meshes[key]
@@ -344,11 +343,7 @@ class ParallelDims:
     def spmd_meshes(self) -> list[DeviceMesh]:
         """Valid full-SPMD meshes, restricted to enabled axes.
 
-        Each entry is a sub-mesh (in canonical outer-to-inner axis order)
-        that fully covers the SPMD ranks for one class of parameters --
-        dense and sparse (these are the only two we have now).
-        Under ``full_dtensor``, the mesh resolved from a module's
-        ``sharding_config`` must be one of these .
+        Returns the full-SPMD meshes; today we have dense and sparse.
         """
         if not self._spmd_meshes:
             self.build_mesh()
@@ -357,12 +352,10 @@ class ParallelDims:
     def get_enabled_mesh(self, axes: list[str]) -> DeviceMesh | None:
         """Submesh of ``axes`` filtered to those actually enabled in this run.
 
-        Unlike ``get_optional_mesh``, axes that don't exist as a single-axis
-        mesh in the current mode (e.g. ``dp_shard`` under non-full_dtensor)
-        or are disabled (size = 1) are silently dropped rather than causing
-        a ``None`` / ``ValueError``. Returns ``None`` only if no axis
-        remains after filtering. Order of the surviving axes follows the
-        input list.
+        Returns a mesh containing the axes in ``axes`` that are enabled. If
+        none of the axes in ``axes`` is enabled, returns ``None``. This
+        differs from ``get_optional_mesh``, which returns ``None`` as soon
+        as any axis in ``axes`` is not enabled.
         """
         if not self._single_axis_meshes:
             self.build_mesh()
