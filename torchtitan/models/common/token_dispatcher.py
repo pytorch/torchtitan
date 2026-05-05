@@ -432,10 +432,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # Offset them to global positions when the scatter buffer is full-size
         # (Replicate path). When the buffer is shard-size (EP+SP Shard path),
         # indices are already 0-based — no offset needed.
-        num_local_tokens = metadata.token_indices_experts_sorted.shape[0] // self.top_k
-        if self.sp_size > 1 and out.shape[0] > num_local_tokens:
+        if self.sp_size > 1:
             token_indices_experts_sorted = (
-                metadata.token_indices_experts_sorted + num_local_tokens * self.sp_rank
+                metadata.token_indices_experts_sorted + x.shape[0] * self.sp_rank
             )
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted

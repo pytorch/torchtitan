@@ -408,11 +408,6 @@ def apply_moe_ep_tp(
             }
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # ColwiseParallel shards w1/w3 columns, RowwiseParallel
-                # shards w2 rows. For EP+SP, ColwiseParallel all-gathers
-                # Shard input internally. Output is Partial (not all-reduced),
-                # combined with Partial routed output and reduced once
-                # at the MoE boundary.
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {

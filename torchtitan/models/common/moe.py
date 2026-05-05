@@ -394,8 +394,6 @@ class MoE(Module):
 
         # Convert to local for combine's scatter_add compatibility.
         shared_out = self.shared_experts(x) if self.shared_experts is not None else None
-        if shared_out is not None and isinstance(shared_out, DTensor):
-            shared_out = shared_out.to_local()
 
         # Routed experts convert to local tensor at GroupedExperts boundary.
         # shared_out is passed to combine() as the scatter_add initial buffer.
