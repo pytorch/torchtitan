@@ -241,9 +241,7 @@ def _precompile_aot(
     joint_custom_passes = get_joint_custom_passes_from_config(
         parallel_dims, compile_config, fsdp_reshard_after_forward
     )
-    compiler_passes = get_compiler_passes_from_config(
-        model, compile_config, parallel_dims
-    )
+    compiler_passes = get_compiler_passes_from_config(model, compile_config)
     fw_compiler, bw_compiler = make_compiler_with_passes(
         compiler_passes, dump_folder=config.dump_folder
     )
