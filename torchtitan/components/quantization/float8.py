@@ -25,6 +25,21 @@ from torchtitan.tools.utils import has_cuda_capability
 from .utils import module_filter_fn, swap_token_dispatcher
 
 
+def blockwise_module_filter_fn(
+    config: Linear.Config,
+    fqn: str,
+    filter_fqns: list[str],
+    block_size: int,
+) -> bool:
+    """Filter linears supported by torchao's blockwise FP8 training kernel."""
+    dims_multiples_of_block_size = (
+        config.in_features % block_size == 0 and config.out_features % block_size == 0
+    )
+    is_filtered_fqn = any(filter_fqn in fqn for filter_fqn in filter_fqns)
+
+    return dims_multiples_of_block_size and not config.bias and not is_filtered_fqn
+
+
 try:
     from torchao.float8.float8_linear import Float8Linear as TorchAOFloat8Linear
 
@@ -54,12 +69,41 @@ except ImportError:
     Float8Linear = None
 
 
+try:
+    from torchao.prototype.blockwise_fp8_training.linear import (
+        Float8BlockwiseLinear as TorchAOFloat8BlockwiseLinear,
+    )
+
+    class Float8BlockwiseLinear(TorchAOFloat8BlockwiseLinear, Module):
+        """TorchTitan wrapper for torchao blockwise FP8 training linear."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(QuantizedLinearConfig):
+            """Drop-in replacement for Linear.Config that builds blockwise FP8 linear."""
+
+            block_size: int = 128
+            use_triton: bool = False
+
+        def __init__(self, config: Config):
+            TorchAOFloat8BlockwiseLinear.__init__(
+                self,
+                config.in_features,
+                config.out_features,
+                bias=config.bias,
+                block_size=config.block_size,
+                use_triton=config.use_triton,
+            )
+
+except ImportError:
+    Float8BlockwiseLinear = None
+
+
 class Float8LinearConverter(QuantizationConverter):
-    """Replace matching Linear.Config with Float8Linear.Config."""
+    """Replace matching Linear.Config with a float8 linear config."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
-        recipe_name: Literal["rowwise", "rowwise_with_gw_hp"] = "rowwise"
+        recipe_name: Literal["rowwise", "rowwise_with_gw_hp", "blockwise"] = "rowwise"
         """Float8 recipe name."""
 
         filter_fqns: list[str] = field(default_factory=list)
@@ -67,6 +111,8 @@ class Float8LinearConverter(QuantizationConverter):
         List of fully qualified names of modules to skip applying float8 training to.
         nn.Linear modules with any dim size not divisible by 16 are always skipped
         due to hardware requirements.
+        For the blockwise recipe, linears must also be bias-free and have in/out
+        features divisible by ``block_size``.
         """
 
         emulate: bool = False
@@ -75,16 +121,54 @@ class Float8LinearConverter(QuantizationConverter):
         This is for test purpose only. Not compatible with torch.compile.
         """
 
+        block_size: int = 128
+        """Block size for the experimental blockwise FP8 training recipe."""
+
+        use_triton: bool = False
+        """
+        Use torchao's explicit Triton GEMM path for blockwise FP8.
+        Keep False for distributed training so DTensor-aware scaled_mm is used.
+        """
+
     def __init__(self, config: Config):
         self.config = config
 
-        if Float8Linear is None:
+        if Float8Linear is None and config.recipe_name != "blockwise":
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
             )
 
         cfg = self.config
         filter_fqns = cfg.filter_fqns
+
+        if cfg.recipe_name == "blockwise":
+            if Float8BlockwiseLinear is None:
+                raise ImportError(
+                    "torchao blockwise FP8 training is not installed. "
+                    "Please install a torchao build with "
+                    "torchao.prototype.blockwise_fp8_training."
+                )
+            if cfg.emulate:
+                raise ValueError("Blockwise FP8 training does not support emulation.")
+            if cfg.block_size != 128:
+                raise ValueError("Blockwise FP8 training currently only supports 128.")
+            if not has_cuda_capability(9, 0):
+                raise ValueError(
+                    "Blockwise FP8 linear training only supported on SM90 or later."
+                )
+
+            clean_fqns = [f for f in filter_fqns if f != "auto_filter_small_kn"]
+            self.filter_fn = partial(
+                blockwise_module_filter_fn,
+                filter_fqns=clean_fqns,
+                block_size=cfg.block_size,
+            )
+            self.enabled = True
+            logger.info(
+                "Float8 blockwise linear training active with block size "
+                f"{cfg.block_size}"
+            )
+            return
 
         if has_cuda_capability(8, 9) or (cfg.emulate and not cfg.model_compile_enabled):
             pass
@@ -151,22 +235,37 @@ class Float8LinearConverter(QuantizationConverter):
         if not self.enabled:
             return
 
-        assert Float8Linear is not None
+        assert Float8Linear is not None or self.config.recipe_name == "blockwise"
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
-                new_config = Float8Linear.Config(
-                    in_features=linear_config.in_features,
-                    out_features=linear_config.out_features,
-                    bias=linear_config.bias,
-                    param_init=linear_config.param_init,
-                    _torchao_config=self.torchao_config,
-                )
+                if self.config.recipe_name == "blockwise":
+                    assert Float8BlockwiseLinear is not None
+                    new_config = Float8BlockwiseLinear.Config(
+                        in_features=linear_config.in_features,
+                        out_features=linear_config.out_features,
+                        bias=linear_config.bias,
+                        param_init=linear_config.param_init,
+                        block_size=self.config.block_size,
+                        use_triton=self.config.use_triton,
+                    )
+                else:
+                    assert Float8Linear is not None
+                    new_config = Float8Linear.Config(
+                        in_features=linear_config.in_features,
+                        out_features=linear_config.out_features,
+                        bias=linear_config.bias,
+                        param_init=linear_config.param_init,
+                        _torchao_config=self.torchao_config,
+                    )
                 if isinstance(parent, list):
                     parent[attr] = new_config
                 else:
                     setattr(parent, attr, new_config)
 
-        logger.info("Swapped to Float8Linear layers")
+        if self.config.recipe_name == "blockwise":
+            logger.info("Swapped to Float8BlockwiseLinear layers")
+        else:
+            logger.info("Swapped to Float8Linear layers")
 
 
 class Float8GroupedExpertsConverter(QuantizationConverter):
