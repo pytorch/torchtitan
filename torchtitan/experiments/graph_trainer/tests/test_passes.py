@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
+import sys
 from unittest.mock import patch
 
 import torch
@@ -45,6 +46,9 @@ from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noq
 )
 from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
     TestCustomCodegenPass,
+)
+from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (  # noqa: F401
+    TestAnnotateRMSNormForRegionalInductorPass,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
@@ -1072,6 +1076,55 @@ class TestRemoveIdentitySlicePass(TestCase):
         self.assertEqual(self._count_slice_nodes(gm), 2)
         remove_identity_slice_pass(gm)
         self.assertEqual(self._count_slice_nodes(gm), 0)
+
+    def _build_dynamic_slice_gm(
+        self,
+        *,
+        dynamic_arg: str,
+    ) -> torch.fx.GraphModule:
+        """Build a slice graph where one of start/end/step is a Node."""
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        # sym_size is just a convenient way to produce a Node — its concrete
+        # value is irrelevant, what matters is that the arg is an FX Node.
+        sym_node = graph.call_function(torch.ops.aten.sym_size.int, args=(x, 0))
+        start = sym_node if dynamic_arg == "start" else 0
+        end = sym_node if dynamic_arg == "end" else sys.maxsize
+        step = sym_node if dynamic_arg == "step" else 1
+        sliced = graph.call_function(
+            torch.ops.aten.slice.Tensor, args=(x, 0, start, end, step)
+        )
+        graph.output(sliced)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        with FakeTensorMode() as fake_mode:
+            fake_val = fake_mode.from_tensor(torch.empty(8, 16))
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_val
+        return gm
+
+    def test_dynamic_end_skipped(self):
+        """Slices whose ``end`` is an FX Node (dynamic shape at runtime) must
+        be left alone — we can't prove identity at pass time."""
+        gm = self._build_dynamic_slice_gm(dynamic_arg="end")
+        # Must not raise and must not remove the slice (can't prove identity).
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_dynamic_start_skipped(self):
+        """Slices whose ``start`` is an FX Node must be left alone."""
+        gm = self._build_dynamic_slice_gm(dynamic_arg="start")
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_dynamic_step_skipped(self):
+        """Slices whose ``step`` is an FX Node must be left alone."""
+        gm = self._build_dynamic_slice_gm(dynamic_arg="step")
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
 
 
 class TestAnnotateModuleFqns(TestCase):
