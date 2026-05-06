@@ -41,7 +41,7 @@ def make_fwd_bwd_step(loss_fn):
     # attribute loss nodes in the traced graph.
     @annotate_fn({_MODULE_FQN: "loss"})
     def compute_loss(pred, labels, global_valid_tokens):
-        return loss_fn(pred, labels) / global_valid_tokens
+        return loss_fn(pred, labels, global_valid_tokens)
 
     def fwd_bwd_step(
         model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
