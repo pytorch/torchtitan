@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .collectives import EagerAllGatherResult, EagerReduceScatterResult
+from .collectives import AsyncAllGatherResult, AsyncReduceScatterResult
 from .state import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class EagerAllGatherBucket:
-    """Runtime metadata for one eager batched all-gather bucket."""
+class AllGatherBucket:
+    """Runtime metadata for one batched all-gather bucket."""
 
     storage: DStorage
     entries: list[tuple[nn.Module, str, nn.Module, ParamInfo]]
@@ -46,40 +46,40 @@ class EagerAllGatherBucket:
 
 
 @dataclass
-class PendingEagerAllGather:
-    """The single one-bucket-ahead eager all-gather in flight."""
+class PendingAllGather:
+    """The single one-bucket-ahead all-gather in flight."""
 
-    bucket: EagerAllGatherBucket
-    result: EagerAllGatherResult
+    bucket: AllGatherBucket
+    result: AsyncAllGatherResult
     recompute: bool
 
 
 @dataclass
-class EagerAllGatherContext:
-    """Communication streams for eager batched collectives."""
+class AllGatherContext:
+    """Communication streams for batched collectives."""
 
     all_gather_stream: torch.Stream
     reduce_scatter_stream: torch.Stream
-    buckets: list[EagerAllGatherBucket] = field(default_factory=list)
-    pending: PendingEagerAllGather | None = None
-    reduce_scatter_states: list[EagerReduceScatterResult] = field(default_factory=list)
+    buckets: list[AllGatherBucket] = field(default_factory=list)
+    pending: PendingAllGather | None = None
+    reduce_scatter_states: list[AsyncReduceScatterResult] = field(default_factory=list)
     reduce_scatter_callback_queued: bool = False
 
 
 @dataclass
-class EagerBucketAllGatherRuntime:
-    """Runtime metadata passed to eager RAF bucket autograd."""
+class BucketAllGatherRuntime:
+    """Runtime metadata passed to RAF bucket autograd."""
 
-    prefetched_result: EagerAllGatherResult | None
+    prefetched_result: AsyncAllGatherResult | None
     infos: list[ParamInfo]
     param_refs: list[tuple[nn.Module, str]]
     mesh: DeviceMesh
-    context: EagerAllGatherContext
+    context: AllGatherContext
     debug_fqn: str | None
 
 
-def _queue_reduce_scatter_wait(context: EagerAllGatherContext) -> None:
-    """Queue a post-backward wait for eager reduce-scatter work."""
+def _queue_reduce_scatter_wait(context: AllGatherContext) -> None:
+    """Queue a post-backward wait for reduce-scatter work."""
     if context.reduce_scatter_callback_queued:
         return
     context.reduce_scatter_callback_queued = True
@@ -100,10 +100,10 @@ def _queue_reduce_scatter_wait(context: EagerAllGatherContext) -> None:
 
 
 def _wait_and_clear_reduce_scatter_states(
-    context: EagerAllGatherContext,
+    context: AllGatherContext,
     debug_fqn: str | None,
 ) -> None:
-    """Wait for prior eager reduce-scatter states and release their buffers."""
+    """Wait for prior reduce-scatter states and release their buffers."""
     if not context.reduce_scatter_states:
         return
     with torch.profiler.record_function(
@@ -118,8 +118,8 @@ def _wait_and_clear_reduce_scatter_states(
         context.reduce_scatter_states.clear()
 
 
-class _EagerBucketAllGather(torch.autograd.Function):
-    """Autograd boundary for eager RAF bucket all-gather.
+class _BucketAllGather(torch.autograd.Function):
+    """Autograd boundary for RAF bucket all-gather.
 
     Forward consumes a raw all-gather result, either prefetched by the previous
     bucket or launched on demand. Backward packs full-parameter gradients and
@@ -129,7 +129,7 @@ class _EagerBucketAllGather(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx: Any,
-        runtime: EagerBucketAllGatherRuntime,
+        runtime: BucketAllGatherRuntime,
         *local_shards: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         ctx.runtime = runtime
@@ -153,7 +153,7 @@ class _EagerBucketAllGather(torch.autograd.Function):
         ctx: Any,
         *full_param_grads: torch.Tensor | None,
     ) -> tuple[Any, ...]:
-        runtime: EagerBucketAllGatherRuntime = ctx.runtime
+        runtime: BucketAllGatherRuntime = ctx.runtime
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
         valid_param_refs: list[tuple[nn.Module, str]] = []
@@ -208,10 +208,10 @@ class _EagerBucketAllGather(torch.autograd.Function):
         return (None, *([None] * ctx.num_inputs))
 
 
-def _get_or_create_eager_comm_context(
+def _get_or_create_comm_context(
     root_module: nn.Module,
     device: torch.device,
-) -> EagerAllGatherContext:
+) -> AllGatherContext:
     contexts = getattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, None)
     if contexts is None:
         contexts = {}
@@ -219,7 +219,7 @@ def _get_or_create_eager_comm_context(
 
     context = contexts.get(device)
     if context is None:
-        context = EagerAllGatherContext(
+        context = AllGatherContext(
             all_gather_stream=torch.cuda.Stream(device=device, priority=-1),
             reduce_scatter_stream=torch.cuda.Stream(device=device, priority=-1),
         )
@@ -227,27 +227,27 @@ def _get_or_create_eager_comm_context(
     return context
 
 
-def _storage_requires_eager_batched_unshard(storage: DStorage) -> bool:
-    """Return whether eager execution must use pre-gathered bucket tensors."""
+def _storage_requires_batched_unshard(storage: DStorage) -> bool:
+    """Return whether execution must use pre-gathered bucket tensors."""
     infos = list(storage._param_infos.values())
     if not infos:
         return False
     return storage.byte_storage.device.type != "cpu"
 
 
-def _storage_uses_eager_autograd_unshard(storage: DStorage) -> bool:
-    """Return whether eager RAF should use the custom bucket autograd path."""
+def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
+    """Return whether RAF should use the custom bucket autograd path."""
     if not storage._reshard_after_forward:
         return False
     if not storage._param_infos:
         return False
-    return _get_eager_raf_custom_bucket_unsupported_reason(storage) is None
+    return _get_bucket_autograd_unshard_unsupported_reason(storage) is None
 
 
-def _get_eager_raf_custom_bucket_unsupported_reason(
+def _get_bucket_autograd_unshard_unsupported_reason(
     storage: DStorage,
 ) -> str | None:
-    """Return why a RAF eager bucket cannot use the custom autograd path."""
+    """Return why a RAF bucket cannot use the custom autograd path."""
     infos = list(storage._param_infos.values())
     if not infos:
         return None
@@ -262,8 +262,8 @@ def _get_eager_raf_custom_bucket_unsupported_reason(
     return None
 
 
-def _raise_unsupported_eager_raf_custom_bucket(storage: DStorage) -> None:
-    reason = _get_eager_raf_custom_bucket_unsupported_reason(storage)
+def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
+    reason = _get_bucket_autograd_unshard_unsupported_reason(storage)
     bucket_fqn = _get_storage_debug_fqn(storage)
     bucket_msg = f" for bucket {bucket_fqn!r}" if bucket_fqn else ""
     raise NotImplementedError(
@@ -327,10 +327,8 @@ def _create_eager_parametrizations(
     module_param_map: dict[nn.Module, dict[str, nn.Module]] = {}
 
     for storage in storages:
-        requires_eager_batched_unshard = _storage_requires_eager_batched_unshard(
-            storage
-        )
-        uses_eager_autograd_unshard = _storage_uses_eager_autograd_unshard(storage)
+        requires_batched_unshard = _storage_requires_batched_unshard(storage)
+        uses_bucket_autograd_unshard = _storage_uses_bucket_autograd_unshard(storage)
         bucket_fqn = _get_storage_debug_fqn(storage)
         for fqn, info in storage._param_infos.items():
             bucket_spec = fqn_to_bucket_spec[fqn]
@@ -352,12 +350,12 @@ def _create_eager_parametrizations(
             setattr(
                 parametrization,
                 _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
-                requires_eager_batched_unshard,
+                requires_batched_unshard,
             )
             setattr(
                 parametrization,
                 _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-                uses_eager_autograd_unshard,
+                uses_bucket_autograd_unshard,
             )
             setattr(parametrization, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
             setattr(parametrization, _PARAM_FQN_ATTR, fqn)
@@ -389,14 +387,14 @@ def _install_batched_allgather_hooks(
             continue
 
         ptype = type(infos[0].placements[0])
-        # Skip batching when the placement/storage does not support the eager
+        # Skip batching when the placement/storage does not support the
         # batched path. Parametrization remains the source of truth.
-        if not _storage_requires_eager_batched_unshard(storage):
+        if not _storage_requires_batched_unshard(storage):
             continue
-        if storage._reshard_after_forward and not _storage_uses_eager_autograd_unshard(
+        if storage._reshard_after_forward and not _storage_uses_bucket_autograd_unshard(
             storage
         ):
-            _raise_unsupported_eager_raf_custom_bucket(storage)
+            _raise_unsupported_bucket_autograd_unshard(storage)
 
         # Pre-compute (leaf_module, param_name, parametrization, info) for
         # each param in this bucket. Captured at flex_shard() time (before
@@ -432,17 +430,17 @@ def _install_batched_allgather_hooks(
         ag_context = None
         if ptype is Shard and storage.byte_storage.device.type == "cuda":
             device = storage.byte_storage.device
-            ag_context = _get_or_create_eager_comm_context(storage._module, device)
+            ag_context = _get_or_create_comm_context(storage._module, device)
         ag_bucket = None
         if ag_context is not None:
-            ag_bucket = EagerAllGatherBucket(
+            ag_bucket = AllGatherBucket(
                 storage=storage,
                 entries=param_entries,
                 infos=infos,
                 debug_fqn=_get_storage_debug_fqn(storage),
-                use_autograd_unshard=_storage_uses_eager_autograd_unshard(storage),
+                use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
             )
-        use_autograd_unshard = _storage_uses_eager_autograd_unshard(storage)
+        use_autograd_unshard = _storage_uses_bucket_autograd_unshard(storage)
 
         def make_hooks(
             s,
@@ -486,7 +484,7 @@ def _install_batched_allgather_hooks(
                 if next_idx >= len(prefetch_order):
                     return
                 next_bucket = prefetch_order[next_idx]
-                all_gather_context.pending = PendingEagerAllGather(
+                all_gather_context.pending = PendingAllGather(
                     bucket=next_bucket,
                     result=_begin_bucket_unshard(next_bucket),
                     recompute=_reshard_checkpoint_recompute.get(),
@@ -588,7 +586,7 @@ def _install_batched_allgather_hooks(
                 ):
                     if use_autograd_bucket:
                         prefetched_result = _take_pending_for_current_bucket()
-                        runtime = EagerBucketAllGatherRuntime(
+                        runtime = BucketAllGatherRuntime(
                             prefetched_result=prefetched_result,
                             infos=entry_infos,
                             param_refs=[(leaf, name) for leaf, name, _, _ in entries],
@@ -597,7 +595,7 @@ def _install_batched_allgather_hooks(
                             debug_fqn=all_gather_bucket.debug_fqn,
                         )
                         full_params = list(
-                            _EagerBucketAllGather.apply(runtime, *local_shards)
+                            _BucketAllGather.apply(runtime, *local_shards)
                         )
                         _prefetch_next_bucket()
                     else:

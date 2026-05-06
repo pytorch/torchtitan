@@ -28,7 +28,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from .eager_runtime import EagerAllGatherContext
+    from .eager_runtime import AllGatherContext
     from .storage import DStorage
 
 
@@ -46,7 +46,7 @@ class FlexShardModule:
         return getattr(self, _DSTORAGES_ATTR)
 
     @property
-    def eager_comm_contexts(self) -> dict[torch.device, EagerAllGatherContext]:
+    def eager_comm_contexts(self) -> dict[torch.device, AllGatherContext]:
         """Root-owned eager communication contexts keyed by CUDA device."""
         return getattr(self, _EAGER_COMM_CONTEXTS_ATTR)
 

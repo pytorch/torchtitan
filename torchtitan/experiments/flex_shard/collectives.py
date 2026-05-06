@@ -68,8 +68,8 @@ class StreamHandoff:
 
 
 @dataclass
-class EagerAllGatherResult:
-    """State needed to finish an eager all-gather launched on a side stream."""
+class AsyncAllGatherResult:
+    """State needed to finish an async all-gather launched on a side stream."""
 
     gathered: list[torch.Tensor]
     infos: list[ParamInfo]
@@ -81,8 +81,8 @@ class EagerAllGatherResult:
 
 
 @dataclass
-class EagerReduceScatterResult:
-    """State needed to finish an eager reduce-scatter launched on a side stream."""
+class AsyncReduceScatterResult:
+    """State needed to finish an async reduce-scatter launched on a side stream."""
 
     sharded_grads: list[torch.Tensor]
     event: torch.Event | None
