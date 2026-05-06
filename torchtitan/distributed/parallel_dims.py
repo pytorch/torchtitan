@@ -28,12 +28,8 @@ class ParallelDims:
     ep: int
     world_size: int
     full_dtensor: bool = False
-    # Cache the meshes we create -- DeviceMesh equality is by identity, so
-    # recreating a mesh would break ``mesh in spmd_meshes()`` checks.
-    # 1. _single_axis_meshes stores 1D meshes.
-    # 2. _multi_axis_meshes stores nD submeshes.
-    # 3. _spmd_meshes stores the full SPMD meshes; today: spmd_dense and
-    #    spmd_sparse.
+    # Cache by axis name(s); DeviceMesh equality is by identity, so reuse
+    # is required for ``mesh in spmd_meshes()`` checks.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _multi_axis_meshes: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
@@ -83,6 +79,12 @@ class ParallelDims:
         if name == "fsdp":
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
+            return True
+        if name == "dp_shard" and self.full_dtensor:
+            # Under full_dtensor ``dp_shard`` is the DP storage axis (no
+            # flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
+            # can install MixedPrecisionPolicy and FSDP can discriminate
+            # the DP submesh on TP/DDP/PP-only.
             return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
