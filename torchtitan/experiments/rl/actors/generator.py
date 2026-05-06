@@ -154,10 +154,18 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support context parallelism, "
                     f"got cp={p.context_parallel_degree}"
                 )
-            if p.expert_parallel_degree > 1:
+            # vLLM ties EP to TP (enable_expert_parallel=True reuses the TP
+            # group as the EP group), so the only valid values are EP=1
+            # (disabled) or EP=TP.
+            if (
+                p.expert_parallel_degree != 1
+                and p.expert_parallel_degree != p.tensor_parallel_degree
+            ):
                 raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
+                    f"Generator requires expert_parallel_degree to be 1 or "
+                    f"equal to tensor_parallel_degree (vLLM reuses the TP "
+                    f"group for EP), got ep={p.expert_parallel_degree}, "
+                    f"tp={p.tensor_parallel_degree}"
                 )
 
     def __init__(
@@ -185,6 +193,12 @@ class VLLMGenerator(Actor, Configurable):
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
+        # Signal the wrapper to skip the HF weight load when running with
+        # random init. The trainer pushes its random-init weights to TorchStore
+        # at startup, so the generator picks up matching weights from there.
+        if config.debug.random_init:
+            os.environ["TORCHTITAN_SKIP_INITIAL_HF_LOAD"] = "1"
+
         set_batch_invariance(config.debug.batch_invariant)
 
         self._set_determinism(config.debug)
@@ -192,6 +206,7 @@ class VLLMGenerator(Actor, Configurable):
         self.model_path = model_path
 
         # Build vLLM engine
+        enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             model=model_path,
             trust_remote_code=True,
@@ -202,6 +217,7 @@ class VLLMGenerator(Actor, Configurable):
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
+            enable_expert_parallel=enable_ep,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
