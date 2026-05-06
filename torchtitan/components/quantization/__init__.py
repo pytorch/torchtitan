@@ -50,6 +50,7 @@ class QuantizationConverter(Configurable):
 
 # Re-export all public symbols so callers can import from the package directly.
 from .float8 import (  # noqa: F401, E402
+    Float8BlockwiseLinear,
     Float8GroupedExpertsConverter,
     Float8Linear,
     Float8LinearConverter,
@@ -61,6 +62,7 @@ from .mx import (  # noqa: F401, E402
 )
 
 __all__ = [
+    "Float8BlockwiseLinear",
     "Float8GroupedExpertsConverter",
     "Float8Linear",
     "Float8LinearConverter",

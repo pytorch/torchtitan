@@ -75,6 +75,41 @@ def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
     return config
 
 
+def _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size: int) -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.training.local_batch_size = local_batch_size
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        quantization=[
+            Float8LinearConverter.Config(
+                recipe_name="blockwise",
+                filter_fqns=["lm_head", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
+def deepseek_v3_debugmodel_fp8_blockwise() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=8)
+
+
+def deepseek_v3_debugmodel_fp8_blockwise_bs1() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=1)
+
+
+def deepseek_v3_debugmodel_fp8_blockwise_bs4() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=4)
+
+
+def deepseek_v3_debugmodel_fp8_blockwise_bs8() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=8)
+
+
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
