@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 
+import torch.distributed.spmd_types as spmd
 from torchtitan.config import Configurable
 from torchtitan.protocols.sharding import (
     LocalSpmdConfig,
@@ -41,13 +42,12 @@ def _spmd_redistribute_tensor(
     parallel_dims: "ParallelDims",
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
-    from spmd_types._collectives import redistribute
 
     for axis, dst_t in dst_types.items():
         src_t = src_types.get(axis)
         if src_t is not None and src_t != dst_t:
             pg = parallel_dims.get_spmd_pg_for_axis(axis)
-            x = redistribute(x, pg, src=src_t, dst=dst_t)
+            x = spmd.redistribute(x, pg, src=src_t, dst=dst_t)
     return x
 
 
@@ -57,8 +57,6 @@ def _wrap_local_spmd(
     parallel_dims: "ParallelDims",
 ) -> Callable:
     """Wrap forward with a global->local->global SPMD typechecking boundary."""
-    import torch.distributed.spmd_types as spmd
-    from spmd_types._state import is_type_checking
 
     resolved_in = tuple(resolve_spmd_types(t, parallel_dims) for t in config.in_types)
     resolved_out = tuple(resolve_spmd_types(t, parallel_dims) for t in config.out_types)
@@ -67,7 +65,7 @@ def _wrap_local_spmd(
     out_specs = tuple(resolve_partition_spec(s, parallel_dims) for s in config.out_partition_specs) if config.out_partition_specs else None
 
     def wrapped(*args, **kwargs):
-        if not is_type_checking():
+        if not spmd.is_type_checking():
             return fn(*args, **kwargs)
 
         for i, (arg, expected) in enumerate(zip(args, resolved_in)):
@@ -353,8 +351,7 @@ class Module(nn.Module, Configurable):
     # ----- spmd_types path -----
 
     def _parallelize_spmd(self, parallel_dims: "ParallelDims") -> None:
-        import spmd_types as spmd
-        from spmd_types import R
+        import torch.distributed.spmd_types as spmd
 
         sharding_config = self._sharding_config
         assert sharding_config is not None
@@ -364,15 +361,12 @@ class Module(nn.Module, Configurable):
             if name not in sharding_config.state_shardings:
                 continue
             resolved = resolve_spmd(sharding_config.state_shardings[name], parallel_dims)
-            resolved = {a: (R if t is spmd.I else t) for a, t in resolved.items()}
+            resolved = {a: (spmd.R if t is spmd.I else t) for a, t in resolved.items()}
             spmd.assert_type(param, resolved)
 
-        for name, buf in self.named_buffers(recurse=False):
-            if buf is None or name not in sharding_config.state_shardings:
-                continue
-            resolved = resolve_spmd(sharding_config.state_shardings[name], parallel_dims)
-            resolved = {a: (R if t is spmd.I else t) for a, t in resolved.items()}
-            spmd.assert_type(buf, resolved)
+        # Buffers are not annotated here — they're on meta device and get
+        # re-created by to_empty(). _reannotate_buffers_spmd_types in the
+        # trainer handles real buffer annotation after init_weights().
 
         self._cache_pos_arg_names()
 

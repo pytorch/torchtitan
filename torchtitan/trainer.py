@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -49,6 +50,7 @@ from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
+import torch.distributed.spmd_types as spmd
 from torchtitan.tools.profiler import Profiler
 
 
@@ -390,6 +392,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
+                if config.parallelism.full_spmd_types:
+                    self._reannotate_buffers_spmd_types(model)
+
                 self.model_parts = [model]
 
         # Set lm_head reference for ChunkedCELoss after model construction.
@@ -416,6 +421,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.model_parts[
                     0
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+
+        if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
+            self.loss_fn.enable_spmd_types(parallel_dims.spmd_dp_axes())
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -461,9 +469,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled
+            and not config.parallelism.disable_loss_parallel
+            and not config.parallelism.full_spmd_types
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+
+        self.full_spmd_types: bool = config.parallelism.full_spmd_types
+        if self.full_spmd_types:
+            from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
+                RegisterPostBackwardFunction,
+            )
+
+            spmd.register_local_autograd_function(RegisterPostBackwardFunction)
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -628,7 +646,56 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
+        if self.full_spmd_types:
+            inputs, labels = self._annotate_inputs_spmd_types(
+                inputs, labels, extra_kwargs.get("positions"),
+            )
+
         return inputs, labels, extra_inputs, extra_kwargs
+
+    # ------------------------------------------------------------------
+    # spmd_types helpers
+    # ------------------------------------------------------------------
+
+    def _reannotate_buffers_spmd_types(self, model: torch.nn.Module) -> None:
+        """Re-annotate buffers after to_empty + init_weights.
+
+        Params are handled by FSDP's _restore_spmd_types. Buffers are not
+        FSDP-managed, so their annotations are lost by to_empty.
+        """
+        from torch.distributed.tensor import DTensor
+
+        dp_axes = self.parallel_dims.spmd_dp_axes()
+        if not dp_axes:
+            return
+        spmd_type = {axis: spmd.R for axis in dp_axes}
+        for buf in model.buffers():
+            if not isinstance(buf, DTensor):
+                spmd.assert_type(buf, spmd_type)
+
+    def _annotate_inputs_spmd_types(
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Annotate inputs, labels, and positions with spmd_types {dp: S(0)}."""
+
+        dp_axes = self.parallel_dims.spmd_dp_axes()
+        if not dp_axes:
+            return inputs, labels
+
+        if len(dp_axes) == 1:
+            spmd_type = {dp_axes[0]: spmd.S(0)}
+            for t in (inputs, labels, positions):
+                spmd.assert_type(t, spmd_type)
+        else:
+            spmd_type = {axis: spmd.V for axis in dp_axes}
+            for t in (inputs, labels, positions):
+                spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
+                spmd.assert_type(t, spmd_type, spec)
+
+        return inputs, labels
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
@@ -682,7 +749,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            with self.train_context():
+            current_mesh = (
+                spmd.set_current_mesh(self.parallel_dims.spmd_all_axes())
+                if self.full_spmd_types
+                else contextlib.nullcontext()
+            )
+            typechecker = (
+                spmd.typecheck(local=False)
+                if self.full_spmd_types
+                else contextlib.nullcontext()
+            )
+            with self.train_context(), current_mesh, typechecker:
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                 loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
@@ -720,6 +797,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
         else:
             global_valid_tokens = local_valid_tokens.float()
+
+        if self.full_spmd_types and isinstance(global_valid_tokens, torch.Tensor):
+
+            all_axes = self.parallel_dims.spmd_all_axes()
+            if all_axes:
+                spmd.assert_type(global_valid_tokens, {a: spmd.I for a in all_axes})
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []

@@ -17,6 +17,7 @@ from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
+import torch.distributed.spmd_types as spmd
 from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
@@ -193,15 +194,14 @@ def placement_to_spmd_type(
     Shard(dim) → S(dim), Partial() → P, Replicate() → I by default.
     Replicate() with Partial() grad → R (gradient needs reduction).
     """
-    from spmd_types import I, P, R, S
 
     if isinstance(placement, Shard):
-        return S(placement.dim)
+        return spmd.S(placement.dim)
     if isinstance(placement, Partial):
-        return P
+        return spmd.P
     if grad_placement is not None and isinstance(grad_placement, Partial):
-        return R
-    return I
+        return spmd.R
+    return spmd.I
 
 
 def resolve_spmd(
@@ -242,7 +242,6 @@ def resolve_partition_spec(
 
     Template entries: None, a MeshAxisName, or a tuple of MeshAxisNames.
     """
-    from spmd_types.types import PartitionSpec
     from torch.utils._pytree import tree_map_only
 
     resolved = tree_map_only(
@@ -250,4 +249,4 @@ def resolve_partition_spec(
         lambda name: parallel_dims.get_spmd_axis(name.value),
         template,
     )
-    return PartitionSpec(*resolved)
+    return spmd.PartitionSpec(*resolved)
