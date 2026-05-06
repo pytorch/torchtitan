@@ -7,7 +7,10 @@
 import torch
 import torch.nn.functional as F
 
+from torchtitan.observability import structured_logger as sl
 
+
+@sl.log_trace_span("compute_logprobs")
 def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     """Compute per-token logprobs from logits.
 
@@ -27,6 +30,7 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
     return logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
 
 
+@sl.log_trace_span("extract_response_logprobs")
 def extract_response_logprobs(
     packed_logprobs: torch.Tensor,
     seq_lens: list[int],
@@ -47,6 +51,7 @@ def extract_response_logprobs(
     return result
 
 
+@sl.log_trace_span("verify_logprob_identity")
 def verify_logprob_identity(
     vllm_token_log_probs: list[list[float]],
     batch_token_log_probs: list[torch.Tensor],
