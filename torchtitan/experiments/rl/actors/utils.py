@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
 
@@ -47,50 +51,68 @@ def extract_response_logprobs(
     return result
 
 
+@dataclass(frozen=True)
+class LogprobVerification:
+    """Local additive facts for the trainer-side reducer.
+
+    All fields are local-rank values; the reducer SUMs/MAXes them across
+    the loss mesh and divides by global token counts where applicable.
+    """
+
+    logprob_diff_sum: torch.Tensor  # SUM-lane: numerator for diff/mean
+    logprob_diff_max: torch.Tensor  # MAX-lane
+    num_tokens_different: torch.Tensor  # SUM-lane: numerator for ratio
+
+
 def verify_logprob_identity(
     vllm_token_log_probs: list[list[float]],
     batch_token_log_probs: list[torch.Tensor],
-) -> dict:
-    """Check generator-vs-trainer logprob drift.
+    *,
+    device: torch.device,
+) -> LogprobVerification:
+    """Generator/trainer logprob drift metrics.
 
-    Returns three public-named keys consumed by the trainer reducer:
-    ``train/logprob_diff/mean`` (token-weighted mean log-ratio),
-    ``train/logprob_diff/max`` (max abs log-ratio), and
-    ``train/logprob/bitwise_identical`` (bool).
-
-    Args:
-        vllm_token_log_probs: Per-token log probs from vLLM (generator)
-        batch_token_log_probs: Per-token log probs computed by the trainer model
-
-    Returns:
-        ``{"train/logprob_diff/mean": float,
-           "train/logprob_diff/max": float,
-           "train/logprob/bitwise_identical": bool}``
+    Inputs are response-only per-sample logprobs (no padding — assumes
+    ``TrainBatch`` is varlen-packed).
     """
-    bitwise_identical = True
-    all_log_ratios = []
+    if len(vllm_token_log_probs) != len(batch_token_log_probs):
+        raise ValueError(
+            f"verify_logprob_identity: sample count mismatch — "
+            f"vllm={len(vllm_token_log_probs)}, "
+            f"trainer={len(batch_token_log_probs)}"
+        )
 
-    for vllm_lps, titan_lps in zip(vllm_token_log_probs, batch_token_log_probs):
-        vllm_tensor = torch.tensor(vllm_lps, dtype=torch.float32)
-        titan_tensor = titan_lps.detach().cpu().float()
+    if not vllm_token_log_probs:
+        zero = torch.zeros((), dtype=torch.float32, device=device)
+        return LogprobVerification(
+            logprob_diff_sum=zero,
+            logprob_diff_max=zero,
+            num_tokens_different=zero,
+        )
 
-        if not torch.equal(vllm_tensor, titan_tensor):
-            bitwise_identical = False
+    vllm_flat = torch.tensor(
+        [lp for sample in vllm_token_log_probs for lp in sample],
+        dtype=torch.float32,
+    )
+    titan_flat = torch.cat([t.detach().cpu().float() for t in batch_token_log_probs])
+    if vllm_flat.numel() != titan_flat.numel():
+        raise ValueError(
+            f"verify_logprob_identity: total token count mismatch — "
+            f"vllm={vllm_flat.numel()}, trainer={titan_flat.numel()}"
+        )
+    if vllm_flat.numel() == 0:
+        zero = torch.zeros((), dtype=torch.float32, device=device)
+        return LogprobVerification(
+            logprob_diff_sum=zero,
+            logprob_diff_max=zero,
+            num_tokens_different=zero,
+        )
 
-        # Log ratio: log(pi_train / pi_generator) = logprob_train - logprob_generator.
-        # Should be 0 when weights are identical (ratio = 1).
-        all_log_ratios.append(titan_tensor - vllm_tensor)
-
-    if all_log_ratios:
-        combined_log_ratios = torch.cat(all_log_ratios)
-        diff_mean = combined_log_ratios.mean().item()
-        diff_max = combined_log_ratios.abs().max().item()
-    else:
-        diff_mean = 0.0
-        diff_max = 0.0
-
-    return {
-        "train/logprob_diff/mean": diff_mean,
-        "train/logprob_diff/max": diff_max,
-        "train/logprob/bitwise_identical": bitwise_identical,
-    }
+    diff = titan_flat - vllm_flat
+    return LogprobVerification(
+        logprob_diff_sum=diff.sum().to(device),
+        logprob_diff_max=diff.abs().max().to(device),
+        num_tokens_different=(vllm_flat != titan_flat)
+        .sum()
+        .to(device=device, dtype=torch.float32),
+    )

@@ -35,6 +35,7 @@ from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
     extract_response_logprobs,
+    LogprobVerification,
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.loss.types import LossOutput
@@ -251,89 +252,58 @@ class PolicyTrainer(Actor, Configurable):
 
         return model
 
-    def reduce_token_mean_loss_metrics(
+    def reduce_forward_backward_metrics(
         self,
-        metric_sums: dict[str, torch.Tensor],
+        loss_metric_sums: dict[str, torch.Tensor],
+        verification: LogprobVerification,
         *,
-        num_valid_tokens: torch.Tensor,
+        num_local_valid_tokens: torch.Tensor,
     ) -> dict[str, float]:
-        """All loss diagnostics are token-weighted means with the same denominator.
+        """SUM-mean lane + MAX lane, packed into 2 collectives total.
 
-        SUM-reduce numerators + denominator in one pack; divide once.
+        Pack N values into one all_reduce; ``dist_utils.dist_sum`` requires
+        scalar inputs and would cost N round-trips. Same primitive, one trip.
+
+        Returns:
+            loss/* — token-weighted mean per loss key
+            bit_wise/logprob_diff/mean — global token-weighted log-ratio mean
+            bit_wise/logprob_diff/max — global max abs log-ratio
+            bit_wise/ratio_tokens_different/mean — global differing fraction
         """
-        keys = list(metric_sums)
-        if not keys:
-            return {}
-        batch_mesh = self.parallel_dims.get_optional_mesh("batch")
-        pack = torch.stack(
-            [metric_sums[k].to(torch.float64) for k in keys]
-            + [num_valid_tokens.to(torch.float64)]
-        )
-        if batch_mesh is not None and self.dp_size > 1:
-            pack = funcol.all_reduce(pack, c10d.ReduceOp.SUM.name, batch_mesh)
-        global_n = pack[-1].clamp(min=1.0)
-        return {k: float((pack[i] / global_n).item()) for i, k in enumerate(keys)}
+        loss_keys = list(loss_metric_sums)
+        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
 
-    def reduce_verification_metrics(
-        self,
-        raw: dict[str, torch.Tensor | float | bool],
-        *,
-        num_valid_tokens: torch.Tensor,
-    ) -> dict[str, float]:
-        """Hand-coded reducer for the 3 fixed verification metrics.
-
-        SUM pack: token-weighted mean + denominator.
-        MAX pack: max + inverted bool (so ``bitwise_identical=False`` on any
-        rank flips the global to 0.0).
-        """
-        # TODO(rl-loss-total-agg-type): when the loss-migration PR adds
-        # agg_type="sequence_mean" or "fixed_horizon", decide whether
-        # loss/total should keep reporting this token-weighted diagnostic
-        # or gain an objective-weighted lane with the agg_type-specific
-        # denominator. If the latter, extend LossOutput with optional
-        # loss_total_sum/loss_total_denominator fields (additive, no
-        # breaking change).
-        batch_mesh = self.parallel_dims.get_optional_mesh("batch")
-
-        diff_mean = torch.as_tensor(
-            raw["train/logprob_diff/mean"],
-            dtype=torch.float64,
-            device=self.device,
-        )
-        diff_max = torch.as_tensor(
-            raw["train/logprob_diff/max"],
-            dtype=torch.float32,
-            device=self.device,
-        )
         sum_pack = torch.stack(
-            [
-                diff_mean * num_valid_tokens.to(torch.float64),
-                num_valid_tokens.to(torch.float64),
+            [loss_metric_sums[k].detach().to(torch.float64) for k in loss_keys]
+            + [
+                verification.logprob_diff_sum.detach().to(torch.float64),
+                verification.num_tokens_different.detach().to(torch.float64),
+                num_local_valid_tokens.detach().to(torch.float64),
             ]
         )
-        max_pack = torch.stack(
-            [
-                diff_max,
-                torch.tensor(
-                    0.0 if bool(raw["train/logprob/bitwise_identical"]) else 1.0,
-                    dtype=torch.float32,
-                    device=self.device,
-                ),
-            ]
-        )
-        if batch_mesh is not None and self.dp_size > 1:
-            sum_pack = funcol.all_reduce(sum_pack, c10d.ReduceOp.SUM.name, batch_mesh)
-            max_pack = funcol.all_reduce(max_pack, c10d.ReduceOp.MAX.name, batch_mesh)
+        max_value = verification.logprob_diff_max.detach().to(torch.float32)
 
-        return {
-            "train/logprob_diff/mean": float(
-                sum_pack[0].item() / max(float(sum_pack[1].item()), 1.0)
-            ),
-            "train/logprob_diff/max": float(max_pack[0].item()),
-            "train/logprob/bitwise_identical": (
-                1.0 if float(max_pack[1].item()) == 0.0 else 0.0
-            ),
-        }
+        if loss_mesh is not None:
+            sum_pack = funcol.all_reduce(
+                sum_pack, reduceOp=c10d.ReduceOp.SUM.name, group=loss_mesh
+            )
+            max_value = funcol.all_reduce(
+                max_value, reduceOp=c10d.ReduceOp.MAX.name, group=loss_mesh
+            )
+
+        global_valid_tokens = sum_pack[-1].clamp(min=1.0)
+        out: dict[str, float] = {}
+        for i, k in enumerate(loss_keys):
+            out[k] = float((sum_pack[i] / global_valid_tokens).item())
+        n_loss = len(loss_keys)
+        out["bit_wise/logprob_diff/mean"] = float(
+            (sum_pack[n_loss] / global_valid_tokens).item()
+        )
+        out["bit_wise/ratio_tokens_different/mean"] = float(
+            (sum_pack[n_loss + 1] / global_valid_tokens).item()
+        )
+        out["bit_wise/logprob_diff/max"] = float(max_value.item())
+        return out
 
     @endpoint
     async def forward_backward(self, train_data: list[TrainBatch]) -> dict:
@@ -343,8 +313,7 @@ class PolicyTrainer(Actor, Configurable):
             train_data: List of batches, one per DP rank.
 
         Returns:
-            Already-namespaced public-key dict mixing ``loss/*`` and
-            ``train/logprob_*`` floats. Safe to log under global names.
+            Reduced metrics from loss and logprob verification.
         """
         logger.debug(
             f"{os.getpid()=} PolicyTrainer forward_backward "
@@ -387,46 +356,27 @@ class PolicyTrainer(Actor, Configurable):
             advantages=advantages,
         )
 
-        verification_raw = verify_logprob_identity(
+        verification = verify_logprob_identity(
             local_batch.token_logprobs,
             policy_logprobs,
-        )
-        logger.debug(
-            "Logprob verification: bitwise_identical=%s, "
-            "diff_mean=%.6e, diff_max=%.6e",
-            verification_raw["train/logprob/bitwise_identical"],
-            verification_raw["train/logprob_diff/mean"],
-            verification_raw["train/logprob_diff/max"],
+            device=device,
         )
 
-        # Backward pass
         self.optimizers.zero_grad()
         loss_output.loss.backward()
 
-        return {
-            **self.reduce_token_mean_loss_metrics(
-                loss_output.token_mean_metric_sums,
-                num_valid_tokens=loss_output.num_valid_tokens,
-            ),
-            **self.reduce_verification_metrics(
-                verification_raw,
-                num_valid_tokens=loss_output.num_valid_tokens,
-            ),
-        }
+        return self.reduce_forward_backward_metrics(
+            loss_output.token_mean_metric_sums,
+            verification,
+            num_local_valid_tokens=loss_output.num_local_valid_tokens,
+        )
 
     @endpoint
     async def optim_step(self) -> dict:
         """Clip gradients, step optimizer and LR scheduler.
 
         Returns:
-            ``{"train/grad_norm/mean": float, "train/lr": float,
-               "train/policy_version/mean": float}``. ``grad_norm`` is
-            already DP-global after ``clip_grad_norm_``; ``lr`` and
-            ``policy_version`` are rank-identical. Keys announce the
-            (no-op, single-value) reduction in the name so wandb/console
-            outputs read consistently with other ``*/mean``-suffixed
-            metrics; ``train/lr`` is a step-by-step scalar with no
-            natural reduction and stays unsuffixed.
+            Reduced metrics from optimization step.
         """
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules (see Tinker API).

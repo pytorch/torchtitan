@@ -377,23 +377,23 @@ _COLOR_CYCLE = [
 _CONSOLE_SEPARATOR = "-" * 10
 
 
-def _expand_keys(
-    aggregated: dict[str, Any],
+def _filter_allow_list(
+    metrics: dict[str, Any],
     allow_list: Sequence[str] | None,
 ) -> list[str]:
-    """Expand ``allow_list`` patterns against ``aggregated`` keys.
+    """Expand ``allow_list`` patterns against ``metrics`` keys.
 
     Pattern order is preserved; within a pattern, keys sort alphabetically.
     ``None`` returns every key in alphabetical order; ``[]`` returns ``[]``.
     """
     if allow_list is None:
-        return sorted(aggregated)
+        return sorted(metrics)
     seen: list[str] = []
     seen_set: set[str] = set()
     for raw in allow_list:
         pattern = re.compile(raw)
         matches = sorted(
-            key for key in aggregated if pattern.search(key) and key not in seen_set
+            key for key in metrics if pattern.search(key) and key not in seen_set
         )
         for key in matches:
             seen.append(key)
@@ -403,12 +403,6 @@ def _expand_keys(
 
 def _fmt_value(value: Any) -> str:
     """Format a value for console display.
-
-    Numbers: show at least 2 non-zero decimals, up to 5 decimal places.
-    Values smaller than ``1e-5`` (no significant digit fits in 5
-    decimals) fall back to scientific notation so things like
-    ``train/lr=2e-6`` don't render as ``0.00000``.
-    Other types (bool, str, ...) use `str(value)` as-is.
 
     Examples:
 
@@ -437,9 +431,6 @@ def _fmt_value(value: Any) -> str:
         temp *= 10
         if int(temp) % 10 != 0 or n_nonzero > 0:
             n_nonzero += 1
-    # No significant digit fit in 5 decimals — fall back to scientific
-    # so very small values (e.g. ``2e-6`` learning rates) still convey
-    # a magnitude instead of rendering as ``0.00000``.
     if n_nonzero == 0:
         return f"{value:.1e}"
     return f"{value:.{max(n_decimals, 2)}f}"
@@ -447,40 +438,42 @@ def _fmt_value(value: Any) -> str:
 
 def log_to_console(
     step: int,
-    aggregated: dict[str, Any],
+    metrics: dict[str, Any],
     *,
     allow_list: Sequence[str] | None,
     prefix: str = "",
 ) -> None:
-    """Render one ``step: N | k1: v1 | ...`` line to the standard logger.
+    """Print one console line for `metrics` input. Filtered by `allow_list`.
 
-    Stateless — each call expands ``allow_list`` against ``aggregated``,
-    so the column order is deterministic per allow-list and only keys
-    actually present this step are rendered (no ``--`` placeholders).
+    For example, ``log_to_console(1, {"reward/mean": 3.67, "my_loss/mean: 0.00123"},
+    allow_list=["loss"])`` prints ``step: 1 loss: 0.0012``.
+
+    Column order matches `allow_list` pattern order. None prints all keys
+    alphabetically; [] prints nothing. Missing keys are skipped.
 
     Args:
-        step: Training step (or validation step) number.
-        aggregated: Reduced metrics dict (e.g. output of
-            ``aggregate_metrics``). Keys not in ``allow_list`` are dropped.
-        allow_list: Regex patterns (matched via ``re.search``); only
-            matching keys are printed, in pattern order. ``None`` prints
-            every key in alphabetical order. ``[]`` prints nothing.
-        prefix: Optional label printed before ``step:`` (e.g.
-            ``"validate "``).
+        step: Step number to display.
+        metrics: Reduced metrics dict.
+        allow_list: Regex patterns; matching keys print in pattern order.
+        prefix: Optional label before "step:" (e.g. "validate ").
     """
-    keys = _expand_keys(aggregated, allow_list)
+    keys = _filter_allow_list(metrics, allow_list)
     if not keys:
         return
+
+    # `isatty` detects if the output is a terminal. If it is, we can use colors.
     color = Color() if sys.stdout.isatty() else NoColor()
     parts = [f"{color.red}{prefix}step: {step:2}"]
     for i, key in enumerate(keys):
         color_name = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
         tone = getattr(color, color_name)
-        parts.append(f"{tone}{key}: {_fmt_value(aggregated[key])}")
+        parts.append(f"{tone}{key}: {_fmt_value(metrics[key])}")
     parts.append(color.reset)
-    logger.info(_CONSOLE_SEPARATOR)
-    logger.info("  ".join(parts))
-    logger.info(_CONSOLE_SEPARATOR)
+    # Single log call so the timestamp prefix (`[titan] ... INFO -`) only
+    # appears once per step. The leading separator visually splits this
+    # line from any non-metric log spam above; trailing separator is
+    # implicit (next step's leading separator divides them).
+    logger.info("%s\n%s", _CONSOLE_SEPARATOR, "  ".join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -497,14 +490,8 @@ class MetricsConfig:
     """
 
     log_freq: int = 1
-    """Log every N training steps. Currently a no-op — RL logs every
-    step. Kept on the surface for forward compatibility; see
-    ``IDEAS.md`` for the trainer-side cost-reduction follow-up.
-
-    TODO(rl-metrics-log-freq): honor this on the trainer-side reduction
-    path (skip the loss+verification all_reduce on non-log steps) so
-    `log_freq>1` actually saves work, not just bytes.
-    """
+    """Reserved for future cadence control. Values other than 1 currently
+    warn; RL still logs every step."""
 
     train_console_allow_list: list[str] | None = None
     """Regex patterns selecting console keys for **training** steps.
@@ -519,17 +506,12 @@ class MetricsConfig:
 
 
 class MetricLogger:
-    """Aggregates a ``list[Metric]`` once per ``log`` call, renders the
-    console line in-place, and fans the reduced dict out to every
-    backend (W&B, ...).
-
-    Console output is intentionally **not** a backend: callers pass a
-    per-call ``console_allow_list`` to render a context-specific line
-    (training vs. validation) without re-aggregating.
+    """Aggregates Metric records and dispatches to metrc logging backends (e.g. WandB)
+    + console logging.
 
     Args:
-        backends: Sequence of `MetricBackend` instances. Each implements
-            `log(metrics, step)` and `close()`.
+        backends: Sequence of MetricBackend instances. Each implements
+            log(metrics, step) and close().
     """
 
     def __init__(self, backends: Sequence[MetricBackend]) -> None:
@@ -543,24 +525,21 @@ class MetricLogger:
         console_allow_list: Sequence[str] | None = None,
         console_prefix: str = "",
     ) -> None:
-        """Reduce ``metrics`` once, render the console line, and dispatch
-        to every backend.
+        """Reduce metrics once, print the console line, dispatch to backends.
 
         Args:
-            step: Training step (or validation step) number.
-            metrics: Iterable of `Metric` records.
-            console_allow_list: Patterns selecting console keys for this
-                call. ``None`` (default) prints every key alphabetically;
-                ``[]`` suppresses the console render entirely; a list of
-                regex patterns prints matching keys in pattern order.
-                Same contract as :func:`log_to_console`.
-            console_prefix: Optional label printed before ``step:``
-                (e.g. ``"validate "``).
+            step: Step number.
+            metrics: Iterable of Metric records.
+            console_allow_list: Patterns selecting which metrics should be logged
+                to console. None prints all keys alphabetically; [] suppresses
+                the console line; a regex list prints matching keys in
+                pattern order. Same contract as `log_to_console`.
+            console_prefix: Optional label before "step:" (e.g. "validate ").
         """
         reduced = aggregate_metrics(metrics)
         log_to_console(
-            step,
-            reduced,
+            step=step,
+            metrics=reduced,
             allow_list=console_allow_list,
             prefix=console_prefix,
         )
@@ -591,27 +570,19 @@ class MetricLogger:
         log_dir: str | None = None,
         config_dict: dict[str, Any] | None = None,
     ) -> MetricLogger:
-        """Build a `MetricLogger` with default backends from `config`.
-
-        Console rendering happens inline in :meth:`log` and isn't a
-        backend; ``config``'s ``*_console_allow_list`` fields are read
-        by the controller, not by this method.
+        """Build a MetricLogger with backends from config.
 
         Args:
-            config: Metrics config block (typically from `RLTrainer.Config`).
-            log_dir: Directory passed to `wandb.init(dir=...)`. Required
-                when `config.enable_wandb=True`.
-            config_dict: Hyperparameter snapshot passed to
-                `wandb.init(config=...)`. Typically the full job config dict
-                (e.g. `config.to_dict()`) so the W&B UI shows every CLI flag
-                that produced this run. Optional.
+            config: Metrics config block (typically from RLTrainer.Config).
+            log_dir: Directory passed to wandb.init(dir=...). Required
+                when config.enable_wandb=True.
+            config_dict: Hyperparameter snapshot for wandb.init(config=...).
+                Typically the full job config dict so the W&B UI shows
+                every CLI flag that produced this run. Optional.
         """
         if config.log_freq != 1:
-            # See ``MetricsConfig.log_freq`` docstring + ``IDEAS.md``;
-            # warn so users don't silently expect a no-op to take effect.
             logger.warning(
-                "MetricsConfig.log_freq=%d is currently a no-op; RL logs "
-                "every step. Tracked as TODO(rl-metrics-log-freq).",
+                "MetricsConfig.log_freq=%d is reserved; RL still logs every step.",
                 config.log_freq,
             )
 

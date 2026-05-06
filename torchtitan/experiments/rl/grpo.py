@@ -96,18 +96,11 @@ class GRPOLoss(Configurable):
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
         sample_pg_losses = -torch.min(ratio * advantages, clipped_ratio * advantages)
         pg_loss = sample_pg_losses.mean()
-        clipped_frac = (torch.abs(ratio - clipped_ratio) > 1e-6).to(ratio.dtype)
 
-        return LossOutput(
-            loss=pg_loss,  # backward target — math unchanged
-            token_mean_metric_sums={
-                # Bridge: each sample scalar weighted by its response length.
-                # Loss-migration PR replaces with true per-token sums; the
-                # LossOutput contract stays identical.
+        with torch.no_grad():
+            clipped_frac = (torch.abs(ratio - clipped_ratio) > 1e-6).to(ratio.dtype)
+            token_mean_metric_sums = {
                 "loss/total": sequence_scalar_token_weighted_sum(
-                    sample_pg_losses, response_lens
-                ),
-                "loss/pg": sequence_scalar_token_weighted_sum(
                     sample_pg_losses, response_lens
                 ),
                 "loss/ratio/mean": sequence_scalar_token_weighted_sum(
@@ -116,8 +109,13 @@ class GRPOLoss(Configurable):
                 "loss/ratio/clipped_frac": sequence_scalar_token_weighted_sum(
                     clipped_frac, response_lens
                 ),
-            },
-            num_valid_tokens=response_lens.sum().detach(),
+            }
+            num_local_valid_tokens = response_lens.sum().detach()
+
+        return LossOutput(
+            loss=pg_loss,
+            token_mean_metric_sums=token_mean_metric_sums,
+            num_local_valid_tokens=num_local_valid_tokens,
         )
 
 
@@ -169,12 +167,9 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 
 
-# Curated headline allow-lists for the per-step console line. The
-# controller passes these to ``MetricLogger.log`` per call so the train
-# line and the validation line each show only their context's keys
-# (no ``--`` placeholders for the other context). Override with
-# ``--metrics.{train,validation}-console-allow-list=.*`` to print every
-# key. W&B always receives the full reduced set.
+# Default console keys per context. Override with
+# `--metrics.train-console-allow-list=.*` or
+# `--metrics.validation-console-allow-list=.*` to print all console keys.
 _RL_TRAIN_HEADLINE_METRIC_PATTERNS = [
     r"^loss/total$",
     r"^loss/ratio/clipped_frac$",
@@ -246,15 +241,12 @@ class RLTrainer(Configurable):
 
         metrics: m.MetricsConfig = field(
             default_factory=lambda: m.MetricsConfig(
-                # Wrap with list(...) so each Config gets its own copy;
-                # never share the module-level constant directly.
                 train_console_allow_list=list(_RL_TRAIN_HEADLINE_METRIC_PATTERNS),
                 validation_console_allow_list=list(
                     _RL_VALIDATION_HEADLINE_METRIC_PATTERNS
                 ),
             )
         )
-        """Metric backend configuration (per-context console + optional W&B)."""
 
         def __post_init__(self):
             if self.trainer.debug.batch_invariant:
@@ -349,7 +341,7 @@ class RLTrainer(Configurable):
             token_ids=torch.tensor([all_ids], dtype=torch.long),
             prompt_lens=prompt_lens,
             response_lens=response_lens,
-            seq_lens=[p + r for p, r in zip(prompt_lens, response_lens)],
+            seq_lens=[p + r for p, r in zip(prompt_lens, response_lens, strict=True)],
             advantages=torch.tensor(
                 [ep.advantage for ep in episodes],
                 dtype=torch.float32,
@@ -504,8 +496,6 @@ class RLTrainer(Configurable):
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
 
-        # Build metric backends. Done after meshes are spawned so that
-        # only the controller (rank-0 driver process) initializes W&B.
         self.metric_logger = m.MetricLogger.build(
             config.metrics,
             log_dir=config.dump_folder,
@@ -536,14 +526,7 @@ class RLTrainer(Configurable):
 
         response_lens = [len(c.token_ids) for c in completions]
         prompt_lens = [len(c.prompt_token_ids) for c in completions]
-        # `max(prompt+response per episode)` — the actual max sequence
-        # length, not the (looser) `max(prompt) + max(response)` upper
-        # bound that may combine two different episodes.
-        total_lens = [p + r for p, r in zip(prompt_lens, response_lens)]
-        # Truncation rate = fraction of completions that vLLM stopped
-        # because they hit ``max_tokens`` (rather than a stop token).
-        # ``finish_reason`` may be None on older vLLM builds; default to
-        # False so the metric stays well-defined.
+        total_lens = [p + r for p, r in zip(prompt_lens, response_lens, strict=True)]
         truncated = [c.finish_reason == "length" for c in completions]
         rollout_metrics: list[m.Metric] = [
             m.Metric("rollout/response_length", m.Mean.from_list(response_lens)),
@@ -588,11 +571,6 @@ class RLTrainer(Configurable):
                 )
 
         num_groups = len(group_stds)
-        # Fraction of groups whose rollouts all got the same reward
-        # (group std == 0). Their GRPO advantage is zero, so they
-        # contribute no learning signal — high values mean the prompt
-        # batch is too easy or too hard. (slime calls this
-        # ``zero_std_frac``; matches that convention.)
         zero_std_frac = (
             sum(1 for s in group_stds if s == 0.0) / num_groups if num_groups else 0.0
         )
@@ -658,28 +636,28 @@ class RLTrainer(Configurable):
 
         pre_metrics = await self.validate()
         self.metric_logger.log(
-            0,
-            pre_metrics,
+            step=0,
+            metrics=pre_metrics,
             console_allow_list=self.config.metrics.validation_console_allow_list,
             console_prefix="validate ",
         )
 
         for step in range(num_steps):
-            step_t0 = time.perf_counter()
+            step_start = time.perf_counter()
 
             # --- rollouts ---
-            rollout_t0 = time.perf_counter()
+            rollout_start = time.perf_counter()
             trajectories, rollout_metrics = self._collect_rollouts(
                 num_groups, step=step
             )
             episodes, episode_metrics = self._build_episodes(trajectories)
-            rollout_s = time.perf_counter() - rollout_t0
+            rollout_s = time.perf_counter() - rollout_start
 
             if self.config.log_samples:
                 _log_samples(episodes)
 
             # --- train ---
-            train_t0 = time.perf_counter()
+            train_start = time.perf_counter()
             batches = [
                 self._collate_episodes(per_rank_episodes)
                 for per_rank_episodes in self._shard_episodes(episodes)
@@ -688,32 +666,29 @@ class RLTrainer(Configurable):
                 self.trainer.forward_backward.call(batches).get()
             )
             optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
-            train_s = time.perf_counter() - train_t0
+            train_s = time.perf_counter() - train_start
 
-            # --- weight sync (existing) ---
-            push_t0 = time.perf_counter()
+            # --- weight sync ---
+            push_start = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
-            weight_sync_push_s = time.perf_counter() - push_t0
+            weight_sync_push_s = time.perf_counter() - push_start
             self.generator.pull_model_state_dict.call(
                 optim_metrics["train/policy_version/mean"]
             ).get()
-            weight_sync_total_s = time.perf_counter() - push_t0
+            weight_sync_total_s = time.perf_counter() - push_start
 
             # --- divergence check before any logging ---
             if not math.isfinite(fwd_metrics["loss/total"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
 
-            # --- assemble + log ---
-            step_s = time.perf_counter() - step_t0
+            step_s = time.perf_counter() - step_start
             total_tokens = sum(
                 len(ep.prompt_token_ids) + len(ep.token_ids) for ep in episodes
             )
 
             step_metrics: list[m.Metric] = []
-            # All actor-side dicts arrive with already-namespaced public
-            # keys (loss/total, train/grad_norm/mean, …) — values are
-            # already DP-reduced so NoReduce passes them through unchanged.
+            # Actor metrics are already globally reduced; NoReduce passes them through.
             step_metrics += [m.Metric(k, m.NoReduce(v)) for k, v in fwd_metrics.items()]
             step_metrics += [
                 m.Metric(k, m.NoReduce(v)) for k, v in optim_metrics.items()
@@ -733,15 +708,15 @@ class RLTrainer(Configurable):
             )
 
             self.metric_logger.log(
-                step,
-                step_metrics,
+                step=step,
+                metrics=step_metrics,
                 console_allow_list=self.config.metrics.train_console_allow_list,
             )
 
         post_metrics = await self.validate()
         self.metric_logger.log(
-            num_steps,
-            post_metrics,
+            step=num_steps,
+            metrics=post_metrics,
             console_allow_list=self.config.metrics.validation_console_allow_list,
             console_prefix="validate ",
         )

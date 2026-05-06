@@ -338,8 +338,8 @@ class TestRLTrainerConfigWiring:
 class TestGRPOLossBridge:
     def test_returns_loss_output_with_token_weighted_sums(self) -> None:
         loss_fn = GRPOLoss(GRPOLoss.Config(clip_eps=0.2))
-        # Two samples with **unequal** response lengths, so the
-        # token-weighted bridge differs from naive sample averaging.
+        # Two samples with unequal response lengths so the token-weighted
+        # bridge differs from naive sample averaging.
         policy_logprobs = [
             torch.zeros(2, requires_grad=True),
             torch.zeros(8, requires_grad=True),
@@ -348,27 +348,17 @@ class TestGRPOLossBridge:
 
         out = loss_fn(policy_logprobs=policy_logprobs, advantages=advantages)
         assert isinstance(out, LossOutput)
-        # Numerator + denominator are SUMs (token-weighted), not means.
-        assert out.num_valid_tokens.item() == 10.0
-        for key in (
-            "loss/total",
-            "loss/pg",
-            "loss/ratio/mean",
-            "loss/ratio/clipped_frac",
-        ):
+        assert out.num_local_valid_tokens.item() == 10.0
+        for key in ("loss/total", "loss/ratio/mean", "loss/ratio/clipped_frac"):
             assert key in out.token_mean_metric_sums
+        # `loss/pg` is no longer emitted — it was a duplicate of `loss/total`.
+        assert "loss/pg" not in out.token_mean_metric_sums
 
     def test_loss_total_diverges_from_loss_item_under_unequal_lengths(self) -> None:
-        """Document v8/v9 transitional behavior. Under unequal response
-        lengths the bridged ``loss/total`` differs from
-        ``LossOutput.loss.item()``; this is intentional and the
-        loss-migration PR converges them. A future change cannot silently
-        re-couple them without updating this test.
-        """
+        """Bridged ``loss/total`` is token-weighted across samples, so
+        under unequal response lengths it differs from ``loss.item()``
+        (an unweighted sample mean). Pin the divergence."""
         loss_fn = GRPOLoss(GRPOLoss.Config(clip_eps=0.2))
-        # Different per-sample logprobs so per-sample pg_loss differs;
-        # response lengths differ so the token-weighted sum disagrees
-        # with the unweighted sample mean.
         policy_logprobs = [
             torch.full((2,), 0.1, requires_grad=True),
             torch.full((8,), 0.0, requires_grad=True),
@@ -376,11 +366,9 @@ class TestGRPOLossBridge:
         advantages = torch.tensor([1.0, -1.0])
 
         out = loss_fn(policy_logprobs=policy_logprobs, advantages=advantages)
-        # `loss/total/mean` (after dividing by num_valid_tokens) ≠ loss
-        # under unequal lengths.
         token_weighted_loss_total = (
             out.token_mean_metric_sums["loss/total"].item()
-            / out.num_valid_tokens.item()
+            / out.num_local_valid_tokens.item()
         )
         assert not math.isclose(
             token_weighted_loss_total,
@@ -411,67 +399,107 @@ def _stub_trainer_for_reducers(dp_size: int):
     return inst
 
 
+def _zero_verification(device: torch.device | None = None) -> "LogprobVerification":
+    from torchtitan.experiments.rl.actors.utils import LogprobVerification
+
+    device = device or torch.device("cpu")
+    zero = torch.zeros((), dtype=torch.float32, device=device)
+    return LogprobVerification(
+        logprob_diff_sum=zero,
+        logprob_diff_max=zero,
+        num_tokens_different=zero,
+    )
+
+
 class TestReducerFastPaths:
-    def test_loss_reducer_single_dp(self) -> None:
-        trainer = _stub_trainer_for_reducers(dp_size=1)
-        # 4 valid tokens; numerator 12.0 ⇒ mean 3.0
-        sums = {"loss/total": torch.tensor(12.0)}
-        out = trainer.reduce_token_mean_loss_metrics(
-            sums, num_valid_tokens=torch.tensor(4.0)
-        )
-        assert out == {"loss/total": pytest.approx(3.0)}
+    def test_single_dp_identical(self) -> None:
+        from torchtitan.experiments.rl.actors.utils import LogprobVerification
 
-    def test_loss_reducer_empty(self) -> None:
         trainer = _stub_trainer_for_reducers(dp_size=1)
-        out = trainer.reduce_token_mean_loss_metrics(
-            {}, num_valid_tokens=torch.tensor(4.0)
+        out = trainer.reduce_forward_backward_metrics(
+            loss_metric_sums={"loss/total": torch.tensor(12.0)},
+            verification=LogprobVerification(
+                logprob_diff_sum=torch.tensor(0.004),  # 0.001 mean × 4 tokens
+                logprob_diff_max=torch.tensor(0.005),
+                num_tokens_different=torch.tensor(0.0),
+            ),
+            num_local_valid_tokens=torch.tensor(4.0),
         )
-        assert out == {}
+        # 4 valid tokens, numerator 12.0 ⇒ mean 3.0
+        assert out["loss/total"] == pytest.approx(3.0)
+        # diff_sum 0.004 / 4 tokens ⇒ 0.001
+        assert out["bit_wise/logprob_diff/mean"] == pytest.approx(0.001)
+        assert out["bit_wise/logprob_diff/max"] == pytest.approx(0.005)
+        assert out["bit_wise/ratio_tokens_different/mean"] == 0.0
 
-    def test_verification_reducer_single_dp_identical(self) -> None:
+    def test_single_dp_one_token_differs(self) -> None:
+        from torchtitan.experiments.rl.actors.utils import LogprobVerification
+
         trainer = _stub_trainer_for_reducers(dp_size=1)
-        out = trainer.reduce_verification_metrics(
-            {
-                "train/logprob_diff/mean": 0.001,
-                "train/logprob_diff/max": 0.005,
-                "train/logprob/bitwise_identical": True,
-            },
-            num_valid_tokens=torch.tensor(4.0),
+        out = trainer.reduce_forward_backward_metrics(
+            loss_metric_sums={},
+            verification=LogprobVerification(
+                logprob_diff_sum=torch.tensor(0.0),
+                logprob_diff_max=torch.tensor(0.0),
+                num_tokens_different=torch.tensor(1.0),
+            ),
+            num_local_valid_tokens=torch.tensor(4.0),
         )
-        assert out["train/logprob_diff/mean"] == pytest.approx(0.001)
-        assert out["train/logprob_diff/max"] == pytest.approx(0.005)
-        assert out["train/logprob/bitwise_identical"] == 1.0
+        # 1 of 4 tokens differs ⇒ ratio 0.25
+        assert out["bit_wise/ratio_tokens_different/mean"] == pytest.approx(0.25)
 
-    def test_verification_reducer_single_dp_not_identical(self) -> None:
-        trainer = _stub_trainer_for_reducers(dp_size=1)
-        out = trainer.reduce_verification_metrics(
-            {
-                "train/logprob_diff/mean": 0.0,
-                "train/logprob_diff/max": 0.0,
-                "train/logprob/bitwise_identical": False,
-            },
-            num_valid_tokens=torch.tensor(4.0),
-        )
-        assert out["train/logprob/bitwise_identical"] == 0.0
+    def test_unbiased_reduction_under_unequal_tokens(self) -> None:
+        """Two ranks with unequal token counts: token-weighted mean must
+        equal `Σ numerator / Σ denominator`, not the mean-of-means.
 
-    def test_loss_reducer_simulated_two_dp(self) -> None:
-        """Mock funcol.all_reduce as a lambda that doubles tensors so we
-        can verify the pack layout end-to-end without NCCL."""
+        Rank 0: numerator=10, tokens=5  (local mean 2.0)
+        Rank 1: numerator=30, tokens=10 (local mean 3.0)
+        mean-of-means = 2.5; correct = 40/15 = 2.6667
+        """
         trainer = _stub_trainer_for_reducers(dp_size=2)
-        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="batch")
+        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
+
+        # Real per-rank shapes: SUM pack is
+        #   [loss/total, logprob_diff_sum, num_tokens_different, denom]
+        rank0 = torch.tensor([10.0, 0.0, 0.0, 5.0], dtype=torch.float64)
+        rank1 = torch.tensor([30.0, 0.0, 0.0, 10.0], dtype=torch.float64)
+
+        def fake_all_reduce(t, *, reduceOp, group):
+            # Identify the SUM pack by length-4 shape; everything else is
+            # the MAX pack and we don't combine here.
+            if t.numel() == rank0.numel():
+                return rank0 + rank1
+            return t
 
         with patch(
             "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
-            side_effect=lambda t, op, mesh: t * 2,
+            side_effect=fake_all_reduce,
         ):
-            sums = {
-                "loss/total": torch.tensor(6.0),  # local numerator
-                "loss/pg": torch.tensor(2.0),
-            }
-            out = trainer.reduce_token_mean_loss_metrics(
-                sums, num_valid_tokens=torch.tensor(3.0)
+            out = trainer.reduce_forward_backward_metrics(
+                loss_metric_sums={"loss/total": torch.tensor(10.0)},
+                verification=_zero_verification(),
+                num_local_valid_tokens=torch.tensor(5.0),
             )
-        # SUM doubled both numerators and denominator => same ratio:
-        # loss/total: 12 / 6 = 2.0; loss/pg: 4 / 6 ≈ 0.6667
+        assert out["loss/total"] == pytest.approx(40.0 / 15.0)
+
+    def test_pack_layout_simulated_two_dp(self) -> None:
+        """Pack-layout sanity check: doubling every value preserves the
+        global mean. Catches off-by-one indexing in slice-by-`n_loss`."""
+        trainer = _stub_trainer_for_reducers(dp_size=2)
+        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
+
+        with patch(
+            "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
+            side_effect=lambda t, *, reduceOp, group: t * 2,
+        ):
+            out = trainer.reduce_forward_backward_metrics(
+                loss_metric_sums={
+                    "loss/total": torch.tensor(6.0),
+                    "loss/ratio/mean": torch.tensor(2.0),
+                },
+                verification=_zero_verification(),
+                num_local_valid_tokens=torch.tensor(3.0),
+            )
+        # Doubling numerator + denominator => same ratio: 12/6, 4/6
         assert out["loss/total"] == pytest.approx(2.0)
-        assert out["loss/pg"] == pytest.approx(2.0 / 3.0)
+        assert out["loss/ratio/mean"] == pytest.approx(2.0 / 3.0)
