@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
-from torchtitan.components.checkpoint import ModelWrapper
+from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torchtitan.config import TORCH_DTYPE_MAP
 
 
@@ -31,15 +31,13 @@ def convert_to_hf(
 
     with torch.device("cpu"):
         model = model_config.build()
-    model = ModelWrapper(model)
-
     sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
 
     # allocate state dict memory with empty weights to load checkpoint
-    state_dict = model._get_state_dict()
+    state_dict = get_model_state_dict(model)
     dcp.load(
         state_dict,
         checkpoint_id=input_dir,
