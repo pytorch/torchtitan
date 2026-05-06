@@ -241,8 +241,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             local_batch_size=config.training.local_batch_size,
         )
 
-        # build model (using meta init by default, overridable via
-        # _get_model_build_device for subclasses that need CPU init)
+        # build model (using meta init)
         model_config = model_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
@@ -253,7 +252,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
         with (
-            torch.device(self._get_model_build_device()),
+            torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
         ):
             model = model_config.build()
@@ -384,7 +383,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                self._init_model_weights(model, init_device, buffer_device)
+                model.to_empty(device=init_device)
+                with torch.no_grad():
+                    # TODO: Change this back to init_weights once
+                    # autoparallel contains the wrap_init_states
+                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -499,21 +502,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
-
-    def _get_model_build_device(self) -> str:
-        """Device to use when building the model. Override for CPU init."""
-        return "meta"
-
-    def _init_model_weights(
-        self,
-        model: torch.nn.Module,
-        init_device: str,
-        buffer_device: torch.device | None,
-    ) -> None:
-        """Materialize and initialize model weights. Override for CPU init."""
-        model.to_empty(device=init_device)
-        with torch.no_grad():
-            cast(BaseModel, model).init_weights(buffer_device=buffer_device)
 
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:

@@ -2,24 +2,24 @@
 
 ## Goal
 
-Land a minimal FlexShard experiment that works for eager training and fails
-explicitly for compile paths. The first version should prove the eager runtime
-without carrying graph capture, precompile, or multi-mesh composition support.
+Land a minimal FlexShard primitive that works for eager execution and fails
+explicitly for graph capture paths. The first version should prove the eager
+runtime without carrying TorchTitan trainer integration, graph capture,
+precompile, or multi-mesh composition support.
 
 ## Supported
 
-- Llama 3 FlexShard experiment.
 - Eager training only.
-- Data-parallel sharding through the `fsdp` mesh.
+- Self-contained FlexShard API tests on a CPU `fsdp` mesh.
+- Data-parallel sharding through a named `fsdp` mesh.
 - `Shard(0)` per-parameter placement.
-- One communication bucket for embeddings, one per transformer block, and one
-  for final norm/lm head.
-- Mixed-precision parameter and reduction dtypes.
-- Eager `reshard_after_forward` policy through the existing FSDP policy knob.
+- Explicit `BucketSpec` coverage.
+- Eager forward/backward through the FlexShard parametrization and hooks.
 
 ## Explicitly Unsupported
 
-- `compile.mode` values `jit`, `aot`, and `aot_fx_trace`.
+- `torch.compile` and graph capture.
+- TorchTitan trainer/model registration.
 - Precompile artifact save/load.
 - Tensor, context, pipeline, expert, and hybrid data parallel composition.
 - CPU offload.
@@ -29,17 +29,14 @@ without carrying graph capture, precompile, or multi-mesh composition support.
 
 ## Implementation Steps
 
-1. Keep the base `Trainer` hook points for model build and initialization device.
-2. Move CPU model build and FlexShard buffer initialization into a
-   FlexShard-specific `GraphTrainer` subclass.
-3. Set FlexShard config defaults to eager by using `compile.mode=None` and
-   `compile.enable=False`.
-4. Add early validation that raises `ValueError` for compile/precompile,
-   checkpointing, unsupported parallelisms, CPU offload, and non-FSDP sharding.
-5. Simplify `parallelize_llama_flex_shard()` to apply only eager activation
-   checkpointing and FlexShard sharding.
-6. Remove graph-pass, trace, and precompile integration from this PR.
-7. Add a small CPU unit test for the eager-only guard.
+1. Keep FlexShard as a library-only experiment under
+   `torchtitan/experiments/flex_shard`.
+2. Do not register a TorchTitan trainer module or config in this PR.
+3. Add a FlexShard-level guard that raises `ValueError` during graph capture.
+4. Remove graph-pass, trace, precompile, and trainer integration from this PR.
+5. Add a self-contained CPU unit test that initializes a single-rank `fsdp`
+   mesh, applies `flex_shard()` to a tiny module, verifies eager
+   forward/backward, and verifies graph capture raises.
 
 ## Validation
 
@@ -48,21 +45,14 @@ Run syntax and targeted unit checks locally:
 ```bash
 python -m py_compile \
   torchtitan/experiments/flex_shard/flex_shard.py \
-  torchtitan/experiments/graph_trainer/flex_shard_llama3/*.py \
-  torchtitan/trainer.py
+  tests/unit_tests/test_flex_shard_eager_only.py
 
 pytest tests/unit_tests/test_flex_shard_eager_only.py -q
 ```
 
-GPU validation, when GPUs are available:
+Distributed GPU validation can continue to use the experiment-local tests when
+GPUs are available:
 
 ```bash
-NGPU=4 MODULE=graph_trainer.flex_shard_llama3 \
-  CONFIG=graph_trainer_flex_shard_llama3_debugmodel \
-  ./run_train.sh --training.steps 5 --compile.mode None
-
-NGPU=4 MODULE=graph_trainer.flex_shard_llama3 \
-  CONFIG=graph_trainer_flex_shard_llama3_debugmodel \
-  ./run_train.sh --training.steps 5 --compile.mode None \
-  --parallelism.fsdp_reshard_after_forward never
+torchrun --nproc_per_node=2 torchtitan/experiments/flex_shard/test_flex_shard.py
 ```

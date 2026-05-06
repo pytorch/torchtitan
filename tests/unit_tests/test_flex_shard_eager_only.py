@@ -5,73 +5,82 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from contextlib import contextmanager
+from datetime import timedelta
+from tempfile import NamedTemporaryFile
+from unittest.mock import patch
 
-from torchtitan.config import TrainingConfig
-from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.flex_shard_llama3.config_registry import (
-    graph_trainer_flex_shard_llama3_debugmodel,
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import DataParallelMeshDims
+
+from torchtitan.experiments.flex_shard import (
+    BucketSpec,
+    flex_shard,
+    is_flex_shard_param,
+    lift_params_to_global_spmd_mesh,
+    per_param_placements,
 )
-from torchtitan.experiments.graph_trainer.flex_shard_llama3.parallelize import (
-    _validate_flex_shard_eager_only,
-)
 
 
-def _parallel_dims(**overrides) -> ParallelDims:
-    values = dict(
-        dp_replicate=1,
-        dp_shard=2,
-        cp=1,
-        tp=1,
-        pp=1,
-        ep=1,
-        world_size=2,
+@contextmanager
+def _single_rank_cpu_mesh():
+    created_pg = False
+    with NamedTemporaryFile() as store:
+        if not dist.is_initialized():
+            dist.init_process_group(
+                "gloo",
+                init_method=f"file://{store.name}",
+                rank=0,
+                world_size=1,
+                timeout=timedelta(seconds=20),
+            )
+            created_pg = True
+        try:
+            yield init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
+        finally:
+            if created_pg and dist.is_initialized():
+                dist.destroy_process_group()
+
+
+def _flex_shard_tiny_model():
+    mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
+    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2))
+    lift_params_to_global_spmd_mesh(model, mesh)
+    flex_shard(
+        model,
+        mesh,
+        DataParallelMeshDims(shard="fsdp"),
+        shard_placement_fn=per_param_placements,
+        buckets=[
+            BucketSpec(["0.*"], reshard_after_forward=False),
+            BucketSpec(["2.*"], reshard_after_forward=False),
+        ],
     )
-    values.update(overrides)
-    return ParallelDims(**values)
+    return model
 
 
 class TestFlexShardEagerOnly(unittest.TestCase):
-    def test_config_defaults_to_eager(self):
-        config = graph_trainer_flex_shard_llama3_debugmodel()
+    def test_eager_forward_backward_on_cpu_mesh(self):
+        with _single_rank_cpu_mesh():
+            model = _flex_shard_tiny_model()
 
-        self.assertFalse(config.compile.enable)
-        self.assertIsNone(config.compile.mode)
+            loss = model(torch.randn(3, 4)).sum()
+            loss.backward()
 
-    def test_compile_mode_raises(self):
-        with self.assertRaisesRegex(ValueError, "eager execution only"):
-            _validate_flex_shard_eager_only(
-                parallel_dims=_parallel_dims(),
-                training=TrainingConfig(),
-                compile_config=GraphTrainerCompileConfig(
-                    enable=False,
-                    mode="aot_fx_trace",
-                ),
-            )
+            for param in model.parameters():
+                self.assertTrue(is_flex_shard_param(param))
+                self.assertIsNotNone(param.grad)
 
-    def test_compile_enable_raises(self):
-        with self.assertRaisesRegex(ValueError, "eager execution only"):
-            _validate_flex_shard_eager_only(
-                parallel_dims=_parallel_dims(),
-                training=TrainingConfig(),
-                compile_config=GraphTrainerCompileConfig(enable=True, mode=None),
-            )
+    def test_graph_capture_raises(self):
+        with _single_rank_cpu_mesh():
+            model = _flex_shard_tiny_model()
 
-    def test_tensor_parallel_raises(self):
-        with self.assertRaisesRegex(ValueError, "tensor parallel"):
-            _validate_flex_shard_eager_only(
-                parallel_dims=_parallel_dims(tp=2, world_size=4),
-                training=TrainingConfig(),
-                compile_config=GraphTrainerCompileConfig(enable=False, mode=None),
-            )
-
-    def test_cpu_offload_raises(self):
-        with self.assertRaisesRegex(ValueError, "CPU offload"):
-            _validate_flex_shard_eager_only(
-                parallel_dims=_parallel_dims(),
-                training=TrainingConfig(enable_cpu_offload=True),
-                compile_config=GraphTrainerCompileConfig(enable=False, mode=None),
-            )
+            with patch.object(torch.compiler, "is_compiling", return_value=True):
+                with self.assertRaisesRegex(ValueError, "eager execution only"):
+                    model(torch.randn(3, 4))
 
 
 if __name__ == "__main__":

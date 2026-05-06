@@ -1548,7 +1548,7 @@ def disable_active_parametrization() -> Generator[None, None, None]:
 
 @contextmanager
 def _disable_reshard_checkpoint() -> Generator[None, None, None]:
-    """Internal compile frontend hook to skip eager reshard checkpoint wrappers."""
+    """Skip eager reshard checkpoint wrappers while entering graph capture."""
     token = _reshard_checkpoint_enabled.set(False)
     try:
         yield
@@ -1568,13 +1568,20 @@ def _mark_reshard_checkpoint_recompute(ctx: Any) -> Generator[None, None, None]:
 
 
 def _is_graph_capture_active() -> bool:
-    """Return whether parametrizations should emit traceable collectives."""
+    """Return whether unsupported graph capture is active."""
     if torch.compiler.is_compiling():
         return True
     try:
         return torch._guards.TracingContext.try_get() is not None
     except AttributeError:
         return False
+
+
+def _raise_graph_capture_unsupported() -> None:
+    raise ValueError(
+        "FlexShard currently supports eager execution only; torch.compile and "
+        "graph capture are not supported yet."
+    )
 
 
 def _raise_missing_eager_batched_unshard(parametrization: nn.Module) -> None:
@@ -1587,8 +1594,7 @@ def _raise_missing_eager_batched_unshard(parametrization: nn.Module) -> None:
         "but eager Shard/RaggedShard parameters must be served by a batched "
         "all-gather hook. This usually means the BucketSpec boundary does not "
         "match the module hook/checkpoint execution unit. Split the bucket to "
-        "match forward module boundaries, or use torch.compile so functional "
-        "collectives are captured by the graph path."
+        "match forward module boundaries."
     )
 
 
@@ -1654,10 +1660,11 @@ def _register_parametrization(
                 ):
                     p._unsharded_for_reduce = unsharded
                 return unsharded
+            if _is_graph_capture_active():
+                _raise_graph_capture_unsupported()
             if (
                 getattr(p, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False)
                 and not getattr(p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
-                and not _is_graph_capture_active()
             ):
                 _raise_missing_eager_batched_unshard(p)
             return p(self._parameters[pn])
@@ -2098,11 +2105,10 @@ class RaggedShard(Placement):
 
 
 class ShardParametrization(nn.Module):
-    """FX-traceable parametrization for Shard placement.
+    """Parametrization for Shard placement.
 
-    Reconstructs the full parameter from a local shard using _c10d_functional
-    ops that are visible to make_fx and torch.compile. The backward pass
-    (reduce_scatter) is autograd-generated.
+    Reconstructs the full parameter from a local shard using differentiable
+    _c10d_functional ops. The backward pass is autograd-generated.
 
     For dim != 0, all_gather_into_tensor concatenates along dim 0, so we
     chunk and re-cat along the correct shard_dim.
@@ -3600,12 +3606,9 @@ def flex_shard(
     for mod, param_map in module_param_map.items():
         _register_parametrization(mod, param_map)
 
-    # Reshard-after-forward: free unsharded params after each layer's
-    # forward, recompute (re-all-gather) in backward.
-    # In compiled modes (JIT/AOT), the graph pass handles this.
-    # In eager mode, we wrap each layer in checkpoint with a selective
-    # policy that recomputes only collective ops (all-gather, broadcast),
-    # saving all compute ops (matmul, attention) to avoid redundant work.
+    # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
+    # a selective policy that recomputes only collective ops (all-gather,
+    # broadcast), saving compute ops to avoid redundant work.
     reshard_storages = [s for s in storages if s._reshard_after_forward]
     if _reshard_checkpoint_enabled.get() and reshard_storages:
         _apply_reshard_checkpoint(module, reshard_storages)
@@ -3811,8 +3814,8 @@ def _install_batched_allgather_hooks(
     _pre_gathered on each parametrization module so the property getter
     skips the per-param all-gather.
 
-    Skipped under torch.compile — compiled modes use per-param
-    _c10d_functional ops which the compiler rebatches via graph passes.
+    Skipped under graph capture. FlexShard currently supports eager execution
+    only, so parameter access will raise before collectives are emitted.
     """
     for storage in storages:
         infos = list(storage._param_infos.values())
