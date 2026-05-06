@@ -448,7 +448,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else None
         )
 
-        model_ref.set_sd_transforms(sd_adapter, model_spec.converters)
+        model_ref.set_sd_adapter(sd_adapter, model_spec.converters)
 
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
@@ -456,7 +456,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=sd_adapter,
             base_folder=config.dump_folder,
         )
 

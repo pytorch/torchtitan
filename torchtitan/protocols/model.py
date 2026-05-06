@@ -4,12 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import enum
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .module import Module
+
+if TYPE_CHECKING:
+    from .state_dict_adapter import BaseStateDictAdapter
 
 
 class StateDictMode(enum.Enum):
@@ -37,25 +42,23 @@ class BaseModel(Module):
     ordering (e.g., weight tying before init).
     """
 
-    # State dict transforms, set once by set_sd_transforms().
-    _to_hf = None
-    _from_hf = None
+    _sd_adapter: BaseStateDictAdapter | None = None
     _adapter_to_hf_fns: list | None = None
 
-    def set_sd_transforms(
-        self, sd_adapter=None, converters: list | None = None
-    ) -> None:
-        """Wire state dict transforms onto this model.
+    @property
+    def sd_adapter(self) -> BaseStateDictAdapter | None:
+        return self._sd_adapter
 
-        Extracts HF key remapping from sd_adapter. If a converter (e.g.
-        LoRA) provides ``build_external_transforms(sd_adapter)``, collects
-        its ``to_external`` callable for adapter export (e.g. PEFT).
+    def set_sd_adapter(
+        self,
+        sd_adapter: BaseStateDictAdapter | None = None,
+        converters: list | None = None,
+    ) -> None:
+        """Store the state dict adapter and build converter transforms.
 
         Called once by the trainer after model build.
         """
-        if sd_adapter is not None:
-            self._to_hf = sd_adapter.to_hf
-            self._from_hf = sd_adapter.from_hf
+        self._sd_adapter = sd_adapter
         self._adapter_to_hf_fns = None
         for converter in converters or []:
             build_fn = getattr(converter, "build_external_transforms", None)
@@ -68,14 +71,14 @@ class BaseModel(Module):
 
     def to_hf(self, sd: dict[str, Any]) -> dict[str, Any]:
         """Convert native base model keys to HF format."""
-        if self._to_hf is not None:
-            sd = self._to_hf(sd)
+        if self._sd_adapter is not None:
+            sd = self._sd_adapter.to_hf(sd)
         return sd
 
     def from_hf(self, sd: dict[str, Any]) -> dict[str, Any]:
         """Convert HF-format keys back to native format."""
-        if self._from_hf is not None:
-            sd = self._from_hf(sd)
+        if self._sd_adapter is not None:
+            sd = self._sd_adapter.from_hf(sd)
         return sd
 
     def adapter_to_hf(self, sd: dict[str, Any]) -> dict[str, Any]:

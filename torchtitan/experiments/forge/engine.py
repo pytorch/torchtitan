@@ -7,7 +7,7 @@
 import os
 from collections.abc import Generator
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -255,17 +255,20 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             training_steps=config.training.steps,
         )
 
+        model_ref = cast(BaseModel, self.model_parts[0])
+        sd_adapter = (
+            self.train_spec.state_dict_adapter(model_config, config.hf_assets_path)
+            if self.train_spec.state_dict_adapter
+            else None
+        )
+        model_ref.set_sd_adapter(sd_adapter)
+
         self.checkpointer = config.checkpoint.build(
             dataloader=None,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            sd_adapter=(
-                self.train_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if self.train_spec.state_dict_adapter
-                else None
-            ),
             base_folder=config.dump_folder,
         )
 
