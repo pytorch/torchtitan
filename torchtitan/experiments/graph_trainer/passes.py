@@ -36,6 +36,10 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.experiments.flex_shard.reshard_after_forward import (
+    _is_broadcast,
+    flex_shard_reshard_after_fwd_pass,
+)
 from torchtitan.experiments.graph_trainer.bucketing import (
     joint_transformer_block_bucketing_reordering_pass,
 )
@@ -999,14 +1003,16 @@ def overlap_fsdp_ag_rs_pass(
 
     count = 0
     for node in gm.graph.nodes:
-        if is_all_gather(node) and node.args[2] == source_pg_name:
+        if is_all_gather(node) or _is_broadcast(node):
             # AG args: (input_tensor, group_size, group_name)
-            node.args = (node.args[0], node.args[1], target_pg_name)
-            count += 1
+            # Broadcast args: (input_tensor, owner_rank, group_name)
+            if node.args[2] == source_pg_name:
+                node.args = (node.args[0], node.args[1], target_pg_name)
+                count += 1
     if count > 0:
         logger.info(
-            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
-            f"to PG {target_pg_name}"
+            f"Rewrote {count} all-gather/broadcast node(s) from PG "
+            f"{source_pg_name} to PG {target_pg_name}"
         )
     gm.recompile()
     return gm
@@ -1070,5 +1076,6 @@ AVAILABLE_COMPILER_PASSES = {
 # Registry for joint custom passes (applied before partitioning, AOT mode only)
 AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
+    "flex_shard_reshard_after_fwd": flex_shard_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
 }

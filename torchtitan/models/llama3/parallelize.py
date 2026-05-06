@@ -154,18 +154,26 @@ def apply_fsdp(
 
     if getattr(model, "enable_weight_tying", False):
         # When weights are tied, tok_embeddings and output share the same parameter.
-        # Group them together in one FSDP unit to avoid duplicate all-gathers.
-        modules = [
-            m
-            for m in (model.tok_embeddings, model.norm, model.lm_head)
-            if m is not None
+        # Group them together in one FSDP unit to avoid duplicate all-gathers,
+        # while keeping norm separate since ChunkedCELoss drives lm_head backward
+        # independently from the decoder/norm backward.
+        if model.norm is not None:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                model.norm,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
+        tied_modules = [
+            m for m in (model.tok_embeddings, model.lm_head) if m is not None
         ]
-        # pyrefly: ignore [no-matching-overload]
-        fully_shard(
-            modules,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward_policy == "always",
-        )
+        if tied_modules:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                tied_modules,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
     else:
         if model.tok_embeddings is not None:
             # pyrefly: ignore [no-matching-overload]
@@ -176,10 +184,17 @@ def apply_fsdp(
             )
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
-        if model.norm is not None and model.lm_head is not None:
+        if model.norm is not None:
             # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                [model.norm, model.lm_head],
+                model.norm,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
+        if model.lm_head is not None:
+            # pyrefly: ignore [no-matching-overload]
+            fully_shard(
+                model.lm_head,
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )

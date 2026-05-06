@@ -135,7 +135,7 @@ def get_default_transformer_block_buckets(
     ]
 
 
-def get_transformer_block_buckets(model) -> list[list[str] | str]:
+def get_buckets(model) -> list[list[str] | str]:
     """Get transformer block buckets for manual bucketing passes.
 
     Works for any model with tok_embeddings, layers (OrderedDict), norm, and output

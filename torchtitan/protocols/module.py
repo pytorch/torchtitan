@@ -18,6 +18,21 @@ from torchtitan.config import Configurable
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
+# Hidden attribute names consumed by FlexShard for non-materialized state.
+_SPMD_MESH_ATTR = "_spmd_mesh"
+_SPMD_PLACEMENTS_ATTR = "_spmd_placements"
+
+
+def _set_spmd_state_metadata(
+    tensor: torch.Tensor,
+    mesh: DeviceMesh,
+    placements: tuple[Any, ...],
+) -> None:
+    """Record the full SPMD state layout without materializing a DTensor."""
+    setattr(tensor, _SPMD_MESH_ATTR, mesh)
+    setattr(tensor, _SPMD_PLACEMENTS_ATTR, tuple(placements))
+
+
 # Cache: maps nn.Module subclass -> created Module wrapper class.
 # Module classes are typically created at import time and live for
 # the process lifetime.
@@ -120,13 +135,13 @@ class Module(nn.Module, Configurable):
         """
         if self._param_init is None:
             raise ValueError(
-                f"No param_init found for parameter '{name}' in "
+                f"No param_init found for parameter {name!r} in "
                 f"{type(self).__name__}. Set param_init on this "
                 f"module's Config or use skip_param_init."
             )
         if name not in self._param_init:
             raise ValueError(
-                f"No initializer for parameter '{name}' in "
+                f"No initializer for parameter {name!r} in "
                 f"{type(self).__name__}. "
                 f"Available: {list(self._param_init.keys())}"
             )
@@ -169,12 +184,20 @@ class Module(nn.Module, Configurable):
         ]
         return self._pos_arg_list
 
-    def parallelize(self, mesh: DeviceMesh) -> None:
+    def parallelize(
+        self,
+        mesh: DeviceMesh,
+        *,
+        activation_mesh: DeviceMesh | None = None,
+        wrap_forward: bool = True,
+        distribute_buffers: bool = True,
+        materialize_state: bool = True,
+    ) -> None:
         """Parallelize this module and all Module children recursively.
 
         For each module with a ``sharding_config``:
 
-        1. ``distribute_tensor`` on params and buffers per ``state_shardings``.
+        1. Materialize or annotate params and buffers per ``state_shardings``.
         2. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
 
         The wrapping order is:
@@ -183,13 +206,34 @@ class Module(nn.Module, Configurable):
         fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
 
         CP (applied before ``parallelize``) is captured inside ``local_map``.
+
+        ``mesh`` is the state mesh used to create parameter and buffer DTensors.
+        ``activation_mesh`` defaults to ``mesh`` and is used for forward input,
+        output, and ``local_map`` placements. FlexShard uses this to create
+        full-SPMD parameter DTensors while preserving TP-only activation
+        wrappers during the migration.
+
+        ``wrap_forward=False`` is for callers such as FlexShard that need
+        ``model.parallelize()`` to prepare global-mesh parameter state but own
+        the data-parallel compute path themselves.
+
+        ``materialize_state=False`` records resolved full-SPMD placements on
+        parameters and buffers without calling ``distribute_tensor``. This lets
+        FlexShard consume CPU-built parameters directly and copy only local
+        shards into its target-device storage.
         """
         # Recurse children first
         queue = list(self.children())
         while queue:
             child = queue.pop()
             if isinstance(child, Module):
-                child.parallelize(mesh)
+                child.parallelize(
+                    mesh,
+                    activation_mesh=activation_mesh,
+                    wrap_forward=wrap_forward,
+                    distribute_buffers=distribute_buffers,
+                    materialize_state=materialize_state,
+                )
             else:
                 # Look through non-Module wrappers, e.g., CheckpointWrapper
                 queue.extend(child.children())
@@ -199,7 +243,7 @@ class Module(nn.Module, Configurable):
             return
 
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-        mesh_axis_names = mesh.mesh_dim_names
+        state_mesh_axis_names = mesh.mesh_dim_names
 
         # Distribute parameters and buffers per state_shardings. Every sharding_config
         # must declare a placement for every mesh axis; ``resolve_placements``
@@ -208,56 +252,74 @@ class Module(nn.Module, Configurable):
             if name not in sharding_config.state_shardings:
                 continue
             placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_axis_names
+                sharding_config.state_shardings[name], state_mesh_axis_names
             )
-            self.register_parameter(
-                name,
-                nn.Parameter(distribute_tensor(param, mesh, list(placements))),
-            )
+            if materialize_state:
+                self.register_parameter(
+                    name,
+                    nn.Parameter(distribute_tensor(param, mesh, list(placements))),
+                )
+            else:
+                _set_spmd_state_metadata(param, mesh, placements)
 
-        for name, buffer in self.named_buffers(recurse=False):
-            if name not in sharding_config.state_shardings or buffer is None:
-                continue
-            placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_axis_names
-            )
-            persistent = name not in self._non_persistent_buffers_set
-            self.register_buffer(
-                name,
-                distribute_tensor(buffer, mesh, list(placements)),
-                persistent=persistent,
-            )
+        if distribute_buffers:
+            for name, buffer in self.named_buffers(recurse=False):
+                if name not in sharding_config.state_shardings or buffer is None:
+                    continue
+                placements = resolve_placements(
+                    sharding_config.state_shardings[name], state_mesh_axis_names
+                )
+                persistent = name not in self._non_persistent_buffers_set
+                if materialize_state:
+                    self.register_buffer(
+                        name,
+                        distribute_tensor(buffer, mesh, list(placements)),
+                        persistent=persistent,
+                    )
+                else:
+                    _set_spmd_state_metadata(buffer, mesh, placements)
+
+        if not wrap_forward:
+            return
 
         # Cache positional arg names of the original forward so _shard_inputs
         # can read them from the cache instead of calling inspect every forward.
         self._cache_pos_arg_names()
 
+        compute_mesh = activation_mesh if activation_mesh is not None else mesh
+        assert (
+            compute_mesh.mesh_dim_names is not None
+        ), "DeviceMesh must have named axes"
+        compute_mesh_axis_names = compute_mesh.mesh_dim_names
+
         fn = self.forward
         if sharding_config.local_map is not None:
             # Resolve each NamedPlacement to a positional tuple for the
-            # current mesh.
+            # current activation mesh.
             lm = sharding_config.local_map
             in_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.in_placements
+                resolve_placements(p, compute_mesh_axis_names) for p in lm.in_placements
             )
             out_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.out_placements
+                resolve_placements(p, compute_mesh_axis_names)
+                for p in lm.out_placements
             )
             in_grad_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.in_grad_placements
+                resolve_placements(p, compute_mesh_axis_names)
+                for p in lm.in_grad_placements
             )
             fn = local_map(
                 fn,
                 in_placements=in_placements,
                 out_placements=out_placements,
                 in_grad_placements=in_grad_placements,
-                device_mesh=mesh,
+                device_mesh=compute_mesh,
             )
 
         def with_redistribution(*args, **kwargs):
-            args, kwargs = self._shard_inputs(mesh, args, kwargs)
+            args, kwargs = self._shard_inputs(compute_mesh, args, kwargs)
             outputs = fn(*args, **kwargs)
-            return self._shard_outputs(mesh, outputs)
+            return self._shard_outputs(compute_mesh, outputs)
 
         self.forward = with_redistribution
 
@@ -288,7 +350,7 @@ class Module(nn.Module, Configurable):
         pos_arg_names = [
             name for name in self._cache_pos_arg_names() if name not in kwargs
         ]
-        new_kwargs = dict(zip(pos_arg_names, args))
+        new_kwargs = dict(zip(pos_arg_names, args, strict=False))
         new_kwargs.update(kwargs)
 
         assert mesh.mesh_dim_names is not None
