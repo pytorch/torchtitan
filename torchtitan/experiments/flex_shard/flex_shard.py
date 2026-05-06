@@ -26,7 +26,7 @@ from .module_wrapping import (
     _register_module_parametrizations,
     FlexShardModule,
 )
-from .planning import _prepare_flex_shard_plan, PlacementFn
+from .planning import _prepare_flex_shard_inputs, PlacementFn
 from .reshard import (
     _apply_reshard_checkpoint,
     _reshard_checkpoint_enabled,
@@ -135,7 +135,7 @@ def flex_shard(
           dtype parameters into separate buckets.
         - Parameters on meta device will have uninitialized storage
     """
-    plan = _prepare_flex_shard_plan(
+    inputs = _prepare_flex_shard_inputs(
         module,
         mesh,
         dp_mesh_dims,
@@ -145,25 +145,25 @@ def flex_shard(
 
     storages, fqn_to_bucket_spec = _materialize_bucket_storages(
         module,
-        plan.named_params,
-        plan.bucket_assignments,
+        inputs.named_params,
+        inputs.bucket_assignments,
         buckets,
-        plan.param_placements,
-        plan.shard_mesh,
-        plan.device,
+        inputs.param_placements,
+        inputs.shard_mesh,
+        inputs.device,
     )
 
     _attach_flex_shard_module_state(module, storages)
 
-    group_name = plan.shard_mesh.get_group().group_name
-    world_size = plan.shard_mesh.size()
+    group_name = inputs.shard_mesh.get_group().group_name
+    world_size = inputs.shard_mesh.size()
     module_param_map = _create_eager_parametrizations(
         module,
         storages,
         fqn_to_bucket_spec,
         group_name,
         world_size,
-        plan.device,
+        inputs.device,
     )
     _register_module_parametrizations(module_param_map)
 

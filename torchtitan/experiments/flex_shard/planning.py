@@ -38,7 +38,7 @@ PlacementFn = Callable[
 
 
 @dataclass(frozen=True)
-class FlexShardPlan:
+class PreparedFlexShardInputs:
     """Validated inputs and derived setup state for flex_shard()."""
 
     named_params: list[tuple[str, nn.Parameter]]
@@ -48,14 +48,14 @@ class FlexShardPlan:
     bucket_assignments: list[list[str]]
 
 
-def _prepare_flex_shard_plan(
+def _prepare_flex_shard_inputs(
     module: nn.Module,
     mesh: DeviceMesh,
     dp_mesh_dims: DataParallelMeshDims,
     shard_placement_fn: PlacementFn,
     buckets: list[BucketSpec],
-) -> FlexShardPlan:
-    """Validate inputs and derive the execution plan for flex_shard()."""
+) -> PreparedFlexShardInputs:
+    """Validate inputs and derive setup state for flex_shard()."""
     _check_not_already_flex_sharded(module)
 
     named_params = _get_managed_named_params(module)
@@ -92,7 +92,7 @@ def _prepare_flex_shard_plan(
         named_params,
     )
 
-    return FlexShardPlan(
+    return PreparedFlexShardInputs(
         named_params=named_params,
         shard_mesh=shard_mesh,
         device=device,
