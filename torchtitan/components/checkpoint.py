@@ -20,15 +20,23 @@ from typing import Any, cast, Literal
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torch.nn as nn
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    set_model_state_dict,
+    StateDictOptions,
+)
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
     AsyncSaveResponse,
 )
+from torch.distributed.checkpoint.stateful import Stateful
+
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
@@ -39,11 +47,64 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
 
-MODEL = "model"  # Kept for backward compat with experiment code
+MODEL = "model"
 OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+
+
+class ModelWrapper(Stateful):
+    """Stateful wrapper that merges state dicts across PP stages.
+
+    Handles pipeline-parallel iteration and mode-based filtering.
+    Set ``mode`` before each save/load to control which parameters
+    are included in ``state_dict()``.
+    """
+
+    def __init__(self, model_parts: list[nn.Module]) -> None:
+        self.model_parts = model_parts
+        self.mode = StateDictMode.FULL
+
+    def _full_sd(self) -> dict[str, Any]:
+        sd: dict[str, Any] = {}
+        for part in self.model_parts:
+            sd.update(get_model_state_dict(part))
+        return sd
+
+    def state_dict(self) -> dict[str, Any]:
+        if self.mode == StateDictMode.TRAINABLE:
+            sd: dict[str, Any] = {}
+            for part in self.model_parts:
+                sd.update(
+                    get_model_state_dict(
+                        part,
+                        options=StateDictOptions(ignore_frozen_params=True),
+                    )
+                )
+            return sd
+        if self.mode == StateDictMode.BASE:
+            full_sd = self._full_sd()
+            trainable_sd: dict[str, Any] = {}
+            for part in self.model_parts:
+                trainable_sd.update(
+                    get_model_state_dict(
+                        part,
+                        options=StateDictOptions(ignore_frozen_params=True),
+                    )
+                )
+            if len(trainable_sd) == len(full_sd):
+                return full_sd
+            return {k: v for k, v in full_sd.items() if k not in trainable_sd}
+        return self._full_sd()
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        for part in self.model_parts:
+            set_model_state_dict(
+                part,
+                model_state_dict=state_dict,
+                options=StateDictOptions(strict=False),
+            )
 
 
 class AsyncMode(str, enum.Enum):
@@ -117,7 +178,7 @@ class CheckpointManager(Configurable):
 
     Args:
         dataloader (DataLoader): The dataloader used to load the data.
-        model (nn.Module): The model (with _pp_parts set by trainer if PP is used).
+        model_parts (list[nn.Module]): Model parts (one per PP stage, or single-element list).
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize the model.
         states (Dict[str, Any]): The states that need to be saved, other than the
@@ -248,19 +309,19 @@ class CheckpointManager(Configurable):
         This will load the model only, excluding the specified keys.
         """
 
-        additional_load_path: str | None = None
+        initial_load_frozen: bool = False
         """
-        Additional checkpoint path for 2-phase loading. When set, ``initial_load_path``
-        always loads base weights (even on resume), and this path provides the adapter
-        or overlay weights. On resume, the checkpoint folder takes priority over this path
-        for adapter + training state.
+        When True, initial load only loads frozen/base params (adapter training).
+        Adapters are freshly initialized at build time by the converter (e.g.
+        LoRAConverter). On resume, the full model (base + adapters) is loaded
+        from the checkpoint folder.
         """
 
-        additional_load_in_hf: bool = False
+        last_save_trainable_only: bool = False
         """
-        Whether the additional_load_path is in HF/PEFT format (safetensors).
-        When True, loads safetensors and converts via ``model.from_external()``.
-        When False (default), loads via DCP.
+        When True, last step save only saves trainable params (e.g. LoRA
+        adapters). Combine with ``last_save_in_hf=True`` to export adapters
+        in PEFT safetensors format.
         """
 
         enable_first_step_checkpoint: bool = False
@@ -291,7 +352,7 @@ class CheckpointManager(Configurable):
         config: Config,
         *,
         dataloader: BaseDataLoader | None,
-        model: BaseModel,
+        model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
@@ -301,10 +362,12 @@ class CheckpointManager(Configurable):
         self.enable = config.enable
         self.load_only = config.load_only
 
-        self.model = model
+        self.model = cast(BaseModel, model_parts[0])
+        self.model_wrapper = ModelWrapper(model_parts)
         self.states = states
         self.states.update(
             {
+                MODEL: self.model_wrapper,
                 OPTIMIZER: optimizers,
                 DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
@@ -345,12 +408,30 @@ class CheckpointManager(Configurable):
             assert (
                 self.hf_io is not None
             ), "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
-        self.additional_load_path = config.additional_load_path
-        self.additional_load_in_hf = config.additional_load_in_hf
+        self.initial_load_frozen = config.initial_load_frozen
+        self.last_save_trainable_only = config.last_save_trainable_only
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.exclude_from_loading = config.exclude_from_loading
         self.interval = config.interval
         self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
+
+        if self.initial_load_in_hf and not self.initial_load_model_only:
+            raise ValueError(
+                "checkpoint.initial_load_in_hf requires "
+                "checkpoint.initial_load_model_only=True because "
+                "safetensors only contains model weights."
+            )
+        if self.initial_load_in_hf_quantized and not self.initial_load_in_hf:
+            raise ValueError(
+                "checkpoint.initial_load_in_hf_quantized requires "
+                "checkpoint.initial_load_in_hf=True."
+            )
+        if self.last_save_in_hf and not self.last_save_model_only:
+            raise ValueError(
+                "checkpoint.last_save_in_hf requires "
+                "checkpoint.last_save_model_only=True because "
+                "safetensors only contains model weights."
+            )
 
         # Async checkpoint related fields.
         async_mode = config.async_mode.lower()
@@ -427,7 +508,7 @@ class CheckpointManager(Configurable):
             enable_garbage_collection (bool): Whether to enable garbage collection after save.
             hf_storage (bool): Whether to use HF safetensors storage writer.
                 Key transforms must be applied by the caller via
-                model.get_sd(external=True) before calling this method.
+                model.to_hf() or model.adapter_to_hf() before calling this method.
 
         Returns:
             Future: The future object if the checkpoint is async, otherwise None.
@@ -517,8 +598,8 @@ class CheckpointManager(Configurable):
         """Load weights from a HuggingFace checkpoint into ``state_dict``.
 
         Pure I/O — the caller provides the container (via
-        ``model.get_sd(mode, external=True)``) and handles conversion
-        afterward.
+        ``model_wrapper.state_dict()`` then ``model.to_hf()``) and
+        handles conversion back via ``model.from_hf()`` afterward.
         """
         assert (
             self.hf_io is not None
@@ -569,7 +650,8 @@ class CheckpointManager(Configurable):
             self._save_last_step(curr_step)
             return
 
-        states = self._flattened_model_states_sd(model_mode=StateDictMode.TRAINABLE)
+        self.model_wrapper.mode = StateDictMode.FULL
+        states = self._flattened_model_states_sd()
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
             if self.stager is None:
@@ -621,53 +703,40 @@ class CheckpointManager(Configurable):
             return False
 
         begin = time.monotonic()
-        has_additional_load = self.additional_load_path is not None
 
-        # Initial load: base weights from initial_load_path.
-        # With additional_load, always runs (even on resume) to load base first.
-        # Without additional_load, only runs when checkpoint folder doesn't exist.
-        if has_additional_load or not os.path.exists(self.folder):
-            loaded_initial = self._load_initial()
-            if (
-                not loaded_initial
-                and not has_additional_load
-                and not os.path.exists(self.folder)
-            ):
+        if not os.path.exists(self.folder):
+            # No checkpoint folder — try initial load
+            if not self._load_initial():
                 return False
-
-        # Resume from checkpoint folder, or load from additional_load_path.
-        resumed = False
-        if os.path.exists(self.folder):
-            step = self._find_load_step() if step == -1 else step
-            if step != -1:
-                checkpoint_id = self._create_checkpoint_id(step)
-                if not os.path.isdir(checkpoint_id):
-                    raise FileNotFoundError(
-                        f"--checkpoint.load_step={step} but "
-                        f"checkpoint {checkpoint_id} is not found."
-                    )
-                model_only = step == 0
-                logger.info(f"Loading checkpoint from {checkpoint_id}.")
-                states = self._states_to_load(model_only)
-                self._load_from_dcp(states, checkpoint_id)
-                self.model.load_sd(states)
-                resumed = True
-        if not resumed and has_additional_load:
-            path = cast(str, self.additional_load_path)
-            if not os.path.isdir(path):
-                raise ValueError(
-                    f"checkpoint.additional_load_path is not a valid directory: {path}"
+        else:
+            # Resume from checkpoint folder
+            if self.initial_load_path:
+                logger.warning(
+                    "checkpoint.initial_load_path is provided but the "
+                    "checkpoint.folder exists. Checkpointer will use the "
+                    f"checkpoints from the checkpoint.folder {self.folder}."
                 )
-            logger.info(f"Loading additional weights from {path}.")
-            if self.additional_load_in_hf:
-                hf_sd = self.model.get_sd(StateDictMode.TRAINABLE, external=True)
-                self._load_from_hf(hf_sd, path)
-                native_sd = self.model.from_external(hf_sd, StateDictMode.TRAINABLE)
-                self.model.load_sd(native_sd)
-            else:
-                sd = self.model.get_sd(StateDictMode.TRAINABLE)
-                self._load_from_dcp(sd, path)
-                self.model.load_sd(sd)
+            if self.initial_load_in_hf:
+                logger.warning(
+                    "checkpoint.initial_load_in_hf is True but the "
+                    "checkpoint.folder exists. Checkpointer will not load "
+                    "from HF safetensors."
+                )
+            step = self._find_load_step() if step == -1 else step
+            if step == -1:
+                return False
+            checkpoint_id = self._create_checkpoint_id(step)
+            if not os.path.isdir(checkpoint_id):
+                raise FileNotFoundError(
+                    f"--checkpoint.load_step={step} but "
+                    f"checkpoint {checkpoint_id} is not found."
+                )
+            model_only = step == 0
+            logger.info(f"Loading checkpoint from {checkpoint_id}.")
+            self.model_wrapper.mode = StateDictMode.FULL
+            states = self._states_to_load(model_only)
+            self._load_from_dcp(states, checkpoint_id)
+            self.model_wrapper.load_state_dict(states)
 
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -677,11 +746,18 @@ class CheckpointManager(Configurable):
         return True
 
     def _load_initial(self) -> bool:
-        """Load base weights from initial_load_path or hf_assets_path.
+        """Load initial weights from initial_load_path or hf_assets_path.
+
+        When ``initial_load_frozen`` is True (adapter training), only BASE
+        (frozen) params are loaded; adapters are freshly initialized.
+        Otherwise, FULL model is loaded.
 
         Returns:
             True if initial weights were loaded.
         """
+        load_mode = (
+            StateDictMode.BASE if self.initial_load_frozen else StateDictMode.FULL
+        )
         from_hf = self.initial_load_in_hf
         from_quantized = self.initial_load_in_hf_quantized
 
@@ -711,10 +787,12 @@ class CheckpointManager(Configurable):
             else:
                 return False
 
-            hf_sd = self.model.get_sd(StateDictMode.BASE, external=True)
+            self.model_wrapper.mode = load_mode
+            sd = self.model_wrapper.state_dict()
+            hf_sd = self.model.to_hf(sd)
             self._load_from_hf(hf_sd, checkpoint_id, from_quantized)
-            native_sd = self.model.from_external(hf_sd, StateDictMode.BASE)
-            self.model.load_sd(native_sd)
+            native_sd = self.model.from_hf(hf_sd)
+            self.model_wrapper.load_state_dict(native_sd)
             return True
 
         if self.initial_load_path:
@@ -725,12 +803,13 @@ class CheckpointManager(Configurable):
                     "but the path is not valid."
                 )
             logger.info(f"Loading DCP checkpoint from {checkpoint_id}.")
+            self.model_wrapper.mode = load_mode
             if self.initial_load_model_only:
-                sd = self.model.get_sd(StateDictMode.BASE)
+                sd = self.model_wrapper.state_dict()
             else:
-                sd = self._flattened_model_states_sd(model_mode=StateDictMode.BASE)
+                sd = self._flattened_model_states_sd()
             self._load_from_dcp(sd, checkpoint_id)
-            self.model.load_sd(sd)
+            self.model_wrapper.load_state_dict(sd)
             return True
 
         return False
@@ -782,27 +861,26 @@ class CheckpointManager(Configurable):
         return os.path.join(folder, f"step-{step}")
 
     def _flattened_model_states_sd(
-        self,
-        state_dict: dict[str, Any] | None = None,
-        *,
-        model_mode: StateDictMode = StateDictMode.FULL,
+        self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Flatten model keys alongside training states."""
+        """Flatten model keys alongside training states.
+
+        The caller must set ``self.model_wrapper.mode`` before calling.
+        """
         states = state_dict if state_dict is not None else self.states
-        sd = dict(states)
-        sd.update(self.model.get_sd(model_mode))
+        sd = {k: v for k, v in states.items() if k != MODEL}
+        if MODEL in states:
+            sd.update(states[MODEL].state_dict())
         return sd
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         """Determines which states to load for the given step.
 
-        Uses TRAINABLE mode for model keys. When no params are frozen,
-        TRAINABLE == FULL so every key is included. With adapters (e.g.
-        LoRA), TRAINABLE returns only adapter keys — base weights come
-        from the initial load.
+        Resume always loads FULL model (base + adapters if present).
+        The caller sets ``self.model_wrapper.mode`` to FULL before calling.
         """
         if model_only:
-            return self.model.get_sd(StateDictMode.FULL)
+            return self.states[MODEL].state_dict()
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
@@ -812,40 +890,40 @@ class CheckpointManager(Configurable):
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
 
-        return self._flattened_model_states_sd(
-            states_to_load, model_mode=StateDictMode.TRAINABLE
-        )
+        return self._flattened_model_states_sd(states_to_load)
 
     def _save_last_step(self, curr_step: int) -> None:
-        # Seed checkpoints save ALL params so they can be loaded under any
-        # parallelism. Training last-step saves only trainable.
-        if self.create_seed_checkpoint:
-            save_mode = StateDictMode.FULL
-        else:
+        if self.last_save_trainable_only:
             save_mode = StateDictMode.TRAINABLE
+        else:
+            save_mode = StateDictMode.FULL
+
         if self.last_save_model_only:
             export_dtype = (
                 self.export_dtype
                 if self.export_dtype != TORCH_DTYPE_MAP["float32"]
                 else None
             )
-            states = self.model.get_sd(
-                save_mode,
-                external=self.last_save_in_hf,
-                dtype=export_dtype,
-            )
+            self.model_wrapper.mode = save_mode
+            states = self.model_wrapper.state_dict()
+            if self.last_save_in_hf:
+                if self.last_save_trainable_only:
+                    states = self.model.adapter_to_hf(states)
+                else:
+                    states = self.model.to_hf(states)
+            if export_dtype is not None:
+                states = {
+                    k: v.to(export_dtype) if isinstance(v, torch.Tensor) else v
+                    for k, v in states.items()
+                }
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "
                 f"at last step, step {curr_step}."
             )
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
-            states = self._flattened_model_states_sd(model_mode=save_mode)
-
-        if self.last_save_in_hf:
-            assert (
-                self.last_save_model_only
-            ), "Only model can be saved when saving in HF safetensors format."
+            self.model_wrapper.mode = save_mode
+            states = self._flattened_model_states_sd()
 
         checkpoint_id = self._create_checkpoint_id(curr_step)
 
