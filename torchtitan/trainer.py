@@ -195,7 +195,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
-        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
@@ -441,10 +440,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
-        # Set up BaseModel reference for checkpoint (PP parts handled via _pp_parts)
         model_ref = cast(BaseModel, self.model_parts[0])
-        if parallel_dims.pp_enabled:
-            model_ref._pp_parts = self.model_parts
 
         sd_adapter = (
             model_spec.state_dict_adapter(model_config, config.hf_assets_path)
@@ -456,7 +452,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
-            model=model_ref,
+            model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},

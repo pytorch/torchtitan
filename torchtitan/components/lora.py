@@ -6,7 +6,7 @@
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any
 
 import torch
@@ -23,35 +23,24 @@ from torchtitan.tools.logging import logger
 
 def _lora_adapter_sharding(
     base_sharding: ShardingConfig | None,
-) -> tuple[ShardingConfig, ShardingConfig]:
+) -> tuple[ShardingConfig | None, ShardingConfig | None]:
     """Derive LoRA adapter sharding from the base linear's TP sharding.
-
-    Both adapters are TP-sharded to match the base linear, ensuring all
-    LoRA gradients have the same TP placement — no mixed Replicate/Shard
-    norms in ``clip_grad_norm_``.
 
     ``lora_b`` mirrors the base weight's TP shard so its output matches
     ``base_out``'s placement (Shard(-1) for colwise, Partial for rowwise).
 
     ``lora_a`` weight is Replicate (small rank dim, no benefit from TP
     sharding).
-
-    Note: under TP, ``clip_grad_norm_`` reports a grad_norm that differs
-    from single-GPU by a constant factor (TP degree). This is a known
-    DTensor ``_NormPartial`` norm computation issue with mixed
-    Replicate/Shard placements, not a LoRA correctness bug — the loss
-    and convergence are identical.
     """
+    base_weight_sharding = (
+        base_sharding.state_shardings.get("weight") if base_sharding else None
+    )
+    if base_weight_sharding is None:
+        return None, None
+
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Replicate())},
     )
-    if base_sharding is None:
-        return replicate_weight, replicate_weight
-
-    base_weight_sharding = base_sharding.state_shardings.get("weight")
-    if base_weight_sharding is None:
-        return replicate_weight, replicate_weight
-
     # lora_b: same TP shard as base weight → output matches base_out
     lora_b_sharding = ShardingConfig(
         state_shardings={"weight": base_weight_sharding},
@@ -66,45 +55,30 @@ _lora_class_cache: dict[type, type] = {}
 def _get_lora_cls(parent_cls: type) -> type:
     """Get or create a LoRA subclass for *parent_cls* (e.g. Linear, Float8Linear).
 
-    The returned class has a proper ``__init__`` that initialises both the
-    base linear and the LoRA adapters in a single construction — no
-    build-then-mutate.
+    The returned class has a proper ``Config`` that extends the parent's Config
+    with LoRA adapter configs (``lora_a``, ``lora_b``) and ``lora_scaling``.
+    Adapters are built in ``__init__`` from their stored configs, following
+    the standard torchtitan Config → build pattern.
     """
     if parent_cls in _lora_class_cache:
         return _lora_class_cache[parent_cls]
 
+    parent_config_cls = parent_cls.Config
+
     class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
-        def __init__(
-            self,
-            config: Linear.Config,
-            *,
-            _lora_rank: int,
-            _lora_alpha: float,
-            _base_sharding: ShardingConfig | None = None,
-        ) -> None:
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            lora_a: Linear.Config
+            lora_b: Linear.Config
+            lora_scaling: float
+
+        def __init__(self, config: Config) -> None:
             super().__init__(config)
-            # Freeze base weight — only adapters should be trainable
             for param in nn.Module.parameters(self):
                 param.requires_grad_(False)
-            self._lora_scaling = _lora_alpha / _lora_rank
-
-            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(_base_sharding)
-            self.lora_a = Linear.Config(
-                in_features=config.in_features,
-                out_features=_lora_rank,
-                bias=False,
-                sharding_config=lora_a_sharding,
-                param_init={
-                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
-                },
-            ).build()
-            self.lora_b = Linear.Config(
-                in_features=_lora_rank,
-                out_features=config.out_features,
-                bias=False,
-                sharding_config=lora_b_sharding,
-                param_init={"weight": nn.init.zeros_},
-            ).build()
+            self._lora_scaling = config.lora_scaling
+            self.lora_a = config.lora_a.build()
+            self.lora_b = config.lora_b.build()
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             base_out = super().forward(input)
@@ -151,23 +125,36 @@ class LoRAConfig(Configurable.Config):
             setattr(self.inner, name, value)
 
     def build(self, **kwargs):
-        from dataclasses import replace
-
         inner = self.inner
         assert inner._owner is not None
         lora_cls = _get_lora_cls(inner._owner)
-        instance = lora_cls(
-            config=replace(inner),
-            _lora_rank=self.rank,
-            _lora_alpha=self.alpha,
-            _base_sharding=inner.sharding_config,
+
+        lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
+            inner.sharding_config
         )
-        # Apply Module.Config properties that inner.build() would set
-        if inner.param_init is not None:
-            instance._param_init = inner.param_init
-        if inner.sharding_config is not None:
-            instance._sharding_config = inner.sharding_config
-        return instance
+        config = lora_cls.Config(
+            **{f.name: getattr(inner, f.name) for f in fields(inner)},
+            lora_a=Linear.Config(
+                in_features=inner.in_features,
+                out_features=self.rank,
+                bias=False,
+                sharding_config=lora_a_sharding,
+                param_init={
+                    "weight": lambda w: nn.init.kaiming_uniform_(
+                        w, a=math.sqrt(5)
+                    ),
+                },
+            ),
+            lora_b=Linear.Config(
+                in_features=self.rank,
+                out_features=inner.out_features,
+                bias=False,
+                sharding_config=lora_b_sharding,
+                param_init={"weight": nn.init.zeros_},
+            ),
+            lora_scaling=self.alpha / self.rank,
+        )
+        return config.build()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -298,8 +285,8 @@ class LoRAConverter(Configurable):
     def build_external_transforms(self, sd_adapter) -> dict[str, Any] | None:
         """Build LoRA external format transforms.
 
-        Returns a dict with ``to_external``/``from_external`` callables
-        for PEFT key remapping, or None if LoRA is not active.
+        Returns a dict with ``to_external`` callable for PEFT key
+        remapping, or None if LoRA is not active.
         """
         if not _lora_class_cache or sd_adapter is None:
             return None
@@ -307,7 +294,6 @@ class LoRAConverter(Configurable):
 
         return {
             "to_external": lambda sd: remap_lora_keys_to_hf(sd, from_hf_map),
-            "from_external": lambda sd: remap_lora_keys_from_hf(sd, from_hf_map),
         }
 
 

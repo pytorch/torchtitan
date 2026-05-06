@@ -119,7 +119,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         model_spec=model_registry(
             "671B",
             attn_backend="flex",
-            quantization=[
+            converters=[
                 Float8LinearConverter.Config(
                     filter_fqns=["output", "router.gate"],
                     model_compile_enabled=model_compile_enabled,
