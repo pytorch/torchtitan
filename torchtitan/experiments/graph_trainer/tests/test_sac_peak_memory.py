@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.experiments.graph_trainer.configs import EagerMemoryPolicy
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_registry,
 )
@@ -118,7 +119,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         )
         # Use eager-compatible SAC policy (alternating mm save/recompute)
         # to match the eager AC path's memory behavior.
-        traced_trainer.config.compile.memory_policy = "eager"
+        traced_trainer.config.compile.memory_policy = EagerMemoryPolicy()
 
         # Warm up both paths so allocator and one-time tracing setup do not skew
         # the measured peak memory.
