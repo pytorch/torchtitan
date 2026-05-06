@@ -10,10 +10,10 @@ import torch
 import torch.fx as fx
 from torch._inductor.fx_passes.control_dependencies import control_deps
 
-from torchtitan.experiments.graph_trainer.skip_module import (
-    _anchor_module_region,
-    _inline_control_deps,
-    skip_module,
+from torchtitan.experiments.graph_trainer.opaque_modules import (
+    _make_modules_opaque,
+    _restore_modules,
+    opaque_modules,
 )
 
 
@@ -23,7 +23,7 @@ def _annotate(node: fx.Node, fqn: str) -> None:
 
 def _build_simple_gm() -> fx.GraphModule:
     """Build a small graph: x -> a -> b -> c -> y. Nodes a, b, c are tagged
-    with module_fqn so we can selectively anchor them."""
+    with module_fqn so we can selectively make them opaque."""
     graph = fx.Graph()
     x = graph.placeholder("x")
     a = graph.call_function(torch.add, args=(x, 1.0))
@@ -41,10 +41,10 @@ def _ops_in_order(gm: fx.GraphModule) -> list:
     return [n.target for n in gm.graph.nodes if n.op == "call_function"]
 
 
-class TestAnchorModuleRegion(unittest.TestCase):
+class TestMakeModulesOpaque(unittest.TestCase):
     def test_wraps_only_matching_fqn(self):
         gm = _build_simple_gm()
-        _anchor_module_region(gm, ["loss"])
+        _make_modules_opaque(gm, ["loss"])
 
         ops = [n for n in gm.graph.nodes if n.op == "call_function"]
         targets = [n.target for n in ops]
@@ -56,13 +56,13 @@ class TestAnchorModuleRegion(unittest.TestCase):
     def test_no_match_is_noop(self):
         gm = _build_simple_gm()
         before = _ops_in_order(gm)
-        _anchor_module_region(gm, ["other"])
+        _make_modules_opaque(gm, ["other"])
         after = _ops_in_order(gm)
         self.assertEqual(before, after)
 
     def test_pairs_consecutive_anchored_nodes(self):
         gm = _build_simple_gm()
-        _anchor_module_region(gm, ["loss", "lm_head"])
+        _make_modules_opaque(gm, ["loss", "lm_head"])
 
         wraps = [
             n
@@ -78,39 +78,39 @@ class TestAnchorModuleRegion(unittest.TestCase):
         self.assertEqual(wraps[2].args[0], (wraps[1],))
 
 
-class TestInlineControlDeps(unittest.TestCase):
-    def test_inline_restores_original_ops(self):
+class TestRestoreModules(unittest.TestCase):
+    def test_restore_brings_back_original_ops(self):
         gm = _build_simple_gm()
         before_targets = _ops_in_order(gm)
-        _anchor_module_region(gm, ["loss", "lm_head"])
-        # Sanity check: anchoring replaced ops with control_deps.
+        _make_modules_opaque(gm, ["loss", "lm_head"])
+        # Sanity check: making opaque replaced ops with control_deps.
         self.assertNotEqual(_ops_in_order(gm), before_targets)
 
-        _inline_control_deps(gm)
+        _restore_modules(gm)
 
         after_targets = _ops_in_order(gm)
         self.assertEqual(after_targets, before_targets)
 
-    def test_inline_is_noop_when_no_hops(self):
+    def test_restore_is_noop_when_no_hops(self):
         gm = _build_simple_gm()
         before = _ops_in_order(gm)
-        _inline_control_deps(gm)
+        _restore_modules(gm)
         self.assertEqual(_ops_in_order(gm), before)
 
-    def test_anchor_then_inline_preserves_semantics(self):
+    def test_make_then_restore_preserves_semantics(self):
         torch.manual_seed(0)
         gm = _build_simple_gm()
         x = torch.randn(4)
         expected = gm(x)
 
-        _anchor_module_region(gm, ["loss", "lm_head"])
-        _inline_control_deps(gm)
+        _make_modules_opaque(gm, ["loss", "lm_head"])
+        _restore_modules(gm)
         actual = gm(x)
 
         torch.testing.assert_close(actual, expected)
 
 
-class TestSkipModuleDecorator(unittest.TestCase):
+class TestOpaqueModulesDecorator(unittest.TestCase):
     def test_decorator_preserves_pass_output(self):
         gm = _build_simple_gm()
         before = _ops_in_order(gm)
@@ -118,21 +118,21 @@ class TestSkipModuleDecorator(unittest.TestCase):
         def identity_pass(g, example_inputs=None):
             return g
 
-        wrapped = skip_module(["loss"])(identity_pass)
+        wrapped = opaque_modules(["loss"])(identity_pass)
         result = wrapped(gm)
 
-        # After identity-pass + inline, graph should match the original.
+        # After identity-pass + restore, graph should match the original.
         self.assertIs(result, gm)
         self.assertEqual(_ops_in_order(gm), before)
 
-    def test_decorator_inlines_even_on_pass_exception(self):
+    def test_decorator_restores_even_on_pass_exception(self):
         gm = _build_simple_gm()
         before = _ops_in_order(gm)
 
         def bad_pass(g, example_inputs=None):
             raise RuntimeError("boom")
 
-        wrapped = skip_module(["loss"])(bad_pass)
+        wrapped = opaque_modules(["loss"])(bad_pass)
         with self.assertRaises(RuntimeError):
             wrapped(gm)
 
@@ -142,7 +142,7 @@ class TestSkipModuleDecorator(unittest.TestCase):
             self.assertIsNot(node.target, control_deps)
         self.assertEqual(_ops_in_order(gm), before)
 
-    def test_decorator_shields_pass_from_seeing_anchored_nodes(self):
+    def test_decorator_makes_pass_see_opaque_nodes(self):
         gm = _build_simple_gm()
         seen_targets: list = []
 
@@ -152,7 +152,7 @@ class TestSkipModuleDecorator(unittest.TestCase):
             )
             return g
 
-        wrapped = skip_module(["loss"])(inspect_pass)
+        wrapped = opaque_modules(["loss"])(inspect_pass)
         wrapped(gm)
 
         # The pass should observe control_deps in place of the loss-tagged
