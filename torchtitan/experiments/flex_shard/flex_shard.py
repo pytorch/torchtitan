@@ -38,7 +38,6 @@ from .metadata import (
 )
 from .placements import (
     _MixedPrecisionCast,
-    disable_active_parametrization,
     Placement,
 )
 from .reshard import (
@@ -58,6 +57,12 @@ from .storage import (
     OffloadPolicy,
 )
 from .utils import (
+    _get_managed_named_params,
+    _is_graph_capture_active,
+    _raise_graph_capture_unsupported,
+    _raise_missing_eager_batched_unshard,
+    _set_param_on_module,
+    disable_active_parametrization,
     _validate_bucket_placements,
     _validate_eager_params,
     _validate_flex_shard_mesh,
@@ -124,37 +129,6 @@ def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:
     except (AttributeError, RuntimeError):
         return torch.device(mesh.device_type)
     return torch.device(mesh.device_type, device_module.current_device())
-
-
-def _is_graph_capture_active() -> bool:
-    """Return whether unsupported graph capture is active."""
-    if torch.compiler.is_compiling():
-        return True
-    try:
-        return torch._guards.TracingContext.try_get() is not None
-    except AttributeError:
-        return False
-
-
-def _raise_graph_capture_unsupported() -> None:
-    raise ValueError(
-        "FlexShard currently supports eager execution only; torch.compile and "
-        "graph capture are not supported yet."
-    )
-
-
-def _raise_missing_eager_batched_unshard(parametrization: nn.Module) -> None:
-    param_fqn = getattr(parametrization, _PARAM_FQN_ATTR, "<unknown>")
-    bucket_fqn = getattr(parametrization, _BUCKET_FQN_ATTR, None)
-    bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
-    raise RuntimeError(
-        "FlexShard eager mode would fall back to per-parameter "
-        f"_c10d_functional collectives for parameter {param_fqn!r}{bucket_msg}, "
-        "but eager Shard(0) parameters must be served by a batched "
-        "all-gather hook. This usually means the BucketSpec boundary does not "
-        "match the module hook/checkpoint execution unit. Split the bucket to "
-        "match forward module boundaries."
-    )
 
 
 _wrap_class_counter = 0
@@ -240,48 +214,6 @@ class FlexShardModule:
     def eager_comm_contexts(self) -> dict[torch.device, EagerAllGatherContext]:
         """Root-owned eager communication contexts keyed by CUDA device."""
         return getattr(self, _EAGER_COMM_CONTEXTS_ATTR)
-
-
-def _set_param_on_module(
-    root_module: nn.Module,
-    fqn: str,
-    param: nn.Parameter,
-) -> None:
-    """Navigate to submodule by FQN and set parameter."""
-    parts = fqn.split(".")
-    module = root_module
-    for part in parts[:-1]:
-        module = getattr(module, part)
-    setattr(module, parts[-1], param)
-
-
-def _get_managed_named_params(
-    module: nn.Module,
-) -> list[tuple[str, nn.Parameter]]:
-    """
-    Collect parameters that should be managed by this module's DStorage.
-
-    This excludes parameters from child modules that already have their own
-    DStorage (i.e., already wrapped with flex_shard).
-
-    Similar to FSDP2's _get_managed_modules/_get_managed_states pattern.
-    """
-    managed_params: list[tuple[str, nn.Parameter]] = []
-
-    # Find child modules that already have DStorage
-    wrapped_prefixes: set[str] = set()
-    for name, child in module.named_modules():
-        if name and getattr(child, _DSTORAGE_ATTR, None) is not None:
-            # This child is already wrapped; skip its parameters
-            wrapped_prefixes.add(name + ".")
-
-    # Collect parameters not in wrapped submodules
-    for fqn, param in module.named_parameters():
-        is_wrapped = any(fqn.startswith(prefix) for prefix in wrapped_prefixes)
-        if not is_wrapped:
-            managed_params.append((fqn, param))
-
-    return managed_params
 
 
 PlacementFn = Callable[

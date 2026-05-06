@@ -17,11 +17,11 @@ from .metadata import (
     set_sharding_info,
 )
 from .placements import (
-    disable_active_parametrization,
     per_param_placements,
     Placement,
     Shard,
 )
+from .utils import disable_active_parametrization
 
 
 __all__ = [

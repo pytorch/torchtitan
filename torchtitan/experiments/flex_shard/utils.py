@@ -6,16 +6,123 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from .placements import FlatShard, Owned, Placement, RaggedShard, Shard
+from .metadata import _BUCKET_FQN_ATTR, _DSTORAGE_ATTR, _PARAM_FQN_ATTR
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
+
+    from .placements import Placement
+
+
+def _with_fqn(label: str, fqn: str | None) -> str:
+    """Append a module/bucket FQN to profiler labels, matching FSDP style."""
+    if fqn:
+        return f"{label} ({fqn})"
+    return label
+
+
+_active_parametrization = True
+
+
+@contextmanager
+def disable_active_parametrization() -> Generator[None, None, None]:
+    """Disable parametrization forward (returns raw sharded tensor).
+
+    Use during initialization, checkpointing, or any context where
+    parameter access should not trigger collective communication.
+    """
+    global _active_parametrization
+    try:
+        _active_parametrization = False
+        yield
+    finally:
+        _active_parametrization = True
+
+
+def _active_parametrization_enabled() -> bool:
+    """Return whether placement parametrization forwards are active."""
+    return _active_parametrization
+
+
+def _is_graph_capture_active() -> bool:
+    """Return whether unsupported graph capture is active."""
+    if torch.compiler.is_compiling():
+        return True
+    try:
+        return torch._guards.TracingContext.try_get() is not None
+    except AttributeError:
+        return False
+
+
+def _raise_graph_capture_unsupported() -> None:
+    raise ValueError(
+        "FlexShard currently supports eager execution only; torch.compile and "
+        "graph capture are not supported yet."
+    )
+
+
+def _raise_missing_eager_batched_unshard(parametrization: nn.Module) -> None:
+    param_fqn = getattr(parametrization, _PARAM_FQN_ATTR, "<unknown>")
+    bucket_fqn = getattr(parametrization, _BUCKET_FQN_ATTR, None)
+    bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
+    raise RuntimeError(
+        "FlexShard eager mode would fall back to per-parameter "
+        f"_c10d_functional collectives for parameter {param_fqn!r}{bucket_msg}, "
+        "but eager Shard(0) parameters must be served by a batched "
+        "all-gather hook. This usually means the BucketSpec boundary does not "
+        "match the module hook/checkpoint execution unit. Split the bucket to "
+        "match forward module boundaries."
+    )
+
+
+def _set_param_on_module(
+    root_module: nn.Module,
+    fqn: str,
+    param: nn.Parameter,
+) -> None:
+    """Navigate to submodule by FQN and set parameter."""
+    parts = fqn.split(".")
+    module = root_module
+    for part in parts[:-1]:
+        module = getattr(module, part)
+    setattr(module, parts[-1], param)
+
+
+def _get_managed_named_params(
+    module: nn.Module,
+) -> list[tuple[str, nn.Parameter]]:
+    """
+    Collect parameters that should be managed by this module's DStorage.
+
+    This excludes parameters from child modules that already have their own
+    DStorage (i.e., already wrapped with flex_shard).
+
+    Similar to FSDP2's _get_managed_modules/_get_managed_states pattern.
+    """
+    managed_params: list[tuple[str, nn.Parameter]] = []
+
+    # Find child modules that already have DStorage
+    wrapped_prefixes: set[str] = set()
+    for name, child in module.named_modules():
+        if name and getattr(child, _DSTORAGE_ATTR, None) is not None:
+            # This child is already wrapped; skip its parameters
+            wrapped_prefixes.add(name + ".")
+
+    # Collect parameters not in wrapped submodules
+    for fqn, param in module.named_parameters():
+        is_wrapped = any(fqn.startswith(prefix) for prefix in wrapped_prefixes)
+        if not is_wrapped:
+            managed_params.append((fqn, param))
+
+    return managed_params
 
 
 def _validate_flex_shard_mesh(
@@ -79,6 +186,7 @@ def _validate_placements(
     mesh: DeviceMesh,
 ) -> None:
     """Validate that placements are compatible with eager FlexShard."""
+    from .placements import FlatShard, Owned, RaggedShard, Shard
 
     param_dict = dict(named_params)
     world_size = mesh.size()
@@ -120,6 +228,8 @@ def _validate_bucket_placements(
     named_params: list[tuple[str, nn.Parameter]],
 ) -> None:
     """Validate minimal eager bucket constraints."""
+    from .placements import Shard
+
     param_dict = dict(named_params)
     for bucket_idx, fqns in enumerate(bucket_assignments):
         if not fqns:

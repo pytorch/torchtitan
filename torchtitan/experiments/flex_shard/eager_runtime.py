@@ -18,13 +18,13 @@ from .metadata import (
     _EAGER_COMM_CONTEXTS_ATTR,
 )
 from .placements import (
-    _with_fqn,
     EagerAllGatherResult,
     EagerReduceScatterResult,
     Shard,
 )
 from .reshard import _get_storage_debug_fqn, _reshard_checkpoint_recompute
 from .storage import DStorage, ParamInfo
+from .utils import _with_fqn
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh

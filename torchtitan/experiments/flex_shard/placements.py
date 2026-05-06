@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, TYPE_CHECKING
@@ -16,6 +14,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
+
+from .utils import _active_parametrization_enabled, _with_fqn
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -96,31 +96,6 @@ class EagerReduceScatterResult:
     debug_fqn: str | None
 
 
-def _with_fqn(label: str, fqn: str | None) -> str:
-    """Append a module/bucket FQN to profiler labels, matching FSDP style."""
-    if fqn:
-        return f"{label} ({fqn})"
-    return label
-
-
-_active_parametrization = True
-
-
-@contextmanager
-def disable_active_parametrization() -> Generator[None, None, None]:
-    """Disable parametrization forward (returns raw sharded tensor).
-
-    Use during initialization, checkpointing, or any context where
-    parameter access should not trigger collective communication.
-    """
-    global _active_parametrization
-    try:
-        _active_parametrization = False
-        yield
-    finally:
-        _active_parametrization = True
-
-
 class _MixedPrecisionCast(torch.autograd.Function):
     """Cast with decoupled forward/backward dtype control."""
 
@@ -168,7 +143,7 @@ class ShardParametrization(nn.Module):
         self.global_dim_size = global_dim_size
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization:
+        if not _active_parametrization_enabled():
             return local_shard
         if (
             self.compute_device is not None
@@ -228,7 +203,7 @@ class FlatShardParametrization(nn.Module):
         self.global_numel = global_numel
 
     def forward(self, flat_shard: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization:
+        if not _active_parametrization_enabled():
             return flat_shard
         if self.compute_device is not None and flat_shard.device != self.compute_device:
             flat_shard = flat_shard.to(self.compute_device, non_blocking=True)
@@ -299,7 +274,7 @@ class OwnedParametrization(nn.Module):
         self.compute_device = compute_device
 
     def forward(self, param: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization:
+        if not _active_parametrization_enabled():
             return param
         if self.compute_device is not None and param.device != self.compute_device:
             param = param.to(self.compute_device, non_blocking=True)
@@ -335,7 +310,7 @@ class RaggedShardParametrization(nn.Module):
         self.compute_device = compute_device
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization:
+        if not _active_parametrization_enabled():
             return local_shard
         if (
             self.compute_device is not None
@@ -1421,7 +1396,6 @@ def param_boundary_placements(
 
 
 __all__ = [
-    "disable_active_parametrization",
     "FlatShard",
     "FlatShardParametrization",
     "flat_shard_placements",
