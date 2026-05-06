@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+import torch.distributed._functional_collectives as funcol
 import torch.distributed.checkpoint as dcp
+import torch.distributed.distributed_c10d as c10d
 import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torch.distributed.checkpoint.state_dict import (
@@ -35,6 +37,7 @@ from torchtitan.experiments.rl.actors.utils import (
     extract_response_logprobs,
     verify_logprob_identity,
 )
+from torchtitan.experiments.rl.loss.types import LossOutput
 from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.protocols.model_spec import ModelSpec
@@ -248,15 +251,100 @@ class PolicyTrainer(Actor, Configurable):
 
         return model
 
+    def reduce_token_mean_loss_metrics(
+        self,
+        metric_sums: dict[str, torch.Tensor],
+        *,
+        num_valid_tokens: torch.Tensor,
+    ) -> dict[str, float]:
+        """All loss diagnostics are token-weighted means with the same denominator.
+
+        SUM-reduce numerators + denominator in one pack; divide once.
+        """
+        keys = list(metric_sums)
+        if not keys:
+            return {}
+        batch_mesh = self.parallel_dims.get_optional_mesh("batch")
+        pack = torch.stack(
+            [metric_sums[k].to(torch.float64) for k in keys]
+            + [num_valid_tokens.to(torch.float64)]
+        )
+        if batch_mesh is not None and self.dp_size > 1:
+            pack = funcol.all_reduce(pack, c10d.ReduceOp.SUM.name, batch_mesh)
+        global_n = pack[-1].clamp(min=1.0)
+        return {k: float((pack[i] / global_n).item()) for i, k in enumerate(keys)}
+
+    def reduce_verification_metrics(
+        self,
+        raw: dict[str, torch.Tensor | float | bool],
+        *,
+        num_valid_tokens: torch.Tensor,
+    ) -> dict[str, float]:
+        """Hand-coded reducer for the 3 fixed verification metrics.
+
+        SUM pack: token-weighted mean + denominator.
+        MAX pack: max + inverted bool (so ``bitwise_identical=False`` on any
+        rank flips the global to 0.0).
+        """
+        # TODO(rl-loss-total-agg-type): when the loss-migration PR adds
+        # agg_type="sequence_mean" or "fixed_horizon", decide whether
+        # loss/total should keep reporting this token-weighted diagnostic
+        # or gain an objective-weighted lane with the agg_type-specific
+        # denominator. If the latter, extend LossOutput with optional
+        # loss_total_sum/loss_total_denominator fields (additive, no
+        # breaking change).
+        batch_mesh = self.parallel_dims.get_optional_mesh("batch")
+
+        diff_mean = torch.as_tensor(
+            raw["train/logprob_diff/mean"],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        diff_max = torch.as_tensor(
+            raw["train/logprob_diff/max"],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        sum_pack = torch.stack(
+            [
+                diff_mean * num_valid_tokens.to(torch.float64),
+                num_valid_tokens.to(torch.float64),
+            ]
+        )
+        max_pack = torch.stack(
+            [
+                diff_max,
+                torch.tensor(
+                    0.0 if bool(raw["train/logprob/bitwise_identical"]) else 1.0,
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
+            ]
+        )
+        if batch_mesh is not None and self.dp_size > 1:
+            sum_pack = funcol.all_reduce(sum_pack, c10d.ReduceOp.SUM.name, batch_mesh)
+            max_pack = funcol.all_reduce(max_pack, c10d.ReduceOp.MAX.name, batch_mesh)
+
+        return {
+            "train/logprob_diff/mean": float(
+                sum_pack[0].item() / max(float(sum_pack[1].item()), 1.0)
+            ),
+            "train/logprob_diff/max": float(max_pack[0].item()),
+            "train/logprob/bitwise_identical": (
+                1.0 if float(max_pack[1].item()) == 0.0 else 0.0
+            ),
+        }
+
     @endpoint
     async def forward_backward(self, train_data: list[TrainBatch]) -> dict:
-        """Run forward pass, compute loss, and call backward.
+        """Run forward pass, compute loss, call backward, and DP-reduce diagnostics.
 
         Args:
             train_data: List of batches, one per DP rank.
 
         Returns:
-            dict with loss metrics, advantage stats, and logprob verification.
+            Already-namespaced public-key dict mixing ``loss/*`` and
+            ``train/logprob_*`` floats. Safe to log under global names.
         """
         logger.debug(
             f"{os.getpid()=} PolicyTrainer forward_backward "
@@ -294,39 +382,36 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        loss, loss_metrics = self.loss_fn(
+        loss_output: LossOutput = self.loss_fn(
             policy_logprobs=policy_logprobs,
             advantages=advantages,
         )
 
-        verification_result = verify_logprob_identity(
+        verification_raw = verify_logprob_identity(
             local_batch.token_logprobs,
             policy_logprobs,
         )
-
         logger.debug(
-            f"Logprob verification: bitwise_identical={verification_result['logprob_bitwise_identical']}, "
-            f"max_delta={verification_result['logprob_max_delta']:.6e}, "
-            f"diff_mean={verification_result['logprob_diff_mean']:.6e}, "
-            f"diff_max={verification_result['logprob_diff_max']:.6e}, "
-            f"tokens_checked={verification_result['total_tokens_checked']}"
+            "Logprob verification: bitwise_identical=%s, "
+            "diff_mean=%.6e, diff_max=%.6e",
+            verification_raw["train/logprob/bitwise_identical"],
+            verification_raw["train/logprob_diff/mean"],
+            verification_raw["train/logprob_diff/max"],
         )
 
         # Backward pass
         self.optimizers.zero_grad()
-        loss.backward()
+        loss_output.loss.backward()
 
         return {
-            "loss": loss.item(),
-            "advantage_mean": advantages.mean().item(),
-            "advantage_std": advantages.std().item(),
-            "logprob_diff_mean": verification_result["logprob_diff_mean"],
-            "logprob_diff_max": verification_result["logprob_diff_max"],
-            "logprob_max_delta": verification_result["logprob_max_delta"],
-            "logprob_bitwise_identical": verification_result[
-                "logprob_bitwise_identical"
-            ],
-            **loss_metrics,
+            **self.reduce_token_mean_loss_metrics(
+                loss_output.token_mean_metric_sums,
+                num_valid_tokens=loss_output.num_valid_tokens,
+            ),
+            **self.reduce_verification_metrics(
+                verification_raw,
+                num_valid_tokens=loss_output.num_valid_tokens,
+            ),
         }
 
     @endpoint
@@ -334,10 +419,27 @@ class PolicyTrainer(Actor, Configurable):
         """Clip gradients, step optimizer and LR scheduler.
 
         Returns:
-            dict with grad_norm and policy_version.
+            ``{"train/grad_norm/mean": float, "train/lr": float,
+               "train/policy_version/mean": float}``. ``grad_norm`` is
+            already DP-global after ``clip_grad_norm_``; ``lr`` and
+            ``policy_version`` are rank-identical. Keys announce the
+            (no-op, single-value) reduction in the name so wandb/console
+            outputs read consistently with other ``*/mean``-suffixed
+            metrics; ``train/lr`` is a step-by-step scalar with no
+            natural reduction and stays unsuffixed.
         """
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules (see Tinker API).
+
+        # Capture LR before the scheduler advances; assert single param
+        # group since `train/lr` is a single scalar.
+        current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
+        if len(current_lrs) != 1:
+            raise ValueError(
+                "RL metrics only support a single optimizer LR for "
+                f"train/lr; got {current_lrs}"
+            )
+        current_lr = float(current_lrs[0])
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -357,8 +459,11 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         return {
-            "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
-            "policy_version": self.policy_version,
+            "train/grad_norm/mean": (
+                grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm)
+            ),
+            "train/lr": current_lr,
+            "train/policy_version/mean": float(self.policy_version),
         }
 
     @endpoint

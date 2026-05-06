@@ -323,6 +323,7 @@ class VLLMGenerator(Actor, Configurable):
                             text=sample.text,
                             token_ids=sample.token_ids,
                             token_logprobs=per_token_logprobs,
+                            finish_reason=sample.finish_reason,
                         )
                     )
 
