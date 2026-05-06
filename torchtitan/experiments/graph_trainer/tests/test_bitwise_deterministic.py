@@ -110,6 +110,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self.model = model
         self.inputs = torch.randint(0, vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
         self.labels = torch.randint(0, vocab_size, (BATCH_SIZE, SEQ_LEN), device="cuda")
+        self.positions = torch.arange(SEQ_LEN, device="cuda").repeat(BATCH_SIZE, 1)
 
     def tearDown(self):
         FlexAttention.inductor_configs = self._orig_inductor_configs
@@ -143,7 +144,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
             loss = trainer.forward_backward_step(
-                input_dict={"input": self.inputs},
+                input_dict={"input": self.inputs, "positions": self.positions},
                 labels=self.labels,
                 global_valid_tokens=global_valid_tokens,
             )
@@ -185,7 +186,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
         )
         extra_inputs: dict[str, torch.Tensor] = {}
-        extra_kwargs: dict[str, torch.Tensor] = {}
+        extra_kwargs: dict[str, torch.Tensor] = {"positions": self.positions}
 
         # Step 1: Trace the graph
         traced_result = trace_train_step(fwd_bwd_fn)(

@@ -66,7 +66,7 @@ jobs:
         pip install uv
 
         # 1. Install Monarch and TorchStore
-        uv pip install torchmonarch==0.3.0
+        uv pip install torchmonarch==0.4.1
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
 
@@ -90,6 +90,11 @@ jobs:
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Install nvcc so FlashInfer can JIT compile its CUDA kernels.
+        # vLLM uses FlashInfer sampler by default (vllm-project/vllm#40376)
+        # but the CI docker image only has CUDA runtime, not the toolkit.
+        uv pip install nvidia-cuda-nvcc
 
         # Run E2E RL integration tests (up to 8 GPUs).
         # Includes the MoE TP=4 EP=4 random_init test which needs 8 GPUs.

@@ -30,6 +30,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
+# must run before torch import
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torchstore as ts
 import tyro
