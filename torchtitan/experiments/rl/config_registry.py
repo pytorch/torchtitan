@@ -19,7 +19,11 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
+from torchtitan.experiments.rl.actors.generator import (
+    SamplingConfig,
+    VLLMCudagraphConfig,
+    VLLMGenerator,
+)
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
@@ -234,10 +238,7 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
-            compile=GeneratorCompileConfig(
-                backend="none",
-                cudagraph_mode="none",
-            ),
+            cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
@@ -294,10 +295,7 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="none",
-                cudagraph_mode="none",
-            ),
+            cudagraph=VLLMCudagraphConfig(enable=False),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
@@ -342,10 +340,7 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            compile=GeneratorCompileConfig(
-                backend="eager",
-                cudagraph_mode="piecewise",
-            ),
+            cudagraph=VLLMCudagraphConfig(enable=True),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
