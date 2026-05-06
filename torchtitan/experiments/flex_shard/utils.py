@@ -117,55 +117,41 @@ def _validate_bucket_placements(
     bucket_assignments: list[list[str]],
     param_placements: dict[str, tuple[Placement, ...]],
     buckets: list[Any],
+    named_params: list[tuple[str, nn.Parameter]],
 ) -> None:
-    """Validate that all params in each bucket share the same placement type."""
+    """Validate minimal eager bucket constraints."""
+    param_dict = dict(named_params)
     for bucket_idx, fqns in enumerate(bucket_assignments):
         if not fqns:
             continue
-        reference_placement = param_placements[fqns[0]][0]
-        for fqn in fqns[1:]:
-            placement = param_placements[fqn][0]
-            if type(placement) is not type(reference_placement):
+        reference_dtype = param_dict[fqns[0]].dtype
+        for fqn in fqns:
+            placements = param_placements[fqn]
+            if len(placements) != 1:
                 raise ValueError(
                     f"Bucket {bucket_idx} "
                     f"{buckets[bucket_idx].patterns} "
-                    f"has mixed placement types: {fqns[0]!r} uses "
-                    f"{type(reference_placement).__name__} but {fqn!r} uses "
-                    f"{type(placement).__name__}. "
-                    "All params in a bucket must share the same placement type."
+                    f"parameter {fqn!r} has {len(placements)} placements. "
+                    "FlexShard eager mode currently supports exactly one "
+                    "Shard(0) placement per parameter."
                 )
-            if isinstance(placement, Shard) and isinstance(reference_placement, Shard):
-                if placement.dim != reference_placement.dim:
-                    raise ValueError(
-                        f"Bucket {bucket_idx} "
-                        f"{buckets[bucket_idx].patterns} "
-                        f"has mixed shard dimensions: {fqns[0]!r} uses "
-                        f"Shard({reference_placement.dim}) but {fqn!r} uses "
-                        f"Shard({placement.dim}). "
-                        "All Shard params in a bucket must share the same "
-                        "dimension."
-                    )
-            if isinstance(placement, Owned) and isinstance(reference_placement, Owned):
-                if placement.owner_rank != reference_placement.owner_rank:
-                    raise ValueError(
-                        f"Bucket {bucket_idx} "
-                        f"{buckets[bucket_idx].patterns} "
-                        f"has mixed owner ranks: {fqns[0]!r} uses "
-                        f"Owned({reference_placement.owner_rank}) but "
-                        f"{fqn!r} uses Owned({placement.owner_rank}). "
-                        "All Owned params in a bucket must share the same "
-                        "owner_rank."
-                    )
-            if isinstance(placement, RaggedShard) and isinstance(
-                reference_placement, RaggedShard
-            ):
-                if placement.local_units != reference_placement.local_units:
-                    raise ValueError(
-                        f"Bucket {bucket_idx} "
-                        f"{buckets[bucket_idx].patterns} "
-                        f"has mixed local_units: {fqns[0]!r} uses "
-                        f"{reference_placement.local_units} but {fqn!r} uses "
-                        f"{placement.local_units}. "
-                        "All RaggedShard params in a bucket must share the "
-                        "same local_units."
-                    )
+            placement = placements[0]
+            if not isinstance(placement, Shard) or placement.dim != 0:
+                raise ValueError(
+                    f"Bucket {bucket_idx} "
+                    f"{buckets[bucket_idx].patterns} "
+                    f"parameter {fqn!r} uses {placement!r}. "
+                    "FlexShard eager mode currently supports only Shard(0) "
+                    "placements."
+                )
+
+            dtype = param_dict[fqn].dtype
+            if dtype != reference_dtype:
+                raise ValueError(
+                    f"Bucket {bucket_idx} "
+                    f"{buckets[bucket_idx].patterns} "
+                    f"has mixed parameter dtypes: {fqns[0]!r} uses "
+                    f"{reference_dtype} but {fqn!r} uses {dtype}. "
+                    "All params in a FlexShard storage must share the same "
+                    "dtype."
+                )

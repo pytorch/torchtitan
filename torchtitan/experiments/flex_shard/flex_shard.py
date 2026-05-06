@@ -21,14 +21,11 @@ import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 from torch.distributed.fsdp import DataParallelMeshDims
 from .placements import (
-    _OwnedFullCopy,
     _MixedPrecisionCast,
     _with_fqn,
     disable_active_parametrization,
     EagerAllGatherResult,
     EagerReduceScatterResult,
-    FlatShard,
-    Owned,
     Placement,
     Shard,
 )
@@ -399,7 +396,7 @@ def _raise_missing_eager_batched_unshard(parametrization: nn.Module) -> None:
     raise RuntimeError(
         "FlexShard eager mode would fall back to per-parameter "
         f"_c10d_functional collectives for parameter {param_fqn!r}{bucket_msg}, "
-        "but eager Shard/RaggedShard parameters must be served by a batched "
+        "but eager Shard(0) parameters must be served by a batched "
         "all-gather hook. This usually means the BucketSpec boundary does not "
         "match the module hook/checkpoint execution unit. Split the bucket to "
         "match forward module boundaries."
@@ -665,24 +662,13 @@ class ParamInfo:
     global_numel: int = 0  # total elements in unsharded param
 
 
-def _get_dtype_alignment(dtype: torch.dtype) -> int:
-    """Get alignment requirement in bytes for a dtype."""
-    # Most dtypes need alignment equal to their element size
-    return dtype.itemsize
-
-
-def _align_offset(offset: int, alignment: int) -> int:
-    """Round up offset to next aligned boundary."""
-    return (offset + alignment - 1) // alignment * alignment
-
-
 class DStorage:
     """
-    Manages a unified byte buffer that backs multiple sharded parameters.
+    Manages a byte buffer that backs one bucket of sharded parameters.
 
-    All parameters, regardless of dtype, are stored in a single contiguous
-    byte buffer. Each parameter's local shard is a typed view into this buffer
-    at the appropriate byte offset with proper alignment.
+    All parameters in a storage must share the same dtype and use Shard(0)
+    placement. Each parameter's local shard is a typed view into this buffer at
+    its sequential byte offset.
 
     Communication is delegated to eager hooks and parametrization modules; this
     storage object owns buffer layout and metadata.
@@ -750,13 +736,7 @@ def _storage_requires_eager_batched_unshard(storage: DStorage) -> bool:
     infos = list(storage._param_infos.values())
     if not infos:
         return False
-    ptype = type(infos[0].placements[0])
-    return (
-        ptype is not _OwnedFullCopy
-        and ptype is not Owned
-        and ptype is not FlatShard
-        and storage.byte_storage.device.type != "cpu"
-    )
+    return storage.byte_storage.device.type != "cpu"
 
 
 def _storage_uses_eager_autograd_unshard(storage: DStorage) -> bool:
@@ -844,8 +824,8 @@ def _create_param_infos(
     """
     Create ParamInfo for each parameter, computing local shapes and byte offsets.
 
-    Placement-agnostic: works with any placement type (Shard, FlatShard, Owned, etc.).
-    Parameters are laid out sequentially in the byte buffer with proper alignment.
+    The caller validates that each bucket uses Shard(0) and a uniform dtype, so
+    parameters are laid out sequentially in the byte buffer.
 
     Args:
         named_params: List of (fqn, param) tuples
@@ -869,13 +849,10 @@ def _create_param_infos(
         dtype = param.dtype
         global_numel = param.numel()
 
-        alignment = _get_dtype_alignment(dtype)
-
         # Sharded buffer: only allocate if this rank has data
         if local_numel > 0:
-            aligned_offset = _align_offset(current_byte_offset, alignment)
-            byte_offset = aligned_offset
-            current_byte_offset = aligned_offset + local_numel * dtype.itemsize
+            byte_offset = current_byte_offset
+            current_byte_offset += local_numel * dtype.itemsize
         else:
             byte_offset = 0
 
@@ -1024,8 +1001,8 @@ def flex_shard(
             FlexShard derives its DP shard mesh from ``mesh``.
         shard_placement_fn: Required callable that maps
             ``(named_params, dp_shard_mesh)`` to per-parameter placements.
-            Built-in callables include ``per_param_placements``,
-            ``flat_shard_placements``, and ``param_boundary_placements``.
+            The minimal eager path currently supports ``Shard(0)`` placements,
+            for example via ``per_param_placements``.
         buckets: Required list of bucket specifications. Use
             ``[BucketSpec(["*"])]`` for a single whole-module bucket or
             ``auto_buckets()`` to generate one bucket per direct child module.
@@ -1064,10 +1041,10 @@ def flex_shard(
         ... )
 
     Note:
-        - Parameters of different dtypes are supported in a single unified buffer
-        - Proper alignment is maintained for each dtype
+        - Each bucket must contain only ``Shard(0)`` placements.
+        - Each bucket must contain one original parameter dtype. Split mixed
+          dtype parameters into separate buckets.
         - Parameters on meta device will have uninitialized storage
-        - Each bucket must have consistent placement types
     """
     # Check if module is already wrapped
     if getattr(module, _DSTORAGES_ATTR, None) is not None:
@@ -1122,7 +1099,12 @@ def flex_shard(
 
     param_fqns = [fqn for fqn, _ in named_params]
     bucket_assignments = _assign_params_to_buckets(param_fqns, buckets)
-    _validate_bucket_placements(bucket_assignments, param_placements, buckets)
+    _validate_bucket_placements(
+        bucket_assignments,
+        param_placements,
+        buckets,
+        named_params,
+    )
 
     # Log bucket coverage
     if logger.isEnabledFor(logging.DEBUG):
@@ -1134,21 +1116,6 @@ def flex_shard(
             total_params += len(fqns)
         lines.append(f"  total: {total_params} params across {len(buckets)} buckets")
         logger.debug("\n".join(lines))
-
-    # In parametrization mode, adjust placements for traceability:
-    # - FlatShard: decompose bucket-level into per-parameter flat sharding
-    # - Owned: store full param on all ranks (broadcast ensures consistency)
-    named_params_dict_tmp = dict(named_params)
-    for fqn in param_placements:
-        placement = param_placements[fqn][0]
-        if isinstance(placement, FlatShard):
-            numel = named_params_dict_tmp[fqn].numel()
-            param_placements[fqn] = (FlatShard(0, numel, numel),)
-        elif isinstance(placement, Owned):
-            # In parametrization mode, all ranks store the full param.
-            # Replace with _OwnedFullCopy so compute_local_shape/numel
-            # and extract_local_shard return the full param for all ranks.
-            param_placements[fqn] = (_OwnedFullCopy(placement.owner_rank),)
 
     # Per-bucket: create param_infos, byte buffer, replace params, create DStorage
     named_params_dict = dict(named_params)

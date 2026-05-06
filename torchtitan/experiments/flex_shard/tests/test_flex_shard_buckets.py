@@ -207,8 +207,21 @@ class TestBucketAssignment(unittest.TestCase):
 class TestBucketPlacementValidation(unittest.TestCase):
     """Test _validate_bucket_placements."""
 
-    def test_rejects_mixed_placement_types(self):
-        """Shard + FlatShard in one bucket raises ValueError."""
+    @staticmethod
+    def _named_params(
+        dtypes: dict[str, torch.dtype] | None = None,
+    ) -> list[tuple[str, nn.Parameter]]:
+        dtypes = dtypes or {}
+        return [
+            (
+                fqn,
+                nn.Parameter(torch.empty(2, 2, dtype=dtypes.get(fqn, torch.float32))),
+            )
+            for fqn in ("a.weight", "b.weight")
+        ]
+
+    def test_rejects_non_shard0_placement(self):
+        """FlatShard in a bucket raises ValueError."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
@@ -220,11 +233,16 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "b.weight": (FlatShard(),),
         }
         buckets = [BucketSpec(["*"])]
-        with self.assertRaises(ValueError, msg="mixed placement types"):
-            _validate_bucket_placements(assignments, placements, buckets)
+        with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
+            _validate_bucket_placements(
+                assignments,
+                placements,
+                buckets,
+                self._named_params(),
+            )
 
-    def test_rejects_mixed_shard_dims(self):
-        """Shard(0) + Shard(1) in one bucket raises ValueError."""
+    def test_rejects_nonzero_shard_dim(self):
+        """Shard(1) in a bucket raises ValueError."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
@@ -236,8 +254,13 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "b.weight": (Shard(1),),
         }
         buckets = [BucketSpec(["*"])]
-        with self.assertRaises(ValueError, msg="mixed shard dimensions"):
-            _validate_bucket_placements(assignments, placements, buckets)
+        with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
+            _validate_bucket_placements(
+                assignments,
+                placements,
+                buckets,
+                self._named_params(),
+            )
 
     def test_accepts_same_placement(self):
         """Shard(0) + Shard(0) in one bucket passes."""
@@ -253,10 +276,15 @@ class TestBucketPlacementValidation(unittest.TestCase):
         }
         buckets = [BucketSpec(["*"])]
         # Should not raise
-        _validate_bucket_placements(assignments, placements, buckets)
+        _validate_bucket_placements(
+            assignments,
+            placements,
+            buckets,
+            self._named_params(),
+        )
 
-    def test_accepts_separate_buckets_different_placements(self):
-        """Different placement types in separate buckets is fine."""
+    def test_rejects_non_shard0_in_separate_bucket(self):
+        """FlatShard is rejected even when isolated to its own bucket."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
@@ -268,20 +296,52 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "b.weight": (FlatShard(),),
         }
         buckets = [BucketSpec(["a.*"]), BucketSpec(["b.*"])]
-        # Should not raise
-        _validate_bucket_placements(assignments, placements, buckets)
+        with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
+            _validate_bucket_placements(
+                assignments,
+                placements,
+                buckets,
+                self._named_params(),
+            )
+
+    def test_rejects_mixed_dtypes(self):
+        """Parameters in one bucket must share the same storage dtype."""
+        from torchtitan.experiments.flex_shard.utils import (
+            _validate_bucket_placements,
+        )
+        from torchtitan.experiments.flex_shard.placements import Shard
+
+        assignments = [["a.weight", "b.weight"]]
+        placements = {
+            "a.weight": (Shard(0),),
+            "b.weight": (Shard(0),),
+        }
+        buckets = [BucketSpec(["*"])]
+        with self.assertRaisesRegex(ValueError, "mixed parameter dtypes"):
+            _validate_bucket_placements(
+                assignments,
+                placements,
+                buckets,
+                self._named_params({"b.weight": torch.bfloat16}),
+            )
 
     def test_empty_bucket_skipped(self):
         """Empty bucket assignments are silently skipped."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
+        from torchtitan.experiments.flex_shard.placements import Shard
 
         assignments = [[], ["a.weight"]]
-        placements = {"a.weight": (None,)}
+        placements = {"a.weight": (Shard(0),)}
         buckets = [BucketSpec(["x.*"]), BucketSpec(["a.*"])]
         # Should not raise (first bucket is empty)
-        _validate_bucket_placements(assignments, placements, buckets)
+        _validate_bucket_placements(
+            assignments,
+            placements,
+            buckets,
+            self._named_params(),
+        )
 
 
 # ---------------------------------------------------------------------------
