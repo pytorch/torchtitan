@@ -212,7 +212,7 @@ class Shard(Placement):
         return f"Shard({self.dim})"
 
     def create_parametrization(self, info, group_name, world_size, **kwargs):
-        from .flex_shard import ShardParametrization
+        from .parametrizations import ShardParametrization
 
         dim_size = info.global_shape[self.dim]
         uneven = dim_size % world_size != 0
@@ -609,7 +609,7 @@ class FlatShard(Placement):
     total_flat_numel: int = 0
 
     def create_parametrization(self, info, group_name, world_size, **kwargs):
-        from .flex_shard import FlatShardParametrization
+        from .parametrizations import FlatShardParametrization
 
         numel = info.global_numel
         flat_uneven = numel % world_size != 0
@@ -901,7 +901,7 @@ class _OwnedFullCopy(Owned):
     """
 
     def create_parametrization(self, info, group_name, world_size, **kwargs):
-        from .flex_shard import OwnedParametrization
+        from .parametrizations import OwnedParametrization
 
         return OwnedParametrization(
             owner_rank=self.owner_rank,
@@ -964,7 +964,7 @@ class RaggedShard(Placement):
         return f"RaggedShard(dims={self.dims}, local_units={self.local_units})"
 
     def create_parametrization(self, info, group_name, world_size, **kwargs):
-        from .flex_shard import RaggedShardParametrization
+        from .parametrizations import RaggedShardParametrization
 
         split_sizes = self._compute_dim_splits(info.global_shape[self.dim])
         return RaggedShardParametrization(

@@ -7,7 +7,6 @@
 from .flex_shard import (
     auto_buckets,
     BucketSpec,
-    disable_active_parametrization,
     flex_shard,
     get_global_shape,
     get_placements,
@@ -15,6 +14,7 @@ from .flex_shard import (
     MixedPrecisionPolicy,
     set_sharding_info,
 )
+from .parametrizations import disable_active_parametrization
 from .placements import (
     per_param_placements,
     Placement,
