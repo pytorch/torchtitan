@@ -33,8 +33,8 @@ from torchtitan.experiments.flex_shard import (
     lift_params_to_global_spmd_mesh,
     MixedPrecisionPolicy as FlexShardMPPolicy,
     Owned,
+    per_param_placements,
     RaggedShard,
-    Shard,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
@@ -47,12 +47,21 @@ STEPS = 20
 
 def _flex_shard_global(model, mesh, **kwargs):
     lift_params_to_global_spmd_mesh(model, mesh)
+    kwargs.setdefault("shard_placement_fn", per_param_placements)
+    kwargs.setdefault("buckets", [BucketSpec(["*"])])
     return flex_shard(
         model,
         mesh,
         DataParallelMeshDims(shard="fsdp"),
         **kwargs,
     )
+
+
+def _single_placement_fn(placement):
+    def placement_fn(named_params, _mesh):
+        return {fqn: (placement,) for fqn, _ in named_params}
+
+    return placement_fn
 
 
 class TestFlexShardNumerics(FSDPTest):
@@ -103,7 +112,6 @@ class TestFlexShardNumerics(FSDPTest):
         _flex_shard_global(
             model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Shard(0)},
             **kwargs,
         )
         return self._train_loop(model, inputs, labels)
@@ -112,7 +120,6 @@ class TestFlexShardNumerics(FSDPTest):
         _flex_shard_global(
             model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Shard(0)},
         )
         model = torch.compile(model, backend="aot_eager", fullgraph=True)
         return self._train_loop(model, inputs, labels)
@@ -204,7 +211,6 @@ class TestFlexShardNumerics(FSDPTest):
         _flex_shard_global(
             fs_model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Shard(0)},
             buckets=[
                 BucketSpec(
                     ["*"],
@@ -258,7 +264,7 @@ class TestFlexShardNumerics(FSDPTest):
         _flex_shard_global(
             model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Owned(0)},
+            shard_placement_fn=_single_placement_fn(Owned(0)),
         )
         losses = self._train_loop(model, inputs, labels)
 
@@ -277,7 +283,7 @@ class TestFlexShardNumerics(FSDPTest):
         _flex_shard_global(
             model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Owned(0)},
+            shard_placement_fn=_single_placement_fn(Owned(0)),
         )
         model = torch.compile(model, backend="aot_eager", fullgraph=True)
         losses = self._train_loop(model, inputs, labels)
@@ -297,7 +303,7 @@ class TestFlexShardNumerics(FSDPTest):
         _flex_shard_global(
             eager_model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Owned(0)},
+            shard_placement_fn=_single_placement_fn(Owned(0)),
         )
         eager_losses = self._train_loop(eager_model, inputs, labels)
 
@@ -306,7 +312,7 @@ class TestFlexShardNumerics(FSDPTest):
         _flex_shard_global(
             compiled_model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Owned(0)},
+            shard_placement_fn=_single_placement_fn(Owned(0)),
         )
         compiled_model = torch.compile(
             compiled_model, backend="aot_eager", fullgraph=True
@@ -359,7 +365,6 @@ class TestFlexShardPhase5Numerics(FSDPTest):
         _flex_shard_global(
             model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Shard(0)},
         )
         losses = self._train_loop(model, inputs, labels)
 
@@ -380,7 +385,6 @@ class TestFlexShardPhase5Numerics(FSDPTest):
         _flex_shard_global(
             eager_model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Shard(0)},
         )
         eager_losses = self._train_loop(eager_model, inputs, labels)
 
@@ -389,7 +393,6 @@ class TestFlexShardPhase5Numerics(FSDPTest):
         _flex_shard_global(
             compiled_model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": Shard(0)},
         )
         compiled_model = torch.compile(
             compiled_model, backend="aot_eager", fullgraph=True
@@ -417,7 +420,8 @@ class TestFlexShardPhase5Numerics(FSDPTest):
         _flex_shard_global(
             model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": RaggedShard((0,), local_units)},
+            shard_placement_fn=_single_placement_fn(RaggedShard((0,), local_units)),
+            buckets=[BucketSpec(["*"], reshard_after_forward=False)],
         )
         losses = self._train_loop(model, inputs, labels)
 
@@ -441,7 +445,8 @@ class TestFlexShardPhase5Numerics(FSDPTest):
         _flex_shard_global(
             eager_model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": RaggedShard((0,), local_units)},
+            shard_placement_fn=_single_placement_fn(RaggedShard((0,), local_units)),
+            buckets=[BucketSpec(["*"], reshard_after_forward=False)],
         )
         eager_losses = self._train_loop(eager_model, inputs, labels)
 
@@ -450,7 +455,8 @@ class TestFlexShardPhase5Numerics(FSDPTest):
         _flex_shard_global(
             compiled_model,
             self.parallel_dims.get_mesh("fsdp"),
-            shard_placement_fn={"*": RaggedShard((0,), local_units)},
+            shard_placement_fn=_single_placement_fn(RaggedShard((0,), local_units)),
+            buckets=[BucketSpec(["*"], reshard_after_forward=False)],
         )
         compiled_model = torch.compile(
             compiled_model, backend="aot_eager", fullgraph=True
@@ -517,13 +523,15 @@ class TestFlexShardDoubleWrapping(FSDPTest):
             model.experts,
             fsdp_mesh,
             DataParallelMeshDims(shard="fsdp"),
-            shard_placement_fn={"*": Shard(0)},
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
         )
         flex_shard(
             model,
             fsdp_mesh,
             DataParallelMeshDims(shard="fsdp"),
-            shard_placement_fn={"*": Shard(0)},
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
         )
 
         losses = self._train_loop(model, inputs, labels)
@@ -554,7 +562,8 @@ class TestFlexShardDoubleWrapping(FSDPTest):
             model.experts,
             fsdp_mesh,
             DataParallelMeshDims(shard="fsdp"),
-            shard_placement_fn={"*": Shard(0)},
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
         )
         expert_storages = len(model.experts._dstorages)
 
@@ -563,7 +572,8 @@ class TestFlexShardDoubleWrapping(FSDPTest):
             model,
             fsdp_mesh,
             DataParallelMeshDims(shard="fsdp"),
-            shard_placement_fn={"*": Shard(0)},
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
         )
 
         # Root should have its own storage(s) for shared params only

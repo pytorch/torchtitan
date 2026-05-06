@@ -90,7 +90,7 @@ class TestParametrizationTracing(unittest.TestCase):
 
         from torchtitan.experiments.flex_shard import ShardParametrization
 
-        with FakeTensorMode() as fake_mode:
+        with FakeTensorMode():
             param = ShardParametrization(
                 shard_dim=0, group_name="fake_pg", world_size=2
             )
@@ -279,6 +279,19 @@ class TestInitValidation(unittest.TestCase):
         mesh.size.return_value = size
         return mesh
 
+    def _make_mock_mesh_info(self, mesh):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        from torchtitan.experiments.flex_shard.flex_shard import FlexShardMeshInfo
+
+        return FlexShardMeshInfo(
+            dp_shard_mesh=mesh,
+            spmd_mesh=mesh,
+            dp_mesh_dims=DataParallelMeshDims(shard="fsdp"),
+            dp_shard_dim_names=("fsdp",),
+            dp_dim_indices=(0,),
+        )
+
     def test_accepts_multidim_mesh(self):
         """Multi-dim mesh is accepted (Phase 5: multi-mesh composition)."""
         from torchtitan.experiments.flex_shard.flex_shard import (
@@ -292,6 +305,7 @@ class TestInitValidation(unittest.TestCase):
         _validate_placements_for_tracing(
             param_placements={"weight": (Shard(0),)},
             named_params=[("weight", param)],
+            mesh_info=self._make_mock_mesh_info(mesh),
             mesh=mesh,
         )
 
@@ -308,6 +322,7 @@ class TestInitValidation(unittest.TestCase):
             _validate_placements_for_tracing(
                 param_placements={"weight": (Owned(4),)},
                 named_params=[("weight", param)],
+                mesh_info=self._make_mock_mesh_info(mesh),
                 mesh=mesh,
             )
 
@@ -324,6 +339,7 @@ class TestInitValidation(unittest.TestCase):
         _validate_placements_for_tracing(
             param_placements={"weight": (Owned(0),)},
             named_params=[("weight", param)],
+            mesh_info=self._make_mock_mesh_info(mesh),
             mesh=mesh,
         )
 
@@ -340,6 +356,7 @@ class TestInitValidation(unittest.TestCase):
         _validate_placements_for_tracing(
             param_placements={"weight": (RaggedShard((0,), (1, 2, 1, 1)),)},
             named_params=[("weight", param)],
+            mesh_info=self._make_mock_mesh_info(mesh),
             mesh=mesh,
         )
 
@@ -356,6 +373,7 @@ class TestInitValidation(unittest.TestCase):
             _validate_placements_for_tracing(
                 param_placements={"weight": (RaggedShard((0,), (1, 2)),)},
                 named_params=[("weight", param)],
+                mesh_info=self._make_mock_mesh_info(mesh),
                 mesh=mesh,
             )
 
@@ -372,6 +390,7 @@ class TestInitValidation(unittest.TestCase):
         _validate_placements_for_tracing(
             param_placements={"weight": (Shard(0),)},
             named_params=[("weight", param)],
+            mesh_info=self._make_mock_mesh_info(mesh),
             mesh=mesh,
         )
 
@@ -389,6 +408,7 @@ class TestInitValidation(unittest.TestCase):
         _validate_placements_for_tracing(
             param_placements={"weight": (FlatShard(),)},
             named_params=[("weight", param)],
+            mesh_info=self._make_mock_mesh_info(mesh),
             mesh=mesh,
         )
 
@@ -405,6 +425,7 @@ class TestInitValidation(unittest.TestCase):
             _validate_placements_for_tracing(
                 param_placements={"weight": (Shard(2),)},
                 named_params=[("weight", param)],
+                mesh_info=self._make_mock_mesh_info(mesh),
                 mesh=mesh,
             )
 
@@ -420,6 +441,7 @@ class TestInitValidation(unittest.TestCase):
         _validate_placements_for_tracing(
             param_placements={"weight": (Shard(0),)},
             named_params=[("weight", param)],
+            mesh_info=self._make_mock_mesh_info(mesh),
             mesh=mesh,
         )
 
@@ -435,6 +457,7 @@ class TestInitValidation(unittest.TestCase):
         _validate_placements_for_tracing(
             param_placements={"weight": (FlatShard(),)},
             named_params=[("weight", param)],
+            mesh_info=self._make_mock_mesh_info(mesh),
             mesh=mesh,
         )
 

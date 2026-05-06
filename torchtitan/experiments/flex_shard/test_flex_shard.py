@@ -123,14 +123,17 @@ def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
     torch.cuda.manual_seed(42)
     ref_model = DDP(MultiLayerMLP().to(device), device_ids=[rank])
 
-    # Per-layer wrapping: wrap each layer first, then root
+    # Per-layer wrapping: wrap each layer first, then root. The per-param
+    # bucket boundaries must match the Linear modules that RAF checkpointing
+    # wraps; one bucket spanning both linears in the Sequential would require
+    # a root hook that checkpoint recomputation cannot replay.
     for layer in model.layers:
         flex_shard(
             layer,
             mesh,
             DataParallelMeshDims(shard="fsdp"),
             shard_placement_fn=shard_placement_fn,
-            buckets=[BucketSpec(["*"])],
+            buckets=[BucketSpec(["0.*"]), BucketSpec(["2.*"])],
         )
     flex_shard(
         model,
@@ -191,6 +194,49 @@ def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
     torch.cuda.synchronize()
 
 
+def run_test_invalid_per_param_bucket_boundary():
+    """Verify eager per-param RAF rejects a bucket crossing checkpoint units."""
+    world_size = dist.get_world_size()
+    device = torch.device("cuda", torch.cuda.current_device())
+    mesh = _init_flex_mesh(world_size)
+
+    print_rank0(f"\n{'=' * 70}")
+    print_rank0("Testing invalid_per_param_bucket_boundary")
+    print_rank0(f"{'=' * 70}")
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    model = MultiLayerMLP().to(device)
+    lift_params_to_global_spmd_mesh(model, mesh)
+
+    for layer in model.layers:
+        flex_shard(
+            layer,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
+        )
+    flex_shard(
+        model,
+        mesh,
+        DataParallelMeshDims(shard="fsdp"),
+        shard_placement_fn=per_param_placements,
+        buckets=[BucketSpec(["embed.*"]), BucketSpec(["output.*"])],
+    )
+
+    inp = torch.randn(4, 16, device=device)
+    try:
+        model(inp)
+    except RuntimeError as exc:
+        if "bucket '0, 2'" not in str(exc):
+            raise
+        print_rank0("PASSED: invalid_per_param_bucket_boundary")
+        torch.cuda.synchronize()
+        return
+    raise AssertionError("Expected invalid per-param bucket boundary to raise")
+
+
 def main():
     """Run tests."""
     rank, world_size = setup_distributed()
@@ -211,6 +257,16 @@ def main():
             if rank == 0:
                 traceback.print_exc()
             success = False
+
+    try:
+        run_test_invalid_per_param_bucket_boundary()
+    except Exception as e:
+        print_rank0(f"FAILED: invalid_per_param_bucket_boundary: {e}")
+        import traceback
+
+        if rank == 0:
+            traceback.print_exc()
+        success = False
 
     cleanup_distributed()
     return success

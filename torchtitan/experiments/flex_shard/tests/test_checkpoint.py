@@ -36,7 +36,7 @@ from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
     lift_params_to_global_spmd_mesh,
-    Shard,
+    per_param_placements,
 )
 
 
@@ -101,6 +101,8 @@ class TestFlexShardCheckpoint(FSDPTest):
 
     def _flex_shard(self, model, mesh, **kwargs):
         lift_params_to_global_spmd_mesh(model, mesh)
+        kwargs.setdefault("shard_placement_fn", per_param_placements)
+        kwargs.setdefault("buckets", [BucketSpec(["*"])])
         return flex_shard(
             model,
             mesh,
@@ -126,7 +128,7 @@ class TestFlexShardCheckpoint(FSDPTest):
         labels = torch.randn(8, 8).cuda()
 
         # Train original
-        self._flex_shard(model, mesh, shard_placement_fn={"*": Shard(0)})
+        self._flex_shard(model, mesh)
         self._train_steps(model, inputs, labels)
 
         # Save per-rank sharded state
@@ -135,7 +137,7 @@ class TestFlexShardCheckpoint(FSDPTest):
 
         # Load into fresh model with same config
         model2 = torch.nn.Linear(8, 8)
-        self._flex_shard(model2, mesh, shard_placement_fn={"*": Shard(0)})
+        self._flex_shard(model2, mesh)
         self._load_per_rank(model2, tmpdir)
 
         # Verify params match (state_dict bypasses properties)
@@ -155,7 +157,7 @@ class TestFlexShardCheckpoint(FSDPTest):
         labels = torch.randn(8, 8).cuda()
 
         # Train and save
-        self._flex_shard(model, mesh, shard_placement_fn={"*": Shard(0)})
+        self._flex_shard(model, mesh)
         self._train_steps(model, inputs, labels, steps=2)
         tmpdir = self._shared_tmpdir()
         self._save_per_rank(model, tmpdir)
@@ -165,7 +167,7 @@ class TestFlexShardCheckpoint(FSDPTest):
 
         # Load checkpoint into fresh model and train same steps
         model2 = torch.nn.Linear(8, 8)
-        self._flex_shard(model2, mesh, shard_placement_fn={"*": Shard(0)})
+        self._flex_shard(model2, mesh)
         self._load_per_rank(model2, tmpdir)
         self._train_steps(model2, inputs, labels, steps=3)
 
@@ -191,7 +193,6 @@ class TestFlexShardCheckpoint(FSDPTest):
         self._flex_shard(
             model,
             mesh,
-            shard_placement_fn={"*": Shard(0)},
             buckets=[
                 BucketSpec(["fc1.*"]),
                 BucketSpec(["fc2.*"]),
@@ -207,7 +208,6 @@ class TestFlexShardCheckpoint(FSDPTest):
         self._flex_shard(
             model2,
             mesh,
-            shard_placement_fn={"*": Shard(0)},
             buckets=[
                 BucketSpec(["fc1.*"]),
                 BucketSpec(["fc2.*"]),

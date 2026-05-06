@@ -238,11 +238,15 @@ class TestDistributedMixedPrecision(unittest.TestCase):
         from torch.distributed.fsdp import DataParallelMeshDims
 
         from torchtitan.experiments.flex_shard import (
+            BucketSpec,
             flex_shard,
             lift_params_to_global_spmd_mesh,
+            per_param_placements,
         )
 
         lift_params_to_global_spmd_mesh(model, mesh)
+        kwargs.setdefault("shard_placement_fn", per_param_placements)
+        kwargs.setdefault("buckets", [BucketSpec(["*"])])
         return flex_shard(
             model,
             mesh,
@@ -313,7 +317,11 @@ class TestDistributedMixedPrecision(unittest.TestCase):
 
     def test_gradient_in_reduce_dtype(self):
         """After backward, param.grad is in reduce_dtype."""
-        from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            disable_active_parametrization,
+            MixedPrecisionPolicy,
+        )
 
         mesh = self._init_mesh()
 
@@ -338,8 +346,10 @@ class TestDistributedMixedPrecision(unittest.TestCase):
         # The reduce-scatter produces gradients in reduce_dtype
         # Since parametrization backward casts to fp32 before reduce-scatter,
         # the local grad shard is fp32
-        self.assertIsNotNone(model.weight.grad)
-        self.assertEqual(model.weight.grad.dtype, torch.float32)
+        with disable_active_parametrization():
+            grad = model.weight.grad
+        self.assertIsNotNone(grad)
+        self.assertEqual(grad.dtype, torch.float32)
 
     def test_no_mp_matches_original(self):
         """Without mp_policy, output matches non-mp baseline."""
@@ -386,7 +396,7 @@ class TestDistributedMixedPrecision(unittest.TestCase):
                     patterns=["linear1.*"],
                     mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16),
                 ),
-                ["linear2.*"],  # no mp_policy
+                BucketSpec(["linear2.*"]),  # no mp_policy
             ],
         )
 

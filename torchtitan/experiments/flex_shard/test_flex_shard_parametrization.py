@@ -383,6 +383,28 @@ class TestDistributedParametrization(unittest.TestCase):
             expected_local_grad,
         )
 
+    def test_eager_reshard_after_forward_raises_for_shard_dim1(self):
+        """RAF eager custom buckets reject unsupported Shard dimensions."""
+        from torchtitan.experiments.flex_shard import BucketSpec, Shard
+
+        mesh = self._init_mesh()
+        model = nn.Linear(8, 4, bias=False, device="cuda")
+        torch.distributed.broadcast(model.weight.data, src=0)
+
+        def shard_dim1(named_params, _mesh):
+            return {fqn: (Shard(1),) for fqn, _ in named_params}
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            r"only CUDA Shard\(0\) buckets.*Shard dimension is \[1\]",
+        ):
+            self._flex_shard(
+                model,
+                mesh,
+                shard_placement_fn=shard_dim1,
+                buckets=[BucketSpec(["*"], reshard_after_forward=True)],
+            )
+
     def test_eager_reshard_after_forward_prefetches_next_bucket(self):
         """RAF eager buckets prefetch the next bucket as raw AG state."""
         from torchtitan.experiments.flex_shard import BucketSpec

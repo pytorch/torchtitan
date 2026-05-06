@@ -18,8 +18,10 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.experiments.flex_shard import (
+    BucketSpec,
     flex_shard,
     lift_params_to_global_spmd_mesh,
+    per_param_placements,
 )
 
 TRACE_DIR = "/data/users/weif/code-review/torchtitan/profiler_traces"
@@ -63,9 +65,21 @@ def main():
     lift_params_to_global_spmd_mesh(model, mesh)
 
     # Wrap each layer first, then root
-    for i, layer in enumerate(model.layers):
-        flex_shard(layer, mesh, DataParallelMeshDims(shard="fsdp"))
-    flex_shard(model, mesh, DataParallelMeshDims(shard="fsdp"))
+    for layer in model.layers:
+        flex_shard(
+            layer,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["0.*"]), BucketSpec(["2.*"])],
+        )
+    flex_shard(
+        model,
+        mesh,
+        DataParallelMeshDims(shard="fsdp"),
+        shard_placement_fn=per_param_placements,
+        buckets=[BucketSpec(["embed.*"]), BucketSpec(["output.*"])],
+    )
 
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
 
