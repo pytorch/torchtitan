@@ -423,7 +423,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
-            self.loss_fn.enable_spmd_types(parallel_dims.spmd_dp_axes())
+            tp_axis = parallel_dims.get_spmd_axis("tp")
+            self.loss_fn.enable_spmd_types(
+                parallel_dims.spmd_dp_axes(),
+                tp_axis=tp_axis if tp_axis.size() > 1 else None,
+                tp_pg=parallel_dims.get_spmd_pg("tp"),
+            )
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -482,6 +487,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
 
             spmd.register_local_autograd_function(RegisterPostBackwardFunction)
+
+            # Register real meshes in the shard propagator so type
+            # propagation works for ops like rms_norm, embedding, etc.
+            # Must use PGs from the dense mesh (same as FSDP's mesh).
+            from spmd_types._checker import _shard_propagator
+
+            # Don't register real dense submeshes — they carry parent context
+            # with trivial dims that pollute DTensor dispatch. The shard
+            # propagator auto-creates standalone fake meshes by size.
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -662,13 +676,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         Params are handled by FSDP's _restore_spmd_types. Buffers are not
         FSDP-managed, so their annotations are lost by to_empty.
+        DP axes get R (different data per rank), TP gets I (identical).
         """
         from torch.distributed.tensor import DTensor
 
         dp_axes = self.parallel_dims.spmd_dp_axes()
-        if not dp_axes:
-            return
         spmd_type = {axis: spmd.R for axis in dp_axes}
+        tp_axis = self.parallel_dims.get_spmd_axis("tp")
+        if tp_axis.size() > 1:
+            spmd_type[tp_axis] = spmd.R
+        if not spmd_type:
+            return
         for buf in model.buffers():
             if not isinstance(buf, DTensor):
                 spmd.assert_type(buf, spmd_type)
@@ -679,18 +697,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         labels: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Annotate inputs, labels, and positions with spmd_types {dp: S(0)}."""
+        """Annotate inputs, labels, and positions with spmd_types.
 
+        DP axes get S(0) (batch-sharded). TP axis gets I (invariant —
+        each TP rank sees the same tokens).
+        """
         dp_axes = self.parallel_dims.spmd_dp_axes()
-        if not dp_axes:
-            return inputs, labels
+        tp_axis = self.parallel_dims.get_spmd_axis("tp")
 
-        if len(dp_axes) == 1:
-            spmd_type = {dp_axes[0]: spmd.S(0)}
-            for t in (inputs, labels, positions):
-                spmd.assert_type(t, spmd_type)
+        spmd_type: dict = {}
+        if tp_axis.size() > 1:
+            spmd_type[tp_axis] = spmd.R
+
+        if len(dp_axes) <= 1:
+            for axis in dp_axes:
+                spmd_type[axis] = spmd.S(0)
+            if spmd_type:
+                for t in (inputs, labels, positions):
+                    spmd.assert_type(t, spmd_type)
         else:
-            spmd_type = {axis: spmd.V for axis in dp_axes}
+            for axis in dp_axes:
+                spmd_type[axis] = spmd.V
             for t in (inputs, labels, positions):
                 spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
                 spmd.assert_type(t, spmd_type, spec)
@@ -749,16 +776,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            current_mesh = (
-                spmd.set_current_mesh(self.parallel_dims.spmd_all_axes())
-                if self.full_spmd_types
-                else contextlib.nullcontext()
-            )
-            typechecker = (
-                spmd.typecheck(local=False)
-                if self.full_spmd_types
-                else contextlib.nullcontext()
-            )
+            current_mesh = spmd.set_current_mesh(self.parallel_dims.spmd_all_axes()) if self.full_spmd_types else contextlib.nullcontext()
+            typechecker = spmd.typecheck(local=False) if self.full_spmd_types else contextlib.nullcontext()
             with self.train_context(), current_mesh, typechecker:
                 pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                 loss = self.loss_fn(pred, labels, global_valid_tokens)

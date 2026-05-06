@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 DP_REPLICATE = MeshAxisName.DP_REPLICATE
 DP_SHARD = MeshAxisName.DP_SHARD
 FSDP = MeshAxisName.FSDP
+TP = MeshAxisName.TP
 
 
 def set_llama3_sharding_config(
@@ -33,6 +34,8 @@ def set_llama3_sharding_config(
     enable_sp: bool,
     full_spmd_types: bool = False,
     dp_replicate_enabled: bool = False,
+    dp_shard_enabled: bool = True,
+    enable_tp: bool = False,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
@@ -46,7 +49,8 @@ def set_llama3_sharding_config(
     ``full_spmd_types`` uses LocalSpmdConfig instead of LocalMapConfig.
     """
     set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+        config, loss_parallel=loss_parallel, enable_sp=enable_sp,
+        full_spmd_types=full_spmd_types,
     )
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(
@@ -54,6 +58,8 @@ def set_llama3_sharding_config(
             enable_sp=enable_sp,
             full_spmd_types=full_spmd_types,
             dp_replicate_enabled=dp_replicate_enabled,
+            dp_shard_enabled=dp_shard_enabled,
+            enable_tp=enable_tp,
         )
 
 
@@ -63,6 +69,8 @@ def _set_llama3_layer_sharding(
     enable_sp: bool,
     full_spmd_types: bool = False,
     dp_replicate_enabled: bool = False,
+    dp_shard_enabled: bool = True,
+    enable_tp: bool = False,
 ) -> None:
     """Set sharding on one Llama3 transformer layer.
 
@@ -82,6 +90,8 @@ def _set_llama3_layer_sharding(
         _set_inner_attention_local_spmd(
             layer_cfg.attention.inner_attention,
             dp_replicate_enabled=dp_replicate_enabled,
+            dp_shard_enabled=dp_shard_enabled,
+            enable_tp=enable_tp,
         )
     else:
         set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
@@ -98,22 +108,45 @@ def _set_inner_attention_local_spmd(
     inner_attention_cfg,
     *,
     dp_replicate_enabled: bool = False,
+    dp_shard_enabled: bool = True,
+    enable_tp: bool = False,
 ) -> None:
-    """Install a LocalSpmdConfig for inner attention with DP axes."""
+    """Install a LocalSpmdConfig for inner attention with DP and/or TP axes."""
     from spmd_types import S, V
 
     # q/k/v shape: (batch, seq, heads, head_dim)
+    batch_axes: list = []
+    heads_axis = None
+
     if dp_replicate_enabled:
-        qkv_type: dict = {DP_REPLICATE: V, DP_SHARD: V}
-        spec = ((DP_REPLICATE, DP_SHARD), None, None, None)
+        batch_axes.append(DP_REPLICATE)
+    if dp_shard_enabled:
+        batch_axes.append(DP_SHARD)
+
+    if enable_tp:
+        heads_axis = TP
+
+    # When multiple axes shard different tensor dims, we need explicit V types
+    # + PartitionSpec template. With a single axis, S(dim) suffices (local_map
+    # auto-decays S(dim) to V + PartitionSpec).
+    sharded_axes = batch_axes + ([heads_axis] if heads_axis else [])
+    needs_spec = len(sharded_axes) > 1
+
+    if needs_spec:
+        qkv_type: dict = {axis: V for axis in sharded_axes}
+        batch_entry = tuple(batch_axes) if len(batch_axes) > 1 else batch_axes[0]
+        spec_template = (batch_entry, None, heads_axis, None)
+        leaf = (qkv_type, spec_template)
     else:
-        qkv_type = {DP_SHARD: S(0)}
-        spec = None
+        qkv_type = {}
+        if batch_axes:
+            qkv_type[batch_axes[0]] = S(0)
+        if heads_axis:
+            qkv_type[heads_axis] = S(2)
+        leaf = qkv_type
 
     set_gqa_inner_attention_local_spmd(
         inner_attention_cfg,
-        in_types=(qkv_type, qkv_type, qkv_type),
-        out_types=(qkv_type,),
-        in_partition_specs=(spec, spec, spec) if spec else None,
-        out_partition_specs=(spec,) if spec else None,
+        in_specs=(leaf, leaf, leaf),
+        out_specs=leaf,
     )

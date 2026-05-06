@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import torch
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
@@ -206,6 +207,23 @@ class ParallelDims:
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
+        # Eagerly populate spmd_axes from the dense mesh so all code
+        # (parallelize, FSDP, trainer) uses the same PG objects.
+        if self.full_spmd_types:
+            from torch.distributed.spmd_types import MeshAxis
+
+            for name in dense_mesh.mesh_dim_names:
+                if name == "pp":
+                    continue
+                size = dense_mesh.size(dense_mesh.mesh_dim_names.index(name))
+                if size > 1:
+                    pg = dense_mesh.get_group(name)
+                    pg._set_group_desc(name)
+                    self._spmd_axes[name] = MeshAxis.of(pg)
+                    self._spmd_pgs[name] = pg
+                else:
+                    self._spmd_axes[name] = MeshAxis.of(1, 1)
+
         # Validate mesh sizes
         self._validate_meshes()
 
@@ -367,6 +385,16 @@ class ParallelDims:
             if a is axis:
                 return self._spmd_pgs.get(name)
         return None
+
+    def tp_shard(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
+        """Slice tensor along dim by TP rank. No DTensor involved."""
+        import torch.distributed as dist
+
+        tp_pg = self.get_spmd_pg("tp")
+        assert tp_pg is not None, "TP is not enabled"
+        rank = dist.get_rank(tp_pg)
+        chunks = tensor.chunk(self.tp, dim=dim)
+        return chunks[rank].contiguous()
 
     def spmd_dp_axes(self) -> list:
         """Active DP MeshAxis objects."""
