@@ -35,7 +35,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     _make_default_memory_policy,
     apply_sac_pass,
     insert_kernel_annotations_pass,
-    reassign_to_pg_pass,
+    overlap_fsdp_ag_rs_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
@@ -79,8 +79,8 @@ class ToyModel(Module):
         return x
 
 
-class TestReassignToPgPass(FSDPTest):
-    """Integration tests: toy model + simple_fsdp + export_joint + reassign_to_pg_pass."""
+class TestOverlapFsdpAgRsPass(FSDPTest):
+    """Integration tests: toy model + simple_fsdp + export_joint + overlap_fsdp_ag_rs_pass."""
 
     def _setup(self):
         """Set up ParallelDims and device mesh for FSDP."""
@@ -142,14 +142,15 @@ class TestReassignToPgPass(FSDPTest):
                 count += 1
         return count
 
-    def test_reassign_rewrites_ag_nodes(self):
-        """Apply reassign_to_pg_pass on the real backward graph and verify
-        that all-gather nodes are rewritten to the target PG."""
+    def test_overlap_rewrites_ag_nodes(self):
+        """Apply overlap_fsdp_ag_rs_pass on the real backward graph and verify
+        that FSDP AG nodes are rewritten to the auto-created extra PG."""
+        from torchtitan.experiments.graph_trainer.passes import _EXTRA_FSDP_PG_REGISTRY
+
         self._setup()
         model = self._make_fsdp_model()
         inputs = torch.randn(4, 16).cuda()
         fsdp_pg_name = self._get_fsdp_pg_name()
-        target_pg_name = "test_target_pg"
 
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
@@ -157,101 +158,44 @@ class TestReassignToPgPass(FSDPTest):
         ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
         self.assertGreater(ag_before, 0, "Expected AG nodes with FSDP PG name")
 
-        # Apply the pass
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name=fsdp_pg_name,
-            target_pg_name=target_pg_name,
-        )
+        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
 
-        # After: AG nodes should use the target PG
+        extra_pg_name = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
         ag_with_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        ag_with_new = self._count_ag_nodes_with_pg(bw_gm, target_pg_name)
+        ag_with_new = self._count_ag_nodes_with_pg(bw_gm, extra_pg_name)
 
         self.assertEqual(ag_with_old, 0, "No AG nodes should still use the old PG")
         self.assertEqual(
-            ag_with_new, ag_before, "All AG nodes should now use the target PG"
+            ag_with_new,
+            ag_before,
+            "All AG nodes should now use the extra PG",
         )
 
-    def test_reassign_preserves_total_ag_count(self):
+    def test_overlap_preserves_total_ag_count(self):
         """The pass should not add or remove AG nodes, only rewrite PG names."""
         self._setup()
         model = self._make_fsdp_model()
         inputs = torch.randn(4, 16).cuda()
-        fsdp_pg_name = self._get_fsdp_pg_name()
 
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
         total_before = self._count_all_ag_nodes(bw_gm)
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name=fsdp_pg_name,
-            target_pg_name="new_pg",
-        )
+        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
         total_after = self._count_all_ag_nodes(bw_gm)
 
         self.assertEqual(total_before, total_after)
 
-    def test_reassign_with_non_matching_pg_is_noop(self):
-        """If the source PG name doesn't match any AG node, nothing changes."""
+    def test_overlap_is_noop_when_no_fsdp_ag(self):
+        """If the graph has no FSDP all-gathers, the pass is a no-op."""
         self._setup()
-        model = self._make_fsdp_model()
-        inputs = torch.randn(4, 16).cuda()
-        fsdp_pg_name = self._get_fsdp_pg_name()
-
-        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
-
-        ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-
-        # Use a non-matching source PG name
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name="nonexistent_pg",
-            target_pg_name="target_pg",
-        )
-
-        # FSDP AG nodes should be unchanged
-        ag_after = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        self.assertEqual(ag_before, ag_after)
-
-    def test_reassign_with_extra_pg(self):
-        """Test the production-like flow: create an extra FSDP PG and
-        reassign AG nodes to it."""
-        self._setup()
-        model = self._make_fsdp_model()
-        inputs = torch.randn(4, 16).cuda()
-        fsdp_pg_name = self._get_fsdp_pg_name()
-
-        # Create an extra PG mirroring the FSDP topology
-        from torchtitan.experiments.graph_trainer.common_utils import (
-            create_extra_fsdp_pg,
-            get_extra_fsdp_pg_name,
-        )
-
-        create_extra_fsdp_pg(self.parallel_dims)
-        extra_pg_name = get_extra_fsdp_pg_name(fsdp_pg_name)
-
-        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
-
-        ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        self.assertGreater(ag_before, 0)
-
-        # Reassign to the real extra PG
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name=fsdp_pg_name,
-            target_pg_name=extra_pg_name,
-        )
-
-        ag_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        ag_new = self._count_ag_nodes_with_pg(bw_gm, extra_pg_name)
-
-        self.assertEqual(ag_old, 0)
-        self.assertEqual(ag_new, ag_before)
+        # Plain (non-FSDP) module: a graph without FSDP all-gathers.
+        gm = torch.fx.symbolic_trace(torch.nn.Linear(4, 4))
+        ag_before = self._count_all_ag_nodes(gm)
+        overlap_fsdp_ag_rs_pass(gm, ())
+        ag_after = self._count_all_ag_nodes(gm)
+        self.assertEqual(ag_before, 0)
+        self.assertEqual(ag_after, 0)
 
 
 class TestApplySACPass(TestCase):
