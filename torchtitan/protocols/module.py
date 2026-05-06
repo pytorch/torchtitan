@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import inspect
-import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
@@ -15,7 +14,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 
-import torch.distributed.spmd_types as spmd
+import spmd_types as spmd
 from torchtitan.config import Configurable
 from torch.distributed.tensor import Replicate
 from torchtitan.protocols.sharding import (
@@ -105,7 +104,6 @@ def _spmd_redistribute_tensor(
     parallel_dims: "ParallelDims",
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
-
     for axis, dst_t in dst_types.items():
         if axis.size() <= 1:
             continue
@@ -443,9 +441,8 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         # Shard states: physically slice TP-sharded params, annotate all.
-        # Replicate → R for params (different data per DP rank).
-        # Replicate on TP → I (no grad reduction) unless grad_placement
-        # says otherwise.
+        # Replicate -> R for params (different data per DP rank).
+        # Replicate on TP -> I (no grad reduction).
         i_to_r_params: list[str] = []
         tp_pg = parallel_dims.get_spmd_pg("tp")
 
@@ -463,7 +460,7 @@ class Module(nn.Module, Configurable):
                         break
 
             resolved = resolve_spmd(named_p, parallel_dims)
-            # Replicate → R only on DP axes (different data per rank).
+            # Replicate -> R only on DP axes (different data per rank).
             # TP-replicated params stay I (identical computation).
             dp_axes_set = set(parallel_dims.spmd_dp_axes())
             resolved = {
@@ -568,8 +565,6 @@ class Module(nn.Module, Configurable):
 
             if out_dst and isinstance(outputs, torch.Tensor):
                 if out_src:
-                    # Annotate with src type first (shard propagator may
-                    # have produced wrong types on non-redistributed axes)
                     _spmd_annotate_tensor(outputs, out_src)
                     outputs = _spmd_redistribute_tensor(outputs, out_src, out_dst, parallel_dims)
                 else:

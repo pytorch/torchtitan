@@ -17,7 +17,7 @@ from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
-import torch.distributed.spmd_types as spmd
+import spmd_types as spmd
 from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
@@ -142,10 +142,6 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_input_grad_placements: Per-input gradient placement.
-            Disambiguates ``Replicate()`` → ``R`` vs ``I`` for spmd_types.
-        local_output_grad_placements: Output gradient placement.
-            Same disambiguation for outputs.
         local_map: If set, wraps forward with ``local_map()``.
         local_spmd: If set, wraps forward with spmd_types local
             typechecking boundary. Mutually exclusive with ``local_map``.
@@ -156,8 +152,6 @@ class ShardingConfig:
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_src_shardings: NamedPlacement | None = None
     out_dst_shardings: NamedPlacement | None = None
-    local_input_grad_placements: dict[str, NamedPlacement] | None = None
-    local_output_grad_placements: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
     local_spmd: LocalSpmdConfig | None = None
 
@@ -200,9 +194,8 @@ def placement_to_spmd_type(
 ) -> Any:
     """Convert a DTensor Placement to an spmd_types type.
 
-    Shard(dim) → S(dim), Partial() → P, Replicate() → R.
+    Shard(dim) -> S(dim), Partial() -> P, Replicate() -> R.
     """
-
     if isinstance(placement, Shard):
         return spmd.S(placement.dim)
     if isinstance(placement, Partial):
@@ -262,8 +255,7 @@ def resolve_local_spmd_spec_leaf(
 ) -> Any:
     """Resolve one ``LocalSpmdConfig`` spec leaf for ``spmd.local_map``.
 
-    Returns a ``_LocalMapSpecLeaf``: resolved ``dict``, ``(dict, PartitionSpec)``,
-    or ``None``.
+    Returns a resolved ``dict``, ``(dict, PartitionSpec)``, or ``None``.
     """
     if leaf is None:
         return None
