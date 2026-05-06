@@ -58,6 +58,14 @@ Example usages:
 10. Run baseline with specific options and export the losses:
     loss_compare.py . . --baseline-options='--parallelism.dp=2' \
         --export-result=my_config_losses.txt
+
+11. Verify checkpoint resume produces identical loss:
+    loss_compare.py . . --test-checkpoint-resume --steps=20 \
+        --import-result=tests/assets/losses/llama3_cuda.txt --assert-equal
+
+12. Verify checkpoint resume with custom interval:
+    loss_compare.py . . --test-checkpoint-resume --test-checkpoint-interval=5 \
+        --steps=20 --assert-equal
 """
 
 import argparse
@@ -225,6 +233,7 @@ def validate_arguments(
     assert_equal: bool,
     export_result: str | None,
     import_result: str | None,
+    test_checkpoint_resume: bool = False,
 ) -> bool:
     """Validate command line arguments.
 
@@ -239,7 +248,11 @@ def validate_arguments(
     options_differ = baseline_options != test_options
 
     all_identical = not (
-        commits_differ or configs_differ or modules_differ or options_differ
+        commits_differ
+        or configs_differ
+        or modules_differ
+        or options_differ
+        or test_checkpoint_resume
     )
 
     # Determine baseline-only mode:
@@ -992,6 +1005,24 @@ Examples:
         default=8,
         help="Number of GPUs for test run (default: 8)",
     )
+    parser.add_argument(
+        "--test-checkpoint-resume",
+        action="store_true",
+        help=(
+            "Run the test scenario in two phases: train to checkpoint "
+            "interval and save, then resume to --steps.  Verifies that "
+            "checkpoint save/load does not corrupt training state."
+        ),
+    )
+    parser.add_argument(
+        "--test-checkpoint-interval",
+        type=int,
+        default=0,
+        help=(
+            "Checkpoint interval for --test-checkpoint-resume. "
+            "Defaults to steps // 2 if not specified."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1083,6 +1114,7 @@ def main() -> None:
         args.assert_equal,
         args.export_result,
         args.import_result,
+        args.test_checkpoint_resume,
     )
 
     # Setup environment
@@ -1151,28 +1183,88 @@ def main() -> None:
             args.job_dump_folder, baseline_tb_folder
         )
 
+        # Resolve checkpoint resume interval
+        checkpoint_resume_interval = None
+        if args.test_checkpoint_resume:
+            checkpoint_resume_interval = args.test_checkpoint_interval
+            if checkpoint_resume_interval <= 0:
+                checkpoint_resume_interval = args.steps // 2
+            if checkpoint_resume_interval >= args.steps:
+                log_print(
+                    f"Error: --test-checkpoint-interval ({checkpoint_resume_interval}) "
+                    f"must be less than --steps ({args.steps})"
+                )
+                sys.exit(1)
+            log_print(
+                f"Checkpoint resume enabled: save at step "
+                f"{checkpoint_resume_interval}, resume to step {args.steps}"
+            )
+
         # Run test training (skip in baseline-only mode)
         test_log = None
         test_losses = None
         if not baseline_only_mode:
-            test_log = run_scenario(
-                "test",
-                args.test_commit,
-                args.test_module,
-                args.test_config,
-                args.test_options,
-                args.steps,
-                enable_seed_checkpoint,
-                args.output_folder,
-                args.job_dump_folder,
-                args.test_ngpus,
-                tb_folder=test_tb_folder,
-            )
+            if checkpoint_resume_interval is not None:
+                # Two-phase test: train to checkpoint, save, resume to final step.
+                # Phase 1: train to checkpoint interval
+                ckpt_options = f"{args.test_options} --checkpoint.enable"
+                run_scenario(
+                    "test_phase1",
+                    args.test_commit,
+                    args.test_module,
+                    args.test_config,
+                    ckpt_options,
+                    checkpoint_resume_interval,
+                    enable_seed_checkpoint,
+                    args.output_folder,
+                    args.job_dump_folder,
+                    args.test_ngpus,
+                    tb_folder=test_tb_folder,
+                )
+                phase1_losses = extract_losses_from_tensorboard(
+                    args.job_dump_folder, test_tb_folder
+                )
 
-            # Extract test losses from TensorBoard (full precision)
-            test_losses = extract_losses_from_tensorboard(
-                args.job_dump_folder, test_tb_folder
-            )
+                # Phase 2: resume from checkpoint, train to final step
+                run_scenario(
+                    "test_phase2",
+                    args.test_commit,
+                    args.test_module,
+                    args.test_config,
+                    ckpt_options,
+                    args.steps,
+                    enable_seed_checkpoint,
+                    args.output_folder,
+                    args.job_dump_folder,
+                    args.test_ngpus,
+                    tb_folder=test_tb_folder,
+                )
+                phase2_losses = extract_losses_from_tensorboard(
+                    args.job_dump_folder, test_tb_folder
+                )
+
+                # Merge: phase 1 (steps 1..interval) + phase 2 (steps interval+1..final)
+                test_losses = phase1_losses
+                test_losses.update(phase2_losses)
+            else:
+                run_scenario(
+                    "test",
+                    args.test_commit,
+                    args.test_module,
+                    args.test_config,
+                    args.test_options,
+                    args.steps,
+                    enable_seed_checkpoint,
+                    args.output_folder,
+                    args.job_dump_folder,
+                    args.test_ngpus,
+                    tb_folder=test_tb_folder,
+                )
+
+                # Extract test losses from TensorBoard (full precision)
+                test_losses = extract_losses_from_tensorboard(
+                    args.job_dump_folder, test_tb_folder
+                )
         log_print()
 
         # Assert losses are equal if requested
