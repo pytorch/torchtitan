@@ -7,7 +7,13 @@
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import LocalMapConfig, NamedPlacement, ShardingConfig
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    LocalSpmdConfig,
+    NamedPlacement,
+    NamedSpmdType,
+    ShardingConfig,
+)
 from torchtitan.protocols.types import MeshAxisName
 
 DP_REPLICATE = MeshAxisName.DP_REPLICATE
@@ -169,6 +175,27 @@ def set_gqa_inner_attention_local_map(
             in_placements=(qkv_placements, qkv_placements, qkv_placements),
             out_placements=(qkv_placements,) * num_outputs,
             in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
+        ),
+    )
+
+
+def set_gqa_inner_attention_local_spmd(
+    inner_attention_cfg,
+    in_types: tuple[NamedSpmdType, ...],
+    out_types: tuple[NamedSpmdType, ...],
+    in_partition_specs: tuple | None = None,
+    out_partition_specs: tuple | None = None,
+) -> None:
+    """Install a ``LocalSpmdConfig`` on an inner-attention config.
+
+    spmd_types counterpart to ``set_gqa_inner_attention_local_map``.
+    """
+    inner_attention_cfg.sharding_config = ShardingConfig(
+        local_spmd=LocalSpmdConfig(
+            in_types=in_types,
+            out_types=out_types,
+            in_partition_specs=in_partition_specs,
+            out_partition_specs=out_partition_specs,
         ),
     )
 
