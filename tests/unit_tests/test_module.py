@@ -213,12 +213,14 @@ class TestFromNnModule(unittest.TestCase):
         self.assertIsInstance(cfg.sharding_config, ShardingConfig)
 
     def test_auto_config_build_forwards_args(self):
-        """Config.build forwards positional/keyword args to the nn module."""
+        """Config.build forwards keyword args to the nn module."""
         from torchtitan.protocols.sharding import ShardingConfig
 
         LayerNorm = Module.from_nn_module(nn.LayerNorm)
         sc = ShardingConfig()
-        instance = LayerNorm.Config(sharding_config=sc).build(16, eps=1e-5)
+        instance = LayerNorm.Config(sharding_config=sc).build(
+            normalized_shape=16, eps=1e-5
+        )
         self.assertIsInstance(instance, LayerNorm)
         self.assertEqual(instance.normalized_shape, (16,))
         self.assertEqual(instance.eps, 1e-5)

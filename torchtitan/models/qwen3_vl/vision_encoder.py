@@ -339,8 +339,7 @@ class PatchMerger(Module):
             if config.use_postshuffle_norm
             else config.hidden_size
         )
-        # pyrefly: ignore [bad-argument-count]
-        self.norm = config.norm.build(norm_dim, eps=1e-6)
+        self.norm = config.norm.build(normalized_shape=norm_dim, eps=1e-6)
         self.linear_fc1 = config.fc1.build()
         self.act_fn = config.act_fn.build(approximate="tanh")
         self.linear_fc2 = config.fc2.build()
@@ -463,10 +462,12 @@ class VisionTransformerBlock(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        # pyrefly: ignore [bad-argument-count]
-        self.norm1 = config.norm1.build(config.dim, eps=config.layer_norm_eps)
-        # pyrefly: ignore [bad-argument-count]
-        self.norm2 = config.norm2.build(config.dim, eps=config.layer_norm_eps)
+        self.norm1 = config.norm1.build(
+            normalized_shape=config.dim, eps=config.layer_norm_eps
+        )
+        self.norm2 = config.norm2.build(
+            normalized_shape=config.dim, eps=config.layer_norm_eps
+        )
         self.attn = config.attn.build()
         self.mlp = config.mlp.build()
 
