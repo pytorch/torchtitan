@@ -426,7 +426,9 @@ def get_compiler_passes_from_config(
     Returns:
         List of compiler pass functions
     """
-    from torchtitan.experiments.graph_trainer.common_utils import get_buckets
+    from torchtitan.experiments.graph_trainer.common_utils import (
+        get_transformer_block_buckets,
+    )
     from torchtitan.experiments.graph_trainer.passes import AVAILABLE_COMPILER_PASSES
 
     pass_names = getattr(compile_config, "passes", [])
@@ -457,7 +459,7 @@ def get_compiler_passes_from_config(
             compiler_passes.append(
                 functools.partial(
                     AVAILABLE_COMPILER_PASSES[pass_name],
-                    fsdp_manual_buckets=get_buckets(model),
+                    fsdp_manual_buckets=get_transformer_block_buckets(model),
                 )
             )
         elif pass_name == "regional_inductor" and getattr(
@@ -532,29 +534,16 @@ def get_joint_custom_passes_from_config(
                 f"Available joint passes: {list(AVAILABLE_JOINT_PASSES.keys())}"
             )
 
-        if pass_name == "flex_shard_reshard_after_fwd":
-            # flex_shard_reshard_after_fwd_pass requires reshard_after_forward kwarg
-            joint_custom_passes.append(
-                functools.partial(
-                    AVAILABLE_JOINT_PASSES[pass_name],
-                    reshard_after_forward=fsdp_reshard_after_forward,
-                )
-            )
-        else:
-            joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
+        joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
 
     if joint_pass_names:
         logger.info(f"Using joint passes from config: {joint_pass_names}")
 
-    # flex_shard_reshard_after_fwd is a superset of fsdp_reshard_after_fwd —
-    # skip the hardcoded SimpleFSDP version when the FlexShard version is
-    # already in the user's joint_passes config.
-    if "flex_shard_reshard_after_fwd" not in joint_pass_names:
-        joint_custom_passes.append(
-            functools.partial(
-                fsdp_reshard_after_fwd_pass,
-                reshard_after_forward=fsdp_reshard_after_forward,
-            )
+    joint_custom_passes.append(
+        functools.partial(
+            fsdp_reshard_after_fwd_pass,
+            reshard_after_forward=fsdp_reshard_after_forward,
         )
+    )
 
     return joint_custom_passes

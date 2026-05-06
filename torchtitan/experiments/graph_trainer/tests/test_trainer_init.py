@@ -10,7 +10,9 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.experiments.graph_trainer.flex_shard_llama3.trainer import (
+    FlexShardGraphTrainer,
+)
 
 
 class _FlexShardLikeModel(nn.Module):
@@ -30,7 +32,7 @@ class _FlexShardLikeModel(nn.Module):
 class TestGraphTrainerInit(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_flex_shard_init_moves_buffers_without_model_to(self):
-        trainer = GraphTrainer.__new__(GraphTrainer)
+        trainer = FlexShardGraphTrainer.__new__(FlexShardGraphTrainer)
         model = _FlexShardLikeModel()
 
         trainer._init_model_weights(model, "cuda", None)

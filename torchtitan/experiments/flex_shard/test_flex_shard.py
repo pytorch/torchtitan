@@ -34,7 +34,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
-    flat_shard_placements,
     flex_shard,
     FlexShardModule,
     lift_params_to_global_spmd_mesh,
@@ -243,20 +242,18 @@ def main():
     print_rank0(f"Running tests with world_size={world_size}")
 
     success = True
-    tests = [
-        (per_param_placements, "per_param"),
-        (flat_shard_placements, "flat_shard"),
-    ]
-    for placement_fn, name in tests:
-        try:
-            run_test_per_layer_wrapping(shard_placement_fn=placement_fn, name=name)
-        except Exception as e:
-            print_rank0(f"FAILED: {name}: {e}")
-            import traceback
+    try:
+        run_test_per_layer_wrapping(
+            shard_placement_fn=per_param_placements,
+            name="per_param",
+        )
+    except Exception as e:
+        print_rank0(f"FAILED: per_param: {e}")
+        import traceback
 
-            if rank == 0:
-                traceback.print_exc()
-            success = False
+        if rank == 0:
+            traceback.print_exc()
+        success = False
 
     try:
         run_test_invalid_per_param_bucket_boundary()

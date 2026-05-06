@@ -21,8 +21,6 @@ from torchtitan.protocols.types import MeshAxisName
 
 # Placement per mesh axis, keyed by MeshAxisName.
 # Example: {MeshAxisName.TP: Shard(0), MeshAxisName.DP_SHARD: Replicate()}
-# Runtime meshes use the public FSDP axis name ("fsdp"); model sharding specs
-# use the role name DP_SHARD. ``resolve_placements`` maps "fsdp" to DP_SHARD.
 # Every sharding_config must declare a placement for every mesh axis it will be applied
 # against; ``resolve_placements`` errors otherwise.
 #
@@ -125,8 +123,6 @@ def resolve_placements(
     result = []
     for axis_name in mesh_axis_names:
         key = MeshAxisName(axis_name)
-        if key == MeshAxisName.FSDP and key not in named:
-            key = MeshAxisName.DP_SHARD
         if key not in named:
             raise ValueError(
                 f"Sharding sharding_config does not declare a placement for mesh axis "

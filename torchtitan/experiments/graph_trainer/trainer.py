@@ -66,53 +66,6 @@ class GraphTrainer(Trainer):
             default_factory=GraphTrainerCompileConfig
         )
 
-    def _get_model_build_device(self) -> str:
-        """Build on CPU so FlexShard sees real tensors at flex_shard() time."""
-        return "cpu"
-
-    def _init_model_weights(self, model, init_device, buffer_device):
-        """Initialize weights in-place (model already on CPU, not meta).
-
-        No to_empty() needed — the model was built on CPU via
-        _get_model_build_device(). FlexShard owns parameter storage after
-        parallelization, so FlexShard models move parameters before sharding and
-        only need unmanaged buffers placed after init.
-        """
-        from typing import cast
-
-        from torchtitan.protocols import BaseModel
-
-        has_flex_shard_state = any(
-            getattr(module, "_dstorages", None) is not None
-            for module in model.modules()
-        )
-        target_device = torch.device(init_device)
-        if (
-            has_flex_shard_state
-            and buffer_device is None
-            and target_device.type != "cpu"
-        ):
-            buffer_device = target_device
-
-        with torch.no_grad():
-            cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-
-        if target_device.type == "cpu":
-            return
-
-        if has_flex_shard_state:
-            for module in model.modules():
-                for name, buffer in list(module._buffers.items()):
-                    if buffer is None or buffer.device.type == "meta":
-                        continue
-                    if buffer.device != target_device:
-                        module._buffers[name] = buffer.to(target_device)
-            return
-
-        # Move to target device after init (CPU→CUDA) for non-FlexShard models.
-        if target_device.type != "cpu":
-            model.to(init_device)
-
     def __init__(self, config):
         super().__init__(config)
 
