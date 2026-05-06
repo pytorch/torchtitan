@@ -361,10 +361,3 @@ class VLLMGenerator(Actor, Configurable):
         logger.debug(
             f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
-
-    def __del__(self):
-        """Cleanup vLLM engine."""
-        if hasattr(self, "_engine"):
-            del self._engine
-            if torch is not None:
-                torch.cuda.empty_cache()
