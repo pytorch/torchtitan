@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from .collectives import EagerAllGatherResult, EagerReduceScatterResult
-from .metadata import (
+from .state import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .metadata import (
+from .state import (
     _DSTORAGE_ATTR,
     _DSTORAGES_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,

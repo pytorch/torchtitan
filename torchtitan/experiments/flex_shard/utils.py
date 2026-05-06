@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from .metadata import _BUCKET_FQN_ATTR, _DSTORAGE_ATTR, _PARAM_FQN_ATTR
+from .state import _BUCKET_FQN_ATTR, _DSTORAGE_ATTR, _PARAM_FQN_ATTR
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh

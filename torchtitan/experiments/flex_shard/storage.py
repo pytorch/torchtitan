@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 
-from .metadata import set_sharding_info
+from .state import set_sharding_info
 from .utils import _set_param_on_module
 
 if TYPE_CHECKING:

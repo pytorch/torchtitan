@@ -15,7 +15,7 @@ from .eager_runtime import (
     _create_eager_parametrizations,
     _install_batched_allgather_hooks,
 )
-from .metadata import (
+from .state import (
     get_global_shape,
     get_placements,
     is_flex_shard_param,
