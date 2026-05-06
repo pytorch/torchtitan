@@ -4,7 +4,118 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Paged stash memory policy for CUDA-graphable MoE training."""
+"""
+Paged stash memory policy for CUDA-graphable MoE training.
+
+End-to-end CUDA graph capture for MoE training with paged activation stashing
+to reduce memory consumption from dynamic expert routing.
+
+Why Paged Stashing
+------------------
+
+MoE expert activations have dynamic token counts -- the number of tokens routed
+to each expert varies per-batch due to learned routing decisions. Under HybridEP
+with capacity-factor padding, these activations are oversized (padded to worst-
+case). Standard SAC either:
+
+1. Recomputes them (expensive: grouped GEMM + SwiGLU per layer per backward), or
+2. Saves them (wasteful: each layer must reserve its own worst-case buffer,
+   O(layers x worst_case) memory even though only one layer executes at a time
+   inside CUDA graphs where the pool is fixed at capture time).
+
+Paged stashing replaces per-layer worst-case buffers with a single shared paged
+buffer plus one worst-case dispatch buffer, reducing memory from
+O(layers x worst_case) to O(worst_case + actual_usage). Activations are stored
+in the paged buffer managed by Triton kernels, and compact fixed-size page_record
+handles (int64 tensors encoding page IDs) are saved in the graph.
+
+How It Works
+------------
+
+1. **HybridEP: CUDA-graph-compatible MoE dispatch.** Standard EP dispatch
+   requires CPU-GPU sync to learn per-rank token counts. HybridEP pre-sizes the
+   buffer using a capacity factor (``num_tokens * ep_size * min(local_experts,
+   top_k) * capacity_factor``). No D2H sync needed.
+
+2. **Op-target matching.** The graph pass identifies stash-eligible
+   ``_grouped_mm`` nodes by matching ``aten._grouped_mm.default`` whose output
+   feeds ``silu`` (gate projection) or feeds a ``mul`` whose other operand is a
+   ``silu`` output (up projection, i.e. SwiGLU). The down projection feeds a
+   different ``mul`` (combine with shared experts) and is excluded.
+
+3. **Graph surgery** (``apply_paged_stash_pass``): Operates on the joint fwd+bwd
+   graph in ``aot_fx_trace`` mode. For each eligible forward node:
+   - Inserts ``paged_stash.copy`` + ``ao.wait_tensor(page_record, keepalive=activation)``
+   - Inserts ``paged_stash.pop`` + ``ao.wait_tensor(pop_output)`` before backward consumers
+   - Redirects backward consumers via ``replace_input_with``
+
+4. **After surgery.** The large activation has no backward users. SAC's remat
+   naturally ignores these nodes.
+
+5. **Stream overlap.** Copy/pop ops use ao's ``_get_or_create_transfer_stream``
+   internally. Triton kernels launch on the transfer stream; ``ao.wait_tensor``
+   synchronizes the compute stream. Captured into CUDA graphs.
+
+6. **Buffer access.** Via ``_PAGED_STASH_REGISTRY[buffer_id]`` inside op
+   implementations -- the graph only carries integer buffer_id constants.
+
+Overflow Defense
+----------------
+
+Level 1 (Host spillover): When CUDA pages exhausted, the Triton copy kernel
+falls back to a pinned host buffer. The pop kernel reads ``spilled_to_host``
+to select the source. CUDA-graph compatible (data-dependent branching).
+
+Level 2 (Hard error): If both CUDA and host buffers are exhausted, the overflow
+flag is set and a RuntimeError is raised at the start of the next step with
+guidance on how to fix (enable spillover, increase buffer, or disable paged stash).
+
+Configuration
+-------------
+
+Select with ``compile.memory_policy:paged_stash`` on the CLI. Parameters:
+
+- ``buffer_size_factor``: CUDA buffer over-provisioning (default 1.1x).
+- ``host_buffer_size_factor``: host spillover buffer (default 0, disabled).
+- ``page_size``: tokens per page (default 64).
+
+To disable paged stash, use ``compile.memory_policy:default`` — MoE activations
+will be recomputed (standard SAC behavior since ``_grouped_mm`` is not in the
+default save ops list).
+
+Note: if ``_grouped_mm`` is added to the default save ops in the future (because
+recomputing grouped GEMM + SwiGLU is too expensive), saving without paging would
+incur O(layers x worst_case_dispatch_size) memory — each layer reserves its own
+worst-case buffer in the CUDA graph memory pool. Paged stashing avoids this by
+sharing a single paged buffer across all layers: O(worst_case + actual_usage).
+
+Usage::
+
+    CUDA_HOME=/usr/local/cuda NGPU=4 \
+      MODULE=graph_trainer.deepseek_v3 \
+      CONFIG=graph_trainer_deepseek_v3_debugmodel_hybridep \
+      ./run_train.sh \
+      --compile.mode aot_fx_trace \
+      --parallelism.data_parallel_shard_degree=2 \
+      --parallelism.tensor_parallel_degree=2 \
+      --parallelism.expert_parallel_degree=2 \
+      --training.steps=10 \
+      compile.memory-policy:paged-stash \
+      --compile.memory-policy.buffer-size-factor 1.1 \
+      --compile.memory-policy.host-buffer-size-factor 0.5 \
+      --compile.memory-policy.page-size 64
+
+Buffer Sizing
+-------------
+
+::
+
+    estimated_tokens = max_tokens / capacity_factor   # balanced estimate
+    cuda_tokens = estimated_tokens * buffer_size_factor * num_ops
+    host_tokens = estimated_tokens * host_buffer_size_factor * num_ops  # 0 = off
+
+page_record format: ``[num_tokens, spilled_to_host, page_id_0, page_id_1, ...]``
+"""
 
 import functools
 import operator
