@@ -24,18 +24,29 @@ def _annotate(node: fx.Node, fqn: str) -> None:
 
 
 def _build_simple_gm() -> fx.GraphModule:
-    """Build a small graph: x -> a -> b -> c -> y. Nodes a, b, c are tagged
-    with module_fqn so we can selectively make them opaque."""
+    """Build a graph that mirrors the ChunkedCELoss buffer pattern: a
+    fresh ``buf`` is filled by two in-place ``copy_`` writes into slice
+    views (tagged ``loss``), then read back via ``clone(buf)`` (tagged
+    ``lm_head``). The reader's only FX arg-edge dependency is on ``buf``
+    itself — the read-after-write ordering between the writes and the
+    clone is implicit through shared storage. This is the aliasing case
+    a pass walking arg edges would freely reorder, and exactly what the
+    opaque_modules wrapping is meant to defend against."""
     graph = fx.Graph()
     x = graph.placeholder("x")
-    a = graph.call_function(torch.add, args=(x, 1.0))
-    b = graph.call_function(torch.mul, args=(a, 2.0))
-    c = graph.call_function(torch.sub, args=(b, 0.5))
-    graph.output(c)
+    buf = graph.call_function(torch.zeros, args=((4,),))
+    src0 = graph.call_function(torch.ops.aten.slice.Tensor, args=(x, 0, 0, 2))
+    dst0 = graph.call_function(torch.ops.aten.slice.Tensor, args=(buf, 0, 0, 2))
+    write0 = graph.call_function(torch.ops.aten.copy_.default, args=(dst0, src0))
+    src1 = graph.call_function(torch.ops.aten.slice.Tensor, args=(x, 0, 2, 4))
+    dst1 = graph.call_function(torch.ops.aten.slice.Tensor, args=(buf, 0, 2, 4))
+    write1 = graph.call_function(torch.ops.aten.copy_.default, args=(dst1, src1))
+    out = graph.call_function(torch.ops.aten.clone.default, args=(buf,))
+    graph.output(out)
     gm = fx.GraphModule({}, graph)
-    _annotate(a, "loss")
-    _annotate(b, "loss")
-    _annotate(c, "lm_head")
+    _annotate(write0, "loss")
+    _annotate(write1, "loss")
+    _annotate(out, "lm_head")
     return gm
 
 
@@ -47,34 +58,42 @@ class TestMakeModulesOpaque(TestCase):
     def test_wraps_only_matching_fqn(self):
         gm = _build_simple_gm()
         _make_modules_opaque(gm, ["loss"])
-        # loss-tagged nodes (add, mul) are wrapped in control_deps with
-        # the preceding-anchor chain; lm_head-tagged node (sub) stays as
-        # the original op.
+        # loss-tagged copy_ writes get wrapped in a control_deps chain
+        # so the bucketing pass sees an explicit write0 -> write1
+        # ordering; the lm_head-tagged clone, the buffer alloc, and the
+        # un-tagged slice views stay as plain ops. Note the clone has no
+        # FX arg edge to either copy_ — without the wrapping chain a
+        # reorder pass would be free to move it ahead of the writes.
         self.assertExpectedInline(
             normalize_gm(gm.print_readable(print_output=False)),
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, x):
-        subgraph_add = self.subgraph_add
+        zeros = torch.zeros((4,))
+        slice_tensor = torch.ops.aten.slice.Tensor(x, 0, 0, 2)
+        slice_tensor_1 = torch.ops.aten.slice.Tensor(zeros, 0, 0, 2)
+        subgraph_copy__default = self.subgraph_copy__default
 
-        add = torch.ops.higher_order.control_deps((), subgraph_add, x);  subgraph_add = x = None
+        copy__default = torch.ops.higher_order.control_deps((), subgraph_copy__default, slice_tensor_1, slice_tensor);  subgraph_copy__default = slice_tensor_1 = slice_tensor = None
 
-        subgraph_mul = self.subgraph_mul
+        slice_tensor_2 = torch.ops.aten.slice.Tensor(x, 0, 2, 4);  x = None
+        slice_tensor_3 = torch.ops.aten.slice.Tensor(zeros, 0, 2, 4)
+        subgraph_copy__default_1 = self.subgraph_copy__default_1
 
-        mul = torch.ops.higher_order.control_deps((add,), subgraph_mul, add);  add = subgraph_mul = None
+        copy__default_1 = torch.ops.higher_order.control_deps((copy__default,), subgraph_copy__default_1, slice_tensor_3, slice_tensor_2);  copy__default = subgraph_copy__default_1 = slice_tensor_3 = slice_tensor_2 = copy__default_1 = None
 
-        sub = torch.sub(mul, 0.5);  mul = None
-        return sub
+        clone_default = torch.ops.aten.clone.default(zeros);  zeros = None
+        return clone_default
 
-    class subgraph_add(torch.nn.Module):
-        def forward(self, arg_0):
-            add = torch.add(arg_0, 1.0);  arg_0 = None
-            return add
+    class subgraph_copy__default(torch.nn.Module):
+        def forward(self, arg_0, arg_1):
+            copy__default = torch.ops.aten.copy_.default(arg_0, arg_1);  arg_0 = arg_1 = None
+            return copy__default
 
-    class subgraph_mul(torch.nn.Module):
-        def forward(self, arg_0):
-            mul = torch.mul(arg_0, 2.0);  arg_0 = None
-            return mul
+    class subgraph_copy__default_1(torch.nn.Module):
+        def forward(self, arg_0, arg_1):
+            copy__default = torch.ops.aten.copy_.default(arg_0, arg_1);  arg_0 = arg_1 = None
+            return copy__default
 """,
         )
 
@@ -91,53 +110,66 @@ class GraphModule(torch.nn.Module):
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, x):
-        add = torch.add(x, 1.0);  x = None
-        mul = torch.mul(add, 2.0);  add = None
+        zeros = torch.zeros((4,))
+        slice_tensor = torch.ops.aten.slice.Tensor(x, 0, 0, 2)
+        slice_tensor_1 = torch.ops.aten.slice.Tensor(zeros, 0, 0, 2)
 
-        sub = torch.sub(mul, 0.5);  mul = None
-        return sub
+        copy__default = torch.ops.aten.copy_.default(slice_tensor_1, slice_tensor);  slice_tensor_1 = slice_tensor = copy__default = None
+
+        slice_tensor_2 = torch.ops.aten.slice.Tensor(x, 0, 2, 4);  x = None
+        slice_tensor_3 = torch.ops.aten.slice.Tensor(zeros, 0, 2, 4)
+
+        copy__default_1 = torch.ops.aten.copy_.default(slice_tensor_3, slice_tensor_2);  slice_tensor_3 = slice_tensor_2 = copy__default_1 = None
+
+        clone_default = torch.ops.aten.clone.default(zeros);  zeros = None
+        return clone_default
 """,
         )
 
     def test_pairs_consecutive_anchored_nodes(self):
         gm = _build_simple_gm()
         _make_modules_opaque(gm, ["loss", "lm_head"])
-        # Each anchored node carries a control_deps tuple referencing the
-        # previous anchored node, forming the "loss → loss → lm_head"
-        # chain that the wrapping pass must respect. The first wrap has
-        # an empty deps tuple.
+        # All loss + lm_head tagged nodes get linked into one shared
+        # dependency chain (write0 -> write1 -> clone), so the bucketing
+        # pass is forced to keep the writes before the read even though
+        # FX arg edges don't connect them.
         self.assertExpectedInline(
             normalize_gm(gm.print_readable(print_output=False)),
             """\
 class GraphModule(torch.nn.Module):
     def forward(self, x):
-        subgraph_add = self.subgraph_add
+        zeros = torch.zeros((4,))
+        slice_tensor = torch.ops.aten.slice.Tensor(x, 0, 0, 2)
+        slice_tensor_1 = torch.ops.aten.slice.Tensor(zeros, 0, 0, 2)
+        subgraph_copy__default = self.subgraph_copy__default
 
-        add = torch.ops.higher_order.control_deps((), subgraph_add, x);  subgraph_add = x = None
+        copy__default = torch.ops.higher_order.control_deps((), subgraph_copy__default, slice_tensor_1, slice_tensor);  subgraph_copy__default = slice_tensor_1 = slice_tensor = None
 
-        subgraph_mul = self.subgraph_mul
+        slice_tensor_2 = torch.ops.aten.slice.Tensor(x, 0, 2, 4);  x = None
+        slice_tensor_3 = torch.ops.aten.slice.Tensor(zeros, 0, 2, 4)
+        subgraph_copy__default_1 = self.subgraph_copy__default_1
 
-        mul = torch.ops.higher_order.control_deps((add,), subgraph_mul, add);  add = subgraph_mul = None
+        copy__default_1 = torch.ops.higher_order.control_deps((copy__default,), subgraph_copy__default_1, slice_tensor_3, slice_tensor_2);  copy__default = subgraph_copy__default_1 = slice_tensor_3 = slice_tensor_2 = None
 
-        subgraph_sub = self.subgraph_sub
+        subgraph_clone_default = self.subgraph_clone_default
 
-        sub = torch.ops.higher_order.control_deps((mul,), subgraph_sub, mul);  mul = subgraph_sub = None
-        return sub
+        clone_default = torch.ops.higher_order.control_deps((copy__default_1,), subgraph_clone_default, zeros);  copy__default_1 = subgraph_clone_default = zeros = None
+        return clone_default
 
-    class subgraph_add(torch.nn.Module):
+    class subgraph_copy__default(torch.nn.Module):
+        def forward(self, arg_0, arg_1):
+            copy__default = torch.ops.aten.copy_.default(arg_0, arg_1);  arg_0 = arg_1 = None
+            return copy__default
+
+    class subgraph_copy__default_1(torch.nn.Module):
+        def forward(self, arg_0, arg_1):
+            copy__default = torch.ops.aten.copy_.default(arg_0, arg_1);  arg_0 = arg_1 = None
+            return copy__default
+
+    class subgraph_clone_default(torch.nn.Module):
         def forward(self, arg_0):
-            add = torch.add(arg_0, 1.0);  arg_0 = None
-            return add
-
-    class subgraph_mul(torch.nn.Module):
-        def forward(self, arg_0):
-            mul = torch.mul(arg_0, 2.0);  arg_0 = None
-            return mul
-
-    class subgraph_sub(torch.nn.Module):
-        def forward(self, arg_0):
-            sub = torch.sub(arg_0, 0.5);  arg_0 = None
-            return sub
+            clone_default = torch.ops.aten.clone.default(arg_0);  arg_0 = None
+            return clone_default
 """,
         )
 
@@ -220,12 +252,12 @@ class TestOpaqueModulesDecorator(unittest.TestCase):
         wrapped(gm)
 
         # The pass should observe control_deps in place of the loss-tagged
-        # ops (torch.add and torch.mul) but the unanchored torch.sub
-        # remains visible as itself.
+        # copy_ writes, while the unanchored clone (lm_head) and slice
+        # views remain visible as themselves.
         self.assertIn(control_deps, seen_targets)
-        self.assertNotIn(torch.add, seen_targets)
-        self.assertNotIn(torch.mul, seen_targets)
-        self.assertIn(torch.sub, seen_targets)
+        self.assertNotIn(torch.ops.aten.copy_.default, seen_targets)
+        self.assertIn(torch.ops.aten.clone.default, seen_targets)
+        self.assertIn(torch.ops.aten.slice.Tensor, seen_targets)
 
 
 if __name__ == "__main__":
