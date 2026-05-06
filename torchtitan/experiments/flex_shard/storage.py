@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -251,7 +251,7 @@ def _compute_local_info(
 
 def _create_param_infos(
     named_params: list[tuple[str, nn.Parameter]],
-    mesh_info: Any,
+    mesh: DeviceMesh,
     param_placements: dict[str, tuple[Placement, ...]],
 ) -> tuple[dict[str, ParamInfo], int]:
     """
@@ -262,7 +262,7 @@ def _create_param_infos(
 
     Args:
         named_params: List of (fqn, param) tuples
-        mesh_info: Mesh metadata for sharding
+        mesh: DP shard mesh used for sharding
         param_placements: Dict mapping FQN to placement tuple for each parameter
 
     Returns:
@@ -276,9 +276,7 @@ def _create_param_infos(
         placements = param_placements[fqn]
         global_shape = param.shape
         global_stride = make_contiguous_strides_for(global_shape)
-        local_shape, local_numel = _compute_local_info(
-            global_shape, mesh_info.dp_shard_mesh, placements
-        )
+        local_shape, local_numel = _compute_local_info(global_shape, mesh, placements)
         dtype = param.dtype
         global_numel = param.numel()
 
@@ -309,7 +307,7 @@ def _create_param_infos(
 def _create_sharded_view(
     local_view: torch.Tensor,
     info: ParamInfo,
-    mesh_info: Any,
+    mesh: DeviceMesh,
 ) -> torch.Tensor:
     """Annotate a local tensor view with placement metadata."""
     set_sharding_info(
@@ -317,7 +315,7 @@ def _create_sharded_view(
         placements=info.placements,
         global_shape=info.global_shape,
         global_stride=info.global_stride,
-        mesh=mesh_info.dp_shard_mesh,
+        mesh=mesh,
     )
     return local_view
 
@@ -326,14 +324,13 @@ def _write_params_to_dstorage(
     byte_storage: torch.Tensor,
     named_params: list[tuple[str, nn.Parameter]],
     param_infos: dict[str, ParamInfo],
-    mesh_info: Any,
+    mesh: DeviceMesh,
 ) -> None:
     """Pack original parameter data into byte storage.
 
     Calls placement.extract_local_shard() to get each rank's typed local shard,
     then copies it as uint8 into the byte buffer.
     """
-    mesh = mesh_info.dp_shard_mesh
     my_rank = mesh.get_local_rank()
     world_size = mesh.size()
 

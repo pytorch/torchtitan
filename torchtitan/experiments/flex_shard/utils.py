@@ -152,6 +152,37 @@ def _validate_flex_shard_mesh(
             )
 
 
+def _get_submesh(mesh: DeviceMesh, names: tuple[str, ...]) -> DeviceMesh:
+    """Return one mesh axis or flatten several named mesh axes."""
+    if len(names) == 1:
+        return mesh[names[0]]
+    return mesh[names]._flatten("_".join(names))
+
+
+def _get_dp_shard_mesh(
+    mesh: DeviceMesh,
+    dp_mesh_dims: DataParallelMeshDims,
+) -> DeviceMesh:
+    """Derive FlexShard's DP shard mesh from the input mesh."""
+    _validate_flex_shard_mesh(mesh, dp_mesh_dims)
+
+    assert mesh.mesh_dim_names is not None
+    return _get_submesh(mesh, dp_mesh_dims.shard_names)
+
+
+def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:
+    """Return the current rank's device for ``mesh``."""
+    if mesh.device_type == "cpu":
+        return torch.device("cpu")
+    if mesh.device_type == "cuda":
+        return torch.device("cuda", torch.cuda.current_device())
+    try:
+        device_module = torch.get_device_module(mesh.device_type)
+    except (AttributeError, RuntimeError):
+        return torch.device(mesh.device_type)
+    return torch.device(mesh.device_type, device_module.current_device())
+
+
 def _validate_eager_params(
     named_params: list[tuple[str, nn.Parameter]],
     expected_device: torch.device | None = None,
@@ -189,6 +220,21 @@ def _validate_placements(
     from .placements import FlatShard, Owned, RaggedShard, Shard
 
     param_dict = dict(named_params)
+    expected_fqns = set(param_dict)
+    actual_fqns = set(param_placements)
+    missing_fqns = expected_fqns - actual_fqns
+    extra_fqns = actual_fqns - expected_fqns
+    if missing_fqns or extra_fqns:
+        msg_parts = []
+        if missing_fqns:
+            msg_parts.append(f"missing placements for {sorted(missing_fqns)}")
+        if extra_fqns:
+            msg_parts.append(f"unexpected placements for {sorted(extra_fqns)}")
+        raise ValueError(
+            "shard_placement_fn must return placements for exactly the managed "
+            f"parameters; {', '.join(msg_parts)}."
+        )
+
     world_size = mesh.size()
 
     for fqn, placements in param_placements.items():

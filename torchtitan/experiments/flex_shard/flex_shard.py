@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -57,7 +56,9 @@ from .storage import (
     OffloadPolicy,
 )
 from .utils import (
+    _get_device_from_mesh,
     _get_managed_named_params,
+    _get_dp_shard_mesh,
     _is_graph_capture_active,
     _raise_graph_capture_unsupported,
     _raise_missing_eager_batched_unshard,
@@ -65,7 +66,6 @@ from .utils import (
     disable_active_parametrization,
     _validate_bucket_placements,
     _validate_eager_params,
-    _validate_flex_shard_mesh,
     _validate_placements,
 )
 
@@ -84,51 +84,6 @@ __all__ = [
     "MixedPrecisionPolicy",
     "set_sharding_info",
 ]
-
-
-@dataclass(frozen=True)
-class FlexShardMeshInfo:
-    """Mesh metadata for FlexShard's data-parallel shard view.
-
-    ``dp_shard_mesh`` is the one-dimensional mesh used for FlexShard
-    collectives and storage sharding.
-    """
-
-    dp_shard_mesh: DeviceMesh
-
-
-def _get_submesh(mesh: DeviceMesh, names: tuple[str, ...]) -> DeviceMesh:
-    """Return one mesh dim or flatten several named mesh dims."""
-    if len(names) == 1:
-        return mesh[names[0]]
-    return mesh[names]._flatten("_".join(names))
-
-
-def _get_flex_shard_mesh_info(
-    mesh: DeviceMesh,
-    dp_mesh_dims: DataParallelMeshDims,
-) -> FlexShardMeshInfo:
-    """Derive FlexShard's DP shard mesh from the input mesh."""
-    _validate_flex_shard_mesh(mesh, dp_mesh_dims)
-
-    assert mesh.mesh_dim_names is not None
-    shard_names = dp_mesh_dims.shard_names
-    return FlexShardMeshInfo(
-        dp_shard_mesh=_get_submesh(mesh, shard_names),
-    )
-
-
-def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:
-    """Return the current rank's device for ``mesh``."""
-    if mesh.device_type == "cpu":
-        return torch.device("cpu")
-    if mesh.device_type == "cuda":
-        return torch.device("cuda", torch.cuda.current_device())
-    try:
-        device_module = torch.get_device_module(mesh.device_type)
-    except (AttributeError, RuntimeError):
-        return torch.device(mesh.device_type)
-    return torch.device(mesh.device_type, device_module.current_device())
 
 
 _wrap_class_counter = 0
@@ -315,8 +270,7 @@ def flex_shard(
             f"Module {type(module).__name__} has no parameters to shard. "
             "All parameters may belong to already-wrapped submodules."
         )
-    mesh_info = _get_flex_shard_mesh_info(mesh, dp_mesh_dims)
-    shard_mesh = mesh_info.dp_shard_mesh
+    shard_mesh = _get_dp_shard_mesh(mesh, dp_mesh_dims)
 
     # Determine device - use meta only if all params are meta, otherwise use mesh device.
     all_params_meta = all(param.device.type == "meta" for _, param in named_params)
@@ -331,20 +285,6 @@ def flex_shard(
 
     # Resolve placements for all params
     param_placements = shard_placement_fn(named_params, shard_mesh)
-    expected_fqns = {fqn for fqn, _ in named_params}
-    actual_fqns = set(param_placements)
-    missing_fqns = expected_fqns - actual_fqns
-    extra_fqns = actual_fqns - expected_fqns
-    if missing_fqns or extra_fqns:
-        msg_parts = []
-        if missing_fqns:
-            msg_parts.append(f"missing placements for {sorted(missing_fqns)}")
-        if extra_fqns:
-            msg_parts.append(f"unexpected placements for {sorted(extra_fqns)}")
-        raise ValueError(
-            "shard_placement_fn must return placements for exactly the managed "
-            f"parameters; {', '.join(msg_parts)}."
-        )
     _validate_placements(param_placements, named_params, shard_mesh)
 
     if not buckets:
@@ -395,7 +335,7 @@ def flex_shard(
         bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
 
         param_infos, total_bytes = _create_param_infos(
-            bucket_named_params, mesh_info, bucket_placements
+            bucket_named_params, shard_mesh, bucket_placements
         )
 
         if bucket_offload_policy is not None:
@@ -408,7 +348,7 @@ def flex_shard(
         else:
             byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
         _write_params_to_dstorage(
-            byte_storage, bucket_named_params, param_infos, mesh_info
+            byte_storage, bucket_named_params, param_infos, shard_mesh
         )
 
         for fqn, info in param_infos.items():
@@ -426,7 +366,7 @@ def flex_shard(
                     f"Expected sharded parameter {fqn!r} on "
                     f"{expected_param_device}, but got {new_param.device}"
                 )
-            _create_sharded_view(new_param, info, mesh_info)
+            _create_sharded_view(new_param, info, shard_mesh)
             _set_param_on_module(module, fqn, new_param)
 
         storage = DStorage(

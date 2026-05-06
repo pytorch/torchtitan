@@ -44,60 +44,59 @@ class _FakeMesh:
 
 
 # ---------------------------------------------------------------------------
-# Mesh metadata tests (single-process, no PG required)
+# DP shard mesh tests (single-process, no PG required)
 # ---------------------------------------------------------------------------
 
 
-class TestFlexShardMeshInfo(unittest.TestCase):
-    """Test FlexShard mesh metadata derivation."""
+class TestDPShardMesh(unittest.TestCase):
+    """Test FlexShard DP shard mesh derivation."""
 
     def test_dp_mesh_dims_derives_shard_submesh(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.flex_shard import (
-            _get_flex_shard_mesh_info,
+        from torchtitan.experiments.flex_shard.utils import (
+            _get_dp_shard_mesh,
         )
 
         mesh = _FakeMesh(("fsdp", "tp"))
-        info = _get_flex_shard_mesh_info(mesh, DataParallelMeshDims(shard="fsdp"))
+        shard_mesh = _get_dp_shard_mesh(mesh, DataParallelMeshDims(shard="fsdp"))
 
-        self.assertEqual(info.dp_shard_mesh.mesh_dim_names, ("fsdp",))
+        self.assertEqual(shard_mesh.mesh_dim_names, ("fsdp",))
 
     def test_dp_mesh_dims_flattens_multiple_shard_dims(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.flex_shard import (
-            _get_flex_shard_mesh_info,
+        from torchtitan.experiments.flex_shard.utils import (
+            _get_dp_shard_mesh,
         )
 
         mesh = _FakeMesh(("dp0", "dp1", "tp"))
-        info = _get_flex_shard_mesh_info(
-            mesh, DataParallelMeshDims(shard=("dp0", "dp1"))
+        shard_mesh = _get_dp_shard_mesh(
+            mesh,
+            DataParallelMeshDims(shard=("dp0", "dp1")),
         )
 
-        self.assertEqual(info.dp_shard_mesh.mesh_dim_names, ("dp0_dp1",))
+        self.assertEqual(shard_mesh.mesh_dim_names, ("dp0_dp1",))
 
     def test_dp_mesh_dims_requires_named_mesh(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.flex_shard import (
-            _get_flex_shard_mesh_info,
+        from torchtitan.experiments.flex_shard.utils import (
+            _get_dp_shard_mesh,
         )
 
         with self.assertRaisesRegex(ValueError, "mesh_dim_names"):
-            _get_flex_shard_mesh_info(
-                _FakeMesh(None), DataParallelMeshDims(shard="fsdp")
-            )
+            _get_dp_shard_mesh(_FakeMesh(None), DataParallelMeshDims(shard="fsdp"))
 
     def test_dp_mesh_dims_rejects_missing_dim(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.flex_shard import (
-            _get_flex_shard_mesh_info,
+        from torchtitan.experiments.flex_shard.utils import (
+            _get_dp_shard_mesh,
         )
 
         with self.assertRaisesRegex(ValueError, "not found"):
-            _get_flex_shard_mesh_info(
+            _get_dp_shard_mesh(
                 _FakeMesh(("fsdp", "tp")),
                 DataParallelMeshDims(shard="missing"),
             )
@@ -105,12 +104,12 @@ class TestFlexShardMeshInfo(unittest.TestCase):
     def test_dp_mesh_dims_rejects_replicate_until_hsdp_supported(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.flex_shard import (
-            _get_flex_shard_mesh_info,
+        from torchtitan.experiments.flex_shard.utils import (
+            _get_dp_shard_mesh,
         )
 
         with self.assertRaisesRegex(NotImplementedError, "replicate"):
-            _get_flex_shard_mesh_info(
+            _get_dp_shard_mesh(
                 _FakeMesh(("rep", "fsdp", "tp")),
                 DataParallelMeshDims(shard="fsdp", replicate="rep"),
             )
@@ -219,6 +218,30 @@ class TestBucketPlacementValidation(unittest.TestCase):
             )
             for fqn in ("a.weight", "b.weight")
         ]
+
+    def test_rejects_missing_or_extra_placements(self):
+        """Placement validation requires exact managed parameter coverage."""
+        from torchtitan.experiments.flex_shard.utils import _validate_placements
+        from torchtitan.experiments.flex_shard.placements import Shard
+
+        named_params = self._named_params()
+        with self.assertRaisesRegex(ValueError, "missing placements"):
+            _validate_placements(
+                {"a.weight": (Shard(0),)},
+                named_params,
+                _FakeMesh(("fsdp",)),
+            )
+
+        with self.assertRaisesRegex(ValueError, "unexpected placements"):
+            _validate_placements(
+                {
+                    "a.weight": (Shard(0),),
+                    "b.weight": (Shard(0),),
+                    "extra.weight": (Shard(0),),
+                },
+                named_params,
+                _FakeMesh(("fsdp",)),
+            )
 
     def test_rejects_non_shard0_placement(self):
         """FlatShard in a bucket raises ValueError."""
