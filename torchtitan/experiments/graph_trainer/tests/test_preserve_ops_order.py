@@ -12,10 +12,10 @@ from torch._dynamo.testing import normalize_gm
 from torch._inductor.fx_passes.control_dependencies import control_deps
 from torch.testing._internal.common_utils import TestCase
 
-from torchtitan.experiments.graph_trainer.opaque_modules import (
-    _make_modules_opaque,
-    _restore_modules,
-    opaque_modules,
+from torchtitan.experiments.graph_trainer.preserve_ops_order import (
+    _pin_ops_order,
+    _unpin_ops_order,
+    preserve_ops_order,
 )
 
 
@@ -31,7 +31,7 @@ def _build_simple_gm() -> fx.GraphModule:
     itself — the read-after-write ordering between the writes and the
     clone is implicit through shared storage. This is the aliasing case
     a pass walking arg edges would freely reorder, and exactly what the
-    opaque_modules wrapping is meant to defend against."""
+    preserve_ops_order pinning is meant to defend against."""
     graph = fx.Graph()
     x = graph.placeholder("x")
     buf = graph.call_function(torch.zeros, args=((4,),))
@@ -54,10 +54,10 @@ def _ops_in_order(gm: fx.GraphModule) -> list:
     return [n.target for n in gm.graph.nodes if n.op == "call_function"]
 
 
-class TestMakeModulesOpaque(TestCase):
+class TestPinOpsOrder(TestCase):
     def test_wraps_only_matching_fqn(self):
         gm = _build_simple_gm()
-        _make_modules_opaque(gm, ["loss"])
+        _pin_ops_order(gm, ["loss"])
         # loss-tagged copy_ writes get wrapped in a control_deps chain
         # so the bucketing pass sees an explicit write0 -> write1
         # ordering; the lm_head-tagged clone, the buffer alloc, and the
@@ -100,7 +100,7 @@ class GraphModule(torch.nn.Module):
     def test_no_match_is_noop(self):
         gm = _build_simple_gm()
         before = normalize_gm(gm.print_readable(print_output=False))
-        _make_modules_opaque(gm, ["other"])
+        _pin_ops_order(gm, ["other"])
         after = normalize_gm(gm.print_readable(print_output=False))
         self.assertEqual(before, after)
         # Lock the no-op shape so a future change to the helper that
@@ -126,9 +126,9 @@ class GraphModule(torch.nn.Module):
 """,
         )
 
-    def test_pairs_consecutive_anchored_nodes(self):
+    def test_pairs_consecutive_pinned_nodes(self):
         gm = _build_simple_gm()
-        _make_modules_opaque(gm, ["loss", "lm_head"])
+        _pin_ops_order(gm, ["loss", "lm_head"])
         # All loss + lm_head tagged nodes get linked into one shared
         # dependency chain (write0 -> write1 -> clone), so the bucketing
         # pass is forced to keep the writes before the read even though
@@ -174,15 +174,15 @@ class GraphModule(torch.nn.Module):
         )
 
 
-class TestRestoreModules(unittest.TestCase):
+class TestUnpinOpsOrder(unittest.TestCase):
     def test_restore_brings_back_original_ops(self):
         gm = _build_simple_gm()
         before_targets = _ops_in_order(gm)
-        _make_modules_opaque(gm, ["loss", "lm_head"])
-        # Sanity check: making opaque replaced ops with control_deps.
+        _pin_ops_order(gm, ["loss", "lm_head"])
+        # Sanity check: pinning replaced ops with control_deps wrappers.
         self.assertNotEqual(_ops_in_order(gm), before_targets)
 
-        _restore_modules(gm)
+        _unpin_ops_order(gm)
 
         after_targets = _ops_in_order(gm)
         self.assertEqual(after_targets, before_targets)
@@ -190,7 +190,7 @@ class TestRestoreModules(unittest.TestCase):
     def test_restore_is_noop_when_no_hops(self):
         gm = _build_simple_gm()
         before = _ops_in_order(gm)
-        _restore_modules(gm)
+        _unpin_ops_order(gm)
         self.assertEqual(_ops_in_order(gm), before)
 
     def test_make_then_restore_preserves_semantics(self):
@@ -199,14 +199,14 @@ class TestRestoreModules(unittest.TestCase):
         x = torch.randn(4)
         expected = gm(x)
 
-        _make_modules_opaque(gm, ["loss", "lm_head"])
-        _restore_modules(gm)
+        _pin_ops_order(gm, ["loss", "lm_head"])
+        _unpin_ops_order(gm)
         actual = gm(x)
 
         torch.testing.assert_close(actual, expected)
 
 
-class TestOpaqueModulesDecorator(unittest.TestCase):
+class TestPreserveOpsOrderDecorator(unittest.TestCase):
     def test_decorator_preserves_pass_output(self):
         gm = _build_simple_gm()
         before = _ops_in_order(gm)
@@ -214,7 +214,7 @@ class TestOpaqueModulesDecorator(unittest.TestCase):
         def identity_pass(g, example_inputs=None):
             return g
 
-        wrapped = opaque_modules(["loss"])(identity_pass)
+        wrapped = preserve_ops_order(["loss"])(identity_pass)
         result = wrapped(gm)
 
         # After identity-pass + restore, graph should match the original.
@@ -228,7 +228,7 @@ class TestOpaqueModulesDecorator(unittest.TestCase):
         def bad_pass(g, example_inputs=None):
             raise RuntimeError("boom")
 
-        wrapped = opaque_modules(["loss"])(bad_pass)
+        wrapped = preserve_ops_order(["loss"])(bad_pass)
         with self.assertRaises(RuntimeError):
             wrapped(gm)
 
@@ -238,7 +238,7 @@ class TestOpaqueModulesDecorator(unittest.TestCase):
             self.assertIsNot(node.target, control_deps)
         self.assertEqual(_ops_in_order(gm), before)
 
-    def test_decorator_makes_pass_see_opaque_nodes(self):
+    def test_decorator_makes_pass_see_pinned_nodes(self):
         gm = _build_simple_gm()
         seen_targets: list = []
 
@@ -248,11 +248,11 @@ class TestOpaqueModulesDecorator(unittest.TestCase):
             )
             return g
 
-        wrapped = opaque_modules(["loss"])(inspect_pass)
+        wrapped = preserve_ops_order(["loss"])(inspect_pass)
         wrapped(gm)
 
         # The pass should observe control_deps in place of the loss-tagged
-        # copy_ writes, while the unanchored clone (lm_head) and slice
+        # copy_ writes, while the unpinned clone (lm_head) and slice
         # views remain visible as themselves.
         self.assertIn(control_deps, seen_targets)
         self.assertNotIn(torch.ops.aten.copy_.default, seen_targets)
