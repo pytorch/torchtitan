@@ -210,6 +210,7 @@ class Module(nn.Module, Configurable):
             placements = resolve_placements(
                 sharding_config.state_shardings[name], mesh_axis_names
             )
+            # Preserve frozen state through DTensor distribution
             self.register_parameter(
                 name,
                 nn.Parameter(

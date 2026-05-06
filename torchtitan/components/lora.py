@@ -286,7 +286,7 @@ class LoRAConverter(Configurable):
         """
         if not _lora_class_cache or sd_adapter is None:
             return None
-        from_hf_map = sd_adapter.from_hf_map  # pyrefly: ignore [missing-attribute]
+        from_hf_map = sd_adapter.from_hf_map
 
         return {
             "to_external": lambda sd: remap_lora_keys_to_hf(sd, from_hf_map),

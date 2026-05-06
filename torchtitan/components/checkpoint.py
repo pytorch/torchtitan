@@ -845,9 +845,15 @@ class CheckpointManager(Configurable):
 
         for filename in os.listdir(folder):
             match = re.search(pattern, filename)
+            if not match:
+                continue
             dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
-            if match and os.path.isfile(dcp_metadata_probe):
+            if os.path.isfile(dcp_metadata_probe):
                 step_counts.append(int(match.group(1)))
+            else:
+                logger.debug(
+                    "Skipping %s for resume (no DCP .metadata).", filename
+                )
         if not step_counts:
             return -1
         return max(step_counts)
