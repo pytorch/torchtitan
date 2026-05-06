@@ -71,7 +71,7 @@ def parallelize_llama(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
+            # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
@@ -261,12 +261,25 @@ def apply_fsdp(
                 # ep_degree > 1: per-param mesh
                 from torch.distributed.fsdp._fully_shard._fsdp_common import (
                     FSDPMeshInfo,
+                    HSDPMeshInfo,
                     ShardPlacementResult,
                 )
 
                 assert edp_mesh is not None
-                edp_mesh_info = FSDPMeshInfo(mesh=edp_mesh, shard_mesh_dim=0)
-                dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
+
+                def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
+                    if mesh.ndim == 1:
+                        return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
+                    if mesh.ndim == 2:
+                        return HSDPMeshInfo(
+                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
+                        )
+                    raise ValueError(
+                        f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
+                    )
+
+                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh)
+                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
