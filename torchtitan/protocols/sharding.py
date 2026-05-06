@@ -17,6 +17,7 @@ from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
+import spmd_types as spmd
 from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
@@ -67,26 +68,36 @@ class LocalMapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class LocalSpmdConfig:
-    """Spec for modules that switch from global to local SPMD typechecking.
+    """Spec for modules using ``spmd.local_map`` for local typechecking.
 
-    At the input boundary, asserts types and optionally redistributes
-    (e.g. all-gather k/v on CP). Then switches to local-only typechecking.
-    At the output boundary, re-annotates with global types.
+    Wraps a module's forward so that type checking is suspended inside the
+    body; ``spmd.local_map`` re-establishes SPMD types at the boundary.
+
+    Each spec leaf (in ``in_specs`` / ``out_specs``) is one of:
+
+    * ``NamedSpmdType`` (``dict[MeshAxisName, spmd_type]``) — per-axis types.
+      ``S(dim)`` entries are auto-decayed to ``V`` + ``PartitionSpec`` by
+      ``assert_type``.
+    * ``(NamedSpmdType, tuple)`` — per-axis types plus a ``PartitionSpec``
+      template (tuple of ``MeshAxisName | None``). Needed when multiple axes
+      shard different tensor dims (e.g. DP batch + TP heads).
+    * ``None`` — non-tensor argument/output.
+
+    At parallelize time, ``MeshAxisName`` keys are resolved to ``MeshAxis``
+    objects and tuple templates become ``PartitionSpec`` instances.
 
     Attributes:
-        in_types: Per-input NamedSpmdTypes (positional, e.g. q, k, v).
-        in_dst_types: Optional per-input destination types. If set,
-            redistribute from in_types[i] to in_dst_types[i] at entry.
-        out_types: Per-output NamedSpmdTypes.
-        in_partition_specs: Optional per-input partition spec templates.
-        out_partition_specs: Same format, for output re-annotation.
+        out_specs: Spec leaf or pytree of spec leaves matching return value.
+        in_specs: Tuple of spec leaves (one per positional arg).
+            ``None`` means ``Infer`` (inputs pass through unchecked).
+        in_dst_specs: If set, tuple of ``NamedSpmdType`` destination types.
+            Inputs are redistributed from ``in_specs`` to ``in_dst_specs``
+            at entry (e.g. CP all-gather on k/v).
     """
 
-    in_types: tuple[NamedSpmdType, ...]
-    in_dst_types: tuple[NamedSpmdType, ...] | None = None
-    out_types: tuple[NamedSpmdType, ...]
-    in_partition_specs: tuple[tuple, ...] | None = None
-    out_partition_specs: tuple[tuple, ...] | None = None
+    out_specs: Any
+    in_specs: tuple | None = None
+    in_dst_specs: tuple[NamedSpmdType, ...] | None = None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -131,10 +142,6 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_input_grad_placements: Per-input gradient placement.
-            Disambiguates ``Replicate()`` → ``R`` vs ``I`` for spmd_types.
-        local_output_grad_placements: Output gradient placement.
-            Same disambiguation for outputs.
         local_map: If set, wraps forward with ``local_map()``.
         local_spmd: If set, wraps forward with spmd_types local
             typechecking boundary. Mutually exclusive with ``local_map``.
@@ -145,8 +152,6 @@ class ShardingConfig:
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_src_shardings: NamedPlacement | None = None
     out_dst_shardings: NamedPlacement | None = None
-    local_input_grad_placements: dict[str, NamedPlacement] | None = None
-    local_output_grad_placements: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
     local_spmd: LocalSpmdConfig | None = None
 
@@ -186,28 +191,21 @@ def resolve_placements(
 
 def placement_to_spmd_type(
     placement: Placement,
-    grad_placement: Placement | None = None,
 ) -> Any:
     """Convert a DTensor Placement to an spmd_types type.
 
-    Shard(dim) → S(dim), Partial() → P, Replicate() → I by default.
-    Replicate() with Partial() grad → R (gradient needs reduction).
+    Shard(dim) -> S(dim), Partial() -> P, Replicate() -> R.
     """
-    from spmd_types import I, P, R, S
-
     if isinstance(placement, Shard):
-        return S(placement.dim)
+        return spmd.S(placement.dim)
     if isinstance(placement, Partial):
-        return P
-    if grad_placement is not None and isinstance(grad_placement, Partial):
-        return R
-    return I
+        return spmd.P
+    return spmd.R
 
 
 def resolve_spmd(
     named: NamedPlacement | None,
     parallel_dims: "ParallelDims",
-    grad_named: NamedPlacement | None = None,
 ) -> dict | None:
     """Resolve NamedPlacement to {MeshAxis: spmd_type}. Skips disabled axes."""
     if named is None:
@@ -217,8 +215,7 @@ def resolve_spmd(
         axis = parallel_dims.get_spmd_axis(axis_name.value)
         if axis.size() <= 1:
             continue
-        grad_p = grad_named.get(axis_name) if grad_named else None
-        result[axis] = placement_to_spmd_type(placement, grad_p)
+        result[axis] = placement_to_spmd_type(placement)
     return result
 
 
@@ -242,7 +239,6 @@ def resolve_partition_spec(
 
     Template entries: None, a MeshAxisName, or a tuple of MeshAxisNames.
     """
-    from spmd_types.types import PartitionSpec
     from torch.utils._pytree import tree_map_only
 
     resolved = tree_map_only(
@@ -250,4 +246,23 @@ def resolve_partition_spec(
         lambda name: parallel_dims.get_spmd_axis(name.value),
         template,
     )
-    return PartitionSpec(*resolved)
+    return spmd.PartitionSpec(*resolved)
+
+
+def resolve_local_spmd_spec_leaf(
+    leaf: Any,
+    parallel_dims: "ParallelDims",
+) -> Any:
+    """Resolve one ``LocalSpmdConfig`` spec leaf for ``spmd.local_map``.
+
+    Returns a resolved ``dict``, ``(dict, PartitionSpec)``, or ``None``.
+    """
+    if leaf is None:
+        return None
+    if isinstance(leaf, dict):
+        return resolve_spmd_types(leaf, parallel_dims)
+    if isinstance(leaf, tuple) and len(leaf) == 2 and isinstance(leaf[0], dict):
+        types = resolve_spmd_types(leaf[0], parallel_dims)
+        spec = resolve_partition_spec(leaf[1], parallel_dims)
+        return (types, spec)
+    raise ValueError(f"Invalid LocalSpmdConfig spec leaf: {leaf!r}")
