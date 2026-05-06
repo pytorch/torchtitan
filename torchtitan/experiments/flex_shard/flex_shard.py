@@ -16,13 +16,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from .buckets import (
-    _assign_params_to_buckets,
-    auto_buckets,
-    BucketSpec,
-    MixedPrecisionPolicy,
-    OffloadPolicy,
-)
 from .eager_runtime import (
     _install_batched_allgather_hooks,
     _storage_requires_eager_batched_unshard,
@@ -54,10 +47,15 @@ from .reshard import (
     _reshard_checkpoint_enabled,
 )
 from .storage import (
+    _assign_params_to_buckets,
     _create_param_infos,
     _create_sharded_view,
     _write_params_to_dstorage,
+    auto_buckets,
+    BucketSpec,
     DStorage,
+    MixedPrecisionPolicy,
+    OffloadPolicy,
 )
 from .utils import (
     _validate_bucket_placements,
