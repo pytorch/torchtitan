@@ -15,7 +15,7 @@ from torchtitan.models.llama3 import (
 
 
 def model_registry(flavor: str) -> FaultTolerantModelSpec:
-    config = llama3_configs[flavor]()
+    config = llama3_configs[flavor](attn_backend="sdpa")
     return FaultTolerantModelSpec(
         name="ft/llama3",
         flavor=flavor,
