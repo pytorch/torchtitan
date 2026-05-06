@@ -8,15 +8,15 @@
 Unified approach for running TorchTitan models with vLLM inference.
 
 To register TorchTitan models with vLLM:
-    from torchtitan.experiments.rl.models.vllm_registry import registry
-    registry(model_spec)
+    from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+    registry_to_vllm(model_spec)
 """
 
-from torchtitan.experiments.rl.models.vllm_registry import registry
+from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
 from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
 
 
 __all__ = [
     "TorchTitanVLLMModelWrapper",
-    "registry",  # Export register function for manual use
+    "registry_to_vllm",  # Export register function for manual use
 ]
