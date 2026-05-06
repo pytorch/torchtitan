@@ -5,10 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 import pytest
 
-from torchtitan.components.quantization import Float8Linear
+from torchtitan.components.quantization import (
+    Float8GroupedExperts,
+    Float8Linear,
+    MXFP8GroupedExperts,
+)
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import GroupedExperts
 
 
 def test_no_float8_by_default():
@@ -39,3 +44,11 @@ def test_float8_applied_by_model_registry():
         if isinstance(lc, Float8Linear.Config)
     ]
     assert len(converted) > 0
+
+
+def test_quantized_grouped_experts_owner():
+    """Config._owner points at the quantized class, not GroupedExperts."""
+    assert MXFP8GroupedExperts.Config._owner is MXFP8GroupedExperts
+    assert Float8GroupedExperts.Config._owner is Float8GroupedExperts
+    assert issubclass(MXFP8GroupedExperts, GroupedExperts)
+    assert issubclass(Float8GroupedExperts, GroupedExperts)
