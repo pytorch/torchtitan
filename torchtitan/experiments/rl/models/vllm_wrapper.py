@@ -24,7 +24,7 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.config.configs import CompileConfig
+from torchtitan.config.configs import CompileConfig, DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
@@ -171,11 +171,18 @@ class TorchTitanVLLMModelWrapper(Module):
         model_spec: ModelSpec,
         vllm_config: VllmConfig,
         prefix: str = "",
-        compile_config: CompileConfig,
     ):
         super().__init__()
 
         assert vllm_config is not None, "vllm_config is required"
+
+        # Reconstruct typed config dataclasses from dicts stamped
+        # ``_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES`` onto
+        # hf_config by the torchtitan ConfigParser.
+        compile_config = CompileConfig(
+            **vllm_config.model_config.hf_config.compile_config
+        )
+        debug_config = DebugConfig(**vllm_config.model_config.hf_config.debug_config)
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -221,7 +228,7 @@ class TorchTitanVLLMModelWrapper(Module):
         # directly instead of requiring a trainer_config wrapper.
         from types import SimpleNamespace
 
-        from torchtitan.config import DebugConfig, TrainingConfig
+        from torchtitan.config import TrainingConfig
 
         self.config.update_from_config(
             trainer_config=SimpleNamespace(
@@ -272,7 +279,7 @@ class TorchTitanVLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Initial load model weights from HuggingFace checkpoint path
+        # Initial load model weights from HuggingFace checkpoint path.
         self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
 
     def _extend_rope_cache(

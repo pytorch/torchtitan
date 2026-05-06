@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import logging
 import math
 import os
@@ -15,10 +16,8 @@ from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
 from torchtitan.config.configs import CompileConfig, DebugConfig, ParallelismConfig
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.models.vllm_registry import (
-    register_model_to_vllm_model_registry,
-    VLLM_MODEL_NAME,
-)
+from torchtitan.experiments.rl.models.vllm_config_parser import TORCHTITAN_CONFIG_FORMAT
+from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
@@ -181,10 +180,7 @@ class VLLMGenerator(Actor, Configurable):
         self._max_num_seqs = max_num_seqs
 
         # Register TorchTitan model with vLLM before any engine creation
-        register_model_to_vllm_model_registry(
-            model_spec,
-            compile_config=compile_config,
-        )
+        registry_to_vllm(model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
@@ -199,6 +195,11 @@ class VLLMGenerator(Actor, Configurable):
         engine_kwargs = dict(
             model=model_path,
             trust_remote_code=True,
+            # Use the torchtitan custom config parser (registered by
+            # registry_to_vllm above). It builds PretrainedConfig from
+            # ModelSpec instead of reading config.json from disk, and
+            # stamps fields like ``compile_config`` for the wrapper.
+            config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
@@ -206,7 +207,14 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            hf_overrides={"architectures": [VLLM_MODEL_NAME]},
+            # Per-engine torchtitan config sections forwarded to the wrapper
+            # via the custom ConfigParser. Keys are validated against
+            # ``_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES`` at engine init: every
+            # value here must originate from a torchtitan config dataclass
+            hf_overrides={
+                "compile_config": dataclasses.asdict(compile_config),
+                "debug_config": dataclasses.asdict(config.debug),
+            },
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.CUSTOM,
             ),
