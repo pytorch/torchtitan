@@ -24,7 +24,7 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.config.configs import CompileConfig
+from torchtitan.config.configs import CompileConfig, DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
@@ -176,11 +176,13 @@ class TorchTitanVLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # Reconstruct CompileConfig from the dict stamped onto hf_config by
-        # the torchtitan ConfigParser (see vllm_registry.registry). Default
-        # to a no-compile config if the parser path wasn't used.
-        cc_dict = getattr(vllm_config.model_config.hf_config, "compile_config", None)
-        compile_config = CompileConfig(**cc_dict) if cc_dict else CompileConfig()
+        # Reconstruct typed config dataclasses from dicts stamped
+        # ``_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES`` onto
+        # hf_config by the torchtitan ConfigParser.
+        compile_config = CompileConfig(
+            **vllm_config.model_config.hf_config.compile_config
+        )
+        debug_config = DebugConfig(**vllm_config.model_config.hf_config.debug_config)
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -226,7 +228,7 @@ class TorchTitanVLLMModelWrapper(Module):
         # directly instead of requiring a trainer_config wrapper.
         from types import SimpleNamespace
 
-        from torchtitan.config import DebugConfig, TrainingConfig
+        from torchtitan.config import TrainingConfig
 
         self.config.update_from_config(
             trainer_config=SimpleNamespace(
@@ -278,12 +280,7 @@ class TorchTitanVLLMModelWrapper(Module):
             )
 
         # Initial load model weights from HuggingFace checkpoint path.
-        if not getattr(
-            vllm_config.model_config.hf_config, "skip_init_weights_load", False
-        ):
-            self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
-        else:
-            logger.info("Skipping initial HF load (skip_init_weights_load=True)")
+        self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
 
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int
