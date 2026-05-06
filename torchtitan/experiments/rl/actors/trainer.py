@@ -32,12 +32,11 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
-    create_positions_from_seq_lens,
-    create_varlen_metadata,
     extract_response_logprobs,
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.types import TrainBatch
+from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
@@ -293,8 +292,10 @@ class PolicyTrainer(Actor, Configurable):
                 f"generation max_tokens."
             )
 
-        attention_masks = create_varlen_metadata(seq_lens, device)
-        positions = create_positions_from_seq_lens(seq_lens, device)
+        positions = torch.cat(
+            [torch.arange(l, device=device) for l in seq_lens]
+        ).unsqueeze(0)
+        attention_masks = create_varlen_metadata_for_document(positions)
 
         logits = self.model(
             token_ids, attention_masks=attention_masks, positions=positions

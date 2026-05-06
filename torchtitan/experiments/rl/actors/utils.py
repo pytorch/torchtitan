@@ -4,29 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import itertools
-
 import torch
 import torch.nn.functional as F
-
-from torchtitan.models.common.attention import VarlenMetadata
-
-# TODO We should either unify all the mask creation for RL, or move them to a
-#      single file.
-def create_varlen_metadata(seq_lens: list[int], device: torch.device) -> VarlenMetadata:
-    """Build VarlenMetadata from sequence lengths.
-
-    Example:
-        seq_lens = [3, 5, 2]
-        -> cu_seqs = [0, 3, 8, 10], max_len = 5
-    """
-    cu_seqs = torch.tensor(
-        [0] + list(itertools.accumulate(seq_lens)), dtype=torch.int32, device=device
-    )
-    max_len = max(seq_lens)
-    return VarlenMetadata(
-        cu_seq_q=cu_seqs, cu_seq_k=cu_seqs, max_q=max_len, max_k=max_len
-    )
 
 
 def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
@@ -66,18 +45,6 @@ def extract_response_logprobs(
         result.append(packed_logprobs[0, s:e])
         seq_start += seq_lens[i]
     return result
-
-
-def create_positions_from_seq_lens(
-    seq_lens: list[int], device: torch.device
-) -> torch.Tensor:
-    """Build a ``[1, total_tokens]`` positions tensor that resets at each sequence boundary.
-
-    Example:
-        seq_lens = [3, 5, 2]
-        -> positions = [[0, 1, 2, 0, 1, 2, 3, 4, 0, 1]]
-    """
-    return torch.cat([torch.arange(l, device=device) for l in seq_lens]).unsqueeze(0)
 
 
 def verify_logprob_identity(
