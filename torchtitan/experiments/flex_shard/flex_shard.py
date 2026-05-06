@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import logging
 import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -46,14 +45,11 @@ from .reshard import (
 )
 from .storage import (
     _assign_params_to_buckets,
-    _create_param_infos,
-    _create_sharded_view,
-    _write_params_to_dstorage,
+    _materialize_bucket_storages,
     auto_buckets,
     BucketSpec,
     DStorage,
     MixedPrecisionPolicy,
-    OffloadPolicy,
 )
 from .utils import (
     _get_device_from_mesh,
@@ -62,7 +58,6 @@ from .utils import (
     _is_graph_capture_active,
     _raise_graph_capture_unsupported,
     _raise_missing_eager_batched_unshard,
-    _set_param_on_module,
     disable_active_parametrization,
     _validate_bucket_placements,
     _validate_eager_params,
@@ -86,7 +81,7 @@ __all__ = [
 ]
 
 
-_wrap_class_counter = 0
+_parametrized_module_class_counter = 0
 
 
 def _register_parametrization(
@@ -103,8 +98,8 @@ def _register_parametrization(
         module: The leaf module owning the parameters.
         param_parametrizations: Maps parameter name to its parametrization module.
     """
-    global _wrap_class_counter
-    _wrap_class_counter += 1
+    global _parametrized_module_class_counter
+    _parametrized_module_class_counter += 1
 
     def _make_flex_shard_param_getter(param_name, parametrization):
         def get_flex_shard_param(self):
@@ -146,7 +141,7 @@ def _register_parametrization(
         for param_name, param in param_parametrizations.items()
     }
     module_cls = type(
-        f"FlexShard{module.__class__.__name__}_{_wrap_class_counter}",
+        f"FlexShard{module.__class__.__name__}_{_parametrized_module_class_counter}",
         (module.__class__,),
         param_name_to_property,
     )
@@ -177,8 +172,6 @@ PlacementFn = Callable[
     [list[tuple[str, nn.Parameter]], "DeviceMesh"],
     dict[str, tuple[Placement, ...]],
 ]
-
-logger = logging.getLogger(__name__)
 
 
 def flex_shard(
@@ -303,83 +296,15 @@ def flex_shard(
         named_params,
     )
 
-    # Log bucket coverage
-    if logger.isEnabledFor(logging.DEBUG):
-        lines = ["flex_shard bucket coverage:"]
-        total_params = 0
-        for i, fqns in enumerate(bucket_assignments):
-            patterns = buckets[i].patterns
-            lines.append(f"  bucket {i} {patterns}: {len(fqns)} params")
-            total_params += len(fqns)
-        lines.append(f"  total: {total_params} params across {len(buckets)} buckets")
-        logger.debug("\n".join(lines))
-
-    # Per-bucket: create param_infos, byte buffer, replace params, create DStorage
-    named_params_dict = dict(named_params)
-    storages: list[DStorage] = []
-    fqn_to_mp_policy: dict[str, MixedPrecisionPolicy | None] = {}
-    fqn_to_offload_policy: dict[str, OffloadPolicy | None] = {}
-
-    for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
-        if not bucket_fqns:
-            continue
-
-        # Extract per-bucket policies
-        bucket_spec = buckets[bucket_idx]
-        bucket_mp_policy = bucket_spec.mp_policy
-        bucket_offload_policy = bucket_spec.offload_policy
-        bucket_reshard_after_forward = bucket_spec.reshard_after_forward
-        for fqn in bucket_fqns:
-            fqn_to_mp_policy[fqn] = bucket_mp_policy
-            fqn_to_offload_policy[fqn] = bucket_offload_policy
-
-        bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
-        bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
-
-        param_infos, total_bytes = _create_param_infos(
-            bucket_named_params, shard_mesh, bucket_placements
-        )
-
-        if bucket_offload_policy is not None:
-            byte_storage = torch.empty(
-                total_bytes,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=bucket_offload_policy.pin_memory,
-            )
-        else:
-            byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
-        _write_params_to_dstorage(
-            byte_storage, bucket_named_params, param_infos, shard_mesh
-        )
-
-        for fqn, info in param_infos.items():
-            local_view = byte_storage[
-                info.byte_offset : info.byte_offset
-                + info.local_numel * info.dtype.itemsize
-            ]
-            typed_view = local_view.view(info.dtype).view(info.local_shape)
-            new_param = nn.Parameter(typed_view, requires_grad=info.requires_grad)
-            expected_param_device = (
-                torch.device("cpu") if bucket_offload_policy is not None else device
-            )
-            if new_param.device != expected_param_device:
-                raise AssertionError(
-                    f"Expected sharded parameter {fqn!r} on "
-                    f"{expected_param_device}, but got {new_param.device}"
-                )
-            _create_sharded_view(new_param, info, shard_mesh)
-            _set_param_on_module(module, fqn, new_param)
-
-        storage = DStorage(
-            byte_storage,
-            param_infos,
-            shard_mesh,
-            total_bytes,
-            module,
-            reshard_after_forward=bucket_reshard_after_forward,
-        )
-        storages.append(storage)
+    storages, fqn_to_bucket_spec = _materialize_bucket_storages(
+        module,
+        named_params,
+        bucket_assignments,
+        buckets,
+        param_placements,
+        shard_mesh,
+        device,
+    )
 
     # Store DStorages on module
     setattr(module, _DSTORAGES_ATTR, storages)
@@ -403,11 +328,13 @@ def flex_shard(
         uses_eager_autograd_unshard = _storage_uses_eager_autograd_unshard(s)
         bucket_fqn = _get_storage_debug_fqn(s)
         for fqn, info in s._param_infos.items():
-            mp = fqn_to_mp_policy.get(fqn)
-            offload = fqn_to_offload_policy.get(fqn)
-            param_dtype = mp.param_dtype if mp else None
-            reduce_dtype = mp.reduce_dtype if mp else None
-            compute_device = torch.device(device) if offload is not None else None
+            bucket_spec = fqn_to_bucket_spec[fqn]
+            mp_policy = bucket_spec.mp_policy
+            param_dtype = mp_policy.param_dtype if mp_policy else None
+            reduce_dtype = mp_policy.reduce_dtype if mp_policy else None
+            compute_device = (
+                torch.device(device) if bucket_spec.offload_policy is not None else None
+            )
             placement = info.placements[0]
             p = placement.create_parametrization(
                 info,

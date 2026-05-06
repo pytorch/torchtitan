@@ -15,6 +15,7 @@ import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 
 from .metadata import set_sharding_info
+from .utils import _set_param_on_module
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -347,3 +348,72 @@ def _write_params_to_dstorage(
             byte_storage[info.byte_offset : info.byte_offset + nbytes].copy_(
                 shard.reshape(-1).view(torch.uint8)
             )
+
+
+def _materialize_bucket_storages(
+    module: nn.Module,
+    named_params: list[tuple[str, nn.Parameter]],
+    bucket_assignments: list[list[str]],
+    buckets: list[BucketSpec],
+    param_placements: dict[str, tuple[Placement, ...]],
+    mesh: DeviceMesh,
+    device: torch.device,
+) -> tuple[list[DStorage], dict[str, BucketSpec]]:
+    """Create DStorages for bucket assignments and install sharded parameters."""
+    named_params_dict = dict(named_params)
+    storages: list[DStorage] = []
+    fqn_to_bucket_spec: dict[str, BucketSpec] = {}
+
+    for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
+        if not bucket_fqns:
+            continue
+
+        bucket_spec = buckets[bucket_idx]
+        for fqn in bucket_fqns:
+            fqn_to_bucket_spec[fqn] = bucket_spec
+
+        bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
+        bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
+        param_infos, total_bytes = _create_param_infos(
+            bucket_named_params, mesh, bucket_placements
+        )
+
+        if bucket_spec.offload_policy is not None:
+            byte_storage = torch.empty(
+                total_bytes,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=bucket_spec.offload_policy.pin_memory,
+            )
+            expected_param_device = torch.device("cpu")
+        else:
+            byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
+            expected_param_device = torch.device(device)
+
+        _write_params_to_dstorage(byte_storage, bucket_named_params, param_infos, mesh)
+
+        for fqn, info in param_infos.items():
+            num_bytes = info.local_numel * info.dtype.itemsize
+            local_view = byte_storage[info.byte_offset : info.byte_offset + num_bytes]
+            typed_view = local_view.view(info.dtype).view(info.local_shape)
+            new_param = nn.Parameter(typed_view, requires_grad=info.requires_grad)
+            if new_param.device != expected_param_device:
+                raise AssertionError(
+                    f"Expected sharded parameter {fqn!r} on "
+                    f"{expected_param_device}, but got {new_param.device}"
+                )
+            _create_sharded_view(new_param, info, mesh)
+            _set_param_on_module(module, fqn, new_param)
+
+        storages.append(
+            DStorage(
+                byte_storage,
+                param_infos,
+                mesh,
+                total_bytes,
+                module,
+                reshard_after_forward=bucket_spec.reshard_after_forward,
+            )
+        )
+
+    return storages, fqn_to_bucket_spec
