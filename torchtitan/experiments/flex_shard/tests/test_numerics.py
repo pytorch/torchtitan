@@ -620,7 +620,7 @@ def _run_flex_shard_loss_compare(
         ".",
         ".",
         "--baseline-module=llama3",
-        "--baseline-config=llama3_debugmodel",
+        "--baseline-config=llama3_debugmodel_ce_loss",
         "--test-module=graph_trainer.flex_shard_llama3",
         "--test-config=graph_trainer_flex_shard_llama3_debugmodel",
         f"--steps={STEPS_FULL_MODEL}",
