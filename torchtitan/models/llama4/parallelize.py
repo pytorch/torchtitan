@@ -381,6 +381,10 @@ def apply_moe_ep_tp(
 
         if tp_mesh is not None:
             moe_layer_plan = {
+                # With SP: all-gather (Shard→Replicate) for input,
+                # reduce-scatter (Partial→Shard) for output.
+                # Without SP: input is already Replicate,
+                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
                     desired_input_layouts=(Replicate(),),
@@ -446,10 +450,9 @@ def apply_moe_ep_tp(
                     # that gets baked into the FX graph.
                     dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
 
-        if experts_mesh is not None and experts_plan is not None:
-            parallelize_module(
-                # pyrefly: ignore [missing-attribute]
-                module=transformer_block.moe.experts,
-                device_mesh=experts_mesh,
-                parallelize_plan=experts_plan,
-            )
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=transformer_block.moe.experts,
+            device_mesh=experts_mesh,
+            parallelize_plan=experts_plan,
+        )
