@@ -7,8 +7,8 @@
 """
 Helpers for the torchtitan custom vLLM ``ConfigParser``.
 
-The parser class itself is defined inside ``vllm_registry.registry`` so it
-can capture ``model_spec`` via closure, using the same pattern as the
+The parser class itself is defined inside ``vllm_registry.registry_to_vllm``
+so it can capture ``model_spec`` via closure, using the same pattern as the
 dynamic model class.
 """
 
@@ -19,13 +19,14 @@ from typing import Any
 from torchtitan.protocols.model_spec import ModelSpec
 
 
-TORCHTITAN_CONFIG_FORMAT = "torchtitan"
-
-# Model-agnostic name used for vLLM model registration. The custom config
-# parser writes this as ``architectures=[VLLM_MODEL_NAME]`` on the resulting
-# PretrainedConfig, so callers don't need to pass
-# hf_overrides={"architectures": [VLLM_MODEL_NAME]} to EngineArgs.
+# Model-agnostic name used for vLLM model registration.
 VLLM_MODEL_NAME = "TorchTitanCausalLM"
+
+# Allowlist of keys the torchtitan ConfigParser accepts via
+# ``EngineArgs(hf_overrides={...})``. Any other key raises ValueError at
+# engine init.
+_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES = frozenset({"compile_config", "debug_config"})
+TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 
 def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
@@ -36,7 +37,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     …) before any model class is constructed. ``PretrainedConfig`` stores any
     extra kwargs as attributes, so callers can pass torchtitan-specific
     runtime flags via ``EngineArgs(hf_overrides={...})`` and read them off
-    ``hf_config`` later (e.g. ``skip_init_weights_load``).
+    ``hf_config`` later (e.g. ``compile_config``).
     """
     cfg = spec.model
     if not cfg.layers:
@@ -62,10 +63,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         "rope_theta": cfg.rope.theta,
         "rms_norm_eps": cfg.norm.eps,
         "tie_word_embeddings": getattr(cfg, "enable_weight_tying", False),
-        # torch_dtype is intentionally omitted: EngineArgs(dtype=...) always
-        # sets it explicitly at engine init, and PretrainedConfig defaults to
-        # None which is fine for that override path.
-        # Best-effort special tokens; tokenizer_config.json overrides at
+        # Best-effort special tokens: tokenizer_config.json overrides at
         # request-processing time.
         "bos_token_id": 0,
         "eos_token_id": 1,
@@ -73,12 +71,15 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
 
     ffn = getattr(layer0, "feed_forward", None)
     if ffn is not None:
-        hf["intermediate_size"] = ffn.hidden_dim
+        # FeedForward.Config holds w1/w2/w3 Linear.Config objects; the SwiGLU
+        # hidden dim is w1.out_features (== w3.out_features == w2.in_features).
+        hf["intermediate_size"] = ffn.w1.out_features
 
     moe = getattr(layer0, "moe", None)
     if moe is not None:
         hf["num_experts"] = moe.experts.num_experts
-        hf["num_experts_per_tok"] = moe.experts.top_k
+        # top_k lives on the router config, not the experts config.
+        hf["num_experts_per_tok"] = moe.router.top_k
         hf["moe_intermediate_size"] = moe.experts.hidden_dim
         # vLLM's qwen3_moe model loader checks this for sparse layer placement.
         hf["decoder_sparse_step"] = 1
@@ -87,29 +88,26 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     return hf
 
 
-def add_custom_fields_to_config_dict(
+def apply_hf_overrides_to_config_dict(
     config_dict: dict[str, Any],
-    **custom_fields: Any,
+    hf_overrides: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Layer caller-provided custom fields on top of the spec-derived dict.
+    """Validate and stamp ``EngineArgs(hf_overrides=...)`` onto the config dict.
 
-    Use this to extend the HF config with torchtitan-specific or runtime-only
-    fields the spec doesn't carry — anything ``PretrainedConfig`` should store
-    as an attribute that downstream code (the wrapper, vLLM internals) reads
-    via ``getattr(hf_config, "<key>", default)``.
+    Rejects any key not in ``_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES`` so the writer
+    side (call site) and the reader side (wrapper) can't drift via typos or
+    rogue literals. Each allowed key carries a ``dataclasses.asdict()`` of a
+    torchtitan config section (e.g. ``CompileConfig``, ``DebugConfig``);
+    downstream code reconstructs the typed object via ``Cls(**d)``.
 
-    Mutates and returns the same dict for chaining. Existing keys are
-    overwritten; pass with care if you might collide with an HF-required
-    field set by ``model_spec_to_hf_config_dict``.
-
-    Example::
-
-        config_dict = model_spec_to_hf_config_dict(spec)
-        config_dict = add_custom_fields_to_hf_config_dict(
-            config_dict,
-            torchtitan_build_tag="2026-05-06",
-            extra_meta={"answer": 42},
-        )
     """
-    config_dict.update(custom_fields)
+    if not hf_overrides:
+        return config_dict
+    unknown = set(hf_overrides) - _ALLOWED_TORCHTITAN_CONFIG_OVERRIDES
+    if unknown:
+        raise ValueError(
+            f"Unknown torchtitan hf_overrides keys: {sorted(unknown)}. "
+            f"Allowed: {sorted(_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES)}."
+        )
+    config_dict.update(hf_overrides)
     return config_dict
