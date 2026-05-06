@@ -30,7 +30,6 @@ class BaseStateDictAdapter(ABC):
 
     fqn_to_index_mapping: dict[Any, int] | None
     hf_assets_path: str | None
-    from_hf_map: dict[str, str | None] | None
 
     @abstractmethod
     def __init__(
@@ -89,7 +88,6 @@ class StateDictAdapter(BaseStateDictAdapter):
         hf_assets_path: str | None,
     ):
         self.hf_assets_path = hf_assets_path
-        self.from_hf_map = None
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
             try:
