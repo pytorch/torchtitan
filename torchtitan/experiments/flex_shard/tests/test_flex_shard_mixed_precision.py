@@ -162,7 +162,7 @@ class TestBucketSpecMpPolicy(unittest.TestCase):
 
     def test_parametrization_receives_dtypes(self):
         """Parametrization created with correct param_dtype/reduce_dtype."""
-        from torchtitan.experiments.flex_shard import ShardParametrization
+        from torchtitan.experiments.flex_shard.flex_shard import ShardParametrization
 
         p = ShardParametrization(
             shard_dim=0,
@@ -176,7 +176,7 @@ class TestBucketSpecMpPolicy(unittest.TestCase):
 
     def test_parametrization_default_no_mp(self):
         """Parametrization without mp has None dtypes."""
-        from torchtitan.experiments.flex_shard import ShardParametrization
+        from torchtitan.experiments.flex_shard.flex_shard import ShardParametrization
 
         p = ShardParametrization(
             shard_dim=0,
@@ -188,10 +188,8 @@ class TestBucketSpecMpPolicy(unittest.TestCase):
 
     def test_guard_disabled_returns_raw_with_mp(self):
         """With guard disabled, parametrization returns input unchanged."""
-        from torchtitan.experiments.flex_shard import (
-            disable_active_parametrization,
-            ShardParametrization,
-        )
+        from torchtitan.experiments.flex_shard import disable_active_parametrization
+        from torchtitan.experiments.flex_shard.flex_shard import ShardParametrization
 
         param = ShardParametrization(
             shard_dim=0,

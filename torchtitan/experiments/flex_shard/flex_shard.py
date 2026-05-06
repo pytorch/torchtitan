@@ -14,7 +14,6 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from enum import auto, Enum
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -710,10 +709,7 @@ class _EagerBucketAllGather(torch.autograd.Function):
                 debug_fqn=runtime.debug_fqn,
             )
         full_params = Shard.finish_unshard(result)
-        return tuple(
-            _set_tensor_reshard_after_forward(full_param, True)
-            for full_param in full_params
-        )
+        return tuple(full_params)
 
     @staticmethod
     def backward(
@@ -972,27 +968,16 @@ __all__ = [
     "auto_buckets",
     "BucketSpec",
     "disable_active_parametrization",
-    "DStorage",
-    "FlexShardMeshInfo",
-    "flat_shard_placements",
-    "FlatShard",
-    "FlatShardParametrization",
     "flex_shard",
-    "FlexShardModule",
     "get_global_shape",
     "get_placements",
     "is_flex_shard_param",
     "lift_params_to_global_spmd_mesh",
     "MixedPrecisionPolicy",
-    "OffloadPolicy",
-    "Owned",
-    "param_boundary_placements",
     "per_param_placements",
     "Placement",
-    "RaggedShard",
     "set_sharding_info",
     "Shard",
-    "ShardParametrization",
 ]
 
 
@@ -1008,7 +993,6 @@ _MESH_ATTR = "_mesh"
 _SPMD_MESH_ATTR = "_spmd_mesh"
 _SPMD_PLACEMENTS_ATTR = "_spmd_placements"
 _SPMD_DP_DIM_INDICES_ATTR = "_spmd_dp_dim_indices"
-_RESHARD_AFTER_FORWARD_ATTR = "_flex_shard_reshard_after_forward"
 _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR = "_flex_shard_requires_eager_batched_unshard"
 _EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered"
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
@@ -1091,18 +1075,6 @@ def _get_flex_shard_mesh_info(
         dp_replicate_dim_names=replicate_names,
         dp_dim_indices=dp_dim_indices,
     )
-
-
-def _maybe_dtensor_local_tensor(param: torch.Tensor) -> torch.Tensor:
-    """Return the DTensor local tensor if ``param`` is a DTensor."""
-    try:
-        from torch.distributed.tensor import DTensor
-
-        if isinstance(param, DTensor):
-            return param.to_local()
-    except ImportError:
-        pass
-    return param
 
 
 def _get_param_spmd_metadata(
@@ -1517,20 +1489,6 @@ _reshard_checkpoint_recompute: ContextVar[bool] = ContextVar(
 )
 
 
-def _set_tensor_reshard_after_forward(
-    tensor: torch.Tensor,
-    reshard_after_forward: bool,
-) -> torch.Tensor:
-    """Attach per-bucket reshard policy to tensors produced while tracing."""
-    if torch.compiler.is_compiling():
-        return tensor
-    try:
-        setattr(tensor, _RESHARD_AFTER_FORWARD_ATTR, reshard_after_forward)
-    except Exception:
-        pass
-    return tensor
-
-
 @contextmanager
 def disable_active_parametrization() -> Generator[None, None, None]:
     """Disable parametrization forward (returns raw sharded tensor).
@@ -1544,16 +1502,6 @@ def disable_active_parametrization() -> Generator[None, None, None]:
         yield
     finally:
         _active_parametrization = True
-
-
-@contextmanager
-def _disable_reshard_checkpoint() -> Generator[None, None, None]:
-    """Skip eager reshard checkpoint wrappers while entering graph capture."""
-    token = _reshard_checkpoint_enabled.set(False)
-    try:
-        yield
-    finally:
-        _reshard_checkpoint_enabled.reset(token)
 
 
 @contextmanager
@@ -1714,18 +1662,7 @@ def is_flex_shard_param(tensor: torch.Tensor) -> bool:
 
 
 class FlexShardModule:
-    """Mixin added to modules after flex_shard(). Provides sharding methods."""
-
-    def unshard(self) -> None:
-        for storage in getattr(self, _DSTORAGES_ATTR):
-            storage.unshard()
-
-    def reshard(self) -> None:
-        raise NotImplementedError
-
-    def reduce_grad(self) -> None:
-        for storage in getattr(self, _DSTORAGES_ATTR):
-            storage.reduce_grad()
+    """Mixin added to modules after flex_shard()."""
 
     @property
     def dstorage(self) -> DStorage:
@@ -2128,7 +2065,6 @@ class ShardParametrization(nn.Module):
         compute_device: torch.device | None = None,
         padded_shard_size: int | None = None,
         global_dim_size: int | None = None,
-        reshard_after_forward: bool = True,
     ):
         super().__init__()
         self.shard_dim = shard_dim
@@ -2139,7 +2075,6 @@ class ShardParametrization(nn.Module):
         self.compute_device = compute_device
         self.padded_shard_size = padded_shard_size
         self.global_dim_size = global_dim_size
-        self.reshard_after_forward = reshard_after_forward
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
@@ -2164,22 +2099,18 @@ class ShardParametrization(nn.Module):
             local_shard, self.world_size, self.group_name
         )
         full = torch.ops._c10d_functional.wait_tensor(full)
-        full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
         if full.requires_grad and torch.is_grad_enabled():
             full.register_hook(lambda grad: grad / self.world_size)
         if self.shard_dim != 0:
             chunks = full.chunk(self.world_size, dim=0)
             full = torch.cat(chunks, dim=self.shard_dim)
-            full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
 
         # Slice out padding if uneven
         if self.global_dim_size is not None:
             full = full.narrow(self.shard_dim, 0, self.global_dim_size)
-            full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
 
         if self.param_dtype is not None or self.reduce_dtype is not None:
             full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
-            full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
         return full
 
 
@@ -2209,7 +2140,6 @@ class FlatShardParametrization(nn.Module):
         compute_device: torch.device | None = None,
         padded_shard_size: int | None = None,
         global_numel: int | None = None,
-        reshard_after_forward: bool = True,
     ):
         super().__init__()
         self.group_name = group_name
@@ -2220,7 +2150,6 @@ class FlatShardParametrization(nn.Module):
         self.compute_device = compute_device
         self.padded_shard_size = padded_shard_size
         self.global_numel = global_numel
-        self.reshard_after_forward = reshard_after_forward
 
     def forward(self, flat_shard: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
@@ -2239,25 +2168,16 @@ class FlatShardParametrization(nn.Module):
             flat_shard, self.world_size, self.group_name
         )
         full_flat = torch.ops._c10d_functional.wait_tensor(full_flat)
-        full_flat = _set_tensor_reshard_after_forward(
-            full_flat, self.reshard_after_forward
-        )
         if full_flat.requires_grad and torch.is_grad_enabled():
             full_flat.register_hook(lambda grad: grad / self.world_size)
 
         # Slice off padding if uneven
         if self.global_numel is not None:
             full_flat = full_flat[: self.global_numel]
-            full_flat = _set_tensor_reshard_after_forward(
-                full_flat, self.reshard_after_forward
-            )
 
         full = full_flat.view(self.original_shape)
-        full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
-
         if self.param_dtype is not None or self.reduce_dtype is not None:
             full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
-            full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
         return full
 
 
@@ -2337,7 +2257,6 @@ class OwnedParametrization(nn.Module):
         param_dtype: torch.dtype | None = None,
         reduce_dtype: torch.dtype | None = None,
         compute_device: torch.device | None = None,
-        reshard_after_forward: bool = True,
     ):
         super().__init__()
         self.owner_rank = owner_rank
@@ -2346,7 +2265,6 @@ class OwnedParametrization(nn.Module):
         self.param_dtype = param_dtype
         self.reduce_dtype = reduce_dtype
         self.compute_device = compute_device
-        self.reshard_after_forward = reshard_after_forward
 
     def forward(self, param: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
@@ -2358,10 +2276,8 @@ class OwnedParametrization(nn.Module):
         full = _OwnedBroadcast.apply(
             param, self.owner_rank, self.group_name, self.world_size
         )
-        full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
         if self.param_dtype is not None or self.reduce_dtype is not None:
             full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
-            full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
         return full
 
 
@@ -2383,7 +2299,6 @@ class RaggedShardParametrization(nn.Module):
         param_dtype: torch.dtype | None = None,
         reduce_dtype: torch.dtype | None = None,
         compute_device: torch.device | None = None,
-        reshard_after_forward: bool = True,
     ):
         super().__init__()
         self.shard_dim = shard_dim
@@ -2394,7 +2309,6 @@ class RaggedShardParametrization(nn.Module):
         self.param_dtype = param_dtype
         self.reduce_dtype = reduce_dtype
         self.compute_device = compute_device
-        self.reshard_after_forward = reshard_after_forward
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
@@ -2419,7 +2333,6 @@ class RaggedShardParametrization(nn.Module):
             local_shard, self.world_size, self.group_name
         )
         full = torch.ops._c10d_functional.wait_tensor(full)
-        full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
         if full.requires_grad and torch.is_grad_enabled():
             full.register_hook(lambda grad: grad / self.world_size)
 
@@ -2430,11 +2343,8 @@ class RaggedShardParametrization(nn.Module):
             for r, chunk in enumerate(chunks)
         ]
         full = torch.cat(real_chunks, dim=self.shard_dim)
-        full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
-
         if self.param_dtype is not None or self.reduce_dtype is not None:
             full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
-            full = _set_tensor_reshard_after_forward(full, self.reshard_after_forward)
         return full
 
 
@@ -2461,11 +2371,8 @@ class DTensorAwareParametrization(nn.Module):
         self.mesh = mesh
         self.placements = placements
         self.dp_dim_indices = dp_dim_indices
-        # The eager batched all-gather fast path reads these attributes from
-        # the outer parametrization when returning a pre-gathered tensor.
         self.param_dtype = getattr(inner, "param_dtype", None)
         self.reduce_dtype = getattr(inner, "reduce_dtype", None)
-        self.reshard_after_forward = getattr(inner, "reshard_after_forward", True)
 
     def _requires_dtensor_output(self) -> bool:
         if self.placements is None:
@@ -2543,26 +2450,6 @@ class DTensorAwareParametrization(nn.Module):
 # Eager reshard-after-forward via checkpoint + selective AC policy
 # ---------------------------------------------------------------------------
 
-# Collective ops that should be recomputed (not saved) by checkpoint.
-class _RegisterPostBackward(torch.autograd.Function):
-    """Identity on forward inputs; fires a callback in backward.
-
-    Inserted on a layer's forward inputs so that the callback fires AFTER
-    all the layer's parameter gradients are computed. Used for batched
-    reduce-scatter per bucket.
-    """
-
-    @staticmethod
-    def forward(ctx, reduce_fn, *inputs):
-        ctx.reduce_fn = reduce_fn
-        return inputs
-
-    @staticmethod
-    def backward(ctx, *grads):
-        ctx.reduce_fn()
-        return (None,) + grads
-
-
 # These produce the unsharded param tensors that we want freed per-layer.
 _FLEX_SHARD_COLLECTIVE_OPS = {
     torch.ops._c10d_functional.all_gather_into_tensor.default,
@@ -2617,13 +2504,6 @@ def _compose_reshard_with_ac_policy(ac_context_fn):
     return merged_context_fn
 
 
-class ShardedState(Enum):
-    """State of the parameters in DStorage."""
-
-    SHARDED = auto()  # Parameters are sharded tensors with placement metadata
-    UNSHARDED = auto()  # Parameters are unsharded for forward/backward
-
-
 @dataclass
 class ParamInfo:
     """Metadata for a parameter in chunked storage."""
@@ -2638,7 +2518,6 @@ class ParamInfo:
     local_numel: int = 0
     byte_offset: int = 0  # byte offset into the sharded storage
     global_numel: int = 0  # total elements in unsharded param
-    unsharded_byte_offset: int = 0  # byte offset into the unsharded storage
     spmd_mesh: DeviceMesh | None = None
     spmd_placements: tuple[Any, ...] | None = None
     spmd_dp_dim_indices: tuple[int, ...] = ()
@@ -2663,9 +2542,7 @@ class DStorage:
     byte buffer. Each parameter's local shard is a typed view into this buffer
     at the appropriate byte offset with proper alignment.
 
-    Communication is delegated to Placement.unshard() and
-    Placement.reduce_grad(), which handle batching per placement type. The
-    default FlexShard execution path uses property-based parametrization; this
+    Communication is delegated to eager hooks and parametrization modules; this
     storage object owns buffer layout and metadata.
     """
 
@@ -2675,7 +2552,6 @@ class DStorage:
         param_infos: dict[str, ParamInfo],
         mesh: DeviceMesh,
         total_bytes: int,
-        total_unsharded_bytes: int,
         module: nn.Module,
         reshard_after_forward: bool = True,
     ) -> None:
@@ -2685,22 +2561,8 @@ class DStorage:
         self._param_infos = param_infos
         self._mesh = mesh
         self._total_bytes = total_bytes
-        self._total_unsharded_bytes = total_unsharded_bytes
         self._module = module
-        self._state = ShardedState.SHARDED
         self._reshard_after_forward = reshard_after_forward
-
-        # Unsharded buffer (allocated on demand)
-        self._unsharded_byte_storage: torch.Tensor | None = None
-
-        # Cache sharded parameters for reduce_grad
-        self._sharded_params: dict[str, nn.Parameter] = {}
-        for fqn in param_infos:
-            parts = fqn.split(".")
-            mod = module
-            for part in parts[:-1]:
-                mod = getattr(mod, part)
-            self._sharded_params[fqn] = getattr(mod, parts[-1])
 
     @property
     def byte_storage(self) -> torch.Tensor:
@@ -2718,11 +2580,6 @@ class DStorage:
         return self._total_bytes
 
     @property
-    def total_unsharded_bytes(self) -> int:
-        """Total bytes needed for unsharded storage."""
-        return self._total_unsharded_bytes
-
-    @property
     def numel(self) -> int:
         """Total number of bytes (for compatibility, returns byte count)."""
         return self._byte_storage.numel()
@@ -2731,11 +2588,6 @@ class DStorage:
     def param_infos(self) -> dict[str, ParamInfo]:
         """Metadata for each parameter."""
         return self._param_infos
-
-    @property
-    def state(self) -> ShardedState:
-        """Current state (SHARDED or UNSHARDED)."""
-        return self._state
 
     @property
     def world_size(self) -> int:
@@ -2749,195 +2601,6 @@ class DStorage:
         byte_view = self._byte_storage[info.byte_offset : info.byte_offset + num_bytes]
         typed_flat = byte_view.view(info.dtype)
         return typed_flat.view(info.local_shape)
-
-    def get_unsharded_view(self, fqn: str) -> torch.Tensor:
-        """Get the unsharded tensor view for a parameter by FQN."""
-        if self._unsharded_byte_storage is None:
-            raise RuntimeError("Unsharded storage not allocated. Call unshard() first.")
-        info = self._param_infos[fqn]
-        num_bytes = info.global_numel * info.dtype.itemsize
-        byte_view = self._unsharded_byte_storage[
-            info.unsharded_byte_offset : info.unsharded_byte_offset + num_bytes
-        ]
-        typed_flat = byte_view.view(info.dtype)
-        return typed_flat.view(info.global_shape)
-
-    def unshard(self) -> None:
-        """
-        All-gather local shards and register unsharded parameters on the module.
-
-        After calling this, model.parameters() returns unsharded tensors for forward/backward.
-        """
-        if self._state == ShardedState.UNSHARDED:
-            return  # Already unsharded
-
-        # Allocate unsharded buffer if needed
-        if self._unsharded_byte_storage is None:
-            self._unsharded_byte_storage = torch.empty(
-                self._total_unsharded_bytes,
-                dtype=torch.uint8,
-                device=self._byte_storage.device,
-            )
-
-        # Gather via Placement.unshard()
-        infos = list(self._param_infos.values())
-        ptype = type(infos[0].placements[0])
-        local_shards = [self._sharded_params[info.fqn].data for info in infos]
-        full_params = ptype.unshard(local_shards, infos, self._mesh)
-
-        for info, full_param in zip(infos, full_params, strict=True):
-            num_bytes = info.global_numel * info.dtype.itemsize
-            dest = self._unsharded_byte_storage[
-                info.unsharded_byte_offset : info.unsharded_byte_offset + num_bytes
-            ]
-            dest.copy_(full_param.reshape(-1).view(torch.uint8))
-
-        # Register unsharded parameters on the module
-        for fqn, info in self._param_infos.items():
-            unsharded_view = self.get_unsharded_view(fqn)
-            unsharded_param = nn.Parameter(
-                unsharded_view, requires_grad=info.requires_grad
-            )
-            _set_param_on_module(self._module, fqn, unsharded_param)
-
-        self._state = ShardedState.UNSHARDED
-
-    def _sync_unsharded_to_storage(self) -> None:
-        """
-        Copy data from unsharded buffer back to sharded byte_storage.
-
-        This is useful after calling reset_parameters() on unsharded params,
-        to ensure the initialized values are persisted in the sharded storage.
-        Must be called while in UNSHARDED state, before reduce_grad().
-        """
-        if self._state != ShardedState.UNSHARDED:
-            raise RuntimeError("Must be in UNSHARDED state to sync to storage")
-        if self._unsharded_byte_storage is None:
-            raise RuntimeError("Unsharded storage not allocated")
-
-        my_rank = self._mesh.get_local_rank()
-        world_size = self.world_size
-
-        for fqn, info in self._param_infos.items():
-            if info.local_numel == 0:
-                continue
-            unsharded_view = self.get_unsharded_view(fqn)
-            shard = info.placements[0].extract_local_shard(
-                unsharded_view, my_rank, world_size
-            )
-            if shard.numel() > 0:
-                nbytes = shard.numel() * shard.element_size()
-                self._byte_storage[info.byte_offset : info.byte_offset + nbytes].copy_(
-                    shard.reshape(-1).view(torch.uint8)
-                )
-
-    def _sync_sharded_to_storage(self, device: torch.device | None = None) -> None:
-        """
-        Copy data from sharded parameter tensors to byte_storage.
-
-        This is useful after calling to_empty() and reset_parameters() on a model
-        that was sharded on meta device. The parameter tensors have been
-        materialized and initialized, but byte_storage may still be on meta or
-        have stale data.
-
-        Args:
-            device: Target device for byte_storage. If None, uses the device of
-                    the first sharded parameter.
-
-        Must be called while in SHARDED state.
-        """
-        if self._state != ShardedState.SHARDED:
-            raise RuntimeError("Must be in SHARDED state to sync to storage")
-
-        # Get target device from first param if not specified
-        if device is None:
-            for fqn, sharded_param in self._sharded_params.items():
-                device = sharded_param.device
-                break
-
-        if device is None:
-            raise RuntimeError("No parameters found to determine target device")
-
-        # Materialize byte_storage if on meta device
-        if self._byte_storage.device == torch.device("meta"):
-            self._byte_storage = torch.empty(
-                self._byte_storage.shape,
-                dtype=self._byte_storage.dtype,
-                device=device,
-            )
-
-        # Copy from each sharded param to byte_storage
-        for fqn, info in self._param_infos.items():
-            sharded_param = self._sharded_params[fqn]
-
-            local_data = sharded_param.data
-
-            if info.local_numel == 0:
-                continue  # No data for this rank
-
-            # Get the view into byte_storage for this param
-            byte_offset = info.byte_offset
-            num_bytes = info.local_numel * info.dtype.itemsize
-            storage_slice = self._byte_storage[byte_offset : byte_offset + num_bytes]
-
-            # View as the param's dtype and copy
-            storage_view = storage_slice.view(info.dtype)
-            storage_view.copy_(local_data.view(-1))
-
-    def reduce_grad(self) -> None:
-        """
-        Reduce gradients, free unsharded buffer, and restore sharded parameters.
-
-        Gradients from the unsharded parameters are reduced via
-        Placement.reduce_grad(), and the resulting sharded gradients
-        are stored on the sharded parameters.
-
-        After calling this, model.parameters() returns sharded tensors with gradients.
-        """
-        if self._state == ShardedState.SHARDED:
-            return  # Already sharded
-
-        # Reduce gradients via Placement.reduce_grad()
-        infos_with_grads: list[ParamInfo] = []
-        grads: list[torch.Tensor] = []
-        for fqn, info in self._param_infos.items():
-            unsharded_param = _get_param_from_module(self._module, fqn)
-            if unsharded_param.grad is not None:
-                infos_with_grads.append(info)
-                grads.append(unsharded_param.grad.contiguous())
-
-        if grads:
-            ptype = type(infos_with_grads[0].placements[0])
-            sharded_grads = ptype.reduce_grad(grads, infos_with_grads, self._mesh)
-
-            for info, sharded_grad in zip(infos_with_grads, sharded_grads, strict=True):
-                if info.local_numel > 0:
-                    self._sharded_params[info.fqn].grad = sharded_grad
-
-        # Restore sharded parameters
-        for fqn, sharded_param in self._sharded_params.items():
-            _set_param_on_module(self._module, fqn, sharded_param)
-
-        # Free unsharded buffer
-        if self._unsharded_byte_storage is not None:
-            self._unsharded_byte_storage = None
-
-        self._state = ShardedState.SHARDED
-
-    @contextmanager
-    def unsharded(self):
-        """
-        Context manager for automatic unshard/reduce_grad around forward.
-
-        Usage:
-            with storage.unsharded():
-                output = model(input)
-        """
-        self.unshard()
-        try:
-            yield
-        finally:
-            self.reduce_grad()
 
 
 def _storage_requires_eager_batched_unshard(storage: DStorage) -> bool:
@@ -3067,7 +2730,7 @@ def _create_param_infos(
     named_params: list[tuple[str, nn.Parameter]],
     mesh_info: FlexShardMeshInfo,
     param_placements: dict[str, tuple[Placement, ...]],
-) -> tuple[dict[str, ParamInfo], int, int]:
+) -> tuple[dict[str, ParamInfo], int]:
     """
     Create ParamInfo for each parameter, computing local shapes and byte offsets.
 
@@ -3082,11 +2745,9 @@ def _create_param_infos(
     Returns:
         param_infos: dict mapping FQN to ParamInfo
         total_bytes: total bytes needed for the sharded buffer
-        total_unsharded_bytes: total bytes needed for the unsharded buffer
     """
     param_infos: dict[str, ParamInfo] = {}
     current_byte_offset = 0
-    current_unsharded_byte_offset = 0
 
     for fqn, param in named_params:
         placements = param_placements[fqn]
@@ -3115,14 +2776,6 @@ def _create_param_infos(
         else:
             byte_offset = 0
 
-        # Unsharded buffer: all ranks need space for all params
-        aligned_unsharded_offset = _align_offset(
-            current_unsharded_byte_offset, alignment
-        )
-        current_unsharded_byte_offset = (
-            aligned_unsharded_offset + global_numel * dtype.itemsize
-        )
-
         info = ParamInfo(
             fqn=fqn,
             global_shape=global_shape,
@@ -3134,14 +2787,13 @@ def _create_param_infos(
             local_numel=local_numel,
             byte_offset=byte_offset,
             global_numel=global_numel,
-            unsharded_byte_offset=aligned_unsharded_offset,
             spmd_mesh=spmd_mesh,
             spmd_placements=spmd_placements,
             spmd_dp_dim_indices=mesh_info.dp_dim_indices,
         )
         param_infos[fqn] = info
 
-    return param_infos, current_byte_offset, current_unsharded_byte_offset
+    return param_infos, current_byte_offset
 
 
 def _create_sharded_view(
@@ -3175,18 +2827,6 @@ def _set_param_on_module(
     for part in parts[:-1]:
         module = getattr(module, part)
     setattr(module, parts[-1], param)
-
-
-def _get_param_from_module(
-    root_module: nn.Module,
-    fqn: str,
-) -> nn.Parameter:
-    """Navigate to submodule by FQN and get parameter."""
-    parts = fqn.split(".")
-    module = root_module
-    for part in parts[:-1]:
-        module = getattr(module, part)
-    return getattr(module, parts[-1])
 
 
 def _assign_params_to_ranks(
@@ -3463,7 +3103,6 @@ def flex_shard(
     storages: list[DStorage] = []
     fqn_to_mp_policy: dict[str, MixedPrecisionPolicy | None] = {}
     fqn_to_offload_policy: dict[str, OffloadPolicy | None] = {}
-    fqn_to_reshard_after_forward: dict[str, bool] = {}
 
     for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
         if not bucket_fqns:
@@ -3479,12 +3118,11 @@ def flex_shard(
         for fqn in bucket_fqns:
             fqn_to_mp_policy[fqn] = bucket_mp_policy
             fqn_to_offload_policy[fqn] = bucket_offload_policy
-            fqn_to_reshard_after_forward[fqn] = bucket_reshard_after_forward
 
         bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
         bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
 
-        param_infos, total_bytes, total_unsharded_bytes = _create_param_infos(
+        param_infos, total_bytes = _create_param_infos(
             bucket_named_params, mesh_info, bucket_placements
         )
 
@@ -3524,7 +3162,6 @@ def flex_shard(
             param_infos,
             shard_mesh,
             total_bytes,
-            total_unsharded_bytes,
             module,
             reshard_after_forward=bucket_reshard_after_forward,
         )
@@ -3557,7 +3194,6 @@ def flex_shard(
             param_dtype = mp.param_dtype if mp else None
             reduce_dtype = mp.reduce_dtype if mp else None
             compute_device = torch.device(device) if offload is not None else None
-            reshard = fqn_to_reshard_after_forward[fqn]
             placement = info.placements[0]
             p = placement.create_parametrization(
                 info,
@@ -3566,7 +3202,6 @@ def flex_shard(
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
-                reshard_after_forward=reshard,
             )
 
             # Wrap for DTensor outputs needed by non-DP composition.

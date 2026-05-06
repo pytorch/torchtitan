@@ -37,10 +37,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
-    FlexShardModule,
     lift_params_to_global_spmd_mesh,
     per_param_placements,
 )
+from torchtitan.experiments.flex_shard.flex_shard import FlexShardModule
 
 
 def setup_distributed():

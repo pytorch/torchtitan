@@ -215,8 +215,9 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_rejects_mixed_placement_types(self):
         """Shard + FlatShard in one bucket raises ValueError."""
-        from torchtitan.experiments.flex_shard import FlatShard, Shard
         from torchtitan.experiments.flex_shard.flex_shard import (
+            FlatShard,
+            Shard,
             _validate_bucket_placements,
         )
 
@@ -263,8 +264,9 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_accepts_separate_buckets_different_placements(self):
         """Different placement types in separate buckets is fine."""
-        from torchtitan.experiments.flex_shard import FlatShard, Shard
         from torchtitan.experiments.flex_shard.flex_shard import (
+            FlatShard,
+            Shard,
             _validate_bucket_placements,
         )
 
