@@ -122,18 +122,18 @@ class PolicyTrainer(Actor, Configurable):
             distinct_seed_mesh_dims=["pp"],
         )
 
-        # Initialize state dict adapter for HF checkpoint loading
-        if model_spec.state_dict_adapter is not None:
-            self.sd_adapter = model_spec.state_dict_adapter(
-                model_spec.model, hf_assets_path
-            )
-        else:
-            self.sd_adapter = None
-
         # Create training policy model
         model = self._build_model(model_spec, config, device_type, hf_assets_path)
         model.train()
         self.model = model
+
+        # Store state dict adapter on the model for HF checkpoint loading
+        sd_adapter = (
+            model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
+            if model_spec.state_dict_adapter is not None
+            else None
+        )
+        model.set_sd_adapter(sd_adapter)
         self.model_parts = [model]
 
         # Build optimizer and LR scheduler
@@ -167,7 +167,7 @@ class PolicyTrainer(Actor, Configurable):
             model: The model to load weights into.
             checkpoint_path: Path to HF checkpoint directory.
         """
-        if self.sd_adapter is None:
+        if model.sd_adapter is None:
             logger.warning(
                 "No state_dict_adapter available, skipping initial weight load"
             )
@@ -179,10 +179,10 @@ class PolicyTrainer(Actor, Configurable):
                 "Please provide a valid path to a HuggingFace checkpoint directory."
             )
 
-        storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_path)
-        hf_state_dict = self.sd_adapter.to_hf(model.state_dict())
+        storage_reader = model.sd_adapter.get_hf_storage_reader(checkpoint_path)
+        hf_state_dict = model.sd_adapter.to_hf(model.state_dict())
         dcp.load(hf_state_dict, storage_reader=storage_reader)
-        torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
+        torchtitan_state_dict = model.sd_adapter.from_hf(hf_state_dict)
 
         set_model_state_dict(
             model=model,

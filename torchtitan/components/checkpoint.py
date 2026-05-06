@@ -42,7 +42,6 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.protocols.model import BaseModel, StateDictMode
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -186,8 +185,8 @@ class CheckpointManager(Configurable):
         config (Checkpoint): The config used to configure the checkpointing.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
             with config.folder
-        sd_adapter (Optional[BaseStateDictAdapter]): HF I/O config (storage reader/writer,
-            fqn mapping, assets path). Key transforms are on the model.
+        The model's ``sd_adapter`` attribute provides HF I/O config (storage
+            reader/writer, fqn mapping, assets path) and key transforms.
 
     """
 
@@ -356,7 +355,6 @@ class CheckpointManager(Configurable):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
     ) -> None:
         self.enable = config.enable
@@ -400,14 +398,10 @@ class CheckpointManager(Configurable):
         self.last_save_in_hf = config.last_save_in_hf
         self.create_seed_checkpoint = config.create_seed_checkpoint
 
-        # HF I/O config extracted from sd_adapter. CheckpointManager only
-        # needs these for HF storage reader/writer — key transforms are on
-        # the model via model.set_sd_transforms().
-        self.hf_io = sd_adapter
         if self.last_save_in_hf:
             assert (
-                self.hf_io is not None
-            ), "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+                self.model.sd_adapter is not None
+            ), "checkpoint.last_save_in_hf is True, but model has no sd_adapter."
         self.initial_load_frozen = config.initial_load_frozen
         self.last_save_trainable_only = config.last_save_trainable_only
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
@@ -522,9 +516,9 @@ class CheckpointManager(Configurable):
         keys_match_mapping = False
         if hf_storage:
             assert (
-                self.hf_io is not None
-            ), "trying to save in HF safetensors format, but sd_adapter is not provided."
-            fqn_to_index_mapping = self.hf_io.fqn_to_index_mapping
+                self.model.sd_adapter is not None
+            ), "trying to save in HF safetensors format, but model has no sd_adapter."
+            fqn_to_index_mapping = self.model.sd_adapter.fqn_to_index_mapping
             # Only use sharded mapping when saved keys match the mapping
             # (e.g. base model HF save). For adapter-only saves (PEFT),
             # keys won't be in the base mapping — fall through to consolidation.
@@ -602,9 +596,9 @@ class CheckpointManager(Configurable):
         handles conversion back via ``model.from_hf()`` afterward.
         """
         assert (
-            self.hf_io is not None
-        ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-        hf_storage_reader = self.hf_io.get_hf_storage_reader(
+            self.model.sd_adapter is not None
+        ), "trying to load checkpoint in HF safetensors format, but model has no sd_adapter."
+        hf_storage_reader = self.model.sd_adapter.get_hf_storage_reader(
             checkpoint_id, from_quantized
         )
         dcp.load(state_dict, storage_reader=hf_storage_reader)
@@ -773,8 +767,11 @@ class CheckpointManager(Configurable):
                     "Loading HF safetensors from "
                     f"--checkpoint.initial_load_path: {checkpoint_id}"
                 )
-            elif self.hf_io is not None and self.hf_io.hf_assets_path is not None:
-                checkpoint_id = self.hf_io.hf_assets_path
+            elif (
+                self.model.sd_adapter is not None
+                and self.model.sd_adapter.hf_assets_path is not None
+            ):
+                checkpoint_id = self.model.sd_adapter.hf_assets_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights "
@@ -826,14 +823,18 @@ class CheckpointManager(Configurable):
             self.staging = False
 
     def _find_load_step(self, folder: str = "") -> int:
-        """Find the step to load the checkpoint for.
+        """Find the latest DCP checkpoint step for resume.
+
+        Only considers checkpoints with DCP ``.metadata`` — HF-only
+        safetensors checkpoints (e.g. PEFT adapter exports) are not
+        resumable and are skipped.
 
         Args:
             folder (str, optional): The folder to find the checkpoint for. If ``folder``
             is "", then ``self.folder`` will be used.
 
         Returns:
-            int: The step to load the checkpoint for.
+            int: The step to load the checkpoint for, or -1 if none found.
         """
         folder = folder if folder else self.folder
         pattern = r"step-(\d+)"
@@ -845,12 +846,7 @@ class CheckpointManager(Configurable):
         for filename in os.listdir(folder):
             match = re.search(pattern, filename)
             dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
-            safetensors_metadata_probe = os.path.join(
-                folder, filename, "model.safetensors.index.json"
-            )
             if match and os.path.isfile(dcp_metadata_probe):
-                step_counts.append(int(match.group(1)))
-            elif match and os.path.isfile(safetensors_metadata_probe):
                 step_counts.append(int(match.group(1)))
         if not step_counts:
             return -1

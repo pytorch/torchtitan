@@ -36,7 +36,6 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.experiments.ft.manager import FTManager
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
@@ -78,7 +77,6 @@ class FTCheckpointManager(CheckpointManager):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
@@ -90,7 +88,6 @@ class FTCheckpointManager(CheckpointManager):
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
             states=states,
-            sd_adapter=sd_adapter,
             base_folder=base_folder,
         )
 

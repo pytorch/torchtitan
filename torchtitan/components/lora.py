@@ -129,9 +129,7 @@ class LoRAConfig(Configurable.Config):
         assert inner._owner is not None
         lora_cls = _get_lora_cls(inner._owner)
 
-        lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
-            inner.sharding_config
-        )
+        lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(inner.sharding_config)
         config = lora_cls.Config(
             **{f.name: getattr(inner, f.name) for f in fields(inner)},
             lora_a=Linear.Config(
@@ -140,9 +138,7 @@ class LoRAConfig(Configurable.Config):
                 bias=False,
                 sharding_config=lora_a_sharding,
                 param_init={
-                    "weight": lambda w: nn.init.kaiming_uniform_(
-                        w, a=math.sqrt(5)
-                    ),
+                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
                 },
             ),
             lora_b=Linear.Config(

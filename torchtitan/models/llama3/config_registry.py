@@ -128,6 +128,27 @@ def llama3_debugmodel_lora_checkpoint() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_lora_save_peft() -> Trainer.Config:
+    """LoRA training that saves adapters in PEFT safetensors format."""
+    config = llama3_debugmodel_lora()
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 5
+    config.checkpoint.last_save_model_only = True
+    config.checkpoint.last_save_trainable_only = True
+    config.checkpoint.last_save_in_hf = True
+    config.checkpoint.keep_latest_k = 0
+    return config
+
+
+def llama3_debugmodel_lora_load_peft() -> Trainer.Config:
+    """LoRA training that loads base weights from DCP, resumes training."""
+    config = llama3_debugmodel_lora()
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 5
+    config.checkpoint.keep_latest_k = 0
+    return config
+
+
 def llama3_debugmodel_ce_loss() -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
     from torchtitan.components.loss import CrossEntropyLoss
