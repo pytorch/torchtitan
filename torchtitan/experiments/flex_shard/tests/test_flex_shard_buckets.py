@@ -44,12 +44,12 @@ class _FakeMesh:
 
 
 # ---------------------------------------------------------------------------
-# Global SPMD mesh metadata tests (single-process, no PG required)
+# Mesh metadata tests (single-process, no PG required)
 # ---------------------------------------------------------------------------
 
 
 class TestFlexShardMeshInfo(unittest.TestCase):
-    """Test global SPMD mesh metadata derivation."""
+    """Test FlexShard mesh metadata derivation."""
 
     def test_dp_mesh_dims_derives_shard_submesh(self):
         from torch.distributed.fsdp import DataParallelMeshDims
@@ -61,11 +61,7 @@ class TestFlexShardMeshInfo(unittest.TestCase):
         mesh = _FakeMesh(("fsdp", "tp"))
         info = _get_flex_shard_mesh_info(mesh, DataParallelMeshDims(shard="fsdp"))
 
-        self.assertIs(info.spmd_mesh, mesh)
         self.assertEqual(info.dp_shard_mesh.mesh_dim_names, ("fsdp",))
-        self.assertEqual(info.dp_shard_dim_names, ("fsdp",))
-        self.assertEqual(info.dp_dim_indices, (0,))
-        self.assertTrue(info.is_spmd_mesh)
 
     def test_dp_mesh_dims_flattens_multiple_shard_dims(self):
         from torch.distributed.fsdp import DataParallelMeshDims
@@ -80,8 +76,6 @@ class TestFlexShardMeshInfo(unittest.TestCase):
         )
 
         self.assertEqual(info.dp_shard_mesh.mesh_dim_names, ("dp0_dp1",))
-        self.assertEqual(info.dp_shard_dim_names, ("dp0", "dp1"))
-        self.assertEqual(info.dp_dim_indices, (0, 1))
 
     def test_dp_mesh_dims_requires_named_mesh(self):
         from torch.distributed.fsdp import DataParallelMeshDims
@@ -216,10 +210,9 @@ class TestBucketPlacementValidation(unittest.TestCase):
     def test_rejects_mixed_placement_types(self):
         """Shard + FlatShard in one bucket raises ValueError."""
         from torchtitan.experiments.flex_shard.flex_shard import (
-            FlatShard,
-            Shard,
             _validate_bucket_placements,
         )
+        from torchtitan.experiments.flex_shard.placements import FlatShard, Shard
 
         assignments = [["a.weight", "b.weight"]]
         placements = {
@@ -232,10 +225,10 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_rejects_mixed_shard_dims(self):
         """Shard(0) + Shard(1) in one bucket raises ValueError."""
-        from torchtitan.experiments.flex_shard import Shard
         from torchtitan.experiments.flex_shard.flex_shard import (
             _validate_bucket_placements,
         )
+        from torchtitan.experiments.flex_shard.placements import Shard
 
         assignments = [["a.weight", "b.weight"]]
         placements = {
@@ -248,10 +241,10 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_accepts_same_placement(self):
         """Shard(0) + Shard(0) in one bucket passes."""
-        from torchtitan.experiments.flex_shard import Shard
         from torchtitan.experiments.flex_shard.flex_shard import (
             _validate_bucket_placements,
         )
+        from torchtitan.experiments.flex_shard.placements import Shard
 
         assignments = [["a.weight", "b.weight"]]
         placements = {
@@ -265,10 +258,9 @@ class TestBucketPlacementValidation(unittest.TestCase):
     def test_accepts_separate_buckets_different_placements(self):
         """Different placement types in separate buckets is fine."""
         from torchtitan.experiments.flex_shard.flex_shard import (
-            FlatShard,
-            Shard,
             _validate_bucket_placements,
         )
+        from torchtitan.experiments.flex_shard.placements import FlatShard, Shard
 
         assignments = [["a.weight"], ["b.weight"]]
         placements = {
@@ -412,11 +404,9 @@ class TestDistributedBuckets(unittest.TestCase):
 
         from torchtitan.experiments.flex_shard import (
             flex_shard,
-            lift_params_to_global_spmd_mesh,
             per_param_placements,
         )
 
-        lift_params_to_global_spmd_mesh(model, mesh)
         kwargs.setdefault("shard_placement_fn", per_param_placements)
         kwargs.setdefault("buckets", [BucketSpec(["*"])])
         return flex_shard(

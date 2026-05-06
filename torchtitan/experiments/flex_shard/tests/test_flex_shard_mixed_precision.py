@@ -243,11 +243,9 @@ class TestDistributedMixedPrecision(unittest.TestCase):
         from torchtitan.experiments.flex_shard import (
             BucketSpec,
             flex_shard,
-            lift_params_to_global_spmd_mesh,
             per_param_placements,
         )
 
-        lift_params_to_global_spmd_mesh(model, mesh)
         kwargs.setdefault("shard_placement_fn", per_param_placements)
         kwargs.setdefault("buckets", [BucketSpec(["*"])])
         return flex_shard(

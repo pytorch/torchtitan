@@ -37,7 +37,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
-    lift_params_to_global_spmd_mesh,
     per_param_placements,
 )
 from torchtitan.experiments.flex_shard.flex_shard import FlexShardModule
@@ -117,7 +116,6 @@ def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     model = MultiLayerMLP().to(device)
-    lift_params_to_global_spmd_mesh(model, mesh)
 
     # Create DDP reference
     torch.manual_seed(42)
@@ -208,7 +206,6 @@ def run_test_invalid_per_param_bucket_boundary():
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     model = MultiLayerMLP().to(device)
-    lift_params_to_global_spmd_mesh(model, mesh)
 
     for layer in model.layers:
         flex_shard(

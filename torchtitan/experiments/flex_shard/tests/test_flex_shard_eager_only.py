@@ -20,7 +20,6 @@ from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
     is_flex_shard_param,
-    lift_params_to_global_spmd_mesh,
     per_param_placements,
 )
 
@@ -47,7 +46,6 @@ def _single_rank_cpu_mesh():
 
 def _flex_shard_tiny_model(mesh):
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2))
-    lift_params_to_global_spmd_mesh(model, mesh)
     flex_shard(
         model,
         mesh,

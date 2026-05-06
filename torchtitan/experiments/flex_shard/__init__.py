@@ -12,11 +12,12 @@ from .flex_shard import (
     get_global_shape,
     get_placements,
     is_flex_shard_param,
-    lift_params_to_global_spmd_mesh,
     MixedPrecisionPolicy,
+    set_sharding_info,
+)
+from .placements import (
     per_param_placements,
     Placement,
-    set_sharding_info,
     Shard,
 )
 
@@ -29,7 +30,6 @@ __all__ = [
     "get_global_shape",
     "get_placements",
     "is_flex_shard_param",
-    "lift_params_to_global_spmd_mesh",
     "MixedPrecisionPolicy",
     "per_param_placements",
     "Placement",

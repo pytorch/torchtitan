@@ -17,65 +17,24 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 from torch.distributed.fsdp import DataParallelMeshDims
+from .placements import (
+    _OwnedFullCopy,
+    _with_fqn,
+    EagerAllGatherResult,
+    EagerReduceScatterResult,
+    FlatShard,
+    Owned,
+    Placement,
+    RaggedShard,
+    Shard,
+)
 
 
 if TYPE_CHECKING:
-    from types import ModuleType
-
     from torch.distributed.device_mesh import DeviceMesh
-
-
-class StreamHandoff:
-    """Hold a tensor until it is safe to release on a target stream."""
-
-    __slots__ = (
-        "_tensor",
-        "_event",
-        "_release_stream",
-        "_device_handle",
-        "_released",
-    )
-
-    def __init__(
-        self,
-        tensor: torch.Tensor,
-        ready_event: torch.Event | None,
-        release_stream: torch.Stream,
-        device_handle: ModuleType | None = None,
-    ) -> None:
-        if device_handle is None:
-            device_handle = getattr(torch, tensor.device.type)
-        self._tensor: torch.Tensor | None = tensor
-        self._event = ready_event
-        self._release_stream = release_stream
-        self._device_handle = device_handle
-        self._released = False
-
-    def wait(self, stream: torch.Stream) -> None:
-        if self._released or self._event is None:
-            return
-        stream.wait_event(self._event)
-
-    def release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        if self._tensor is None:
-            return
-        if self._event is not None:
-            self._release_stream.wait_event(self._event)
-        with self._device_handle.stream(self._release_stream):
-            self._tensor = None
-
-    def __del__(self) -> None:
-        try:
-            self.release()
-        except Exception:
-            pass
 
 
 @dataclass
@@ -111,19 +70,6 @@ class PendingEagerAllGather:
 
 
 @dataclass
-class EagerAllGatherResult:
-    """State needed to finish an eager all-gather launched on a side stream."""
-
-    gathered: list[torch.Tensor]
-    infos: list[ParamInfo]
-    mesh: DeviceMesh
-    per_rank_param_offsets: list[list[int]]
-    event: torch.Event | None
-    send_buf: torch.Tensor | None
-    debug_fqn: str | None
-
-
-@dataclass
 class EagerBucketAllGatherRuntime:
     """Runtime metadata passed to eager RAF bucket autograd."""
 
@@ -133,24 +79,6 @@ class EagerBucketAllGatherRuntime:
     mesh: DeviceMesh
     context: EagerAllGatherContext
     debug_fqn: str | None
-
-
-@dataclass
-class EagerReduceScatterResult:
-    """State needed to finish an eager reduce-scatter launched on a side stream."""
-
-    sharded_grads: list[torch.Tensor]
-    event: torch.Event | None
-    send_buf: torch.Tensor | None
-    recv_buf: torch.Tensor | None
-    debug_fqn: str | None
-
-
-def _with_fqn(label: str, fqn: str | None) -> str:
-    """Append a module/bucket FQN to profiler labels, matching FSDP style."""
-    if fqn:
-        return f"{label} ({fqn})"
-    return label
 
 
 def _queue_reduce_scatter_wait(context: EagerAllGatherContext) -> None:
@@ -191,494 +119,6 @@ def _wait_and_clear_reduce_scatter_states(
                 release_sharded_grads=True,
             )
         context.reduce_scatter_states.clear()
-
-
-class Placement:
-    """Base class for FlexShard placement strategies.
-
-    Each subclass implements per-param sharding (extract_local_shard,
-    assemble_from_shards) and batched communication (unshard, reduce_grad).
-    """
-
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        """How many elements this rank holds for a param with global_shape."""
-        raise NotImplementedError
-
-    def compute_local_shape(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> torch.Size:
-        """Local shape this rank holds for a param with global_shape."""
-        raise NotImplementedError
-
-    def extract_local_shard(
-        self,
-        param: torch.Tensor,
-        rank: int,
-        world_size: int,
-    ) -> torch.Tensor:
-        """Extract this rank's local shard from the full (unsharded) param.
-
-        Returns a contiguous typed tensor. DStorage handles copying into
-        the byte buffer.
-
-        Args:
-            param: the full (unsharded) parameter tensor
-            rank: this rank's index
-            world_size: total number of ranks
-        """
-        raise NotImplementedError
-
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Reconstruct the full unsharded param from typed per-rank shards.
-
-        DStorage extracts typed shards from gathered byte buffers and passes
-        them here. Each shard is a contiguous typed tensor.
-
-        Args:
-            per_rank_shards: list of typed tensors, one per rank
-            global_shape: the full unsharded shape
-            dtype: parameter dtype
-        """
-        raise NotImplementedError
-
-    def create_parametrization(
-        self,
-        info: ParamInfo,
-        group_name: str,
-        world_size: int,
-        param_dtype: torch.dtype | None = None,
-        reduce_dtype: torch.dtype | None = None,
-        compute_device: torch.device | None = None,
-    ) -> nn.Module:
-        """Create an FX-traceable parametrization module for this placement.
-
-        Called by flex_shard() to build the property-getter parametrization
-        that emits _c10d_functional ops. Subclasses override to return their
-        specific parametrization class.
-        """
-        raise NotImplementedError
-
-    @classmethod
-    def unshard(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        """Batched gather communication for all params in a storage unit."""
-        raise NotImplementedError
-
-    @classmethod
-    def reduce_grad(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        """Batched reduce communication for all param gradients in a storage unit."""
-        raise NotImplementedError
-
-
-class Shard(Placement):
-    """Symmetric sharding — parameter split along dim across all ranks."""
-
-    def __init__(self, dim: int = 0):
-        self.dim = dim
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Shard):
-            return False
-        return self.dim == other.dim
-
-    def __hash__(self) -> int:
-        return hash((type(self), self.dim))
-
-    def __repr__(self) -> str:
-        return f"Shard({self.dim})"
-
-    def create_parametrization(self, info, group_name, world_size, **kwargs):
-        dim_size = info.global_shape[self.dim]
-        uneven = dim_size % world_size != 0
-        return ShardParametrization(
-            shard_dim=self.dim,
-            group_name=group_name,
-            world_size=world_size,
-            padded_shard_size=(
-                (dim_size + world_size - 1) // world_size if uneven else None
-            ),
-            global_dim_size=dim_size if uneven else None,
-            **kwargs,
-        )
-
-    def compute_local_shape(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> torch.Size:
-        dim_size = global_shape[self.dim]
-        chunk = (dim_size + world_size - 1) // world_size
-        start = chunk * rank
-        local_dim = min(dim_size, start + chunk) - min(dim_size, start)
-        shape = list(global_shape)
-        shape[self.dim] = local_dim
-        return torch.Size(shape)
-
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        local_shape = self.compute_local_shape(global_shape, rank, world_size)
-        numel = 1
-        for d in local_shape:
-            numel *= d
-        return numel
-
-    def extract_local_shard(
-        self,
-        param: torch.Tensor,
-        rank: int,
-        world_size: int,
-    ) -> torch.Tensor:
-        chunks = list(torch.chunk(param, world_size, dim=self.dim))
-        while len(chunks) < world_size:
-            chunks.append(chunks[0].new_empty(0))
-        return chunks[rank].contiguous()
-
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        non_empty = [s for s in per_rank_shards if s.numel() > 0]
-        if non_empty:
-            return torch.cat(non_empty, dim=self.dim)
-        return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
-
-    @classmethod
-    def unshard(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        result = cls.begin_unshard(
-            tensors,
-            infos,
-            mesh,
-            all_gather_stream=None,
-            debug_fqn=None,
-        )
-        return cls.finish_unshard(result)
-
-    @classmethod
-    def begin_unshard(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-        all_gather_stream: torch.Stream | None,
-        debug_fqn: str | None = None,
-    ) -> EagerAllGatherResult:
-        ws = mesh.size()
-        pg = mesh.get_group()
-        dtype = tensors[0].dtype
-        device = tensors[0].device
-
-        # Pack local shards into one flat buffer
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
-        ):
-            send_buf = torch.cat([t.reshape(-1) for t in tensors])
-
-            # Compute per-rank buffer sizes and param offsets
-            per_rank_sizes: list[int] = []
-            per_rank_param_offsets: list[list[int]] = []
-            for r in range(ws):
-                offset = 0
-                offsets_r: list[int] = []
-                for info in infos:
-                    offsets_r.append(offset)
-                    offset += info.placements[0].compute_local_numel(
-                        info.global_shape, r, ws
-                    )
-                per_rank_sizes.append(offset)
-                per_rank_param_offsets.append(offsets_r)
-
-            # Variable-size all_gather outputs
-            gathered = [
-                torch.empty(per_rank_sizes[r], dtype=dtype, device=device)
-                for r in range(ws)
-            ]
-
-        if all_gather_stream is None or device.type != "cuda":
-            label = _with_fqn("FlexShard::all_gather", debug_fqn)
-            with dist.record_comm(label):
-                dist.all_gather(gathered, send_buf, group=pg)
-            event = None
-            if device.type == "cuda":
-                event = torch.cuda.Event()
-                event.record(torch.cuda.current_stream(device))
-            return EagerAllGatherResult(
-                gathered=gathered,
-                infos=infos,
-                mesh=mesh,
-                per_rank_param_offsets=per_rank_param_offsets,
-                event=event,
-                send_buf=send_buf,
-                debug_fqn=debug_fqn,
-            )
-
-        copy_in_done = torch.cuda.Event()
-        copy_in_done.record(torch.cuda.current_stream(device))
-        with torch.cuda.stream(all_gather_stream):
-            all_gather_stream.wait_event(copy_in_done)
-            label = _with_fqn("FlexShard::all_gather", debug_fqn)
-            with dist.record_comm(label):
-                dist.all_gather(gathered, send_buf, group=pg)
-            event = torch.cuda.Event()
-            event.record(all_gather_stream)
-        return EagerAllGatherResult(
-            gathered=gathered,
-            infos=infos,
-            mesh=mesh,
-            per_rank_param_offsets=per_rank_param_offsets,
-            event=event,
-            send_buf=send_buf,
-            debug_fqn=debug_fqn,
-        )
-
-    @classmethod
-    def finish_unshard(cls, result: EagerAllGatherResult) -> list[torch.Tensor]:
-        cls.wait_for_unshard(result)
-        ws = result.mesh.size()
-        device = result.gathered[0].device
-        # Unpack: per param, extract shard from each rank, assemble_from_shards
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_out", result.debug_fqn)
-        ):
-            results: list[torch.Tensor] = []
-            for i, info in enumerate(result.infos):
-                p = info.placements[0]
-                per_rank_shards: list[torch.Tensor] = []
-                for r in range(ws):
-                    numel = p.compute_local_numel(info.global_shape, r, ws)
-                    shape = p.compute_local_shape(info.global_shape, r, ws)
-                    if numel > 0:
-                        off = result.per_rank_param_offsets[r][i]
-                        per_rank_shards.append(
-                            result.gathered[r][off : off + numel].view(shape)
-                        )
-                    else:
-                        per_rank_shards.append(
-                            torch.empty(shape, dtype=info.dtype, device=device)
-                        )
-                results.append(
-                    p.assemble_from_shards(
-                        per_rank_shards, info.global_shape, info.dtype
-                    )
-                )
-                del per_rank_shards
-            cls.release_unshard_buffers(result)
-            return results
-
-    @classmethod
-    def wait_for_unshard(cls, result: EagerAllGatherResult) -> None:
-        device = result.gathered[0].device
-        if device.type == "cuda" and result.event is not None:
-            torch.cuda.current_stream(device).wait_event(result.event)
-
-    @classmethod
-    def release_unshard_buffers(cls, result: EagerAllGatherResult) -> None:
-        """Release raw all-gather buffers after current-stream work is queued."""
-        if not result.gathered and result.send_buf is None:
-            return
-        device = (
-            result.gathered[0].device
-            if result.gathered
-            else result.send_buf.device  # type: ignore[union-attr]
-        )
-        if device.type != "cuda":
-            result.gathered.clear()
-            result.send_buf = None
-            return
-
-        stream = torch.cuda.current_stream(device)
-        event = torch.cuda.Event()
-        event.record(stream)
-        handoffs: list[StreamHandoff] = []
-        if result.send_buf is not None:
-            handoffs.append(StreamHandoff(result.send_buf, event, stream))
-            result.send_buf = None
-        while result.gathered:
-            handoffs.append(StreamHandoff(result.gathered.pop(), event, stream))
-        for handoff in handoffs:
-            handoff.release()
-
-    @classmethod
-    def reduce_grad(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        result = cls.begin_reduce_grad(
-            tensors,
-            infos,
-            mesh,
-            reduce_scatter_stream=None,
-            debug_fqn=None,
-        )
-        return cls.finish_reduce_grad(result)
-
-    @classmethod
-    def begin_reduce_grad(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-        reduce_scatter_stream: torch.Stream | None,
-        debug_fqn: str | None = None,
-    ) -> EagerReduceScatterResult:
-        ws = mesh.size()
-        rank = mesh.get_local_rank()
-        pg = mesh.get_group()
-        dtype = tensors[0].dtype
-        device = tensors[0].device
-
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
-        ):
-            padded_sizes = []
-            for tensor in tensors:
-                padded_dim0 = ((tensor.size(0) + ws - 1) // ws) * ws
-                padded_sizes.append(torch.Size([padded_dim0] + list(tensor.shape[1:])))
-
-            input_numel = sum(s.numel() for s in padded_sizes)
-            output_numel = input_numel // ws
-
-            send_buf = torch.empty(input_numel, dtype=dtype, device=device)
-            send_buf_2d = send_buf.view(ws, -1)
-            torch._chunk_cat(tensors, dim=0, num_chunks=ws, out=send_buf_2d)
-
-        def _copy_out(recv_buf: torch.Tensor) -> list[torch.Tensor]:
-            with torch.profiler.record_function(
-                _with_fqn("FlexShard::reduce_scatter_copy_out", debug_fqn)
-            ):
-                results: list[torch.Tensor] = []
-                flat_offset = 0
-                for info, padded_size in zip(infos, padded_sizes, strict=True):
-                    local_shape = info.placements[0].compute_local_shape(
-                        info.global_shape, rank, ws
-                    )
-                    stride = make_contiguous_strides_for(local_shape)
-                    shard = torch.as_strided(
-                        recv_buf,
-                        size=local_shape,
-                        stride=stride,
-                        storage_offset=flat_offset,
-                    ).contiguous()
-                    results.append(shard)
-                    flat_offset += padded_size.numel() // ws
-                return results
-
-        if reduce_scatter_stream is None or device.type != "cuda":
-            recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
-            label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
-            with dist.record_comm(label):
-                dist.reduce_scatter_tensor(
-                    output=recv_buf,
-                    input=send_buf,
-                    op=dist.ReduceOp.AVG,
-                    group=pg,
-                )
-            sharded_grads = _copy_out(recv_buf)
-            event = None
-            if device.type == "cuda":
-                event = torch.cuda.Event()
-                event.record(torch.cuda.current_stream(device))
-            return EagerReduceScatterResult(
-                sharded_grads=sharded_grads,
-                event=event,
-                send_buf=send_buf,
-                recv_buf=recv_buf,
-                debug_fqn=debug_fqn,
-            )
-
-        copy_in_done = torch.cuda.Event()
-        copy_in_done.record(torch.cuda.current_stream(device))
-        recv_buf: torch.Tensor
-        with torch.cuda.stream(reduce_scatter_stream):
-            reduce_scatter_stream.wait_event(copy_in_done)
-            recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
-            label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
-            with dist.record_comm(label):
-                dist.reduce_scatter_tensor(
-                    output=recv_buf,
-                    input=send_buf,
-                    op=dist.ReduceOp.AVG,
-                    group=pg,
-                )
-            sharded_grads = _copy_out(recv_buf)
-            event = torch.cuda.Event()
-            event.record(reduce_scatter_stream)
-        return EagerReduceScatterResult(
-            sharded_grads=sharded_grads,
-            event=event,
-            send_buf=send_buf,
-            recv_buf=recv_buf,
-            debug_fqn=debug_fqn,
-        )
-
-    @classmethod
-    def finish_reduce_grad(cls, result: EagerReduceScatterResult) -> list[torch.Tensor]:
-        cls.wait_for_reduce_grad(result)
-        return result.sharded_grads
-
-    @classmethod
-    def wait_for_reduce_grad(cls, result: EagerReduceScatterResult) -> None:
-        device = (
-            result.recv_buf.device
-            if result.recv_buf is not None
-            else result.sharded_grads[0].device
-        )
-        if device.type == "cuda" and result.event is not None:
-            torch.cuda.current_stream(device).wait_event(result.event)
-
-    @classmethod
-    def release_reduce_grad_buffers(
-        cls,
-        result: EagerReduceScatterResult,
-        release_sharded_grads: bool,
-    ) -> None:
-        """Release pending reduce-scatter buffers after its completion wait."""
-        tensors: list[torch.Tensor] = []
-        if result.send_buf is not None:
-            tensors.append(result.send_buf)
-            result.send_buf = None
-        if result.recv_buf is not None:
-            tensors.append(result.recv_buf)
-            result.recv_buf = None
-        if release_sharded_grads:
-            tensors.extend(result.sharded_grads)
-            result.sharded_grads.clear()
-        if not tensors:
-            return
-        device = tensors[0].device
-        if device.type != "cuda":
-            return
-
-        stream = torch.cuda.current_stream(device)
-        event = torch.cuda.Event()
-        event.record(stream)
-        handoffs = [StreamHandoff(tensor, event, stream) for tensor in tensors]
-        tensors.clear()
-        for handoff in handoffs:
-            handoff.release()
 
 
 class _EagerBucketAllGather(torch.autograd.Function):
@@ -771,199 +211,6 @@ class _EagerBucketAllGather(torch.autograd.Function):
         return (None, *([None] * ctx.num_inputs))
 
 
-@dataclass
-class FlatShard(Placement):
-    """FSDP1-style flat sharding — all params flattened into one 1D tensor,
-    divided evenly across ranks. A single param may straddle rank boundaries.
-
-    Each FlatShard instance describes one param's position in the global flat
-    buffer via flat_offset and numel. total_flat_numel is the total size of the
-    buffer (sum of all param numels).
-
-    Attrs:
-        flat_offset: start position of this param in the global flat buffer
-        numel: number of elements in this param
-        total_flat_numel: total elements across all params in the flat buffer
-    """
-
-    flat_offset: int = 0
-    numel: int = 0
-    total_flat_numel: int = 0
-
-    def create_parametrization(self, info, group_name, world_size, **kwargs):
-        numel = info.global_numel
-        flat_uneven = numel % world_size != 0
-        return FlatShardParametrization(
-            group_name=group_name,
-            world_size=world_size,
-            original_shape=info.global_shape,
-            padded_shard_size=(
-                (numel + world_size - 1) // world_size if flat_uneven else None
-            ),
-            global_numel=numel if flat_uneven else None,
-            **kwargs,
-        )
-
-    def _intersection(self, rank: int, world_size: int) -> tuple[int, int]:
-        """Compute overlap between this param's flat range and a rank's flat range.
-
-        Returns:
-            overlap: number of elements in the intersection
-            offset_in_param: where the intersection starts within this param
-        """
-        chunk = (self.total_flat_numel + world_size - 1) // world_size
-        r_start = rank * chunk
-        r_end = min((rank + 1) * chunk, self.total_flat_numel)
-        p_start = self.flat_offset
-        p_end = self.flat_offset + self.numel
-        overlap = max(0, min(r_end, p_end) - max(r_start, p_start))
-        offset_in_param = max(0, r_start - p_start)
-        return overlap, offset_in_param
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, FlatShard):
-            return False
-        return (
-            self.flat_offset == other.flat_offset
-            and self.numel == other.numel
-            and self.total_flat_numel == other.total_flat_numel
-        )
-
-    def __hash__(self) -> int:
-        return hash((type(self), self.flat_offset, self.numel, self.total_flat_numel))
-
-    def __repr__(self) -> str:
-        return (
-            f"FlatShard(flat_offset={self.flat_offset}, numel={self.numel}, "
-            f"total_flat_numel={self.total_flat_numel})"
-        )
-
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        overlap, _ = self._intersection(rank, world_size)
-        return overlap
-
-    def compute_local_shape(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> torch.Size:
-        overlap, _ = self._intersection(rank, world_size)
-        return torch.Size([overlap])
-
-    def extract_local_shard(
-        self,
-        param: torch.Tensor,
-        rank: int,
-        world_size: int,
-    ) -> torch.Tensor:
-        overlap, offset_in_param = self._intersection(rank, world_size)
-        if overlap == 0:
-            return param.new_empty(0)
-        return param.reshape(-1)[
-            offset_in_param : offset_in_param + overlap
-        ].contiguous()
-
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        non_empty = [s for s in per_rank_shards if s.numel() > 0]
-        if non_empty:
-            return torch.cat(non_empty).view(global_shape)
-        return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
-
-    @classmethod
-    def unshard(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        ws = mesh.size()
-        pg = mesh.get_group()
-        total_flat = infos[0].placements[0].total_flat_numel
-        chunk = (total_flat + ws - 1) // ws
-        dtype = tensors[0].dtype
-        device = tensors[0].device
-
-        # Cat local shards = this rank's chunk of the flat buffer
-        non_empty = [t for t in tensors if t.numel() > 0]
-        send_buf = (
-            torch.cat(non_empty)
-            if non_empty
-            else torch.empty(0, dtype=dtype, device=device)
-        )
-        # Pad to uniform chunk size for all_gather_into_tensor
-        if send_buf.numel() < chunk:
-            padded = torch.zeros(chunk, dtype=dtype, device=device)
-            padded[: send_buf.numel()].copy_(send_buf)
-            send_buf = padded
-
-        recv_buf = torch.empty(chunk * ws, dtype=dtype, device=device)
-        dist.all_gather_into_tensor(recv_buf, send_buf, group=pg)
-
-        # Extract each param from the full flat buffer
-        full_flat = recv_buf[:total_flat]
-        results: list[torch.Tensor] = []
-        for info in infos:
-            p = info.placements[0]
-            results.append(
-                full_flat[p.flat_offset : p.flat_offset + p.numel]
-                .view(info.global_shape)
-                .contiguous()
-            )
-        return results
-
-    @classmethod
-    def reduce_grad(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        ws = mesh.size()
-        rank = mesh.get_local_rank()
-        pg = mesh.get_group()
-        total_flat = infos[0].placements[0].total_flat_numel
-        chunk = (total_flat + ws - 1) // ws
-        dtype = tensors[0].dtype
-        device = tensors[0].device
-
-        # Flatten and concatenate all grads
-        flat_grads = torch.cat([g.reshape(-1) for g in tensors])
-        total = flat_grads.numel()
-
-        # Pad to world_size-divisible
-        padded_total = chunk * ws
-        if padded_total > total:
-            send_buf = torch.zeros(padded_total, dtype=dtype, device=device)
-            send_buf[:total].copy_(flat_grads)
-        else:
-            send_buf = flat_grads
-
-        recv_buf = torch.empty(chunk, dtype=dtype, device=device)
-        dist.reduce_scatter_tensor(
-            output=recv_buf,
-            input=send_buf,
-            op=dist.ReduceOp.AVG,
-            group=pg,
-        )
-
-        # Extract per-param sharded grads from recv_buf
-        results: list[torch.Tensor] = []
-        for info in infos:
-            p = info.placements[0]
-            overlap, _ = p._intersection(rank, ws)
-            r_start = rank * chunk
-            offset_in_recv = max(0, p.flat_offset - r_start)
-            results.append(
-                recv_buf[offset_in_recv : offset_in_recv + overlap].contiguous()
-            )
-        return results
-
-
 __all__ = [
     "auto_buckets",
     "BucketSpec",
@@ -972,12 +219,8 @@ __all__ = [
     "get_global_shape",
     "get_placements",
     "is_flex_shard_param",
-    "lift_params_to_global_spmd_mesh",
     "MixedPrecisionPolicy",
-    "per_param_placements",
-    "Placement",
     "set_sharding_info",
-    "Shard",
 ]
 
 
@@ -990,9 +233,6 @@ _PLACEMENTS_ATTR = "_placements"
 _GLOBAL_SHAPE_ATTR = "_global_shape"
 _GLOBAL_STRIDE_ATTR = "_global_stride"
 _MESH_ATTR = "_mesh"
-_SPMD_MESH_ATTR = "_spmd_mesh"
-_SPMD_PLACEMENTS_ATTR = "_spmd_placements"
-_SPMD_DP_DIM_INDICES_ATTR = "_spmd_dp_dim_indices"
 _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR = "_flex_shard_requires_eager_batched_unshard"
 _EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered"
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
@@ -1003,35 +243,25 @@ _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR = "_flex_shard_eager_autograd_bucket_unshard
 
 @dataclass(frozen=True)
 class FlexShardMeshInfo:
-    """Mesh metadata for FlexShard's DP and global SPMD views.
+    """Mesh metadata for FlexShard's data-parallel shard view.
 
     ``dp_shard_mesh`` is the one-dimensional mesh used for FlexShard
-    collectives and storage sharding. ``spmd_mesh`` is the full mesh the
-    model parameters live on when ``dp_mesh_dims`` is provided.
+    collectives and storage sharding.
     """
 
     dp_shard_mesh: DeviceMesh
-    spmd_mesh: DeviceMesh
-    dp_mesh_dims: DataParallelMeshDims
-    dp_shard_dim_names: tuple[str, ...] = ()
-    dp_replicate_dim_names: tuple[str, ...] = ()
-    dp_dim_indices: tuple[int, ...] = ()
-
-    @property
-    def is_spmd_mesh(self) -> bool:
-        return True
 
 
 def _validate_flex_shard_mesh(
     mesh: DeviceMesh,
     dp_mesh_dims: DataParallelMeshDims,
 ) -> None:
-    """Validate mesh inputs for FlexShard global SPMD mode."""
+    """Validate mesh inputs for FlexShard eager mode."""
     if dp_mesh_dims.shard is None:
         raise ValueError("flex_shard requires dp_mesh_dims.shard to be set")
     if dp_mesh_dims.replicate is not None:
         raise NotImplementedError(
-            "flex_shard global SPMD mode does not yet support " "dp_mesh_dims.replicate"
+            "flex_shard eager mode does not yet support dp_mesh_dims.replicate"
         )
     if mesh.mesh_dim_names is None:
         raise ValueError("mesh must have mesh_dim_names when dp_mesh_dims is provided")
@@ -1043,8 +273,7 @@ def _validate_flex_shard_mesh(
     for name in dim_names:
         if name not in mesh_names:
             raise ValueError(
-                f"Mesh dim name {name!r} not found in mesh.mesh_dim_names "
-                f"{mesh_names}"
+                f"Mesh dim name {name!r} not found in mesh.mesh_dim_names {mesh_names}"
             )
 
 
@@ -1059,111 +288,14 @@ def _get_flex_shard_mesh_info(
     mesh: DeviceMesh,
     dp_mesh_dims: DataParallelMeshDims,
 ) -> FlexShardMeshInfo:
-    """Derive FlexShard's DP shard mesh from a global SPMD mesh."""
+    """Derive FlexShard's DP shard mesh from the input mesh."""
     _validate_flex_shard_mesh(mesh, dp_mesh_dims)
 
     assert mesh.mesh_dim_names is not None
     shard_names = dp_mesh_dims.shard_names
-    replicate_names = dp_mesh_dims.replicate_names
-    dp_dim_names = shard_names + replicate_names
-    dp_dim_indices = tuple(mesh.mesh_dim_names.index(name) for name in dp_dim_names)
     return FlexShardMeshInfo(
         dp_shard_mesh=_get_submesh(mesh, shard_names),
-        spmd_mesh=mesh,
-        dp_mesh_dims=dp_mesh_dims,
-        dp_shard_dim_names=shard_names,
-        dp_replicate_dim_names=replicate_names,
-        dp_dim_indices=dp_dim_indices,
     )
-
-
-def _get_param_spmd_metadata(
-    param: torch.Tensor,
-) -> tuple[DeviceMesh | None, tuple[Any, ...] | None]:
-    """Return full-SPMD metadata from either a DTensor or annotated tensor."""
-    try:
-        from torch.distributed.tensor import DTensor
-
-        if isinstance(param, DTensor):
-            return param._spec.mesh, tuple(param._spec.placements)
-    except ImportError:
-        pass
-
-    spmd_mesh = getattr(param, _SPMD_MESH_ATTR, None)
-    spmd_placements = getattr(param, _SPMD_PLACEMENTS_ATTR, None)
-    if spmd_mesh is None or spmd_placements is None:
-        return None, None
-    return spmd_mesh, tuple(spmd_placements)
-
-
-def _get_param_tensor_for_flex_shard(
-    param: torch.Tensor,
-    mesh_info: FlexShardMeshInfo,
-    fqn: str,
-    *,
-    contiguous: bool,
-) -> torch.Tensor:
-    """Return the tensor FlexShard should shard over the DP mesh.
-
-    DTensor parameters already carry local tensors for all non-DP placements.
-    For parameters annotated by ``model.parallelize(materialize_state=False)``,
-    derive the same non-DP local tensor view directly from the full plain tensor
-    while leaving DP dimensions replicated for FlexShard.
-    """
-    try:
-        from torch.distributed.tensor import DTensor
-
-        if isinstance(param, DTensor):
-            return param.to_local()
-    except ImportError:
-        pass
-
-    spmd_mesh, spmd_placements = _get_param_spmd_metadata(param)
-    if spmd_mesh is None or spmd_placements is None:
-        return param
-
-    coordinate = spmd_mesh.get_coordinate()
-    if coordinate is None:
-        raise ValueError(
-            f"Current rank is not part of the SPMD mesh for parameter {fqn!r}."
-        )
-
-    from torch.distributed.tensor import Replicate, Shard as DTensorShard
-
-    local = param.detach()
-    dp_dims = set(mesh_info.dp_dim_indices)
-    for mesh_dim, placement in enumerate(spmd_placements):
-        if mesh_dim in dp_dims or isinstance(placement, Replicate):
-            continue
-        if isinstance(placement, DTensorShard):
-            local = placement._select_split_tensor(
-                local,
-                spmd_mesh.size(mesh_dim=mesh_dim),
-                coordinate[mesh_dim],
-                with_padding=False,
-                contiguous=contiguous,
-                clone=False,
-            )
-            continue
-        raise NotImplementedError(
-            "model.parallelize(..., materialize_state=False) supports "
-            f"Replicate and Shard non-DP parameter placements, but {fqn!r} "
-            f"uses {placement} on mesh dim {mesh_dim}."
-        )
-    if contiguous and not local.is_contiguous():
-        local = local.contiguous()
-    return local
-
-
-def _same_device_mesh(lhs: DeviceMesh, rhs: DeviceMesh) -> bool:
-    """Return whether two DeviceMesh objects describe the same mesh."""
-    if lhs is rhs:
-        return True
-    if lhs.device_type != rhs.device_type:
-        return False
-    if lhs.mesh_dim_names != rhs.mesh_dim_names:
-        return False
-    return torch.equal(lhs.mesh, rhs.mesh)
 
 
 def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:
@@ -1179,145 +311,41 @@ def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:
     return torch.device(mesh.device_type, device_module.current_device())
 
 
-def _validate_global_spmd_params(
+def _validate_eager_params(
     named_params: list[tuple[str, nn.Parameter]],
-    mesh_info: FlexShardMeshInfo,
     expected_device: torch.device | None = None,
 ) -> None:
-    """Validate parameters for global SPMD mode."""
-    from torch.distributed.tensor import DTensor, Replicate
+    """Validate parameters supported by the eager-only path."""
+    try:
+        from torch.distributed.tensor import DTensor
+    except ImportError:
+        DTensor = None
 
     for fqn, param in named_params:
-        param_is_dtensor = isinstance(param, DTensor)
-        spmd_mesh, placements = _get_param_spmd_metadata(param)
-        if spmd_mesh is None or placements is None:
+        if DTensor is not None and isinstance(param, DTensor):
             raise ValueError(
-                "flex_shard with dp_mesh_dims expects all parameters to be "
-                "DTensors on the full SPMD mesh or plain tensors annotated by "
-                "model.parallelize(..., materialize_state=False), but "
-                f"{fqn!r} is {type(param).__name__}."
+                "FlexShard eager mode expects plain parameters; "
+                f"{fqn!r} is a DTensor. DTensor composition is not supported yet."
             )
-        if not _same_device_mesh(spmd_mesh, mesh_info.spmd_mesh):
+        if (
+            expected_device is not None
+            and param.device.type != "meta"
+            and param.device != expected_device
+        ):
             raise ValueError(
-                f"Parameter {fqn!r} is on mesh {spmd_mesh}, but "
-                f"flex_shard was given SPMD mesh {mesh_info.spmd_mesh}."
-            )
-        if len(placements) != mesh_info.spmd_mesh.ndim:
-            raise ValueError(
-                f"Parameter {fqn!r} has {len(placements)} placements, but "
-                f"SPMD mesh has {mesh_info.spmd_mesh.ndim} dims."
-            )
-        for dim in mesh_info.dp_dim_indices:
-            if not isinstance(placements[dim], Replicate):
-                raise ValueError(
-                    f"Parameter {fqn!r} has non-Replicate placement "
-                    f"{placements[dim]} on data-parallel mesh dim {dim}. "
-                    "FlexShard global SPMD mode expects DP dims to be "
-                    "Replicate() before sharding."
-                )
-        if expected_device is not None:
-            if spmd_mesh.device_type != expected_device.type:
-                raise ValueError(
-                    f"Parameter {fqn!r} is on a "
-                    f"{spmd_mesh.device_type!r} SPMD mesh, but "
-                    f"FlexShard mesh device is {expected_device.type!r}."
-                )
-            local = (
-                param.to_local()
-                if param_is_dtensor
-                else _get_param_tensor_for_flex_shard(
-                    param, mesh_info, fqn, contiguous=False
-                )
-            )
-            valid_plain_source = not param_is_dtensor and local.device.type == "cpu"
-            if (
-                local.device.type != "meta"
-                and local.device != expected_device
-                and not valid_plain_source
-            ):
-                raise ValueError(
-                    f"Parameter {fqn!r} has local tensor on {local.device}, but "
-                    f"FlexShard expected {expected_device}. Use "
-                    "model.parallelize(..., materialize_state=False) for "
-                    "plain CPU initialization, or distribute the model onto "
-                    "the target SPMD mesh before calling flex_shard()."
-                )
-
-
-def lift_params_to_global_spmd_mesh(module: nn.Module, mesh: DeviceMesh) -> None:
-    """Lift plain or submesh DTensor parameters onto a full named SPMD mesh.
-
-    FlexShard's public API expects parameters to already be DTensors on the
-    global mesh with data-parallel dims replicated. This helper is a migration
-    utility for callers that still initialize plain parameters or TP-only
-    DTensors before calling ``flex_shard``.
-    """
-    from torch.distributed.tensor import DTensor, Replicate
-
-    if mesh.mesh_dim_names is None:
-        raise ValueError("global SPMD mesh must have mesh_dim_names")
-    spmd_names = tuple(mesh.mesh_dim_names)
-
-    for submodule in module.modules():
-        for name, param in list(submodule._parameters.items()):
-            if param is None:
-                continue
-
-            if isinstance(param, DTensor) and _same_device_mesh(param._spec.mesh, mesh):
-                continue
-
-            placements = [Replicate() for _ in range(mesh.ndim)]
-            if isinstance(param, DTensor):
-                source_mesh = param._spec.mesh
-                source_names = source_mesh.mesh_dim_names
-                if source_names is None:
-                    if source_mesh.ndim == 1 and "tp" in spmd_names:
-                        source_names = ("tp",)
-                    else:
-                        raise ValueError(
-                            "Cannot lift DTensor parameter from unnamed mesh "
-                            f"{source_mesh} to SPMD mesh {mesh}"
-                        )
-                for source_name, placement in zip(
-                    source_names, param._spec.placements, strict=True
-                ):
-                    if source_name not in spmd_names:
-                        raise ValueError(
-                            f"Cannot lift DTensor mesh dim {source_name!r} "
-                            f"into SPMD mesh dims {spmd_names}"
-                        )
-                    placements[spmd_names.index(source_name)] = placement
-                local = param.to_local()
-            else:
-                local = param.detach()
-            if local.device.type != "meta" and local.device.type != mesh.device_type:
-                local = local.to(_get_device_from_mesh(mesh))
-
-            lifted = DTensor.from_local(
-                local,
-                mesh,
-                placements,
-                run_check=False,
-                shape=param.shape,
-                stride=tuple(param.stride()),
-                grad_placements=placements,
-            )
-            submodule._parameters[name] = nn.Parameter(
-                lifted, requires_grad=param.requires_grad
+                f"Parameter {fqn!r} is on {param.device}, but FlexShard expected "
+                f"{expected_device}. Move the module to the target mesh device "
+                "before calling flex_shard()."
             )
 
 
-def _validate_placements_for_tracing(
+def _validate_placements(
     param_placements: dict[str, tuple[Placement, ...]],
     named_params: list[tuple[str, nn.Parameter]],
-    mesh_info: FlexShardMeshInfo,
     mesh: DeviceMesh,
 ) -> None:
-    """Validate that placements are compatible with FX tracing.
+    """Validate that placements are compatible with eager FlexShard."""
 
-    Raises ValueError if any placement uses invalid configuration. The mesh
-    passed here is FlexShard's derived 1D DP shard mesh.
-    """
     param_dict = dict(named_params)
     world_size = mesh.size()
 
@@ -1337,21 +365,17 @@ def _validate_placements_for_tracing(
                         f"world_size is {world_size}."
                     )
             if isinstance(placement, Shard):
-                param = _get_param_tensor_for_flex_shard(
-                    param_dict[fqn], mesh_info, fqn, contiguous=False
-                )
+                param = param_dict[fqn]
                 if placement.dim >= param.ndim:
                     raise ValueError(
                         f"Parameter {fqn!r} has {param.ndim} dimensions but "
                         f"Shard(dim={placement.dim}) is out of range."
                     )
             if isinstance(placement, FlatShard):
-                param = _get_param_tensor_for_flex_shard(
-                    param_dict[fqn], mesh_info, fqn, contiguous=False
-                )
+                param = param_dict[fqn]
                 if param.numel() == 0:
                     raise ValueError(
-                        f"Parameter {fqn!r} has 0 elements, " "cannot apply FlatShard."
+                        f"Parameter {fqn!r} has 0 elements, cannot apply FlatShard."
                     )
 
 
@@ -1610,9 +634,8 @@ def _register_parametrization(
                 return unsharded
             if _is_graph_capture_active():
                 _raise_graph_capture_unsupported()
-            if (
-                getattr(p, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False)
-                and not getattr(p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
+            if getattr(p, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False) and not getattr(
+                p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False
             ):
                 _raise_missing_eager_batched_unshard(p)
             return p(self._parameters[pn])
@@ -1732,315 +755,6 @@ class BucketSpec:
     reshard_after_forward: bool = True
 
 
-class Owned(Placement):
-    """
-    Placement indicating a parameter is fully owned by one rank.
-
-    In parameter-boundary sharding, each parameter is assigned to exactly one
-    rank (the owner). The owner has the full parameter data, while other ranks
-    have an empty tensor.
-
-    This enables sharding at parameter boundaries rather than within parameters,
-    which can be useful for models where parameter sizes don't divide evenly.
-    """
-
-    def __init__(self, owner_rank: int):
-        self.owner_rank = owner_rank
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, Owned):
-            return False
-        return self.owner_rank == other.owner_rank
-
-    def __hash__(self) -> int:
-        return hash((type(self), self.owner_rank))
-
-    def __repr__(self) -> str:
-        return f"Owned({self.owner_rank})"
-
-    def compute_local_shape(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> torch.Size:
-        if rank == self.owner_rank:
-            return global_shape
-        return torch.Size([0] * len(global_shape))
-
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        if rank == self.owner_rank:
-            numel = 1
-            for d in global_shape:
-                numel *= d
-            return numel
-        return 0
-
-    def extract_local_shard(
-        self,
-        param: torch.Tensor,
-        rank: int,
-        world_size: int,
-    ) -> torch.Tensor:
-        if rank == self.owner_rank:
-            return param.contiguous()
-        return param.new_empty(0)
-
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        return per_rank_shards[self.owner_rank].view(global_shape)
-
-    @classmethod
-    def unshard(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        rank = mesh.get_local_rank()
-        pg = mesh.get_group()
-
-        results: list[torch.Tensor] = []
-        for tensor, info in zip(tensors, infos, strict=True):
-            p = info.placements[0]
-            # Broadcast from owner
-            if rank == p.owner_rank:
-                full = tensor.contiguous()
-            else:
-                full = torch.empty(
-                    info.global_shape, dtype=info.dtype, device=tensor.device
-                )
-            dist.broadcast(full, src=p.owner_rank, group=pg)
-            results.append(full)
-        return results
-
-    @classmethod
-    def reduce_grad(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        rank = mesh.get_local_rank()
-        pg = mesh.get_group()
-
-        results: list[torch.Tensor] = []
-        for tensor, info in zip(tensors, infos, strict=True):
-            p = info.placements[0]
-            send = tensor.contiguous()
-            dist.reduce(send, dst=p.owner_rank, op=dist.ReduceOp.AVG, group=pg)
-            if rank == p.owner_rank:
-                results.append(send)
-            else:
-                results.append(tensor.new_empty(0))
-        return results
-
-
-class _OwnedFullCopy(Owned):
-    """Internal variant of Owned used in parametrization mode.
-
-    All ranks store a full copy of the parameter (not just the owner).
-    This enables FX-traceable broadcast from owner_rank via
-    OwnedParametrization. The memory overhead is acceptable since Owned
-    is typically used for small params (biases, norms).
-    """
-
-    def create_parametrization(self, info, group_name, world_size, **kwargs):
-        return OwnedParametrization(
-            owner_rank=self.owner_rank,
-            group_name=group_name,
-            world_size=world_size,
-            **kwargs,
-        )
-
-    def compute_local_shape(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> torch.Size:
-        return global_shape
-
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        numel = 1
-        for d in global_shape:
-            numel *= d
-        return numel
-
-    def extract_local_shard(
-        self,
-        param: torch.Tensor,
-        rank: int,
-        world_size: int,
-    ) -> torch.Tensor:
-        return param.contiguous()
-
-
-class RaggedShard(Placement):
-    """Asymmetric sharding — variable chunk sizes per rank.
-
-    All ranks hold data, but sizes are determined by local_units ratios.
-    Unlike Shard (uniform chunks) or Owned (full param on one rank),
-    RaggedShard distributes every param across all ranks with variable sizes.
-
-    Args:
-        dims: Dimensions to shard along. Currently only single-dim supported.
-        local_units: Relative allocation per rank. Length must equal world_size.
-            E.g., (1, 2, 1, 1) means rank 1 gets 2/5 of the dimension.
-    """
-
-    def __init__(self, dims: tuple[int, ...] = (0,), local_units: tuple[int, ...] = ()):
-        if len(dims) != 1:
-            raise NotImplementedError("Only single-dim RaggedShard supported")
-        self.dims = dims
-        self.local_units = local_units
-        self.dim = dims[0]
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, RaggedShard):
-            return False
-        return self.dims == other.dims and self.local_units == other.local_units
-
-    def __hash__(self) -> int:
-        return hash((type(self), self.dims, self.local_units))
-
-    def __repr__(self) -> str:
-        return f"RaggedShard(dims={self.dims}, local_units={self.local_units})"
-
-    def create_parametrization(self, info, group_name, world_size, **kwargs):
-        split_sizes = self._compute_dim_splits(info.global_shape[self.dim])
-        return RaggedShardParametrization(
-            shard_dim=self.dim,
-            split_sizes=split_sizes,
-            group_name=group_name,
-            world_size=world_size,
-            **kwargs,
-        )
-
-    def _compute_dim_splits(self, dim_size: int) -> list[int]:
-        """Compute per-rank sizes along the sharded dimension.
-
-        Distributes dim_size proportionally by local_units, with remainder
-        distributed to first ranks.
-        """
-        total_units = sum(self.local_units)
-        ws = len(self.local_units)
-        splits = []
-        remaining = dim_size
-        remaining_units = total_units
-        for r in range(ws):
-            if remaining_units == 0:
-                splits.append(0)
-            else:
-                # Proportional allocation with rounding
-                chunk = (
-                    remaining * self.local_units[r] + remaining_units - 1
-                ) // remaining_units
-                chunk = min(chunk, remaining)
-                splits.append(chunk)
-                remaining -= chunk
-                remaining_units -= self.local_units[r]
-        return splits
-
-    def compute_local_shape(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> torch.Size:
-        dim_size = global_shape[self.dim]
-        splits = self._compute_dim_splits(dim_size)
-        shape = list(global_shape)
-        shape[self.dim] = splits[rank]
-        return torch.Size(shape)
-
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        local_shape = self.compute_local_shape(global_shape, rank, world_size)
-        numel = 1
-        for d in local_shape:
-            numel *= d
-        return numel
-
-    def extract_local_shard(
-        self,
-        param: torch.Tensor,
-        rank: int,
-        world_size: int,
-    ) -> torch.Tensor:
-        dim_size = param.shape[self.dim]
-        splits = self._compute_dim_splits(dim_size)
-        start = sum(splits[:rank])
-        return param.narrow(self.dim, start, splits[rank]).contiguous()
-
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        non_empty = [s for s in per_rank_shards if s.numel() > 0]
-        if non_empty:
-            return torch.cat(non_empty, dim=self.dim)
-        return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
-
-    @classmethod
-    def unshard(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        ws = mesh.size()
-        pg = mesh.get_group()
-
-        results: list[torch.Tensor] = []
-        for tensor, info in zip(tensors, infos, strict=True):
-            p = info.placements[0]
-            # Variable-size all_gather
-            per_rank_shards = [
-                torch.empty(
-                    p.compute_local_shape(info.global_shape, r, ws),
-                    dtype=info.dtype,
-                    device=tensor.device,
-                )
-                for r in range(ws)
-            ]
-            dist.all_gather(per_rank_shards, tensor.contiguous(), group=pg)
-            results.append(
-                p.assemble_from_shards(per_rank_shards, info.global_shape, info.dtype)
-            )
-        return results
-
-    @classmethod
-    def reduce_grad(
-        cls,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        ws = mesh.size()
-        rank = mesh.get_local_rank()
-        pg = mesh.get_group()
-
-        results: list[torch.Tensor] = []
-        for tensor, info in zip(tensors, infos, strict=True):
-            p = info.placements[0]
-            dim_size = tensor.shape[p.dim]
-            splits = p._compute_dim_splits(dim_size)
-            input_list = list(torch.split(tensor, splits, dim=p.dim))
-            flat_inputs = [chunk.contiguous().view(-1) for chunk in input_list]
-            local_shape = p.compute_local_shape(info.global_shape, rank, ws)
-            flat_output = torch.empty(
-                info.local_numel, dtype=tensor.dtype, device=tensor.device
-            )
-            dist.reduce_scatter(
-                flat_output, flat_inputs, op=dist.ReduceOp.AVG, group=pg
-            )
-            results.append(flat_output.view(local_shape))
-        return results
-
-
 class ShardParametrization(nn.Module):
     """Parametrization for Shard placement.
 
@@ -2115,7 +829,7 @@ class ShardParametrization(nn.Module):
 
 
 class FlatShardParametrization(nn.Module):
-    """FX-traceable parametrization for FlatShard placement.
+    """Parametrization for FlatShard placement.
 
     Reconstructs the full parameter from a flat 1D shard using
     _c10d_functional ops. The flat shard has shape (numel // world_size,).
@@ -2240,7 +954,7 @@ class _OwnedBroadcast(torch.autograd.Function):
 
 
 class OwnedParametrization(nn.Module):
-    """FX-traceable parametrization for Owned placement.
+    """Parametrization for Owned placement.
 
     All ranks store a full copy of the parameter. The broadcast from
     owner_rank ensures consistency, and the backward all-reduce averages
@@ -2282,7 +996,7 @@ class OwnedParametrization(nn.Module):
 
 
 class RaggedShardParametrization(nn.Module):
-    """FX-traceable parametrization for RaggedShard placement.
+    """Parametrization for RaggedShard placement.
 
     Uses pad-to-uniform: each rank pads its local shard to the maximum shard
     size across all ranks, then uniform all_gather_into_tensor, then narrow
@@ -2346,104 +1060,6 @@ class RaggedShardParametrization(nn.Module):
         if self.param_dtype is not None or self.reduce_dtype is not None:
             full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
         return full
-
-
-class DTensorAwareParametrization(nn.Module):
-    """Wrapper that handles nested DTensor inputs from TP/EP composition.
-
-    FlexShard stores raw sharded parameters as plain local tensors. If the
-    original parameter was a DTensor (e.g., from TP/EP composition), this wrapper
-    re-wraps the unsharded FlexShard result with the original non-DP DTensor
-    mesh and placements.
-
-    It also handles the direct DTensor-input case for compatibility.
-    """
-
-    def __init__(
-        self,
-        inner: nn.Module,
-        mesh: DeviceMesh | None = None,
-        placements: tuple[Any, ...] | None = None,
-        dp_dim_indices: tuple[int, ...] = (),
-    ):
-        super().__init__()
-        self.inner = inner
-        self.mesh = mesh
-        self.placements = placements
-        self.dp_dim_indices = dp_dim_indices
-        self.param_dtype = getattr(inner, "param_dtype", None)
-        self.reduce_dtype = getattr(inner, "reduce_dtype", None)
-
-    def _requires_dtensor_output(self) -> bool:
-        if self.placements is None:
-            return False
-
-        dp_dims = set(self.dp_dim_indices)
-        return any(dim not in dp_dims for dim in range(len(self.placements)))
-
-    def _compute_dtensor_layout(self):
-        if (
-            self.mesh is None
-            or self.placements is None
-            or not self._requires_dtensor_output()
-        ):
-            return None, None
-
-        if self.mesh.mesh_dim_names is None:
-            return self.mesh, self.placements
-
-        from torch.distributed.tensor import Replicate
-
-        dp_dims = set(self.dp_dim_indices)
-        for dim in dp_dims:
-            if dim < len(self.placements) and not isinstance(
-                self.placements[dim], Replicate
-            ):
-                return self.mesh, self.placements
-
-        non_dp_indices = tuple(
-            dim for dim in range(len(self.placements)) if dim not in dp_dims
-        )
-        if not non_dp_indices:
-            return None, None
-        if len(non_dp_indices) == len(self.placements):
-            return self.mesh, self.placements
-
-        mesh_dim_names = self.mesh.mesh_dim_names
-        names = tuple(mesh_dim_names[dim] for dim in non_dp_indices)
-        placements = tuple(self.placements[dim] for dim in non_dp_indices)
-        mesh = self.mesh[names[0]] if len(names) == 1 else self.mesh[names]
-        return mesh, placements
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization:
-            return x
-
-        from torch.distributed.tensor import DTensor
-
-        if isinstance(x, DTensor):
-            inner_mesh = x._spec.mesh
-            inner_placements = tuple(x._spec.placements)
-            local = x.to_local(grad_placements=inner_placements)
-            result = self.inner(local)
-            return DTensor.from_local(
-                result,
-                inner_mesh,
-                inner_placements,
-                run_check=False,
-                grad_placements=inner_placements,
-            )
-        compute_mesh, compute_placements = self._compute_dtensor_layout()
-        if compute_mesh is not None and compute_placements is not None:
-            result = self.inner(x)
-            return DTensor.from_local(
-                result,
-                compute_mesh,
-                compute_placements,
-                run_check=False,
-                grad_placements=compute_placements,
-            )
-        return self.inner(x)
 
 
 # ---------------------------------------------------------------------------
@@ -2518,9 +1134,6 @@ class ParamInfo:
     local_numel: int = 0
     byte_offset: int = 0  # byte offset into the sharded storage
     global_numel: int = 0  # total elements in unsharded param
-    spmd_mesh: DeviceMesh | None = None
-    spmd_placements: tuple[Any, ...] | None = None
-    spmd_dp_dim_indices: tuple[int, ...] = ()
 
 
 def _get_dtype_alignment(dtype: torch.dtype) -> int:
@@ -2670,38 +1283,6 @@ def _compute_local_info(
     return local_shape, local_numel
 
 
-def per_param_placements(
-    named_params: list[tuple[str, nn.Parameter]],
-    mesh: DeviceMesh,
-) -> dict[str, tuple[Placement, ...]]:
-    """Shard(0) per parameter (FSDP2-style)."""
-    # ep_size <> world_size, Shard(0) or Shard(1)
-    return {fqn: (Shard(0),) for fqn, _ in named_params}
-
-
-def flat_shard_placements(
-    named_params: list[tuple[str, nn.Parameter]],
-    mesh: DeviceMesh,
-) -> dict[str, tuple[Placement, ...]]:
-    """Flatten all params into one 1D tensor divided evenly across ranks (FSDP1-style)."""
-    total_flat_numel = sum(p.numel() for _, p in named_params)
-    result: dict[str, tuple[Placement, ...]] = {}
-    flat_offset = 0
-    for fqn, param in named_params:
-        result[fqn] = (FlatShard(flat_offset, param.numel(), total_flat_numel),)
-        flat_offset += param.numel()
-    return result
-
-
-def param_boundary_placements(
-    named_params: list[tuple[str, nn.Parameter]],
-    mesh: DeviceMesh,
-) -> dict[str, tuple[Placement, ...]]:
-    """Assign each parameter to one rank via greedy bin-packing (veScale-FSDP-style)."""
-    assignments = _assign_params_to_ranks(named_params, mesh.size())
-    return {fqn: (Owned(assignments[fqn]),) for fqn, _ in named_params}
-
-
 def auto_buckets(module: nn.Module) -> list[BucketSpec]:
     """Generate one bucket per direct child module.
 
@@ -2751,20 +1332,13 @@ def _create_param_infos(
 
     for fqn, param in named_params:
         placements = param_placements[fqn]
-        # FlexShard operates on the tensor local to non-DP mesh dims. DTensor
-        # params already expose that through to_local(); non-materialized
-        # params derive it from the recorded SPMD placements.
-        spmd_mesh, spmd_placements = _get_param_spmd_metadata(param)
-        param_for_shape = _get_param_tensor_for_flex_shard(
-            param, mesh_info, fqn, contiguous=False
-        )
-        global_shape = param_for_shape.shape
+        global_shape = param.shape
         global_stride = make_contiguous_strides_for(global_shape)
         local_shape, local_numel = _compute_local_info(
             global_shape, mesh_info.dp_shard_mesh, placements
         )
         dtype = param.dtype
-        global_numel = param_for_shape.numel()
+        global_numel = param.numel()
 
         alignment = _get_dtype_alignment(dtype)
 
@@ -2787,9 +1361,6 @@ def _create_param_infos(
             local_numel=local_numel,
             byte_offset=byte_offset,
             global_numel=global_numel,
-            spmd_mesh=spmd_mesh,
-            spmd_placements=spmd_placements,
-            spmd_dp_dim_indices=mesh_info.dp_dim_indices,
         )
         param_infos[fqn] = info
 
@@ -2809,10 +1380,6 @@ def _create_sharded_view(
         global_stride=info.global_stride,
         mesh=mesh_info.dp_shard_mesh,
     )
-    if info.spmd_mesh is not None and info.spmd_placements is not None:
-        setattr(local_view, _SPMD_MESH_ATTR, info.spmd_mesh)
-        setattr(local_view, _SPMD_PLACEMENTS_ATTR, info.spmd_placements)
-        setattr(local_view, _SPMD_DP_DIM_INDICES_ATTR, info.spmd_dp_dim_indices)
     return local_view
 
 
@@ -2827,37 +1394,6 @@ def _set_param_on_module(
     for part in parts[:-1]:
         module = getattr(module, part)
     setattr(module, parts[-1], param)
-
-
-def _assign_params_to_ranks(
-    named_params: list[tuple[str, nn.Parameter]],
-    world_size: int,
-) -> dict[str, int]:
-    """
-    Assign parameters to ranks using greedy bin-packing for balanced memory.
-
-    Assigns larger parameters first to help balance the load.
-
-    Returns:
-        Dict mapping FQN to owner rank.
-    """
-    # Sort by size (descending) for better bin packing
-    sorted_params = sorted(
-        named_params,
-        key=lambda x: x[1].numel() * x[1].element_size(),
-        reverse=True,
-    )
-
-    rank_bytes: list[int] = [0] * world_size
-    assignments: dict[str, int] = {}
-
-    for fqn, param in sorted_params:
-        # Assign to rank with least bytes
-        target_rank = rank_bytes.index(min(rank_bytes))
-        assignments[fqn] = target_rank
-        rank_bytes[target_rank] += param.numel() * param.element_size()
-
-    return assignments
 
 
 def _write_params_to_dstorage(
@@ -2877,11 +1413,11 @@ def _write_params_to_dstorage(
 
     for fqn, param in named_params:
         info = param_infos[fqn]
-        param_data = _get_param_tensor_for_flex_shard(
-            param, mesh_info, fqn, contiguous=True
-        )
+        param_data = param.detach()
         if param_data.device.type == "meta":
             continue
+        if not param_data.is_contiguous():
+            param_data = param_data.contiguous()
         shard = info.placements[0].extract_local_shard(param_data, my_rank, world_size)
         if shard.numel() > 0:
             nbytes = shard.numel() * shard.element_size()
@@ -2942,7 +1478,7 @@ def flex_shard(
     2. Groups parameters into communication buckets (one per bucket, or all in one)
     3. Creates a unified byte buffer per bucket for all its parameters
     4. Replaces each parameter with a plain tensor annotated with placement metadata
-    5. Registers property-based parametrization for traceable communication
+    5. Registers property-based parametrization for eager parameter access
     6. Stores DStorages on the module (accessible via module.dstorages)
 
     Each bucket gets its own byte buffer and DStorage, enabling independent
@@ -2954,11 +1490,9 @@ def flex_shard(
 
     Args:
         module: The module to shard. Can have real or meta device parameters.
-        mesh: The full SPMD device mesh for sharding.
+        mesh: The named device mesh for sharding.
         dp_mesh_dims: Names for the data-parallel dimensions in ``mesh``.
-            FlexShard derives its DP shard mesh from ``mesh`` and expects
-            parameters to be DTensors on that full mesh with DP dims initially
-            Replicate().
+            FlexShard derives its DP shard mesh from ``mesh``.
         shard_placement_fn: Required callable that maps
             ``(named_params, dp_shard_mesh)`` to per-parameter placements.
             Built-in callables include ``per_param_placements``,
@@ -2974,7 +1508,7 @@ def flex_shard(
 
         >>> mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
         >>> model = Transformer(args)
-        >>> model.parallelize(mesh, wrap_forward=False, distribute_buffers=False)
+        >>> model.to("cuda")
         >>> # Single bucket:
         >>> flex_shard(
         ...     model,
@@ -3024,20 +1558,13 @@ def flex_shard(
     shard_mesh = mesh_info.dp_shard_mesh
 
     # Determine device - use meta only if all params are meta, otherwise use mesh device.
-    all_params_meta = all(
-        _get_param_tensor_for_flex_shard(
-            param, mesh_info, fqn, contiguous=False
-        ).device.type
-        == "meta"
-        for fqn, param in named_params
-    )
+    all_params_meta = all(param.device.type == "meta" for _, param in named_params)
     if all_params_meta:
         device = torch.device("meta")
     else:
         device = _get_device_from_mesh(shard_mesh)
-    _validate_global_spmd_params(
+    _validate_eager_params(
         named_params,
-        mesh_info,
         expected_device=None if all_params_meta else device,
     )
 
@@ -3057,9 +1584,7 @@ def flex_shard(
             "shard_placement_fn must return placements for exactly the managed "
             f"parameters; {', '.join(msg_parts)}."
         )
-    _validate_placements_for_tracing(
-        param_placements, named_params, mesh_info, shard_mesh
-    )
+    _validate_placements(param_placements, named_params, shard_mesh)
 
     if not buckets:
         raise ValueError("flex_shard requires at least one BucketSpec in buckets.")
@@ -3088,9 +1613,7 @@ def flex_shard(
     for fqn in param_placements:
         placement = param_placements[fqn][0]
         if isinstance(placement, FlatShard):
-            numel = _get_param_tensor_for_flex_shard(
-                named_params_dict_tmp[fqn], mesh_info, fqn, contiguous=False
-            ).numel()
+            numel = named_params_dict_tmp[fqn].numel()
             param_placements[fqn] = (FlatShard(0, numel, numel),)
         elif isinstance(placement, Owned):
             # In parametrization mode, all ranks store the full param.
@@ -3203,15 +1726,6 @@ def flex_shard(
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
             )
-
-            # Wrap for DTensor outputs needed by non-DP composition.
-            if info.spmd_mesh is not None and info.spmd_placements is not None:
-                p = DTensorAwareParametrization(
-                    p,
-                    mesh=info.spmd_mesh,
-                    placements=info.spmd_placements,
-                    dp_dim_indices=info.spmd_dp_dim_indices,
-                )
 
             setattr(
                 p,

@@ -40,7 +40,6 @@ from torch.utils.checkpoint import create_selective_checkpoint_contexts
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
-    lift_params_to_global_spmd_mesh,
     per_param_placements,
 )
 
@@ -97,7 +96,6 @@ def _init_flex_mesh(world_size):
 
 
 def _flex_shard(model, mesh, **kwargs):
-    lift_params_to_global_spmd_mesh(model, mesh)
     kwargs.setdefault("buckets", _default_bucket_specs(model))
     return flex_shard(model, mesh, DataParallelMeshDims(shard="fsdp"), **kwargs)
 
@@ -173,9 +171,9 @@ def test_no_nested_wrappers():
     for i, layer in enumerate(model.layers):
         assert isinstance(layer, CheckpointWrapper), f"layers.{i} not wrapped"
         inner = layer._checkpoint_wrapped_module
-        assert not isinstance(
-            inner, CheckpointWrapper
-        ), f"layers.{i} has nested CheckpointWrapper"
+        assert not isinstance(inner, CheckpointWrapper), (
+            f"layers.{i} has nested CheckpointWrapper"
+        )
 
     print_rank0("PASSED: no_nested_wrappers")
 
