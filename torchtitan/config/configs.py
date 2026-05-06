@@ -363,6 +363,14 @@ class DebugConfig:
     """Enable batch-invariant mode to use batch-invariant ops in model
     forward and deterministic NCCL collective reduction order"""
 
+    random_init: bool = False
+    """If True, skip loading weights from ``hf_assets_path`` and rely on the
+    model's own ``init_weights()``. The trainer pushes its random-init state
+    to TorchStore at startup so the generator picks up the same weights.
+    ``hf_assets_path`` must still point to a directory with ``config.json``
+    and tokenizer files (vLLM needs those to bootstrap), but ``model.safetensors``
+    is not required. Useful for end-to-end debug runs without a real checkpoint."""
+
     print_config: bool = False
     """Print the job configs to terminal"""
 
