@@ -161,27 +161,6 @@ class Profiler(Configurable):
         This is used to configure torch.profiler.schedule.
         """
 
-        profiler_repeat: int | None = None
-        """
-        The number of times to repeat the profiling cycle
-
-        This is used to configure torch.profiler.schedule.
-        """
-
-        profiler_skip_first: int | None = None
-        """
-        The number of initial profiling cycles to skip
-
-        This is used to configure torch.profiler.schedule.
-        """
-
-        profiler_skip_first_wait: int | None = None
-        """
-        The number of initial profiling cycles to skip the wait time
-
-        This is used to configure torch.profiler.schedule.
-        """
-
         enable_memory_snapshot: bool = False
         """Whether to dump memory snapshot."""
 
@@ -289,16 +268,6 @@ class Profiler(Configurable):
             cfg.profiler_warmup,
             cfg.profiler_active,
         )
-
-        additional_params = {
-            key: val
-            for key, val in [
-                ("repeat", cfg.profiler_repeat),
-                ("skip_first", cfg.profiler_skip_first),
-                ("skip_first_wait", cfg.profiler_skip_first_wait),
-            ]
-            if val is not None
-        }
 
         rank = torch.distributed.get_rank()
         post_processor = (
