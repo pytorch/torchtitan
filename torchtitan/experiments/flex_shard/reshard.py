@@ -15,6 +15,11 @@ import torch
 import torch.nn as nn
 
 from .storage import DStorage
+from .utils import (
+    _module_path_common_prefix,
+    _strip_checkpoint_wrapped_module_path,
+    _top_level_owner_path,
+)
 
 
 _reshard_checkpoint_enabled: ContextVar[bool] = ContextVar(
@@ -129,30 +134,6 @@ def _wrap_with_reshard(child: nn.Module) -> nn.Module:
     return checkpoint_wrapper(child, context_fn=_reshard_only_context_fn)
 
 
-def _module_path_common_prefix(paths: list[str]) -> str:
-    """Return the common module path prefix for parameter-owner module paths."""
-    if not paths:
-        return ""
-    common_parts = paths[0].split(".") if paths[0] else []
-    for path in paths[1:]:
-        parts = path.split(".") if path else []
-        limit = min(len(common_parts), len(parts))
-        i = 0
-        while i < limit and common_parts[i] == parts[i]:
-            i += 1
-        common_parts = common_parts[:i]
-        if not common_parts:
-            break
-    return ".".join(common_parts)
-
-
-def _strip_checkpoint_wrapped_module_path(path: str) -> str:
-    """Remove CheckpointWrapper internals from a dotted module path."""
-    return ".".join(
-        part for part in path.split(".") if part != "_checkpoint_wrapped_module"
-    )
-
-
 def _get_module_by_path(module: nn.Module, path: str) -> nn.Module:
     """Resolve a dotted module path from a root module."""
     result = module
@@ -175,20 +156,6 @@ def _set_module_by_path(module: nn.Module, path: str, child: nn.Module) -> None:
         parent[name] = child
     else:
         setattr(parent, name, child)
-
-
-def _top_level_owner_path(module: nn.Module, owner_path: str) -> str:
-    """Choose the outer module to checkpoint for a parameter owner path."""
-    parts = owner_path.split(".")
-    if not parts or not parts[0]:
-        return ""
-    child = getattr(module, parts[0])
-    if (
-        isinstance(child, (nn.ModuleDict, nn.ModuleList, nn.Sequential))
-        and len(parts) > 1
-    ):
-        return ".".join(parts[:2])
-    return parts[0]
 
 
 def _get_storage_reshard_module_paths(storage: DStorage) -> list[str]:
@@ -220,31 +187,6 @@ def _get_storage_reshard_module_paths(storage: DStorage) -> list[str]:
             for owner_path in owner_paths
         }
     )
-
-
-def _get_storage_debug_fqn(storage: DStorage) -> str | None:
-    """Return a concise module/bucket FQN for profiler annotations."""
-    owner_paths = sorted(
-        {
-            _strip_checkpoint_wrapped_module_path(".".join(fqn.split(".")[:-1]))
-            for fqn in storage._param_infos
-        }
-    )
-    if not owner_paths:
-        return None
-    common = _module_path_common_prefix(owner_paths)
-    if common:
-        return common
-    top_level_paths = sorted(
-        {
-            _top_level_owner_path(storage._module, owner_path)
-            for owner_path in owner_paths
-        }
-    )
-    top_level_paths = [path for path in top_level_paths if path]
-    if not top_level_paths:
-        return None
-    return ", ".join(top_level_paths)
 
 
 def _apply_reshard_checkpoint(

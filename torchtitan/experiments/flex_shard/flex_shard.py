@@ -6,62 +6,39 @@
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-import torch
 import torch.nn as nn
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from .eager_runtime import (
+    _create_eager_parametrizations,
     _install_batched_allgather_hooks,
-    _storage_requires_eager_batched_unshard,
-    _storage_uses_eager_autograd_unshard,
-    EagerAllGatherContext,
 )
 from .metadata import (
-    _BUCKET_FQN_ATTR,
-    _DSTORAGE_ATTR,
-    _DSTORAGES_ATTR,
-    _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-    _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
-    _EAGER_COMM_CONTEXTS_ATTR,
-    _PARAM_FQN_ATTR,
-    _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
     get_global_shape,
     get_placements,
     is_flex_shard_param,
     set_sharding_info,
 )
-from .placements import (
-    _MixedPrecisionCast,
-    Placement,
+from .module_wrapping import (
+    _attach_flex_shard_module_state,
+    _register_module_parametrizations,
+    FlexShardModule,
 )
+from .planning import _prepare_flex_shard_plan, PlacementFn
 from .reshard import (
     _apply_reshard_checkpoint,
-    _get_storage_debug_fqn,
     _reshard_checkpoint_enabled,
 )
 from .storage import (
-    _assign_params_to_buckets,
     _materialize_bucket_storages,
     auto_buckets,
     BucketSpec,
-    DStorage,
     MixedPrecisionPolicy,
 )
 from .utils import (
-    _get_device_from_mesh,
-    _get_managed_named_params,
-    _get_dp_shard_mesh,
-    _is_graph_capture_active,
-    _raise_graph_capture_unsupported,
-    _raise_missing_eager_batched_unshard,
     disable_active_parametrization,
-    _validate_bucket_placements,
-    _validate_eager_params,
-    _validate_placements,
 )
 
 if TYPE_CHECKING:
@@ -78,99 +55,6 @@ __all__ = [
     "is_flex_shard_param",
     "MixedPrecisionPolicy",
     "set_sharding_info",
-]
-
-
-_parametrized_module_class_counter = 0
-
-
-def _register_parametrization(
-    module: nn.Module,
-    param_parametrizations: dict[str, nn.Module],
-) -> None:
-    """Register per-parameter property getters that call parametrization forward.
-
-    Uses dynamic subclass creation (not nn.utils.parametrize) to avoid
-    state_dict key mangling. state_dict reads self._parameters directly,
-    bypassing property getters.
-
-    Args:
-        module: The leaf module owning the parameters.
-        param_parametrizations: Maps parameter name to its parametrization module.
-    """
-    global _parametrized_module_class_counter
-    _parametrized_module_class_counter += 1
-
-    def _make_flex_shard_param_getter(param_name, parametrization):
-        def get_flex_shard_param(self):
-            # In eager batched mode, _pre_gathered is set on the
-            # parametrization by the batched all-gather pre_forward hook.
-            pre = getattr(parametrization, "_pre_gathered", None)
-            if pre is not None:
-                parametrization._pre_gathered = None
-                param_dtype = getattr(parametrization, "param_dtype", None)
-                reduce_dtype = getattr(parametrization, "reduce_dtype", None)
-                if getattr(parametrization, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
-                    if param_dtype is not None or reduce_dtype is not None:
-                        pre = _MixedPrecisionCast.apply(pre, param_dtype, reduce_dtype)
-                    return pre
-
-                if param_dtype is not None and pre.dtype != param_dtype:
-                    pre = pre.to(param_dtype)
-                unsharded = pre.detach().requires_grad_(True)
-                if (
-                    torch.is_grad_enabled()
-                    and getattr(parametrization, "_unsharded_for_reduce", None) is None
-                ):
-                    parametrization._unsharded_for_reduce = unsharded
-                return unsharded
-            if _is_graph_capture_active():
-                _raise_graph_capture_unsupported()
-            if getattr(
-                parametrization, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False
-            ) and not getattr(
-                parametrization, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False
-            ):
-                _raise_missing_eager_batched_unshard(parametrization)
-            return parametrization(self._parameters[param_name])
-
-        return get_flex_shard_param
-
-    param_name_to_property = {
-        param_name: property(_make_flex_shard_param_getter(param_name, param))
-        for param_name, param in param_parametrizations.items()
-    }
-    module_cls = type(
-        f"FlexShard{module.__class__.__name__}_{_parametrized_module_class_counter}",
-        (module.__class__,),
-        param_name_to_property,
-    )
-    module.__class__ = module_cls
-    sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
-
-
-class FlexShardModule:
-    """Mixin added to modules after flex_shard()."""
-
-    @property
-    def dstorage(self) -> DStorage:
-        """First (or only) DStorage. For multi-bucket, use .dstorages."""
-        return getattr(self, _DSTORAGE_ATTR)
-
-    @property
-    def dstorages(self) -> list:
-        """All DStorage instances (one per bucket)."""
-        return getattr(self, _DSTORAGES_ATTR)
-
-    @property
-    def eager_comm_contexts(self) -> dict[torch.device, EagerAllGatherContext]:
-        """Root-owned eager communication contexts keyed by CUDA device."""
-        return getattr(self, _EAGER_COMM_CONTEXTS_ATTR)
-
-
-PlacementFn = Callable[
-    [list[tuple[str, nn.Parameter]], "DeviceMesh"],
-    dict[str, tuple[Placement, ...]],
 ]
 
 
@@ -251,127 +135,37 @@ def flex_shard(
           dtype parameters into separate buckets.
         - Parameters on meta device will have uninitialized storage
     """
-    # Check if module is already wrapped
-    if getattr(module, _DSTORAGES_ATTR, None) is not None:
-        raise ValueError(
-            f"Module {type(module).__name__} already has DStorage. "
-            "Cannot apply flex_shard twice to the same module."
-        )
-
-    # Collect parameters (excluding those from already-wrapped submodules)
-    named_params = _get_managed_named_params(module)
-    if not named_params:
-        raise ValueError(
-            f"Module {type(module).__name__} has no parameters to shard. "
-            "All parameters may belong to already-wrapped submodules."
-        )
-    shard_mesh = _get_dp_shard_mesh(mesh, dp_mesh_dims)
-
-    # Determine device - use meta only if all params are meta, otherwise use mesh device.
-    all_params_meta = all(param.device.type == "meta" for _, param in named_params)
-    if all_params_meta:
-        device = torch.device("meta")
-    else:
-        device = _get_device_from_mesh(shard_mesh)
-    _validate_eager_params(
-        named_params,
-        expected_device=None if all_params_meta else device,
-    )
-
-    # Resolve placements for all params
-    param_placements = shard_placement_fn(named_params, shard_mesh)
-    _validate_placements(param_placements, named_params, shard_mesh)
-
-    if not buckets:
-        raise ValueError("flex_shard requires at least one BucketSpec in buckets.")
-    if not all(isinstance(bucket, BucketSpec) for bucket in buckets):
-        raise TypeError("flex_shard buckets must be a list of BucketSpec objects.")
-
-    param_fqns = [fqn for fqn, _ in named_params]
-    bucket_assignments = _assign_params_to_buckets(param_fqns, buckets)
-    _validate_bucket_placements(
-        bucket_assignments,
-        param_placements,
+    plan = _prepare_flex_shard_plan(
+        module,
+        mesh,
+        dp_mesh_dims,
+        shard_placement_fn,
         buckets,
-        named_params,
     )
 
     storages, fqn_to_bucket_spec = _materialize_bucket_storages(
         module,
-        named_params,
-        bucket_assignments,
+        plan.named_params,
+        plan.bucket_assignments,
         buckets,
-        param_placements,
-        shard_mesh,
-        device,
+        plan.param_placements,
+        plan.shard_mesh,
+        plan.device,
     )
 
-    # Store DStorages on module
-    setattr(module, _DSTORAGES_ATTR, storages)
-    setattr(module, _DSTORAGE_ATTR, storages[0] if storages else None)
-    setattr(module, _EAGER_COMM_CONTEXTS_ATTR, {})
+    _attach_flex_shard_module_state(module, storages)
 
-    # Change module class to include FlexShardModule mixin
-    cls = type(module)
-    if not issubclass(cls, FlexShardModule):
-        module.__class__ = type(cls.__name__, (cls, FlexShardModule), {})
-
-    # Register property-based parametrization.
-    group_name = shard_mesh.get_group().group_name
-    world_size = shard_mesh.size()
-
-    # Group parametrizations by leaf module (across all buckets)
-    module_param_map: dict[nn.Module, dict[str, nn.Module]] = {}
-
-    for s in storages:
-        requires_eager_batched_unshard = _storage_requires_eager_batched_unshard(s)
-        uses_eager_autograd_unshard = _storage_uses_eager_autograd_unshard(s)
-        bucket_fqn = _get_storage_debug_fqn(s)
-        for fqn, info in s._param_infos.items():
-            bucket_spec = fqn_to_bucket_spec[fqn]
-            mp_policy = bucket_spec.mp_policy
-            param_dtype = mp_policy.param_dtype if mp_policy else None
-            reduce_dtype = mp_policy.reduce_dtype if mp_policy else None
-            compute_device = (
-                torch.device(device) if bucket_spec.offload_policy is not None else None
-            )
-            placement = info.placements[0]
-            p = placement.create_parametrization(
-                info,
-                group_name,
-                world_size,
-                param_dtype=param_dtype,
-                reduce_dtype=reduce_dtype,
-                compute_device=compute_device,
-            )
-
-            setattr(
-                p,
-                _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
-                requires_eager_batched_unshard,
-            )
-            setattr(
-                p,
-                _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-                uses_eager_autograd_unshard,
-            )
-            setattr(p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
-            setattr(p, _PARAM_FQN_ATTR, fqn)
-            setattr(p, _BUCKET_FQN_ATTR, bucket_fqn)
-
-            # Find the leaf module owning this param
-            parts = fqn.split(".")
-            leaf_mod = module
-            for part in parts[:-1]:
-                leaf_mod = getattr(leaf_mod, part)
-            local_name = parts[-1]
-
-            if leaf_mod not in module_param_map:
-                module_param_map[leaf_mod] = {}
-            module_param_map[leaf_mod][local_name] = p
-
-    for mod, param_map in module_param_map.items():
-        _register_parametrization(mod, param_map)
+    group_name = plan.shard_mesh.get_group().group_name
+    world_size = plan.shard_mesh.size()
+    module_param_map = _create_eager_parametrizations(
+        module,
+        storages,
+        fqn_to_bucket_spec,
+        group_name,
+        world_size,
+        plan.device,
+    )
+    _register_module_parametrizations(module_param_map)
 
     # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
     # a selective policy that recomputes only collective ops (all-gather,

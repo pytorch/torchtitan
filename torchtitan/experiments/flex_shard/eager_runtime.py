@@ -13,36 +13,25 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from .collectives import EagerAllGatherResult, EagerReduceScatterResult
 from .metadata import (
+    _BUCKET_FQN_ATTR,
+    _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
+    _PARAM_FQN_ATTR,
+    _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
 )
-from .placements import (
-    EagerAllGatherResult,
-    EagerReduceScatterResult,
-    Shard,
-)
-from .reshard import _get_storage_debug_fqn, _reshard_checkpoint_recompute
-from .storage import DStorage, ParamInfo
-from .utils import _with_fqn
+from .placements import Shard
+from .reshard import _reshard_checkpoint_recompute
+from .storage import BucketSpec, DStorage, ParamInfo
+from .utils import _get_storage_debug_fqn, _with_fqn
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class EagerAllGatherContext:
-    """Communication streams for eager batched collectives."""
-
-    all_gather_stream: torch.Stream
-    reduce_scatter_stream: torch.Stream
-    buckets: list[EagerAllGatherBucket] = field(default_factory=list)
-    pending: PendingEagerAllGather | None = None
-    reduce_scatter_states: list[EagerReduceScatterResult] = field(default_factory=list)
-    reduce_scatter_callback_queued: bool = False
 
 
 @dataclass
@@ -63,6 +52,18 @@ class PendingEagerAllGather:
     bucket: EagerAllGatherBucket
     result: EagerAllGatherResult
     recompute: bool
+
+
+@dataclass
+class EagerAllGatherContext:
+    """Communication streams for eager batched collectives."""
+
+    all_gather_stream: torch.Stream
+    reduce_scatter_stream: torch.Stream
+    buckets: list[EagerAllGatherBucket] = field(default_factory=list)
+    pending: PendingEagerAllGather | None = None
+    reduce_scatter_states: list[EagerReduceScatterResult] = field(default_factory=list)
+    reduce_scatter_callback_queued: bool = False
 
 
 @dataclass
@@ -271,6 +272,101 @@ def _raise_unsupported_eager_raf_custom_bucket(storage: DStorage) -> None:
         f"{reason}. Use reshard_after_forward=False for this bucket or add "
         "support for this placement before using eager RAF."
     )
+
+
+def _get_bucket_module(storage: DStorage) -> nn.Module:
+    """Find the deepest common ancestor module for a bucket's params.
+
+    For bucket "layers.0.*", returns model.layers[0].
+    For bucket "norm.*, output.*" (no common prefix), returns root.
+    """
+    fqns = list(storage._param_infos.keys())
+    prefixes = [".".join(fqn.split(".")[:-1]) for fqn in fqns]
+    if not prefixes:
+        return storage._module
+    common = prefixes[0]
+    for prefix in prefixes[1:]:
+        i = 0
+        while i < len(common) and i < len(prefix) and common[i] == prefix[i]:
+            i += 1
+        common = common[:i]
+    # Trim to the last complete component so a partial name match is ignored.
+    if "." in common:
+        common = common[: common.rfind(".") + 1].rstrip(".")
+    elif common and common not in prefixes:
+        common = ""
+    if not common:
+        return storage._module
+    mod = storage._module
+    for part in common.split("."):
+        mod = getattr(mod, part)
+    return mod
+
+
+def _get_param_leaf_module(
+    module: nn.Module,
+    fqn: str,
+) -> tuple[nn.Module, str]:
+    """Return the leaf module and local parameter name for a parameter FQN."""
+    parts = fqn.split(".")
+    leaf_module = module
+    for part in parts[:-1]:
+        leaf_module = getattr(leaf_module, part)
+    return leaf_module, parts[-1]
+
+
+def _create_eager_parametrizations(
+    module: nn.Module,
+    storages: list[DStorage],
+    fqn_to_bucket_spec: dict[str, BucketSpec],
+    group_name: str,
+    world_size: int,
+    device: torch.device,
+) -> dict[nn.Module, dict[str, nn.Module]]:
+    """Create eager parametrizations grouped by owning leaf module."""
+    module_param_map: dict[nn.Module, dict[str, nn.Module]] = {}
+
+    for storage in storages:
+        requires_eager_batched_unshard = _storage_requires_eager_batched_unshard(
+            storage
+        )
+        uses_eager_autograd_unshard = _storage_uses_eager_autograd_unshard(storage)
+        bucket_fqn = _get_storage_debug_fqn(storage)
+        for fqn, info in storage._param_infos.items():
+            bucket_spec = fqn_to_bucket_spec[fqn]
+            mp_policy = bucket_spec.mp_policy
+            param_dtype = mp_policy.param_dtype if mp_policy else None
+            reduce_dtype = mp_policy.reduce_dtype if mp_policy else None
+            compute_device = (
+                torch.device(device) if bucket_spec.offload_policy is not None else None
+            )
+            parametrization = info.placements[0].create_parametrization(
+                info,
+                group_name,
+                world_size,
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                compute_device=compute_device,
+            )
+
+            setattr(
+                parametrization,
+                _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
+                requires_eager_batched_unshard,
+            )
+            setattr(
+                parametrization,
+                _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
+                uses_eager_autograd_unshard,
+            )
+            setattr(parametrization, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
+            setattr(parametrization, _PARAM_FQN_ATTR, fqn)
+            setattr(parametrization, _BUCKET_FQN_ATTR, bucket_fqn)
+
+            leaf_module, local_name = _get_param_leaf_module(module, fqn)
+            module_param_map.setdefault(leaf_module, {})[local_name] = parametrization
+
+    return module_param_map
 
 
 def _install_batched_allgather_hooks(
@@ -598,36 +694,3 @@ def _install_batched_allgather_hooks(
             ag_context.buckets.append(ag_bucket)
         for _, _, param_p, _ in param_entries:
             setattr(param_p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
-
-
-def _get_bucket_module(storage) -> nn.Module:
-    """Find the deepest common ancestor module for a bucket's params.
-
-    For bucket "layers.0.*", returns model.layers[0].
-    For bucket "norm.*, output.*" (no common prefix), returns root.
-    """
-    fqns = list(storage._param_infos.keys())
-    # Get module-level prefixes (strip param name)
-    prefixes = [".".join(fqn.split(".")[:-1]) for fqn in fqns]
-    # Find common prefix
-    if not prefixes:
-        return storage._module
-    common = prefixes[0]
-    for p in prefixes[1:]:
-        # Find common prefix character by character, then trim to last "."
-        i = 0
-        while i < len(common) and i < len(p) and common[i] == p[i]:
-            i += 1
-        common = common[:i]
-    # Trim to last complete component (don't split mid-name)
-    if "." in common:
-        common = common[: common.rfind(".") + 1].rstrip(".")
-    elif common and common not in prefixes:
-        # Partial match — not a complete component
-        common = ""
-    if not common:
-        return storage._module
-    mod = storage._module
-    for part in common.split("."):
-        mod = getattr(mod, part)
-    return mod
