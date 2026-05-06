@@ -402,28 +402,12 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
-    from torchtitan.experiments.graph_trainer.fsdp_passes import (
-        joint_transformer_block_bucketing_reordering_pass,
-    )
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,
     )
 
     passes = compile_time_passes(traced_result, config)
-
-    # TODO: Remove this filter once upstream manual_overlap_bucketing
-    # supports make_fx-traced graphs where collective group_name args
-    # are FX Node references instead of string literals. The bucketing
-    # and comm_analysis code crashes with
-    # "AttributeError: 'Node' object has no attribute 'size'" or
-    # "assert isinstance(group_name, str)".
-    passes = [
-        p
-        for p in passes
-        if getattr(p, "func", p)
-        is not joint_transformer_block_bucketing_reordering_pass
-    ]
 
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
