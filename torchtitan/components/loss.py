@@ -373,6 +373,33 @@ class ChunkedCELoss(BaseLoss):
         )
 
 
+def _maybe_redistribute_multiply(g: torch.Tensor, grad_output: torch.Tensor) -> torch.Tensor:
+    """Multiply ``g`` by ``grad_output`` for the autograd chain rule,
+    redistributing ``grad_output``'s mesh to match ``g``'s first when both
+    are DTensors on different meshes.
+
+    Required because for FSDP+TP layouts ``grad_output`` (= ``ones_like(loss)``
+    at the autograd start) lives on the loss output's mesh — typically the
+    activation mesh ``(tp,)`` — while saved param grads live on the params'
+    mesh ``(fsdp, tp)``. DTensor refuses cross-mesh ``aten.mul.Tensor`` so a
+    naive ``g * grad_output`` would crash. For the only ``grad_output`` shape
+    we actually encounter (a ``Replicate()`` scalar, which is what
+    ``torch.autograd.grad`` constructs for a scalar loss output), the
+    redistribute is a no-op at runtime — no collective fires.
+    """
+    from torch.distributed.tensor import DTensor, Replicate
+
+    if (
+        isinstance(g, DTensor)
+        and isinstance(grad_output, DTensor)
+        and g.device_mesh != grad_output.device_mesh
+    ):
+        grad_output = grad_output.redistribute(
+            g.device_mesh, [Replicate()] * g.device_mesh.ndim
+        )
+    return g * grad_output
+
+
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
@@ -402,17 +429,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     def backward(  # pyrefly: ignore[bad-override]
         ctx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None]:
-        # Contract: callers must use the loss returned by this Function as
-        # the autograd endpoint (no external scaling). Pass any scaling
-        # factor (e.g. global_valid_tokens) into ``loss_fn`` instead — see
-        # graph_trainer's compute_loss for the canonical pattern. Under
-        # that contract grad_output is the autograd-start ones_like(loss),
-        # so we return the saved grad as-is. Multiplying by grad_output
-        # would crash on FSDP+TP because grad_output and accumulated_grad
-        # generally live on different DeviceMeshes (loss on (tp,), grads
-        # on (fsdp, tp)) and DTensor refuses cross-mesh ops.
         (accumulated_grad,) = ctx.saved_tensors
-        return accumulated_grad, None, None
+        return _maybe_redistribute_multiply(accumulated_grad, grad_output), None, None
 
 
 class _ChunkedLossWithParamGrads(torch.autograd.Function):
@@ -470,13 +488,6 @@ class _ChunkedLossWithParamGrads(torch.autograd.Function):
     def backward(  # pyrefly: ignore[bad-override]
         ctx, grad_output: torch.Tensor
     ):
-        # Same contract as _DecoderOutputGradientBackProp.backward: callers
-        # must use the loss returned by this Function as the autograd
-        # endpoint (no external scaling). Pass any scaling factor into
-        # ``loss_fn`` — see graph_trainer's compute_loss. We return saved
-        # grads as-is; multiplying by grad_output would crash on FSDP+TP
-        # due to cross-mesh ops (grad_output on (tp,), param grads on
-        # (fsdp, tp)).
         saved = ctx.saved_tensors
         accumulated_h_grad = saved[0]
         param_grads = saved[1:]
@@ -493,10 +504,10 @@ class _ChunkedLossWithParamGrads(torch.autograd.Function):
                 lambda: lm_head.set_requires_gradient_sync(True, recurse=False)
             )
         return (
-            accumulated_h_grad,
+            _maybe_redistribute_multiply(accumulated_h_grad, grad_output),
             None,
             None,
             None,
             None,
-            *param_grads,
+            *(_maybe_redistribute_multiply(g, grad_output) for g in param_grads),
         )
