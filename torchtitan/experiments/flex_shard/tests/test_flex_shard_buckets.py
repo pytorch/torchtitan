@@ -209,7 +209,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_rejects_mixed_placement_types(self):
         """Shard + FlatShard in one bucket raises ValueError."""
-        from torchtitan.experiments.flex_shard.flex_shard import (
+        from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
         from torchtitan.experiments.flex_shard.placements import FlatShard, Shard
@@ -225,7 +225,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_rejects_mixed_shard_dims(self):
         """Shard(0) + Shard(1) in one bucket raises ValueError."""
-        from torchtitan.experiments.flex_shard.flex_shard import (
+        from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
         from torchtitan.experiments.flex_shard.placements import Shard
@@ -241,7 +241,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_accepts_same_placement(self):
         """Shard(0) + Shard(0) in one bucket passes."""
-        from torchtitan.experiments.flex_shard.flex_shard import (
+        from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
         from torchtitan.experiments.flex_shard.placements import Shard
@@ -257,7 +257,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_accepts_separate_buckets_different_placements(self):
         """Different placement types in separate buckets is fine."""
-        from torchtitan.experiments.flex_shard.flex_shard import (
+        from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
         from torchtitan.experiments.flex_shard.placements import FlatShard, Shard
@@ -273,7 +273,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
     def test_empty_bucket_skipped(self):
         """Empty bucket assignments are silently skipped."""
-        from torchtitan.experiments.flex_shard.flex_shard import (
+        from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
 

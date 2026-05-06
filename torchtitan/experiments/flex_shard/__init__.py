@@ -14,8 +14,8 @@ from .flex_shard import (
     MixedPrecisionPolicy,
     set_sharding_info,
 )
-from .parametrizations import disable_active_parametrization
 from .placements import (
+    disable_active_parametrization,
     per_param_placements,
     Placement,
     Shard,
