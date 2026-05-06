@@ -38,11 +38,11 @@ def generate():
 
     # Register TorchTitan model with vLLM before engine creation
     from torchtitan.experiments.rl.models.vllm_registry import (
-        register_model_to_vllm_model_registry,
+        registry_to_vllm,
         VLLM_MODEL_NAME,
     )
 
-    register_model_to_vllm_model_registry(
+    registry_to_vllm(
         config.model_spec,
         compile_config=config.compile,
     )

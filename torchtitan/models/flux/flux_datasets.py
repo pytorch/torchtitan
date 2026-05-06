@@ -260,7 +260,6 @@ class FluxDataset(IterableDataset, Stateful):
 
             # skip low quality image or image with color channel = 1
             if sample_dict["image"] is None:
-                # pyrefly: ignore [missing-attribute]
                 sample = sample.get("__key__", "unknown")
                 logger.warning(
                     f"Low quality image {sample} is skipped in Flux Dataloader."

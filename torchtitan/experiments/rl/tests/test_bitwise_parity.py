@@ -56,7 +56,7 @@ from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_batch_invariant
 from torchtitan.experiments.rl.grpo import RLTrainer
 from torchtitan.experiments.rl.models.vllm_registry import (
-    register_model_to_vllm_model_registry,
+    registry_to_vllm,
     VLLM_MODEL_NAME,
 )
 from torchtitan.models.common.attention import VarlenMetadata
@@ -440,7 +440,7 @@ class TestBitwiseParity(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
-        register_model_to_vllm_model_registry(
+        registry_to_vllm(
             config.model_spec,
             compile_config=config.compile,
         )
