@@ -372,6 +372,21 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_full_inductor",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+TP+CP",
+            "aot_fx_trace_llama3_fsdp_tp_cp",
+            ngpu=8,
+        ),
     ]
 
 

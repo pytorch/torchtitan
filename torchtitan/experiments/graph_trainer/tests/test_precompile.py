@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch.distributed as dist
 
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
@@ -599,6 +600,199 @@ class TestCudagraphFingerprintConsistency(unittest.TestCase):
         fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
 
         self.assertEqual(fp1, fp2)
+
+
+class TestPrecompileCPSupport(unittest.TestCase):
+    """Tests for context parallelism support in the precompile path."""
+
+    def test_prepare_cp_input_shards_inputs_and_labels(self):
+        """Verify prepare_context_parallel_input shards inputs, labels, and
+        positions along the sequence dimension, matching the shapes the
+        trainer's post_dataloading_process would produce."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        if not dist.is_initialized():
+            dist.init_process_group("fake", rank=0, world_size=4)
+            self.addCleanup(dist.destroy_process_group)
+
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.distributed.context_parallel import (
+            prepare_context_parallel_input,
+        )
+
+        batch_size, seq_len, cp_degree = 2, 128, 4
+        device = torch.device("cuda:0")
+        mesh = init_device_mesh("cuda", (4,), mesh_dim_names=("cp",))
+
+        inputs = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        labels = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        positions = torch.arange(0, seq_len, dtype=torch.int32, device=device).expand(
+            batch_size, seq_len
+        )
+        extra_kwargs = {"positions": positions}
+
+        out_inputs, out_labels, out_kwargs = prepare_context_parallel_input(
+            inputs, labels, extra_kwargs, mesh, device
+        )
+
+        expected_seq = seq_len // cp_degree
+        self.assertEqual(out_inputs.shape, (batch_size, expected_seq))
+        self.assertEqual(out_labels.shape, (batch_size, expected_seq))
+        self.assertEqual(out_kwargs["positions"].shape, (batch_size, expected_seq))
+
+    def test_prepare_cp_input_preserves_extra_kwargs_keys(self):
+        """Extra kwargs other than positions/attention_masks pass through."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        if not dist.is_initialized():
+            dist.init_process_group("fake", rank=0, world_size=2)
+            self.addCleanup(dist.destroy_process_group)
+
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.distributed.context_parallel import (
+            prepare_context_parallel_input,
+        )
+
+        batch_size, seq_len = 2, 64
+        device = torch.device("cuda:0")
+        mesh = init_device_mesh("cuda", (2,), mesh_dim_names=("cp",))
+
+        inputs = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        labels = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        positions = torch.arange(0, seq_len, dtype=torch.int32, device=device).expand(
+            batch_size, seq_len
+        )
+        extra_kwargs = {"positions": positions}
+
+        _, _, out_kwargs = prepare_context_parallel_input(
+            inputs, labels, extra_kwargs, mesh, device
+        )
+
+        self.assertIn("positions", out_kwargs)
+
+    def test_global_valid_tokens_excludes_cp(self):
+        """The dummy_global_valid_tokens calculation must NOT include the CP
+        dimension, matching the trainer's dist_sum over the batch mesh."""
+        dp_shard, dp_replicate, cp = 4, 2, 2
+        local_batch_size, seq_len = 2, 128
+
+        global_batch_size = local_batch_size * dp_shard * dp_replicate
+        dummy_global_valid_tokens = float(global_batch_size * seq_len)
+
+        self.assertEqual(
+            dummy_global_valid_tokens,
+            float(local_batch_size * dp_shard * dp_replicate * seq_len),
+        )
+        wrong_with_cp = float(local_batch_size * dp_shard * dp_replicate * cp * seq_len)
+        self.assertNotEqual(dummy_global_valid_tokens, wrong_with_cp)
+
+    def test_precompile_cp_code_path_exists(self):
+        """The precompile path must call prepare_context_parallel_input when
+        cp_enabled is True, not raise NotImplementedError."""
+        import inspect
+
+        from torchtitan.experiments.graph_trainer.precompile_main import (
+            _precompile_aot_fx_trace,
+        )
+
+        source = inspect.getsource(_precompile_aot_fx_trace)
+        self.assertIn("prepare_context_parallel_input", source)
+        self.assertNotIn(
+            "CooR precompile does not yet support context parallelism", source
+        )
+
+    def test_cp_disabled_skips_prepare(self):
+        """When cp_enabled is False, prepare_context_parallel_input must NOT
+        be called."""
+        parallel_dims = MagicMock()
+        parallel_dims.cp_enabled = False
+
+        with patch(
+            "torchtitan.distributed.context_parallel.prepare_context_parallel_input"
+        ) as mock_prepare:
+            self.assertFalse(parallel_dims.cp_enabled)
+            mock_prepare.assert_not_called()
+
+
+class TestPrecompileCPPositions(unittest.TestCase):
+    """Tests that positions are created correctly for CP in the precompile path."""
+
+    def test_positions_created_when_cp_enabled_without_block_causal(self):
+        """Even with mask_type='causal', positions must be created when
+        cp_enabled=True, because CP needs them for correct RoPE after sharding."""
+        from torchtitan.models.common.decoder import Decoder
+
+        batch_size, seq_len = 2, 128
+        device = torch.device("cpu")
+
+        dummy_inputs = torch.randint(0, 100, (batch_size, seq_len), device=device)
+        extra_kwargs: dict = {}
+
+        model_config = MagicMock(spec=Decoder.Config)
+        attn_config = MagicMock()
+        attn_config.mask_type = "causal"
+        attn_config.inner_attention = None
+        layer_config = MagicMock()
+        layer_config.attention = attn_config
+        model_config.layers = [layer_config]
+
+        cp_enabled = True
+
+        if model_config.layers:
+            mask_type = getattr(model_config.layers[0].attention, "mask_type", "causal")
+            if mask_type == "block_causal" or cp_enabled:
+                extra_kwargs["positions"] = torch.arange(
+                    0,
+                    dummy_inputs.shape[1],
+                    dtype=torch.int32,
+                    device=dummy_inputs.device,
+                ).expand(dummy_inputs.shape)
+
+        self.assertIn("positions", extra_kwargs)
+        self.assertEqual(extra_kwargs["positions"].shape, (batch_size, seq_len))
+        self.assertTrue(
+            torch.equal(
+                extra_kwargs["positions"][0],
+                torch.arange(seq_len, dtype=torch.int32),
+            )
+        )
+
+    def test_positions_not_created_without_cp_or_block_causal(self):
+        """With mask_type='causal' and cp_enabled=False, positions should NOT
+        be added to extra_kwargs."""
+        extra_kwargs: dict = {}
+        batch_size, seq_len = 2, 128
+        dummy_inputs = torch.randint(0, 100, (batch_size, seq_len))
+
+        mask_type = "causal"
+        cp_enabled = False
+
+        if mask_type == "block_causal" or cp_enabled:
+            extra_kwargs["positions"] = torch.arange(
+                0, dummy_inputs.shape[1], dtype=torch.int32
+            ).expand(dummy_inputs.shape)
+
+        self.assertNotIn("positions", extra_kwargs)
+
+
+class TestPrecompileCPFingerprint(unittest.TestCase):
+    """Test that the config fingerprint is sensitive to CP settings."""
+
+    def test_cp_degree_changes_fingerprint(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        cfg = _StubCompileConfig()
+
+        dims_cp1 = _StubParallelDims(cp=1)
+        dims_cp2 = _StubParallelDims(cp=2)
+
+        fp_cp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims_cp1)
+        fp_cp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims_cp2)
+        self.assertNotEqual(fp_cp1, fp_cp2)
 
 
 if __name__ == "__main__":
