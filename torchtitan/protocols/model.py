@@ -4,10 +4,31 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
+import enum
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import Any, TYPE_CHECKING
 
 from .module import Module
+
+if TYPE_CHECKING:
+    from .state_dict_adapter import BaseStateDictAdapter
+
+
+class StateDictMode(enum.Enum):
+    """Which parameters to include in a state dict operation.
+
+    FULL: all keys. For seed saves, DCP resume.
+    TRAINABLE: only requires_grad=True keys. For adapter export.
+    BASE: only requires_grad=False keys (or all if nothing frozen).
+        For initial load in adapter training.
+    """
+
+    FULL = "full"
+    TRAINABLE = "trainable"
+    BASE = "base"
 
 
 class BaseModel(Module):
@@ -20,6 +41,52 @@ class BaseModel(Module):
     ``init_states`` (from Module) auto-recurses; override only for custom
     ordering (e.g., weight tying before init).
     """
+
+    _sd_adapter: BaseStateDictAdapter | None = None
+    _adapter_to_hf_fns: list | None = None
+
+    @property
+    def sd_adapter(self) -> BaseStateDictAdapter | None:
+        return self._sd_adapter
+
+    def set_sd_adapter(
+        self,
+        sd_adapter: BaseStateDictAdapter | None = None,
+        converters: list | None = None,
+    ) -> None:
+        """Store the state dict adapter and build converter transforms.
+
+        Called once by the trainer after model build.
+        """
+        self._sd_adapter = sd_adapter
+        self._adapter_to_hf_fns = None
+        for converter in converters or []:
+            build_fn = getattr(converter, "build_external_transforms", None)
+            if build_fn is not None:
+                ct = build_fn(sd_adapter)
+                if ct is not None and "to_external" in ct:
+                    if self._adapter_to_hf_fns is None:
+                        self._adapter_to_hf_fns = []
+                    self._adapter_to_hf_fns.append(ct["to_external"])
+
+    def to_hf(self, sd: dict[str, Any]) -> dict[str, Any]:
+        """Convert native base model keys to HF format."""
+        if self._sd_adapter is not None:
+            sd = self._sd_adapter.to_hf(sd)
+        return sd
+
+    def from_hf(self, sd: dict[str, Any]) -> dict[str, Any]:
+        """Convert HF-format keys back to native format."""
+        if self._sd_adapter is not None:
+            sd = self._sd_adapter.from_hf(sd)
+        return sd
+
+    def adapter_to_hf(self, sd: dict[str, Any]) -> dict[str, Any]:
+        """Convert native adapter keys to PEFT/HF format."""
+        if self._adapter_to_hf_fns:
+            for fn in self._adapter_to_hf_fns:
+                sd = fn(sd)
+        return sd
 
     def init_weights(self, **kwargs) -> None:
         """Backward-compatible alias for ``init_states``.

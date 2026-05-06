@@ -18,6 +18,26 @@ from torch.utils.data import DataLoader
 from torchtitan.experiments.ft.checkpoint import FTCheckpointManager
 
 
+class FakeBaseModel(nn.Linear):
+    """A fake BaseModel for FT checkpoint tests.
+
+    Inherits nn.Linear so get_model_state_dict works directly, and
+    provides the BaseModel transform methods that CheckpointManager expects.
+    """
+
+    def __init__(self, in_features: int = 2, out_features: int = 2):
+        super().__init__(in_features, out_features)
+
+    def to_hf(self, sd):
+        return sd
+
+    def from_hf(self, sd):
+        return sd
+
+    def adapter_to_hf(self, sd):
+        return sd
+
+
 class FakeOptimizersContainer:
     def __init__(self):
         self._fake_param = torch.tensor([1.0], dtype=torch.float32)
@@ -83,7 +103,8 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.base_temp_dir = tempfile.mkdtemp()
         self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
         os.makedirs(self.test_folder, exist_ok=True)
-        self.model_parts = [nn.Linear(2, 2)]
+        self.model = FakeBaseModel(2, 2)
+        self.model_parts = [self.model]
         self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
@@ -133,7 +154,6 @@ class TestFTCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
-            sd_adapter=None,
             base_folder=self.test_folder,
             ft_manager=self.ft_manager,
         )
