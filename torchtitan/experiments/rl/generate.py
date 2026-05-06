@@ -37,12 +37,9 @@ def generate():
     model_path = config.hf_assets_path
 
     # Register TorchTitan model with vLLM before engine creation
-    from torchtitan.experiments.rl.models.vllm_registry import (
-        register_model_to_vllm_model_registry,
-        VLLM_MODEL_NAME,
-    )
+    from torchtitan.experiments.rl.models.vllm_registry import registry, VLLM_MODEL_NAME
 
-    register_model_to_vllm_model_registry(
+    registry(
         config.model_spec,
         compile_config=config.compile,
     )
