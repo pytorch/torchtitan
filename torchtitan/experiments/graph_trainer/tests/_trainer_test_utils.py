@@ -12,6 +12,7 @@ import torch.nn as nn
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.distributed.utils import get_train_context
+from torchtitan.experiments.graph_trainer.configs import DefaultMemoryPolicy
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
 
@@ -50,7 +51,7 @@ def build_minimal_trainer(
                     [] if compile_joint_passes is None else list(compile_joint_passes)
                 ),
                 precompile_artifact_dir="",
-                memory_policy="default",
+                memory_policy=DefaultMemoryPolicy(),
                 inductor_compilation="regional",
                 numerics_changing_optim=compile_numerics_changing_optim,
                 enable_cudagraph=True,
