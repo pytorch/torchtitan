@@ -3645,6 +3645,13 @@ def _module_path_common_prefix(paths: list[str]) -> str:
     return ".".join(common_parts)
 
 
+def _strip_checkpoint_wrapped_module_path(path: str) -> str:
+    """Remove CheckpointWrapper internals from a dotted module path."""
+    return ".".join(
+        part for part in path.split(".") if part != "_checkpoint_wrapped_module"
+    )
+
+
 def _get_module_by_path(module: nn.Module, path: str) -> nn.Module:
     """Resolve a dotted module path from a root module."""
     result = module
@@ -3686,7 +3693,11 @@ def _top_level_owner_path(module: nn.Module, owner_path: str) -> str:
 def _get_storage_reshard_module_paths(storage: DStorage) -> list[str]:
     """Return module paths to checkpoint for one resharding bucket."""
     owner_paths = sorted(
-        {".".join(fqn.split(".")[:-1]) for fqn in storage._param_infos if "." in fqn}
+        {
+            _strip_checkpoint_wrapped_module_path(".".join(fqn.split(".")[:-1]))
+            for fqn in storage._param_infos
+            if "." in fqn
+        }
     )
     if not owner_paths:
         return []
@@ -3713,7 +3724,10 @@ def _get_storage_reshard_module_paths(storage: DStorage) -> list[str]:
 def _get_storage_debug_fqn(storage: DStorage) -> str | None:
     """Return a concise module/bucket FQN for profiler annotations."""
     owner_paths = sorted(
-        {".".join(fqn.split(".")[:-1]) for fqn in storage._param_infos}
+        {
+            _strip_checkpoint_wrapped_module_path(".".join(fqn.split(".")[:-1]))
+            for fqn in storage._param_infos
+        }
     )
     if not owner_paths:
         return None

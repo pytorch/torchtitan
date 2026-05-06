@@ -1110,13 +1110,62 @@ forward, and preserving stream/prefetch behavior.
 - Done: a Transformer profiler smoke trace shows forward all-gather kernels on
   the shared AG stream and reduce-scatter kernels on the shared RS stream, with
   layer AG and backward RS overlapping default-stream GEMM compute.
-- TODO: validate recompute-side prefetch and checkpointed memory behavior with
-  profiler and memory snapshots. The implementation uses the existing reverse
-  bucket order during checkpoint recompute, but broader trace validation is
-  still needed.
+- Done: recompute-side prefetch and checkpointed memory behavior are covered by
+  a Transformer + user activation checkpointing distributed test. A
+  checkpointed profiler trace shows AG on the shared AG stream and RS on the
+  shared RS stream; a checkpointed memory snapshot shows no live AG/full-param
+  buffers after forward/recompute boundaries and only sharded `param.grad`
+  storage after backward.
 - TODO: extend the custom bucket path beyond CUDA `Shard` buckets to mixed
   precision, CPU offload, `Shard(dim != 0)`, uneven shards, `FlatShard`,
   `RaggedShard`, and `Owned`.
+
+### Plan: Checkpoint/Recompute Validation for Eager RAF
+
+This is the next validation step after the steady-state eager CUDA `Shard(0)`
+path. Activation checkpointing changes when bucket hooks run and when full
+parameters can be dropped, so it is the highest-risk remaining path for the raw
+AG prefetch design.
+
+1. **Add a checkpoint-enabled Transformer coverage case.**
+   Use `torch.testing._internal.distributed._tensor.common_dtensor.Transformer`
+   with per-layer `BucketSpec(..., reshard_after_forward=True)` and user
+   activation checkpointing enabled. Keep the bucket order aligned with forward
+   module execution: embeddings, each layer, norm, output.
+
+2. **Validate recompute-side prefetch order.**
+   Forward prefetch should follow forward bucket order. Checkpoint recompute
+   should use reverse bucket order, matching backward replay. Pending raw AG
+   state must include the recompute/forward phase bit so a forward pending
+   result cannot be consumed during recompute and a recompute pending result
+   cannot escape back to the outer forward.
+
+3. **Check memory with checkpointing enabled.**
+   Dump a backward-inclusive CUDA memory snapshot and verify:
+
+   - raw AG send/gathered/full-param buffers are not live after each recompute
+     bucket finishes
+   - no stale pending AG result survives across forward/recompute boundaries
+   - RS send buffers are transient
+   - only reduced sharded `param.grad` storage remains after backward
+
+4. **Inspect profiler overlap.**
+   Dump a rank0 profiler trace with the standard schedule. Confirm recompute
+   AG still runs on the shared AG stream, RS still runs on the shared RS stream,
+   and any lost overlap is understood as checkpoint replay ordering rather than
+   a stream/lifetime regression.
+
+5. **Turn the smoke checks into tests.**
+   Add focused distributed coverage in `test_ac_composition.py` or
+   `test_flex_shard_parametrization.py` for numerics, local shard grads, and
+   stale-pending cleanup. Keep profiler and memory snapshot inspection as
+   manual diagnostics unless a cheap deterministic assertion can be added.
+
+**Status: done.** `test_ac_composition.py` now has a checkpoint-enabled
+Transformer case that validates forward bucket order, reverse recompute bucket
+order, phase-correct pending AG state, stale-pending cleanup, loss parity, and
+local sharded gradient parity. Manual checkpointed profiler and memory
+snapshots were also inspected.
 
 ### Plan: Eager RAF All-Gather Prefetch
 
@@ -1236,10 +1285,9 @@ checkpoint/module execution unit.
   autograd worker per-thread default stream, and does not immediately block the
   default stream before later backward compute can run. **Smoke validated on the
   Transformer trace.**
-- Memory snapshots still show no live full-parameter storage after each
-  `reshard_after_forward=True` bucket forward. **TODO for checkpoint-enabled
-  validation; non-checkpointed forward still retains tensors required by
-  backward.**
+- Memory snapshots still show no live FlexShard AG/full-parameter storage after
+  checkpointed forward/recompute boundaries; after backward, the only live
+  FlexShard communication storage is reduced sharded `param.grad`.
 - Distributed numerics match the current pure functional RAF baseline for loss,
   local shard grads, and optimizer-updated parameters.
 - Error handling clears stale pending raw buffers and does not leak references
