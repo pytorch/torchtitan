@@ -57,7 +57,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 ],
             ],
             "DeepSeek V3 HSDP+EP",
-            "deepseek_v3_hsdp+ep_no_sp",
+            "deepseek_v3_hsdp+ep",
             ngpu=4,
         ),
         OverrideDefinitions(
