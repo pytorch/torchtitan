@@ -451,7 +451,7 @@ def get_compiler_passes_from_config(
                 f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
         if pass_name == "transformer_block_bucketing":
-            from torchtitan.experiments.graph_trainer.passes import (
+            from torchtitan.experiments.graph_trainer.fsdp_passes import (
                 overlap_fsdp_ag_rs_pass,
             )
 
@@ -504,10 +504,12 @@ def get_joint_custom_passes_from_config(
     Returns:
         List of joint custom pass functions
     """
+    from torchtitan.experiments.graph_trainer.fsdp_passes import (
+        fsdp_reshard_after_fwd_pass,
+    )
     from torchtitan.experiments.graph_trainer.passes import (
         annotate_flex_attention_for_regional_inductor_pass,
         AVAILABLE_JOINT_PASSES,
-        fsdp_reshard_after_fwd_pass,
     )
 
     joint_custom_passes = []
