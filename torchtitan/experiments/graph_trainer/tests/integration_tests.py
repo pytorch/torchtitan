@@ -505,6 +505,25 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_hybridep",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "compile.memory-policy:paged-stash",
+                    "--compile.memory-policy.buffer-size-factor 1.1",
+                    "--compile.memory-policy.host-buffer-size-factor 0.5",
+                    "--compile.memory-policy.page-size 64",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 HybridEP paged_stash",
+            "aot_fx_trace_deepseek_v3_hybridep_paged_stash",
+            ngpu=4,
+        ),
     ]
 
 
