@@ -97,10 +97,55 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     )
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=[
+        converters=[
             Float8LinearConverter.Config(model_compile_enabled=model_compile_enabled),
         ],
     )
+    return config
+
+
+def llama3_debugmodel_lora() -> Trainer.Config:
+    from torchtitan.components.lora import LoRAConverter
+
+    config = llama3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            LoRAConverter.Config(
+                rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_lora_checkpoint() -> Trainer.Config:
+    """LoRA training with checkpoint enabled and HF save/load."""
+    config = llama3_debugmodel_lora()
+    config.checkpoint.enable = True
+    config.checkpoint.last_save_model_only = True
+    config.checkpoint.last_save_in_hf = True
+    return config
+
+
+def llama3_debugmodel_lora_save_peft() -> Trainer.Config:
+    """LoRA training that saves adapters in PEFT safetensors format."""
+    config = llama3_debugmodel_lora()
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 5
+    config.checkpoint.last_save_model_only = True
+    config.checkpoint.last_save_trainable_only = True
+    config.checkpoint.last_save_in_hf = True
+    config.checkpoint.keep_latest_k = 0
+    return config
+
+
+def llama3_debugmodel_lora_load_peft() -> Trainer.Config:
+    """LoRA training that loads base weights from DCP, resumes training."""
+    config = llama3_debugmodel_lora()
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 5
+    config.checkpoint.keep_latest_k = 0
     return config
 
 
@@ -117,7 +162,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=[
+        converters=[
             Float8LinearConverter.Config(
                 emulate=True,
                 model_compile_enabled=(
@@ -208,7 +253,7 @@ def llama3_405b() -> Trainer.Config:
         ),
         model_spec=model_registry(
             "405B",
-            quantization=[
+            converters=[
                 Float8LinearConverter.Config(
                     filter_fqns=["output"],
                     model_compile_enabled=(

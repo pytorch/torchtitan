@@ -23,6 +23,28 @@ FragmentFunction: TypeAlias = Callable[..., list[nn.Module]]
 PostOptimizerBuildFn: TypeAlias = Callable[..., None]
 
 
+def validate_converter_order(converters: list) -> None:
+    """Validate that quantization/QAT converters precede LoRA.
+
+    Raises ``ValueError`` if a quantization converter appears after a LoRA
+    converter in the list.
+    """
+    from torchtitan.components.lora import LoRAConverter
+    from torchtitan.components.quantization import QuantizationConverter
+
+    _BEFORE_LORA = (QuantizationConverter,)
+
+    seen_lora = False
+    for converter in converters:
+        if isinstance(converter, LoRAConverter):
+            seen_lora = True
+        elif seen_lora and isinstance(converter, _BEFORE_LORA):
+            raise ValueError(
+                f"{type(converter).__name__} must be applied before "
+                f"LoRAConverter. Reorder the converters list."
+            )
+
+
 @dataclass
 class ModelSpec:
     """Per-model bundle. Contains already-selected arch config + callables."""

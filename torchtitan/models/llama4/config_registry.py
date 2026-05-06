@@ -71,7 +71,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry(
             "debugmodel",
-            quantization=[
+            converters=[
                 Float8GroupedExpertsConverter.Config(
                     model_compile_enabled=(
                         compile_config.enable and "model" in compile_config.components
