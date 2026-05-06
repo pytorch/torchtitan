@@ -10,23 +10,20 @@ TorchTitan custom config parser with vLLM. Both registrations are wrapped in
 dynamic classes that capture ``model_spec`` via closure — no global state.
 
 Usage:
-    from torchtitan.experiments.rl.models.vllm_registry import registry
+    from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
     from torchtitan.experiments.rl.models.vllm_config_parser import (
         VLLM_MODEL_NAME, TORCHTITAN_CONFIG_FORMAT,
     )
 
-    registry(model_spec, compile_config)
-    # then construct EngineArgs(config_format=TORCHTITAN_CONFIG_FORMAT, ...)
+    registry_to_vllm(model_spec)
+    # then construct EngineArgs(config_format=TORCHTITAN_CONFIG_FORMAT,
+    #                           hf_overrides={"compile_config": ..., ...})
 """
 
 from __future__ import annotations
 
-import dataclasses
-from typing import Any
-
-from torchtitan.config.configs import CompileConfig
 from torchtitan.experiments.rl.models.vllm_config_parser import (
-    add_custom_fields_to_config_dict,
+    apply_hf_overrides_to_config_dict,
     model_spec_to_hf_config_dict,
     TORCHTITAN_CONFIG_FORMAT,
     VLLM_MODEL_NAME,
@@ -34,10 +31,7 @@ from torchtitan.experiments.rl.models.vllm_config_parser import (
 from torchtitan.protocols.model_spec import ModelSpec
 
 
-def registry(
-    model_spec: ModelSpec,
-    compile_config: CompileConfig,
-) -> None:
+def registry_to_vllm(model_spec: ModelSpec) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
     Single entry point for vLLM integration. Must be called before creating
@@ -48,15 +42,17 @@ def registry(
          the name ``VLLM_MODEL_NAME``. This is what vLLM instantiates after
          it resolves the architecture from the parsed config.
       2. ``TorchTitanConfigParserForSpec`` (subclass of ``ConfigParserBase``)
-         with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``.
-         This is what produces the ``PretrainedConfig`` from the torchtitan
+         with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
+         is what produces the ``PretrainedConfig`` from the torchtitan
          ``ModelSpec``.
+
+    Per-engine runtime config (e.g. ``compile_config``, ``debug_config``)
+    flows through ``EngineArgs(hf_overrides={...})``; the parser validates
+    those keys against ``_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES`` and stamps them
+    onto the resulting ``PretrainedConfig``.
 
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components
-        compile_config: Per-layer torch.compile config. When enabled, each
-            TransformerBlock is compiled individually via ``apply_compile``
-            during model construction.
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
     from transformers import PretrainedConfig
@@ -67,22 +63,7 @@ def registry(
 
     logger = init_logger(__name__)
 
-    # Registration-time torchtitan-specific fields stamped onto the resulting
-    # ``PretrainedConfig``. For per-engine runtime flags, callers should use
-    # ``EngineArgs(hf_overrides={...})`` instead.
-    #
-    # CompileConfig is converted to a dict here (rather than stored as a
-    # dataclass instance) so the resulting ``PretrainedConfig`` stays
-    # JSON-serializable — vLLM's telemetry / caching paths sometimes call
-    # ``hf_config.to_json()`` and a dataclass attribute would crash that.
-    # Wrapper reconstructs via ``CompileConfig(**hf_config.compile_config)``.
-    custom_hf_config_fields: dict[str, Any] = {
-        "compile_config": dataclasses.asdict(compile_config),
-    }
-
-    # Dynamic model class capturing ModelSpec in the closure. The wrapper
-    # reconstructs CompileConfig from hf_config (set by the ConfigParser
-    # below), so we don't need to forward it through the constructor.
+    # Dynamic model class capturing ModelSpec in the closure.
     class TorchTitanVLLMModelFromSpec(TorchTitanVLLMModelWrapper):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
@@ -95,8 +76,7 @@ def registry(
     TorchTitanVLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
     ModelRegistry.register_model(VLLM_MODEL_NAME, TorchTitanVLLMModelFromSpec)
 
-    # Dynamic config parser class capturing ModelSpec (and any registration-
-    # time custom fields) in the closure.
+    # Dynamic config parser class capturing ModelSpec in the closure.
     @register_config_parser(TORCHTITAN_CONFIG_FORMAT)
     class TorchTitanConfigParserForSpec(ConfigParserBase):
         def parse(
@@ -108,8 +88,8 @@ def registry(
             **kwargs,
         ):
             config_dict = model_spec_to_hf_config_dict(model_spec)
-            config_dict = add_custom_fields_to_config_dict(
-                config_dict, **custom_hf_config_fields
+            config_dict = apply_hf_overrides_to_config_dict(
+                config_dict, kwargs.get("hf_overrides")
             )
             return config_dict, PretrainedConfig.from_dict(config_dict)
 
