@@ -378,6 +378,12 @@ def _precompile_aot_fx_trace(
         else contextlib.nullcontext()
     )
 
+    from torchtitan.experiments.graph_trainer.common_utils import (
+        maybe_register_blockmask_pytree_node,
+    )
+
+    maybe_register_blockmask_pytree_node()
+
     logger.info("Tracing fwd+loss+bwd via make_fx...")
     with loss_parallel_ctx:
         traced_result = trace_train_step(fwd_bwd_fn)(

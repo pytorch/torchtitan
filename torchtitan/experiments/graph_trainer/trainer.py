@@ -152,12 +152,12 @@ class GraphTrainer(Trainer):
         extra_inputs: dict[str, torch.Tensor],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
+        maybe_register_blockmask_pytree_node()
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-                maybe_register_blockmask_pytree_node()
                 with self.train_context():
                     self._traced_step = trace_train_step(fwd_bwd_fn)(
                         model,
