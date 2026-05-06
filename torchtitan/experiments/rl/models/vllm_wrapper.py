@@ -111,14 +111,20 @@ def create_torchtitan_config_from_vllm_config(
     world_size = dist.get_world_size()
     parallel_config = vllm_config.parallel_config
 
-    # When EP is enabled, all TP ranks are repurposed for expert parallelism
-    # (each rank holds a shard of experts): ep_size = tp_size.
     tp_size = parallel_config.tensor_parallel_size
-    ep_size = tp_size if parallel_config.enable_expert_parallel else 1
+    dp_size = parallel_config.data_parallel_size
 
+    # When EP is enabled, it spans all ranks within a DP*TP group:
+    # each rank holds a shard of experts.
+    ep_size = dp_size * tp_size if parallel_config.enable_expert_parallel else 1
+
+    # Map vLLM DP to dp_shard for two purposes (no actual FSDP wrapping):
+    # 1. Mesh math: efsdp = dp_shard * tp / ep — makes EP dims work
+    # 2. Data routing: vLLM routes different requests to different DP groups
+    # FSDP is skipped for inference (skip_dp=True) — no backward, no grad sync.
     parallel_dims = ParallelDims(
-        dp_replicate=parallel_config.data_parallel_size,
-        dp_shard=1,
+        dp_replicate=1,
+        dp_shard=dp_size,
         cp=1,
         tp=tp_size,
         pp=parallel_config.pipeline_parallel_size,
@@ -127,8 +133,8 @@ def create_torchtitan_config_from_vllm_config(
     )
 
     parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=parallel_config.data_parallel_size,
-        data_parallel_shard_degree=1,
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=dp_size,
         context_parallel_degree=1,
         tensor_parallel_degree=tp_size,
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
@@ -137,13 +143,11 @@ def create_torchtitan_config_from_vllm_config(
         enable_sequence_parallel=False,
     )
 
-    # Build the full device mesh so all dimensions (tp, ep, efsdp, etc.)
-    # are available to the core parallelize function.
     parallel_dims.build_mesh()
 
     logger.info(
         f"Created TorchTitan config from vLLM: "
-        f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
+        f"DP={dp_size}, TP={parallel_dims.tp}, "
         f"CP={parallel_dims.cp}, PP={parallel_dims.pp}, "
         f"EP={parallel_dims.ep}"
     )
@@ -520,7 +524,7 @@ class TorchTitanVLLMModelWrapper(Module):
                 torchtitan_state_dict[name] = DTensor.from_local(
                     tensor.to(device_mesh.device_type),
                     device_mesh=device_mesh,
-                    placements=[Replicate()],
+                    placements=[Replicate()] * device_mesh.ndim,
                 )
 
         return self.load_weights_from_state_dict(torchtitan_state_dict)

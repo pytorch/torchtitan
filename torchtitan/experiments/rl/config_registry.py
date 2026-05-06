@@ -211,6 +211,9 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
     Generator uses TP=2 for dense layers and EP=2 for MoE experts.
     The RL loop auto-rebuilds the model spec with AllToAllTokenDispatcher
     when generator EP > 1.
+
+    Generate the debug checkpoint with:
+        python scripts/create_debug_moe_ckpt.py
     """
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
@@ -228,10 +231,11 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
             ),
             training=TrainingConfig(),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=1,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
+                expert_parallel_degree=2,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
+            compile=CompileConfig(enable=False),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -332,7 +336,7 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
             ),
             training=TrainingConfig(dtype="bfloat16"),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=8,
                 disable_loss_parallel=True,
             ),
             compile=CompileConfig(enable=True, backend="aot_eager"),
@@ -342,9 +346,9 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
             model_dtype="bfloat16",
             cudagraph=VLLMCudagraphConfig(enable=True),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
-                expert_parallel_degree=4,
+                expert_parallel_degree=8,
             ),
             sampling=SamplingConfig(
                 n=8,

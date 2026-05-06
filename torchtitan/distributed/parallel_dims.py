@@ -75,6 +75,10 @@ class ParallelDims:
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
+        if name == "dp_replicate":
+            # Always keep dp_replicate mesh so replicate() / fully_shard()
+            # can use it for data parallel replication even at degree 1.
+            return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
             # FSDP wrapping to help the MoE layers do mixed precision training.
