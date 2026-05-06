@@ -259,7 +259,13 @@ class HFTransformerModel(BaseModel):
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
 
-            if not hasattr(self, "inter_dim"):  # Only for llama model
+            # Recalculate intermediate_size only when model dimensions are
+            # explicitly overridden (debugmodel). When using the HF config's
+            # real architecture (full flavor, dim=None), trust its value.
+            if (
+                not hasattr(self, "inter_dim")
+                and self._titan_injected_model_args.get("dim") is not None
+            ):
                 ffn_hidden_size = 4 * self.dim
                 ffn_hidden_size = int(2 * ffn_hidden_size / 3)
                 if self.ffn_dim_multiplier is not None:
@@ -268,7 +274,8 @@ class HFTransformerModel(BaseModel):
                     (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
                 )
 
-            self.head_dim = self.dim // self.num_attention_heads
+            if self._titan_injected_model_args.get("dim") is not None:
+                self.head_dim = self.dim // self.num_attention_heads
 
             return self
 
@@ -646,16 +653,24 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, positions=None, attention_masks=None, **kwargs):
         local_seq_len = self.max_seq_len
         local_seq_len //= (
             self.cp_mesh.size()
             if self.cp_mesh is not None and self.cp_mesh.size() > 1
             else 1
         )
-        kwargs["position_ids"] = torch.arange(
-            local_seq_len, device=args[0].device
-        ).unsqueeze(0)
+
+        if positions is not None:
+            kwargs["position_ids"] = positions.to(args[0].device)
+        else:
+            kwargs["position_ids"] = torch.arange(
+                local_seq_len, device=args[0].device
+            ).unsqueeze(0)
+
+        if attention_masks is not None:
+            kwargs["attention_mask"] = attention_masks
+
         output = self.model.model(*args, **kwargs)
         if self._skip_lm_head:
             return output.last_hidden_state

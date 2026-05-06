@@ -10,6 +10,7 @@ from .model import HFTransformerModel
 
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
+from .state_dict_adapter import HFTransformerStateDictAdapter
 
 __all__ = [
     "HFTransformerModel",
@@ -18,11 +19,16 @@ __all__ = [
 
 @dataclass
 class TitanDenseModelConfig:
-    """Arguments for the base TorchTitan model."""
+    """Arguments for the base TorchTitan model.
 
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
+    Fields default to None so they don't override values from the HF config
+    loaded via AutoConfig.from_pretrained(). Set explicitly only when you want
+    to override (e.g. debugmodel with dim=256).
+    """
+
+    dim: int | None = None
+    n_layers: int | None = None
+    n_heads: int | None = None
     n_kv_heads: int | None = None
     vocab_size: int | None = None
     multiple_of: int = 256
@@ -44,8 +50,22 @@ flavors = {
             n_kv_heads=16,
         ),
     ),
+    "sft_debugmodel": HFTransformerModel.Config(
+        titan_dense_config=TitanDenseModelConfig(
+            dim=256,
+            n_layers=2,
+            n_heads=16,
+            n_kv_heads=16,
+            attn_mask_type="block_causal",
+        ),
+    ),
     "full": HFTransformerModel.Config(
         titan_dense_config=TitanDenseModelConfig(),
+    ),
+    "sft_full": HFTransformerModel.Config(
+        titan_dense_config=TitanDenseModelConfig(
+            attn_mask_type="block_causal",
+        ),
     ),
 }
 
@@ -58,5 +78,5 @@ def model_registry(flavor: str) -> ModelSpec:
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
         post_optimizer_build_fn=None,
-        state_dict_adapter=None,
+        state_dict_adapter=HFTransformerStateDictAdapter,
     )
