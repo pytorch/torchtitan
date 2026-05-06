@@ -9,6 +9,7 @@ import os
 import torch
 
 from torchtitan.config import ConfigManager
+from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer
 
@@ -26,6 +27,17 @@ def main() -> None:
 
     config_manager = ConfigManager()
     config = config_manager.parse_args()
+
+    # NOTE: internal meta tooling relies on source="training".
+    sl.init_structured_logger(
+        source="training",
+        # pyrefly: ignore [missing-attribute]
+        output_dir=config.dump_folder,
+        # pyrefly: ignore [missing-attribute]
+        enable=config.debug.enable_structured_logging,
+    )
+    sl.log_trace_instant("binary_start")
+
     trainer: Trainer | None = None
 
     try:
@@ -58,7 +70,8 @@ def main() -> None:
     else:
         trainer.close()
         if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+            with sl.log_trace_span("torch_distributed_teardown"):
+                torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
 
 

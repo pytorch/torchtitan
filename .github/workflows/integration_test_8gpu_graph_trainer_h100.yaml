@@ -35,7 +35,7 @@ jobs:
       runner: linux.aws.h100.8
       gpu-arch-type: cuda
       gpu-arch-version: "13.0"
-      docker-image: torchtitan-ubuntu-20.04-clang12
+      docker-image: torchtitan-ubuntu-22.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
