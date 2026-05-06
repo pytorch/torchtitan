@@ -47,8 +47,7 @@ class Completion:
     token_ids: list[int]
     token_logprobs: list[float]
     finish_reason: str | None = None
-    """vLLM ``CompletionOutput.finish_reason`` ("stop" | "length" | "abort").
-    Plumbed for a follow-up that emits ``rollout/truncation_rate``."""
+    """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
 
 @dataclass(kw_only=True, slots=True)

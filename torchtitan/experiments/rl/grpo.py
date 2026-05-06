@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -47,10 +48,6 @@ from torchtitan.experiments.rl.loss.types import (
     sequence_scalar_token_weighted_sum,
 )
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.observability.grpo_metrics import (
-    _population_std,
-    build_reward_component_metrics,
-)
 from torchtitan.experiments.rl.types import (
     Completion,
     Episode,
@@ -187,6 +184,34 @@ _RL_VALIDATION_HEADLINE_METRIC_PATTERNS = [
     r"^validation/reward/_max$",
     r"^validation/response_length/mean$",
 ]
+
+
+def _population_std(values: list[float]) -> float:
+    """Population standard deviation (``ddof=0``); empty input returns NaN."""
+    if not values:
+        return float("nan")
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) * (value - mean) for value in values) / len(values)
+    return math.sqrt(max(0.0, variance))
+
+
+def _build_reward_metrics(
+    prefix: str,
+    reward_dicts: list[dict[str, float]],
+) -> list[m.Metric]:
+    """One ``Mean`` metric per observed reward component.
+
+    Components missing from a step are not zero-filled - the Mean is over
+    the steps where the component appears.
+    """
+    values_by_name: dict[str, list[float]] = defaultdict(list)
+    for rewards in reward_dicts:
+        for name, value in rewards.items():
+            values_by_name[name].append(float(value))
+    return [
+        m.Metric(f"{prefix}/{name}", m.Mean.from_list(values))
+        for name, values in sorted(values_by_name.items())
+    ]
 
 
 class RLTrainer(Configurable):
@@ -536,7 +561,10 @@ class RLTrainer(Configurable):
             m.Metric("rollout/total_length", m.Max.from_list(total_lens)),
             m.Metric("rollout/truncation_rate", m.Mean.from_list(truncated)),
         ]
-        rollout_metrics += build_reward_component_metrics("reward/component", steps)
+        rollout_metrics += _build_reward_metrics(
+            prefix="reward/component",
+            reward_dicts=[step_result.rewards for step_result in steps],
+        )
         return trajectories, rollout_metrics
 
     @staticmethod
@@ -624,8 +652,9 @@ class RLTrainer(Configurable):
             ),
             m.Metric("validation/num_samples", m.NoReduce(float(len(steps)))),
         ]
-        validation_metrics += build_reward_component_metrics(
-            "validation/reward/component", steps
+        validation_metrics += _build_reward_metrics(
+            prefix="validation/reward/component",
+            reward_dicts=[step_result.rewards for step_result in steps],
         )
         return validation_metrics
 

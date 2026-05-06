@@ -324,7 +324,9 @@ class TestLogToConsole:
     ],
 )
 def test_fmt_value(value, expected) -> None:
-    assert m._fmt_value(value) == expected
+    from torchtitan.experiments.rl.observability.metrics.metric_logger import _fmt_value
+
+    assert _fmt_value(value) == expected
 
 
 # ---------------------------------------------------------------------------

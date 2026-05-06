@@ -22,7 +22,7 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
 
     # Config-based TP returns logits as a Replicate DTensor. Downstream RL
     # code (gather with plain-tensor indices, slicing per-sample) expects a
-    # plain tensor — materialize once here.
+    # plain tensor - materialize once here.
     if isinstance(logits, DTensor):
         logits = logits.to_local()
     shift_logits = logits[:, :-1, :].float()
@@ -52,16 +52,12 @@ def extract_response_logprobs(
 
 
 @dataclass(frozen=True)
-class LogprobVerification:
-    """Local additive facts for the trainer-side reducer.
+class LogprobVerificationOutput:
+    """Holds the outputs of `verify_logprob_identity`."""
 
-    All fields are local-rank values; the reducer SUMs/MAXes them across
-    the loss mesh and divides by global token counts where applicable.
-    """
-
-    logprob_diff_sum: torch.Tensor  # SUM-lane: numerator for diff/mean
-    logprob_diff_max: torch.Tensor  # MAX-lane
-    num_tokens_different: torch.Tensor  # SUM-lane: numerator for ratio
+    logprob_diff_sum: torch.Tensor
+    logprob_diff_max: torch.Tensor
+    num_tokens_different: torch.Tensor
 
 
 def verify_logprob_identity(
@@ -69,47 +65,56 @@ def verify_logprob_identity(
     batch_token_log_probs: list[torch.Tensor],
     *,
     device: torch.device,
-) -> LogprobVerification:
+) -> LogprobVerificationOutput:
     """Generator/trainer logprob drift metrics.
 
-    Inputs are response-only per-sample logprobs (no padding — assumes
-    ``TrainBatch`` is varlen-packed).
+    Args:
+        vllm_token_log_probs: Per-token log probs from vLLM (generator)
+        batch_token_log_probs: Per-token log probs computed by the trainer model
+
+    Returns:
+        A `LogprobVerificationOutput` instance
     """
+    # sanity check
     if len(vllm_token_log_probs) != len(batch_token_log_probs):
         raise ValueError(
-            f"verify_logprob_identity: sample count mismatch — "
+            f"verify_logprob_identity: sample count mismatch - "
             f"vllm={len(vllm_token_log_probs)}, "
             f"trainer={len(batch_token_log_probs)}"
         )
 
     if not vllm_token_log_probs:
         zero = torch.zeros((), dtype=torch.float32, device=device)
-        return LogprobVerification(
+        return LogprobVerificationOutput(
             logprob_diff_sum=zero,
             logprob_diff_max=zero,
             num_tokens_different=zero,
         )
 
+    # Make everything a tensor
     vllm_flat = torch.tensor(
         [lp for sample in vllm_token_log_probs for lp in sample],
         dtype=torch.float32,
     )
     titan_flat = torch.cat([t.detach().cpu().float() for t in batch_token_log_probs])
+
+    # sanity check
     if vllm_flat.numel() != titan_flat.numel():
         raise ValueError(
-            f"verify_logprob_identity: total token count mismatch — "
+            f"verify_logprob_identity: total token count mismatch - "
             f"vllm={vllm_flat.numel()}, trainer={titan_flat.numel()}"
         )
     if vllm_flat.numel() == 0:
         zero = torch.zeros((), dtype=torch.float32, device=device)
-        return LogprobVerification(
+        return LogprobVerificationOutput(
             logprob_diff_sum=zero,
             logprob_diff_max=zero,
             num_tokens_different=zero,
         )
 
+    # Compute the logprob difference
     diff = titan_flat - vllm_flat
-    return LogprobVerification(
+    return LogprobVerificationOutput(
         logprob_diff_sum=diff.sum().to(device),
         logprob_diff_max=diff.abs().max().to(device),
         num_tokens_different=(vllm_flat != titan_flat)

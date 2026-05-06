@@ -21,6 +21,8 @@ import pytest
 import torch
 
 from torchtitan.experiments.rl.grpo import (
+    _build_reward_metrics,
+    _population_std,
     _RL_TRAIN_HEADLINE_METRIC_PATTERNS,
     _RL_VALIDATION_HEADLINE_METRIC_PATTERNS,
     GRPOLoss,
@@ -28,10 +30,6 @@ from torchtitan.experiments.rl.grpo import (
 )
 from torchtitan.experiments.rl.loss.types import LossOutput
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.observability.grpo_metrics import (
-    _population_std,
-    build_reward_component_metrics,
-)
 from torchtitan.experiments.rl.types import Completion, Step, Trajectory
 
 
@@ -63,13 +61,13 @@ def _step(rewards: dict[str, float]) -> Step:
     return Step(rewards=rewards, done=True)
 
 
-class TestBuildRewardComponentMetrics:
+class TestBuildRewardMetrics:
     def test_one_metric_per_observed_name(self) -> None:
-        steps = [
-            _step({"correctness": 1.0, "format": 0.5}),
-            _step({"correctness": 0.0, "format": 1.0}),
+        reward_dicts = [
+            {"correctness": 1.0, "format": 0.5},
+            {"correctness": 0.0, "format": 1.0},
         ]
-        metrics = build_reward_component_metrics("reward/component", steps)
+        metrics = _build_reward_metrics("reward/component", reward_dicts)
         keys = {entry.key for entry in metrics}
         assert keys == {
             "reward/component/correctness",
@@ -81,18 +79,19 @@ class TestBuildRewardComponentMetrics:
     def test_components_observed_in_some_steps_only(self) -> None:
         # `format` only appears in step #2 — it should average over that
         # one step (no zero-fill).
-        steps = [_step({"correctness": 1.0}), _step({"format": 0.5})]
-        metrics = build_reward_component_metrics("reward/component", steps)
+        reward_dicts = [{"correctness": 1.0}, {"format": 0.5}]
+        metrics = _build_reward_metrics("reward/component", reward_dicts)
         agg = m.aggregate_metrics(metrics)
         assert agg["reward/component/correctness/mean"] == 1.0
         assert agg["reward/component/format/mean"] == 0.5
 
-    def test_empty_steps(self) -> None:
-        assert build_reward_component_metrics("reward/component", []) == []
+    def test_empty_input(self) -> None:
+        assert _build_reward_metrics("reward/component", []) == []
 
     def test_prefix_controls_namespace(self) -> None:
-        steps = [_step({"correctness": 1.0})]
-        metrics = build_reward_component_metrics("validation/reward/component", steps)
+        metrics = _build_reward_metrics(
+            "validation/reward/component", [{"correctness": 1.0}]
+        )
         assert metrics[0].key == "validation/reward/component/correctness"
 
 
@@ -399,12 +398,14 @@ def _stub_trainer_for_reducers(dp_size: int):
     return inst
 
 
-def _zero_verification(device: torch.device | None = None) -> "LogprobVerification":
-    from torchtitan.experiments.rl.actors.utils import LogprobVerification
+def _zero_verification(
+    device: torch.device | None = None,
+) -> "LogprobVerificationOutput":
+    from torchtitan.experiments.rl.actors.utils import LogprobVerificationOutput
 
     device = device or torch.device("cpu")
     zero = torch.zeros((), dtype=torch.float32, device=device)
-    return LogprobVerification(
+    return LogprobVerificationOutput(
         logprob_diff_sum=zero,
         logprob_diff_max=zero,
         num_tokens_different=zero,
@@ -413,39 +414,39 @@ def _zero_verification(device: torch.device | None = None) -> "LogprobVerificati
 
 class TestReducerFastPaths:
     def test_single_dp_identical(self) -> None:
-        from torchtitan.experiments.rl.actors.utils import LogprobVerification
+        from torchtitan.experiments.rl.actors.utils import LogprobVerificationOutput
 
         trainer = _stub_trainer_for_reducers(dp_size=1)
         out = trainer.reduce_forward_backward_metrics(
             loss_metric_sums={"loss/total": torch.tensor(12.0)},
-            verification=LogprobVerification(
-                logprob_diff_sum=torch.tensor(0.004),  # 0.001 mean × 4 tokens
+            verification=LogprobVerificationOutput(
+                logprob_diff_sum=torch.tensor(0.004),  # 0.001 mean * 4 tokens
                 logprob_diff_max=torch.tensor(0.005),
                 num_tokens_different=torch.tensor(0.0),
             ),
             num_local_valid_tokens=torch.tensor(4.0),
         )
-        # 4 valid tokens, numerator 12.0 ⇒ mean 3.0
+        # 4 valid tokens, numerator 12.0 -> mean 3.0
         assert out["loss/total"] == pytest.approx(3.0)
-        # diff_sum 0.004 / 4 tokens ⇒ 0.001
+        # diff_sum 0.004 / 4 tokens -> 0.001
         assert out["bit_wise/logprob_diff/mean"] == pytest.approx(0.001)
         assert out["bit_wise/logprob_diff/max"] == pytest.approx(0.005)
         assert out["bit_wise/ratio_tokens_different/mean"] == 0.0
 
     def test_single_dp_one_token_differs(self) -> None:
-        from torchtitan.experiments.rl.actors.utils import LogprobVerification
+        from torchtitan.experiments.rl.actors.utils import LogprobVerificationOutput
 
         trainer = _stub_trainer_for_reducers(dp_size=1)
         out = trainer.reduce_forward_backward_metrics(
             loss_metric_sums={},
-            verification=LogprobVerification(
+            verification=LogprobVerificationOutput(
                 logprob_diff_sum=torch.tensor(0.0),
                 logprob_diff_max=torch.tensor(0.0),
                 num_tokens_different=torch.tensor(1.0),
             ),
             num_local_valid_tokens=torch.tensor(4.0),
         )
-        # 1 of 4 tokens differs ⇒ ratio 0.25
+        # 1 of 4 tokens differs -> ratio 0.25
         assert out["bit_wise/ratio_tokens_different/mean"] == pytest.approx(0.25)
 
     def test_unbiased_reduction_under_unequal_tokens(self) -> None:

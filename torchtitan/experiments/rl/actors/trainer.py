@@ -35,7 +35,7 @@ from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
     extract_response_logprobs,
-    LogprobVerification,
+    LogprobVerificationOutput,
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.loss.types import LossOutput
@@ -179,7 +179,7 @@ class PolicyTrainer(Actor, Configurable):
 
         if not os.path.isdir(checkpoint_path):
             raise FileNotFoundError(
-                f"Checkpoint path '{checkpoint_path}' does not exist. "
+                f"Checkpoint path {checkpoint_path!r} does not exist. "
                 "Please provide a valid path to a HuggingFace checkpoint directory."
             )
 
@@ -255,24 +255,21 @@ class PolicyTrainer(Actor, Configurable):
     def reduce_forward_backward_metrics(
         self,
         loss_metric_sums: dict[str, torch.Tensor],
-        verification: LogprobVerification,
+        verification: LogprobVerificationOutput,
         *,
         num_local_valid_tokens: torch.Tensor,
     ) -> dict[str, float]:
-        """SUM-mean lane + MAX lane, packed into 2 collectives total.
-
-        Pack N values into one all_reduce; ``dist_utils.dist_sum`` requires
-        scalar inputs and would cost N round-trips. Same primitive, one trip.
+        """All reduce of metrics with correct calculation of mean-of-means.
+        Packs N values into a tensor and call all_reduce once to avoid N trips.
 
         Returns:
-            loss/* — token-weighted mean per loss key
-            bit_wise/logprob_diff/mean — global token-weighted log-ratio mean
-            bit_wise/logprob_diff/max — global max abs log-ratio
-            bit_wise/ratio_tokens_different/mean — global differing fraction
+            dict[str, float]: Dictionary of reduced metrics.
         """
         loss_keys = list(loss_metric_sums)
         loss_mesh = self.parallel_dims.get_optional_mesh("loss")
 
+        # Pack all metrics into a single tensor for all_reduce
+        # sum_pack
         sum_pack = torch.stack(
             [loss_metric_sums[k].detach().to(torch.float64) for k in loss_keys]
             + [
@@ -281,8 +278,10 @@ class PolicyTrainer(Actor, Configurable):
                 num_local_valid_tokens.detach().to(torch.float64),
             ]
         )
+        # max_value (only one value -- no need to pack)
         max_value = verification.logprob_diff_max.detach().to(torch.float32)
 
+        # All reduce
         if loss_mesh is not None:
             sum_pack = funcol.all_reduce(
                 sum_pack, reduceOp=c10d.ReduceOp.SUM.name, group=loss_mesh
@@ -291,10 +290,16 @@ class PolicyTrainer(Actor, Configurable):
                 max_value, reduceOp=c10d.ReduceOp.MAX.name, group=loss_mesh
             )
 
+        # Unpack and normalize by global_valid_tokens.
+        # Metrics are expected to already be scaled by local_valid_tokens.
         global_valid_tokens = sum_pack[-1].clamp(min=1.0)
+
+        # loss metrics
         out: dict[str, float] = {}
         for i, k in enumerate(loss_keys):
             out[k] = float((sum_pack[i] / global_valid_tokens).item())
+
+        # logprob verification metrics
         n_loss = len(loss_keys)
         out["bit_wise/logprob_diff/mean"] = float(
             (sum_pack[n_loss] / global_valid_tokens).item()
@@ -306,14 +311,14 @@ class PolicyTrainer(Actor, Configurable):
         return out
 
     @endpoint
-    async def forward_backward(self, train_data: list[TrainBatch]) -> dict:
-        """Run forward pass, compute loss, call backward, and DP-reduce diagnostics.
+    async def forward_backward(self, train_data: list[TrainBatch]) -> dict[str, float]:
+        """Run forward pass, compute loss, call backward, and compute metrics.
 
         Args:
             train_data: List of batches, one per DP rank.
 
         Returns:
-            Reduced metrics from loss and logprob verification.
+            dict[str, float]: Reduced metrics from loss and logprob verification.
         """
         logger.debug(
             f"{os.getpid()=} PolicyTrainer forward_backward "
@@ -356,7 +361,7 @@ class PolicyTrainer(Actor, Configurable):
             advantages=advantages,
         )
 
-        verification = verify_logprob_identity(
+        verification: LogprobVerificationOutput = verify_logprob_identity(
             local_batch.token_logprobs,
             policy_logprobs,
             device=device,
@@ -381,8 +386,7 @@ class PolicyTrainer(Actor, Configurable):
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules (see Tinker API).
 
-        # Capture LR before the scheduler advances; assert single param
-        # group since `train/lr` is a single scalar.
+        # capture LR before step
         current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
         if len(current_lrs) != 1:
             raise ValueError(
