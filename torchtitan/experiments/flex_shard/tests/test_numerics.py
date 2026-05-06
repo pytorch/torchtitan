@@ -601,12 +601,18 @@ FLEX_SHARD_PARALLELISM = "--parallelism.data_parallel_shard_degree=-1"
 def _run_flex_shard_loss_compare(
     test_options_extra: str = "", assert_equal: bool = False
 ) -> bool:
-    """Compare FlexShard vs FSDP2 eager numerics using loss_compare.py.
+    """Compare full-model FlexShard vs FSDP2 using loss_compare.py.
 
-    FlexShard uses _c10d_functional ops for reduce-scatter, which accumulates
-    in a different order than FSDP2's reduce-scatter. This produces a small
-    per-step difference (~2e-5) that compounds over training. The unit test
-    (test_flex_shard_vs_simple_fsdp) verifies bitwise eager-mode equivalence.
+    This is intentionally a completion/trajectory test, not a bitwise test.
+    Numerical debugging showed two non-bitwise sources in this full-model path:
+    1. Normal llama3 FSDP2 vs graph_trainer.llama3 with AOT already differs at
+       step 1 by about 3e-6, before FlexShard is involved.
+    2. FlexShard's eager Shard reduce-scatter currently uses ReduceOp.AVG,
+       while Torchtitan disables FSDP gradient division since the loss is
+       normalized by global_valid_tokens. That can introduce larger post-step
+       drift until FlexShard has equivalent gradient division control.
+
+    The smaller unit tests above cover bitwise behavior for focused eager cases.
     """
     import subprocess
     import sys
