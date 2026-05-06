@@ -396,7 +396,7 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
-    from torchtitan.experiments.graph_trainer.bucketing import (
+    from torchtitan.experiments.graph_trainer.fsdp_passes import (
         joint_transformer_block_bucketing_reordering_pass,
     )
     from torchtitan.experiments.graph_trainer.passes import (
