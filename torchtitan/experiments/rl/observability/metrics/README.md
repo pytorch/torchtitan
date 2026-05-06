@@ -73,9 +73,15 @@ aggregate_metrics(records)  ──►  dict[str, float]
     groups by (key, reduction type), filters NaN entries,
     raises on duplicate output keys.
 
-MetricLogger(backends).log(step, records)
-    └── ConsoleMetricLogger(allow_list=None)   ── stdout
-    └── WandbMetricLogger(...)                 ── wandb.log(metrics, step)
+MetricLogger(backends).log(
+    step, records,
+    *,
+    console_allow_list=None,   # None = all, [] = silent, list[regex] = filtered
+    console_prefix="",         # e.g. "validate " for the validation line
+)
+    │
+    ├── log_to_console(...)                    ── stdout (in-process)
+    ├── WandbMetricLogger(...)                 ── wandb.log(metrics, step)
     └── (your custom MetricBackend subclass)
 ```
 
