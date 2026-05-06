@@ -16,7 +16,7 @@ from .parallelize_llama import parallelize_llama
 
 
 def model_registry(flavor: str) -> ModelSpec:
-    config = llama3_configs[flavor]()
+    config = llama3_configs[flavor](attn_backend="sdpa")
     return ModelSpec(
         name="autoparallel/llama3",
         flavor=flavor,
