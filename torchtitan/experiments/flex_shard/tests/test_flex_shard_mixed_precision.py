@@ -10,10 +10,13 @@ Tests for FlexShard Phase 2c: mixed precision.
 
 Usage:
     # Single-process tests (no GPU/NCCL required):
-    python -m pytest test_flex_shard_mixed_precision.py -v -k "not Distributed"
+    python -m pytest \
+      torchtitan/experiments/flex_shard/tests/test_flex_shard_mixed_precision.py \
+      -v -k "not Distributed"
 
     # Distributed correctness tests:
-    torchrun --nproc_per_node=2 test_flex_shard_mixed_precision.py
+    torchrun --nproc_per_node=2 \
+      torchtitan/experiments/flex_shard/tests/test_flex_shard_mixed_precision.py
 """
 
 import unittest
@@ -212,7 +215,9 @@ class TestBucketSpecMpPolicy(unittest.TestCase):
 class TestDistributedMixedPrecision(unittest.TestCase):
     """Multi-process correctness tests for mixed precision FlexShard.
 
-    Run with: torchrun --nproc_per_node=2 test_flex_shard_mixed_precision.py
+    Run with:
+        torchrun --nproc_per_node=2 \
+          torchtitan/experiments/flex_shard/tests/test_flex_shard_mixed_precision.py
     """
 
     @classmethod

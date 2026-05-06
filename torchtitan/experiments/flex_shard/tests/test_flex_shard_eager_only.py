@@ -45,8 +45,7 @@ def _single_rank_cpu_mesh():
                 dist.destroy_process_group()
 
 
-def _flex_shard_tiny_model():
-    mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
+def _flex_shard_tiny_model(mesh):
     model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2))
     lift_params_to_global_spmd_mesh(model, mesh)
     flex_shard(
@@ -64,8 +63,8 @@ def _flex_shard_tiny_model():
 
 class TestFlexShardEagerOnly(unittest.TestCase):
     def test_eager_forward_backward_on_cpu_mesh(self):
-        with _single_rank_cpu_mesh():
-            model = _flex_shard_tiny_model()
+        with _single_rank_cpu_mesh() as mesh:
+            model = _flex_shard_tiny_model(mesh)
 
             loss = model(torch.randn(3, 4)).sum()
             loss.backward()
@@ -75,8 +74,8 @@ class TestFlexShardEagerOnly(unittest.TestCase):
                 self.assertIsNotNone(param.grad)
 
     def test_graph_capture_raises(self):
-        with _single_rank_cpu_mesh():
-            model = _flex_shard_tiny_model()
+        with _single_rank_cpu_mesh() as mesh:
+            model = _flex_shard_tiny_model(mesh)
 
             with patch.object(torch.compiler, "is_compiling", return_value=True):
                 with self.assertRaisesRegex(ValueError, "eager execution only"):

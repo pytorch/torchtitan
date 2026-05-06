@@ -10,10 +10,13 @@ Tests for FlexShard Phase 2b: BucketSpec and bucket validation.
 
 Usage:
     # Single-process tests (no GPU/NCCL required):
-    python -m pytest test_flex_shard_buckets.py -v -k "not Distributed"
+    python -m pytest \
+      torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py \
+      -v -k "not Distributed"
 
     # Distributed correctness tests:
-    torchrun --nproc_per_node=2 test_flex_shard_buckets.py
+    torchrun --nproc_per_node=2 \
+      torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py
 """
 
 import unittest
@@ -378,7 +381,9 @@ class TestBucketSpec(unittest.TestCase):
 class TestDistributedBuckets(unittest.TestCase):
     """Multi-process correctness tests for bucketed FlexShard.
 
-    Run with: torchrun --nproc_per_node=2 test_flex_shard_buckets.py
+    Run with:
+        torchrun --nproc_per_node=2 \
+          torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py
     """
 
     @classmethod

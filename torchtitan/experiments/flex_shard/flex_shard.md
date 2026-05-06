@@ -74,13 +74,14 @@ CPU checks:
 ```bash
 python -m py_compile \
   torchtitan/experiments/flex_shard/flex_shard.py \
-  tests/unit_tests/test_flex_shard_eager_only.py
+  torchtitan/experiments/flex_shard/tests/test_flex_shard_eager_only.py
 
-pytest tests/unit_tests/test_flex_shard_eager_only.py -q
+pytest torchtitan/experiments/flex_shard/tests/test_flex_shard_eager_only.py -q
 ```
 
 GPU checks:
 
 ```bash
-torchrun --nproc_per_node=2 torchtitan/experiments/flex_shard/test_flex_shard.py
+torchrun --nproc_per_node=2 \
+  torchtitan/experiments/flex_shard/tests/test_flex_shard.py
 ```

@@ -12,8 +12,10 @@
 Test script for flex_shard API.
 
 Usage:
-    torchrun --nproc_per_node=2 test_flex_shard.py
-    torchrun --nproc_per_node=4 test_flex_shard.py
+    torchrun --nproc_per_node=2 \
+      torchtitan/experiments/flex_shard/tests/test_flex_shard.py
+    torchrun --nproc_per_node=4 \
+      torchtitan/experiments/flex_shard/tests/test_flex_shard.py
 
 NOTE: Meta device init + numerical parity with DDP requires
 ThreadBasedRNGTracker from https://github.com/pytorch/pytorch/pull/174446.

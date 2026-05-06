@@ -14,7 +14,8 @@ Verifies that when both AC and FlexShard are applied:
 3. Forward/backward produces correct numerics vs. unsharded reference
 
 Usage:
-    torchrun --nproc_per_node=2 test_ac_composition.py
+    torchrun --nproc_per_node=2 \
+      torchtitan/experiments/flex_shard/tests/test_ac_composition.py
 """
 
 import traceback
