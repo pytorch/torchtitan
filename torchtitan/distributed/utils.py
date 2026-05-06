@@ -417,7 +417,7 @@ def init_distributed(
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
+            import torchcomms  # noqa: F401
         except ImportError as err:
             raise ImportError(
                 "torchcomms package is required for --comm.mode=torchcomms."

@@ -171,11 +171,16 @@ class TorchTitanVLLMModelWrapper(Module):
         model_spec: ModelSpec,
         vllm_config: VllmConfig,
         prefix: str = "",
-        compile_config: CompileConfig,
     ):
         super().__init__()
 
         assert vllm_config is not None, "vllm_config is required"
+
+        # Reconstruct CompileConfig from the dict stamped onto hf_config by
+        # the torchtitan ConfigParser (see vllm_registry.registry). Default
+        # to a no-compile config if the parser path wasn't used.
+        cc_dict = getattr(vllm_config.model_config.hf_config, "compile_config", None)
+        compile_config = CompileConfig(**cc_dict) if cc_dict else CompileConfig()
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -272,8 +277,13 @@ class TorchTitanVLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Initial load model weights from HuggingFace checkpoint path
-        self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
+        # Initial load model weights from HuggingFace checkpoint path.
+        if not getattr(
+            vllm_config.model_config.hf_config, "skip_init_weights_load", False
+        ):
+            self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
+        else:
+            logger.info("Skipping initial HF load (skip_init_weights_load=True)")
 
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int

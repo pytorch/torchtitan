@@ -15,10 +15,7 @@ from monarch.actor import Actor, endpoint
 from torchtitan.config import Configurable
 from torchtitan.config.configs import CompileConfig, DebugConfig, ParallelismConfig
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.models.vllm_registry import (
-    register_model_to_vllm_model_registry,
-    VLLM_MODEL_NAME,
-)
+from torchtitan.experiments.rl.models.vllm_registry import registry, VLLM_MODEL_NAME
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
@@ -181,7 +178,7 @@ class VLLMGenerator(Actor, Configurable):
         self._max_num_seqs = max_num_seqs
 
         # Register TorchTitan model with vLLM before any engine creation
-        register_model_to_vllm_model_registry(
+        registry(
             model_spec,
             compile_config=compile_config,
         )
@@ -206,7 +203,14 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            hf_overrides={"architectures": [VLLM_MODEL_NAME]},
+            # Tell wrapper to skip the HF weight load when running with random
+            # init: the trainer pushes its random-init weights to TorchStore
+            # right after engine init, so reading the on-disk checkpoint would
+            # be wasted work AND clobber the trainer's weights.
+            hf_overrides={
+                "architectures": [VLLM_MODEL_NAME],
+                "skip_init_weights_load": config.debug.random_init,
+            },
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.CUSTOM,
             ),
