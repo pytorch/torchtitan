@@ -169,6 +169,25 @@ class Float8LinearConverter(QuantizationConverter):
         logger.info("Swapped to Float8Linear layers")
 
 
+class Float8GroupedExperts(GroupedExperts):
+    """GroupedExperts that applies Float8 quantization in its constructor."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(GroupedExperts.Config, _QuantizedGroupedExpertsConfig):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        from torchao.prototype.moe_training.config import Float8TrainingOpConfig
+        from torchao.quantization.quant_api import quantize_
+
+        quantize_(
+            self,
+            config=Float8TrainingOpConfig(),
+            filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+        )
+
+
 class Float8GroupedExpertsConverter(QuantizationConverter):
     """Apply FP8 quantization to MoE expert grouped GEMMs."""
 
@@ -197,39 +216,10 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             )
 
     def convert(self, model_config) -> None:
-        from torchao.prototype.moe_training.config import Float8TrainingOpConfig
-        from torchao.quantization.quant_api import quantize_
-
-        _converted_config_cache: dict[type, type] = {}
-
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
-
-            base_cls = type(config)
-            if base_cls not in _converted_config_cache:
-
-                @dataclass(kw_only=True, slots=True)
-                class Float8GroupedExpertsConfig(
-                    base_cls, _QuantizedGroupedExpertsConfig
-                ):
-                    def build(self, **kwargs):
-                        instance = base_cls.build(self, **kwargs)
-                        # torchao's quantize_ defaults filter_fn to _is_linear,
-                        # which skips GroupedExperts. Match the built module so
-                        # its nn.Parameters (w1/w2/w3) get wrapped for FP8
-                        # grouped GEMMs.
-                        quantize_(
-                            instance,
-                            config=Float8TrainingOpConfig(),
-                            filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
-                        )
-                        return instance
-
-                _converted_config_cache[base_cls] = Float8GroupedExpertsConfig
-
-            ConfigCls = _converted_config_cache[base_cls]
-            new_config = ConfigCls(
-                **{f.name: getattr(config, f.name) for f in fields(config)}
+            new_config = Float8GroupedExperts.Config(
+                **{f.name: getattr(config, f.name) for f in fields(config)},
             )
             if isinstance(parent, list):
                 parent[attr] = new_config
