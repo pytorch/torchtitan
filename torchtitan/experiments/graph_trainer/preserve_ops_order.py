@@ -4,26 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Generic mechanism for making selected modules look opaque to a graph pass.
+"""Generic mechanism for fixing the relative order of selected ops across a
+graph pass that would otherwise be free to reorder them.
 
 Pass-pipeline annotation that changes what a wrapped pass sees. The pattern is:
 
-    1. Before the pass runs, ``_make_modules_opaque(gm, fqns)`` walks the
+    1. Before the pass runs, ``_pin_ops_order(gm, fqns)`` walks the
        graph and pairs each call_function whose ``module_fqn`` metadata is
-       in ``fqns`` with the previously-anchored node via
+       in ``fqns`` with the previously-pinned node via
        ``preserve_node_ordering``. Each such node ends up wrapped in a
        ``control_deps`` HOP whose first arg points to the previous wrapped
        node. To downstream graph passes walking arg edges or doing
-       topological scheduling, the listed module regions look like single
-       linear chains of opaque ops that cannot be reordered past one
-       another.
-    2. The wrapped pass runs against the annotated graph (it sees opaque
-       HOPs and respects them).
-    3. After the pass, ``_restore_modules(gm)`` unwraps every
+       topological scheduling, the listed ops form a single linear chain
+       that cannot be reordered past one another.
+    2. The wrapped pass runs against the annotated graph (it sees the
+       chained HOPs and respects them).
+    3. After the pass, ``_unpin_ops_order(gm)`` unwraps every
        ``control_deps`` HOP back to the original op so subsequent passes
        see the unmodified graph.
 
-The ``@opaque_modules([...])`` decorator composes the three pieces.
+The ``@preserve_ops_order([...])`` decorator composes the three pieces.
 
 The motivating use case was ``ChunkedCELoss`` whose chunk loop populates a
 buffer via ``aten.copy_`` in-place writes. The ``module_fqn`` of those
@@ -31,7 +31,7 @@ writes (and of the downstream ``view + to`` that read the buffer) is
 ``"loss"``. Bucketing-style reordering passes don't track the implicit
 aliasing dependency between ``copy_`` and views of the same storage, so
 they freely move the readers past the writers, leaving the readers
-seeing the unwritten zeros buffer. Wrapping the loss region in
+seeing the unwritten zeros buffer. Pinning the loss region with
 ``control_deps`` HOPs forces the bucketing pass to keep the writes and
 readers in their original order.
 """
@@ -62,13 +62,10 @@ def _node_module_fqn(node: fx.Node) -> str | None:
     return custom.get(_MODULE_FQN_KEY)
 
 
-def _make_modules_opaque(
-    gm: fx.GraphModule, fqns: Iterable[str]
-) -> None:
-    """Make nodes whose ``module_fqn`` is in ``fqns`` opaque to subsequent
-    passes by anchoring them to their relative order: each such node gets
-    wrapped in a ``control_deps`` HOP that depends on the previous
-    anchored node.
+def _pin_ops_order(gm: fx.GraphModule, fqns: Iterable[str]) -> None:
+    """Pin the relative order of nodes whose ``module_fqn`` is in ``fqns``:
+    each such node gets wrapped in a ``control_deps`` HOP that depends on
+    the previous pinned node, so subsequent passes cannot reorder them.
     """
     fqns_set = frozenset(fqns)
     deps: dict[fx.Node, OrderedSet[fx.Node]] = {}
@@ -78,18 +75,18 @@ def _make_modules_opaque(
             continue
         if _node_module_fqn(node) not in fqns_set:
             continue
-        # Wrap every anchored node — including the first — so the wrapping
-        # pass cannot move ANY anchored node past a non-anchored node
+        # Wrap every pinned node — including the first — so the wrapping
+        # pass cannot move ANY pinned node past a non-pinned node
         # either. The first node's deps tuple is empty.
         deps[node] = OrderedSet([prev]) if prev is not None else OrderedSet()
         prev = node
     preserve_node_ordering(gm.graph, deps)
 
 
-def _restore_modules(gm: fx.GraphModule) -> None:
+def _unpin_ops_order(gm: fx.GraphModule) -> None:
     """Inline every ``control_deps(deps_tuple, get_attr, *operands)`` call
     in ``gm.graph`` back to the wrapped op, removing the HOP wrappers
-    introduced by ``_make_modules_opaque``.
+    introduced by ``_pin_ops_order``.
     """
     control_deps_nodes = [
         n
@@ -128,14 +125,14 @@ def _restore_modules(gm: fx.GraphModule) -> None:
         gm.recompile()
 
 
-def opaque_modules(fqns: list[str]) -> Callable[[Callable], Callable]:
-    """Decorator that makes nodes whose ``module_fqn`` is in ``fqns`` look
-    opaque to the wrapped graph pass.
+def preserve_ops_order(fqns: list[str]) -> Callable[[Callable], Callable]:
+    """Decorator that fixes the relative order of nodes whose
+    ``module_fqn`` is in ``fqns`` across the wrapped graph pass.
 
-    Wraps each such node in a ``control_deps`` HOP before calling the
-    pass (so the pass sees an opaque chain that respects original
-    ordering), and inlines the HOPs back to plain ops afterward (so
-    downstream passes see the original graph).
+    Pins each such node into a ``control_deps``-chained sequence before
+    calling the pass (so the pass cannot reorder them past one another or
+    past non-pinned ops), and inlines the HOPs back to plain ops
+    afterward (so downstream passes see the original graph).
     """
 
     def wrap(pass_fn: Callable) -> Callable:
@@ -145,14 +142,14 @@ def opaque_modules(fqns: list[str]) -> Callable[[Callable], Callable]:
             example_inputs: tuple | None = None,
             **kwargs: Any,
         ) -> fx.GraphModule:
-            _make_modules_opaque(gm, fqns)
+            _pin_ops_order(gm, fqns)
             result = gm
             try:
                 returned = pass_fn(gm, example_inputs, **kwargs)
                 if returned is not None:
                     result = returned
             finally:
-                _restore_modules(result)
+                _unpin_ops_order(result)
             return result
 
         return wrapped

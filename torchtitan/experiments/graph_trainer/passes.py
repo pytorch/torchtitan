@@ -153,9 +153,11 @@ def compile_time_passes(
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
-    from torchtitan.models.common.attention import FlexAttention
 
-    from torchtitan.experiments.graph_trainer.opaque_modules import opaque_modules
+    from torchtitan.experiments.graph_trainer.preserve_ops_order import (
+        preserve_ops_order,
+    )
+    from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
@@ -176,12 +178,12 @@ def compile_time_passes(
         # with compute, but doesn't track tensor aliasing/mutation deps.
         # ChunkedCELoss's per-chunk in-place writes into a grad accumulator
         # buffer (and the downstream readers of that buffer) live under
-        # ``module_fqn`` ``loss``/``lm_head``; without making them opaque, the
-        # bucketing pass moves the readers past the writes and decoder grads
-        # come out all-zero. ``opaque_modules`` wraps the loss region in
-        # ``control_deps`` HOPs so the bucketing pass treats it as an
-        # opaque ordered chain.
-        opaque_modules(["loss", "lm_head"])(
+        # ``module_fqn`` ``loss``/``lm_head``; without pinning their order,
+        # the bucketing pass moves the readers past the writes and decoder
+        # grads come out all-zero. ``preserve_ops_order`` chains the loss
+        # region through ``control_deps`` HOPs so the bucketing pass cannot
+        # break the read-after-write ordering.
+        preserve_ops_order(["loss", "lm_head"])(
             functools.partial(
                 joint_transformer_block_bucketing_reordering_pass,
                 module_bucket_plans=get_default_transformer_block_buckets(n_layers),
