@@ -54,6 +54,7 @@ jobs:
 
         python -m pip install --force-reinstall --pre \
           torch --index-url https://download.pytorch.org/whl/nightly/cu130
+        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu130
         python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

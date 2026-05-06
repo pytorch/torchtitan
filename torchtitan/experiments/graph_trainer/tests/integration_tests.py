@@ -553,6 +553,77 @@ def build_graph_trainer_default_test_list() -> list[OverrideDefinitions]:
     return _build_llama3_tests()
 
 
+def _build_float8_tests() -> list[OverrideDefinitions]:
+    """Float8 tests (require H100 or newer)."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel_float8",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+TP+Float8",
+            "aot_fx_trace_llama3_fsdp_tp_float8",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel_float8",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.inductor_compilation full",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+TP+Float8+full_inductor",
+            "aot_fx_trace_llama3_fsdp_tp_float8_full_inductor",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_float8_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP+Float8",
+            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_float8",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_float8_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.inductor_compilation full",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--debug.moe_force_load_balance",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP+Float8+full_inductor",
+            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_float8_full_inductor",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+    ]
+
+
 def _build_async_tp_tests() -> list[OverrideDefinitions]:
     """Async TP tests (require NVLink for symmetric memory)."""
     return [
@@ -581,8 +652,13 @@ def _build_async_tp_tests() -> list[OverrideDefinitions]:
 
 
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
-    """DeepSeek-v3 + Qwen3 + async_tp tests (for H100 machines)."""
-    return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
+    """DeepSeek-v3 + Qwen3 + Float8 + async_tp tests (for H100 machines)."""
+    return (
+        _build_deepseek_v3_tests()
+        + _build_qwen3_tests()
+        + _build_float8_tests()
+        + _build_async_tp_tests()
+    )
 
 
 _TEST_SUITES_FUNCTION = {
