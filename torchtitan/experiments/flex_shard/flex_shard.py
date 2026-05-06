@@ -106,16 +106,16 @@ def _register_parametrization(
     global _wrap_class_counter
     _wrap_class_counter += 1
 
-    def _make_getter(pn, p):
-        def getter(self):
+    def _make_flex_shard_param_getter(param_name, parametrization):
+        def get_flex_shard_param(self):
             # In eager batched mode, _pre_gathered is set on the
             # parametrization by the batched all-gather pre_forward hook.
-            pre = getattr(p, "_pre_gathered", None)
+            pre = getattr(parametrization, "_pre_gathered", None)
             if pre is not None:
-                p._pre_gathered = None
-                param_dtype = getattr(p, "param_dtype", None)
-                reduce_dtype = getattr(p, "reduce_dtype", None)
-                if getattr(p, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
+                parametrization._pre_gathered = None
+                param_dtype = getattr(parametrization, "param_dtype", None)
+                reduce_dtype = getattr(parametrization, "reduce_dtype", None)
+                if getattr(parametrization, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
                     if param_dtype is not None or reduce_dtype is not None:
                         pre = _MixedPrecisionCast.apply(pre, param_dtype, reduce_dtype)
                     return pre
@@ -125,22 +125,24 @@ def _register_parametrization(
                 unsharded = pre.detach().requires_grad_(True)
                 if (
                     torch.is_grad_enabled()
-                    and getattr(p, "_unsharded_for_reduce", None) is None
+                    and getattr(parametrization, "_unsharded_for_reduce", None) is None
                 ):
-                    p._unsharded_for_reduce = unsharded
+                    parametrization._unsharded_for_reduce = unsharded
                 return unsharded
             if _is_graph_capture_active():
                 _raise_graph_capture_unsupported()
-            if getattr(p, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False) and not getattr(
-                p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False
+            if getattr(
+                parametrization, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False
+            ) and not getattr(
+                parametrization, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False
             ):
-                _raise_missing_eager_batched_unshard(p)
-            return p(self._parameters[pn])
+                _raise_missing_eager_batched_unshard(parametrization)
+            return parametrization(self._parameters[param_name])
 
-        return getter
+        return get_flex_shard_param
 
     param_name_to_property = {
-        param_name: property(_make_getter(param_name, param))
+        param_name: property(_make_flex_shard_param_getter(param_name, param))
         for param_name, param in param_parametrizations.items()
     }
     module_cls = type(
