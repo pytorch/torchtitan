@@ -229,6 +229,14 @@ class ChunkedCELoss(BaseLoss):
     class Config(BaseLoss.Config):
         num_chunks: int = 8
         """Number of chunks to split the sequence into."""
+        support_autograd_grad: bool = False
+        """If True, plumb the sharded lm_head param grads (already produced
+        by the chunk loop's reduce-scatter) out as explicit autograd outputs
+        so outer ``torch.autograd.grad(loss, [hidden_states,
+        *lm_head.parameters()])`` returns them directly — no reliance on
+        ``param.grad`` side effects. Required for FX tracing / replay where
+        side-effecting ``.grad`` writes don't survive. Compatible with both
+        outer ``loss.backward()`` and ``torch.autograd.grad`` consumers."""
 
     def __init__(
         self,
@@ -239,6 +247,7 @@ class ChunkedCELoss(BaseLoss):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
+        self.support_autograd_grad = config.support_autograd_grad
         self.lm_head: nn.Module | None = None
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
@@ -345,6 +354,16 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
+        if self.support_autograd_grad:
+            return _ChunkedLossWithParamGrads.apply(
+                hidden_states,
+                accumulated_grad,
+                total_loss,
+                lm_head,
+                fsdp_enabled,
+                *lm_head.parameters(),
+            )
+
         # Return a differentiable loss via _DecoderOutputGradientBackProp. When
         # .backward() is called (by the trainer or PP schedule), autograd
         # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
@@ -383,10 +402,101 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     def backward(  # pyrefly: ignore[bad-override]
         ctx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None]:
+        # Contract: callers must use the loss returned by this Function as
+        # the autograd endpoint (no external scaling). Pass any scaling
+        # factor (e.g. global_valid_tokens) into ``loss_fn`` instead — see
+        # graph_trainer's compute_loss for the canonical pattern. Under
+        # that contract grad_output is the autograd-start ones_like(loss),
+        # so we return the saved grad as-is. Multiplying by grad_output
+        # would crash on FSDP+TP because grad_output and accumulated_grad
+        # generally live on different DeviceMeshes (loss on (tp,), grads
+        # on (fsdp, tp)) and DTensor refuses cross-mesh ops.
         (accumulated_grad,) = ctx.saved_tensors
-        # Return accumulated_grad as the gradient for hidden_states.
-        # Autograd then propagates this through hidden_states' existing
-        # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
-        # but expressed as a return value so autograd handles the traversal
-        # in a single pass (no "backward through graph twice" error).
         return accumulated_grad, None, None
+
+
+class _ChunkedLossWithParamGrads(torch.autograd.Function):
+    """Like ``_DecoderOutputGradientBackProp`` but also plumbs sharded grads
+    for the lm_head parameters out as explicit autograd outputs, so outer
+    ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
+    returns correct grads instead of relying on ``param.grad`` side effects.
+
+    Forward is invoked *after* the chunked ``chunk_loss.backward()`` loop has
+    populated each lm_head param's sharded ``.grad`` (via FSDP's last-chunk
+    reduce-scatter). Forward captures those grads, clears ``.grad``, and
+    disables grad sync — so that outer ``loss.backward()`` consumers, whose
+    AccumulateGrad would otherwise (a) double-add onto ``.grad`` and (b)
+    re-fire FSDP's reduce-scatter on already-sharded data, get clean
+    behavior. Backward queues a callback to restore grad sync after the
+    engine drains the rest of the backward graph.
+
+    Outer ``torch.autograd.grad`` consumers bypass AccumulateGrad entirely
+    and just receive the saved sharded grads directly.
+    """
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        hidden_states: torch.Tensor,
+        accumulated_h_grad: torch.Tensor,
+        total_loss: torch.Tensor,
+        lm_head: nn.Module,
+        fsdp_enabled: bool,
+        *lm_params: torch.Tensor,
+    ) -> torch.Tensor:
+        # The chunk loop above already populated each lm_head param's
+        # ``.grad`` with the correctly sharded value via the FSDP last-chunk
+        # post-accumulate-grad hook (reduce-scatter). Capture those grads
+        # into saved_tensors so backward can route them as autograd outputs
+        # for the lm_head param inputs of this Function. Then clear ``.grad``
+        # so a subsequent outer ``loss.backward()`` doesn't double-add when
+        # AccumulateGrad fires on those params with our returned grads. Also
+        # disable FSDP grad sync on lm_head: outer .backward() would
+        # otherwise re-fire the post-accumulate-grad hook on already-sharded
+        # data (second reduce-scatter → wrong values / shape mismatch). The
+        # restore is queued in backward() below.
+        sharded_param_grads = [p.grad.detach() for p in lm_params]
+        for p in lm_params:
+            p.grad = None
+        if fsdp_enabled:
+            lm_head.set_requires_gradient_sync(False, recurse=False)
+        ctx.save_for_backward(accumulated_h_grad, *sharded_param_grads)
+        ctx.lm_head = lm_head
+        ctx.fsdp_enabled = fsdp_enabled
+        return total_loss.detach().clone()
+
+    @staticmethod
+    def backward(  # pyrefly: ignore[bad-override]
+        ctx, grad_output: torch.Tensor
+    ):
+        # Same contract as _DecoderOutputGradientBackProp.backward: callers
+        # must use the loss returned by this Function as the autograd
+        # endpoint (no external scaling). Pass any scaling factor into
+        # ``loss_fn`` — see graph_trainer's compute_loss. We return saved
+        # grads as-is; multiplying by grad_output would crash on FSDP+TP
+        # due to cross-mesh ops (grad_output on (tp,), param grads on
+        # (fsdp, tp)).
+        saved = ctx.saved_tensors
+        accumulated_h_grad = saved[0]
+        param_grads = saved[1:]
+        if ctx.fsdp_enabled:
+            # Restore FSDP grad sync that forward() disabled. Use
+            # queue_callback to defer the restore until the engine drains
+            # the rest of the backward graph — including each lm_head
+            # param's AccumulateGrad firing on the grads we return below.
+            # If we restored here (synchronously, before returning), the
+            # first AccumulateGrad would see sync=True and try to
+            # reduce-scatter our already-sharded grad → wrong result.
+            lm_head = ctx.lm_head
+            torch.autograd.Variable._execution_engine.queue_callback(
+                lambda: lm_head.set_requires_gradient_sync(True, recurse=False)
+            )
+        return (
+            accumulated_h_grad,
+            None,
+            None,
+            None,
+            None,
+            *param_grads,
+        )
