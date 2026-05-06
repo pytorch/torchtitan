@@ -184,6 +184,9 @@ class PolicyTrainer(Actor, Configurable):
         dcp.load(hf_state_dict, storage_reader=storage_reader)
         torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
 
+        # strict=False: some buffers (e.g. expert_bias for MoE load
+        # balancing) exist in the model but not in HF checkpoints.
+        # They are zero-initialized by init_states().
         set_model_state_dict(
             model=model,
             model_state_dict=torchtitan_state_dict,

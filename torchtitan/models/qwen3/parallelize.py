@@ -79,10 +79,8 @@ def parallelize_qwen3(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    # Skip FSDP wrapper for inference. FSDP's forward hooks
-    # are incompatible with torch.inference_mode() used by vLLM.
-    # AC and compile are disabled via config (mode="none", enable=False).
     if skip_dp:
+        # Inference path: we don't need to apply FSDP / DDP for inference,
         return model
 
     dp_mesh_names = (
