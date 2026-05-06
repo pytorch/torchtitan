@@ -34,7 +34,7 @@ jobs:
       runner: linux.aws.h100.8
       gpu-arch-type: cuda
       gpu-arch-version: "13.0"
-      docker-image: torchtitan-ubuntu-20.04-clang12
+      docker-image: torchtitan-ubuntu-22.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
@@ -83,6 +83,11 @@ jobs:
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Install nvcc so FlashInfer can JIT compile its CUDA kernels.
+        # vLLM uses FlashInfer sampler by default (vllm-project/vllm#40376)
+        # but the CI docker image only has CUDA runtime, not the toolkit.
+        uv pip install nvidia-cuda-nvcc
 
         # Run bitwise parity tests (TP=2, batch-invariant mode)
         HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
