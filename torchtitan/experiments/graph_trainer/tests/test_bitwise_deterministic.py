@@ -27,6 +27,7 @@ from torch.nn.attention.flex_attention import flex_attention
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.experiments.graph_trainer.configs import DefaultMemoryPolicy
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
@@ -204,7 +205,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
                 compile=SimpleNamespace(
-                    memory_policy="default",
+                    memory_policy=DefaultMemoryPolicy(),
                     inductor_compilation="regional",
                     numerics_changing_optim=False,
                 ),

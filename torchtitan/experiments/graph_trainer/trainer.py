@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
+    PASS_PIPELINE_REGISTRY,
+    POST_INIT_HOOKS,
+    PRE_TRAIN_STEP_HOOKS,
 )
 from torchtitan.trainer import Trainer
 
@@ -76,6 +80,10 @@ class GraphTrainer(Trainer):
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
+
+        # Run post-init hook for the active memory policy
+        policy_type = type(self.config.compile.memory_policy)
+        POST_INIT_HOOKS.get(policy_type, lambda _: None)(self)
 
     def forward_backward_step(
         self,
@@ -169,10 +177,12 @@ class GraphTrainer(Trainer):
                     )
 
             if self.config.compile.enable_passes:
-                passes = construct_default_graph_passes(
-                    self._traced_step,
-                    self.config,
+                policy_type = type(self.config.compile.memory_policy)
+                pipeline_fn = PASS_PIPELINE_REGISTRY.get(
+                    policy_type, construct_default_graph_passes
                 )
+                passes = pipeline_fn(self._traced_step, self.config)
+
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
                     self._traced_step.example_inputs,
@@ -199,6 +209,13 @@ class GraphTrainer(Trainer):
                 param.grad += grad
 
         return loss
+
+    def train_step(
+        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        policy_type = type(self.config.compile.memory_policy)
+        PRE_TRAIN_STEP_HOOKS.get(policy_type, lambda _: None)(self)
+        super().train_step(data_iterator)
 
     def close(self) -> None:
         super().close()

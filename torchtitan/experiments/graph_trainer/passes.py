@@ -44,6 +44,11 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _NOT_IN_LAYERS,
 )
+from torchtitan.experiments.graph_trainer.configs import (
+    CpuOffloadAllMemoryPolicy,
+    DefaultMemoryPolicy,
+    EagerMemoryPolicy,
+)
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     apply_cpu_offload_pass,
     tag_all_offloadable_activations,
@@ -70,6 +75,35 @@ from torchtitan.tools.logging import logger
 
 aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
+
+
+# ---------------------------------------------------------------------------
+# Registries — keyed by memory policy config type
+# ---------------------------------------------------------------------------
+
+MEMORY_POLICY_REGISTRY: dict[type, Callable] = {}
+PASS_PIPELINE_REGISTRY: dict[type, Callable] = {}
+POST_INIT_HOOKS: dict[type, Callable] = {}
+PRE_TRAIN_STEP_HOOKS: dict[type, Callable] = {}
+
+
+def _make_registry_decorator(registry: dict):
+    """Create a decorator that registers a function into the given registry."""
+
+    def register(policy_type: type):
+        def decorator(fn: Callable) -> Callable:
+            registry[policy_type] = fn
+            return fn
+
+        return decorator
+
+    return register
+
+
+register_memory_policy = _make_registry_decorator(MEMORY_POLICY_REGISTRY)
+register_pass_pipeline = _make_registry_decorator(PASS_PIPELINE_REGISTRY)
+register_post_init_hook = _make_registry_decorator(POST_INIT_HOOKS)
+register_pre_train_step_hook = _make_registry_decorator(PRE_TRAIN_STEP_HOOKS)
 
 
 def normalize_view_ops_as_reshape(
@@ -811,6 +845,46 @@ def apply_sac_pass(
     return gm
 
 
+@register_memory_policy(DefaultMemoryPolicy)
+def _default_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that saves all compute-intensive ops and FSDP all_gathers."""
+    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        config.parallelism.fsdp_reshard_after_forward,
+        pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    )
+    policy_fn = _make_default_memory_policy(
+        fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+    )
+    apply_sac_pass(gm, policy_fn=policy_fn)
+    return gm
+
+
+@register_memory_policy(EagerMemoryPolicy)
+def _eager_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that alternates mm ops between save/recompute."""
+    apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
+    return gm
+
+
+@register_memory_policy(CpuOffloadAllMemoryPolicy)
+def _cpu_offload_all_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Tag all eligible activations for CPU offload."""
+    tag_all_offloadable_activations(gm)
+    return gm
+
+
 def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -824,26 +898,17 @@ def tag_with_memory_policy_pass(
         eager: SAC alternating mm ops between save/recompute.
         cpu_offload_all: tag all eligible activations for CPU offload.
 
-    Other memory policies combining SAC and CPU offload can be added here.
+    Other memory policies combining SAC and CPU offload can be added
+    via ``register_memory_policy`` without modifying this function.
     """
     memory_policy = config.compile.memory_policy
-    if memory_policy == "default":
-        fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-            config.parallelism.fsdp_reshard_after_forward,
-            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    policy_type = type(memory_policy)
+    if policy_type not in MEMORY_POLICY_REGISTRY:
+        raise ValueError(
+            f"Unknown memory_policy type: {policy_type.__name__}. "
+            f"Available: {[t.__name__ for t in MEMORY_POLICY_REGISTRY]}"
         )
-        default_policy_fn = functools.partial(
-            _make_default_memory_policy,
-            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-        )
-        apply_sac_pass(gm, policy_fn=default_policy_fn())
-    elif memory_policy == "eager":
-        apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
-    elif memory_policy == "cpu_offload_all":
-        tag_all_offloadable_activations(gm)
-    else:
-        raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
-
+    gm = MEMORY_POLICY_REGISTRY[policy_type](gm, config=config)
     log_activation_memory_policy(gm)
     return gm
 
@@ -1072,3 +1137,9 @@ AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
 }
+
+# Import paged stash registrations (registers additional policies + pipelines + hooks)
+try:
+    import torchtitan.experiments.graph_trainer.paged_stash_memory_policy  # noqa: F401, E402
+except ImportError:
+    pass
