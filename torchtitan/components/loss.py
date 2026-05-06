@@ -236,7 +236,9 @@ class ChunkedCELoss(BaseLoss):
         *lm_head.parameters()])`` returns them directly — no reliance on
         ``param.grad`` side effects. Required for FX tracing / replay where
         side-effecting ``.grad`` writes don't survive. Compatible with both
-        outer ``loss.backward()`` and ``torch.autograd.grad`` consumers."""
+        outer ``loss.backward()`` and ``torch.autograd.grad`` consumers.
+        TODO: we should use it as default then delete the config.
+        """
 
     def __init__(
         self,
@@ -402,16 +404,16 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     def backward(  # pyrefly: ignore[bad-override]
         ctx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None]:
-        # Contract: callers must use the loss returned by this Function as
-        # the autograd endpoint (no external scaling). Pass any scaling
-        # factor (e.g. global_valid_tokens) into ``loss_fn`` instead — see
-        # graph_trainer's compute_loss for the canonical pattern. Under
-        # that contract grad_output is the autograd-start ones_like(loss),
-        # so we return the saved grad as-is. Multiplying by grad_output
-        # would crash on FSDP+TP because grad_output and accumulated_grad
-        # generally live on different DeviceMeshes (loss on (tp,), grads
-        # on (fsdp, tp)) and DTensor refuses cross-mesh ops.
+
         (accumulated_grad,) = ctx.saved_tensors
+        # Return accumulated_grad as the gradient for hidden_states.
+        # Autograd then propagates this through hidden_states' existing
+        # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
+        # but expressed as a return value so autograd handles the traversal
+        # in a single pass (no "backward through graph twice" error).
+        # Note: this is not safe if downstream runs tensor ops after the loss
+        # returns, which would produce a non-trivial grad_output that might.
+        # not be on the device mesh as accumlated_grad.
         return accumulated_grad, None, None
 
 
@@ -448,14 +450,14 @@ class _ChunkedLossWithParamGrads(torch.autograd.Function):
         # The chunk loop above already populated each lm_head param's
         # ``.grad`` with the correctly sharded value via the FSDP last-chunk
         # post-accumulate-grad hook (reduce-scatter). Capture those grads
-        # into saved_tensors so backward can route them as autograd outputs
-        # for the lm_head param inputs of this Function. Then clear ``.grad``
-        # so a subsequent outer ``loss.backward()`` doesn't double-add when
-        # AccumulateGrad fires on those params with our returned grads. Also
-        # disable FSDP grad sync on lm_head: outer .backward() would
+        # into saved_tensors so backward ca route them as autograd outputs
+        # for the lm_head param inputs of this Function. Additionally, we need
+        # following changes:
+        # 1. We need to clear ``.grad`` so a subsequent outer ``loss.backward()`` doesn't
+        # double-add when AccumulateGrad fires on those params with our returned grads.
+        # 2. We need to disable FSDP grad sync on lm_head: outer .backward() would
         # otherwise re-fire the post-accumulate-grad hook on already-sharded
-        # data (second reduce-scatter → wrong values / shape mismatch). The
-        # restore is queued in backward() below.
+        # data. The restore is queued in backward() below.
         sharded_param_grads = [p.grad.detach() for p in lm_params]
         for p in lm_params:
             p.grad = None
@@ -467,16 +469,7 @@ class _ChunkedLossWithParamGrads(torch.autograd.Function):
         return total_loss.detach().clone()
 
     @staticmethod
-    def backward(  # pyrefly: ignore[bad-override]
-        ctx, grad_output: torch.Tensor
-    ):
-        # Same contract as _DecoderOutputGradientBackProp.backward: callers
-        # must use the loss returned by this Function as the autograd
-        # endpoint (no external scaling). Pass any scaling factor into
-        # ``loss_fn`` — see graph_trainer's compute_loss. We return saved
-        # grads as-is; multiplying by grad_output would crash on FSDP+TP
-        # due to cross-mesh ops (grad_output on (tp,), param grads on
-        # (fsdp, tp)).
+    def backward(ctx, grad_output: torch.Tensor):  # pyrefly: ignore[bad-override]
         saved = ctx.saved_tensors
         accumulated_h_grad = saved[0]
         param_grads = saved[1:]
