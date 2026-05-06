@@ -22,11 +22,13 @@ python3 torchtitan/experiments/rl/grpo.py \
 """
 
 import asyncio
+import contextlib
 import logging
 import math
 import os
+import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 # must run before torch import
@@ -236,15 +238,29 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        self.trainer = None
+        self.generator = None
         self._proc_meshes = []
 
-    async def cleanup(self):
-        """Stop all proc meshes to release GPU memory."""
-        for mesh in self._proc_meshes:
+    async def close(self):
+        """Best-effort: tear down actors, then stop proc meshes."""
+        logger.info("Closing: tearing down actors and process meshes.")
+        for actor_name, actor in (
+            ("trainer", self.trainer),
+            ("generator", self.generator),
+        ):
+            if actor is None:
+                continue
+            try:
+                await actor.close.call()
+            except Exception:
+                logger.exception("%s.close failed", actor_name)
+
+        for i, mesh in enumerate(self._proc_meshes):
             try:
                 await mesh.stop()
             except Exception:
-                pass
+                logger.exception("mesh.stop[%d] failed", i)
         self._proc_meshes = []
 
     def _get_rank_0_value(self, result, has_gpus: bool = True):
@@ -536,6 +552,10 @@ class RLTrainer(Configurable):
         logger.info(f"Pre:  {_format_validation(pre_validation)}")
 
         for step in range(num_steps):
+            # Ctrl-C cancellation is only observed between blocking Monarch RPCs.
+            # Yield here before starting the next step's RPCs.
+            await asyncio.sleep(0)
+
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
@@ -589,12 +609,49 @@ class RLTrainer(Configurable):
         )
 
 
+@contextlib.contextmanager
+def _cancel_on_signal() -> Iterator[None]:
+    """Route Ctrl-C and SIGTERM through asyncio cancellation so close can run.
+
+    Flow: signal -> cancel the current task -> the next step-boundary yield
+    raises CancelledError -> main() runs close in its finally block.
+
+    SIGINT covers Ctrl-C in the terminal; SIGTERM covers polite termination
+    from process managers (e.g. ``kill <pid>``, ``docker stop``, SLURM/k8s
+    asking the job to wrap up before SIGKILL).
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+
+    def _on_signal(sig: int) -> None:
+        name = "KeyboardInterrupt" if sig == signal.SIGINT else "SIGTERM"
+        logger.info("%s received; attempting graceful close.", name)
+        task.cancel()
+
+    signals = (signal.SIGINT, signal.SIGTERM)
+    for sig in signals:
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(sig, _on_signal, sig)
+    try:
+        yield
+    finally:
+        for sig in signals:
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(sig)
+
+
 async def main():
-    """Run the distributed RL training loop using Monarch."""
     config = ConfigManager().parse_args()
     rl_trainer = RLTrainer(config)
-    await rl_trainer.setup()
-    await rl_trainer.train()
+    try:
+        with _cancel_on_signal():
+            await rl_trainer.setup()
+            await rl_trainer.train()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Signal-driven cancel; close() runs in finally below, then exit cleanly.
+        pass
+    finally:
+        await rl_trainer.close()
 
 
 if __name__ == "__main__":
