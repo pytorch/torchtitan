@@ -160,6 +160,20 @@ class PolicyTrainer(Actor, Configurable):
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
 
+    @endpoint
+    async def shutdown(self) -> None:
+        """Destroy the worker's torch.distributed process group.
+
+        Called by ``RLTrainer.cleanup`` before stopping the proc mesh so the
+        worker exits without the ``destroy_process_group() was not called``
+        NCCL warning. Safe to call when the group is not initialized.
+
+        The endpoint is named ``shutdown`` rather than ``stop`` because
+        ``Actor.stop`` is reserved by the Monarch base class.
+        """
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+
     def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
         """Load model weights from HF checkpoint using DCP and state_dict_adapter.
 

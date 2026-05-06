@@ -239,12 +239,33 @@ class RLTrainer(Configurable):
         self._proc_meshes = []
 
     async def cleanup(self):
-        """Stop all proc meshes to release GPU memory."""
+        """Gracefully release actor resources, then stop the proc meshes.
+
+        Two-step shape (call actor ``shutdown`` endpoints, then
+        ``mesh.stop()``) is what gives clean shutdown logs:
+
+        * ``PolicyTrainer.shutdown`` calls ``destroy_process_group()`` so
+          NCCL does not warn about a leaked group at process exit.
+        * ``VLLMGenerator.shutdown`` calls ``cleanup_dist_env_and_memory()``
+          so vLLM's TP/world groups are destroyed (vLLM's own
+          ``LLMEngine.__del__`` is a no-op under ``external_launcher``).
+
+        All steps are best-effort: failures are logged but never block the
+        next step or mask the original exception that triggered ``cleanup``.
+        """
+        for actor_name in ("trainer", "generator"):
+            actor = getattr(self, actor_name, None)
+            if actor is None:
+                continue
+            try:
+                await actor.shutdown.call()
+            except Exception:
+                logger.exception("%s.shutdown() failed during cleanup", actor_name)
         for mesh in self._proc_meshes:
             try:
                 await mesh.stop()
             except Exception:
-                pass
+                logger.exception("mesh.stop() failed during cleanup")
         self._proc_meshes = []
 
     def _get_rank_0_value(self, result, has_gpus: bool = True):
@@ -499,6 +520,10 @@ class RLTrainer(Configurable):
     async def validate(self) -> dict:
         """Run validation on held-out prompts using greedy sampling.
         TODO: investigate using pass@k."""
+        # Yield once before the blocking RPC so a Ctrl-C during pre/post
+        # validation can interrupt as well; same rationale as the per-step
+        # yield in ``train``.
+        await asyncio.sleep(0)
         num_samples = self.config.num_validation_samples
         envs = [
             self.config.validation_env.build(step=0, group_idx=i)
@@ -536,6 +561,12 @@ class RLTrainer(Configurable):
         logger.info(f"Pre:  {_format_validation(pre_validation)}")
 
         for step in range(num_steps):
+            # Yield to the event loop once per step so that an in-flight
+            # KeyboardInterrupt (translated to task cancellation by
+            # ``asyncio.run``) can fire here instead of being trapped behind
+            # blocking ``.call().get()`` Monarch RPCs. Cost is negligible.
+            await asyncio.sleep(0)
+
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
@@ -590,11 +621,54 @@ class RLTrainer(Configurable):
 
 
 async def main():
-    """Run the distributed RL training loop using Monarch."""
+    """Run the distributed RL training loop using Monarch.
+
+    Installs a SIGINT/SIGTERM handler that cancels the main task. We do this
+    explicitly (rather than relying on ``asyncio.run``'s default Ctrl-C
+    handling) because Monarch's blocking ``.call().get()`` RPCs and the
+    embedded Tokio runtime can prevent Python's default SIGINT handler from
+    running promptly. Cancellation reaches a yield point at the
+    ``await asyncio.sleep(0)`` inserted at the top of each training step,
+    which then propagates through ``train()`` into ``main()``'s ``finally``
+    and runs ``cleanup``. ``SIGTERM`` gets the same treatment so wrappers
+    like ``timeout`` shut down cleanly.
+    """
+    import signal
+
     config = ConfigManager().parse_args()
     rl_trainer = RLTrainer(config)
-    await rl_trainer.setup()
-    await rl_trainer.train()
+
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def _request_cancel(sig: int) -> None:
+        logger.warning("Received signal %s, cancelling main task", sig)
+        if main_task is not None and not main_task.done():
+            main_task.cancel()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_cancel, sig)
+        except (NotImplementedError, RuntimeError):
+            # Some environments (Windows, signal-restricted runtimes) do
+            # not support add_signal_handler; fall back to default handling.
+            pass
+
+    try:
+        await rl_trainer.setup()
+        await rl_trainer.train()
+    except asyncio.CancelledError:
+        # We installed the SIGINT/SIGTERM handler ourselves; the cancel is
+        # expected and not an error. Swallow so the process exits cleanly
+        # (no asyncio traceback) after ``cleanup`` runs in ``finally``.
+        logger.info("Training cancelled (signal); cleanup will run")
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, RuntimeError):
+                pass
+        await rl_trainer.cleanup()
 
 
 if __name__ == "__main__":

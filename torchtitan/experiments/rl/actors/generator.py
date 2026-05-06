@@ -362,8 +362,22 @@ class VLLMGenerator(Actor, Configurable):
             f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
 
-    def __del__(self):
-        """Cleanup vLLM engine."""
-        if hasattr(self, "_engine"):
+    @endpoint
+    async def shutdown(self) -> None:
+        """Release vLLM engine and destroy the worker's process groups.
+
+        Called by ``RLTrainer.cleanup`` before stopping the proc mesh so the
+        worker exits cleanly (no ``destroy_process_group()`` warning, no
+        finalizer-time CUDA access). vLLM's own ``LLMEngine.__del__`` is a
+        no-op under ``external_launcher``, so we tear down the model-parallel
+        and world process groups explicitly.
+
+        The endpoint is named ``shutdown`` rather than ``stop`` because
+        ``Actor.stop`` is reserved by the Monarch base class.
+        """
+        from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+        if getattr(self, "_engine", None) is not None:
             del self._engine
-            torch.cuda.empty_cache()
+            self._engine = None
+        cleanup_dist_env_and_memory()
