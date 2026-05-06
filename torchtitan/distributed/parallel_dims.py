@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -27,9 +28,12 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
+    full_spmd_types: bool = False
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
+    _spmd_axes: dict[str, Any] = field(default_factory=dict, repr=False)
+    _spmd_pgs: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_config(
@@ -43,6 +47,7 @@ class ParallelDims:
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
+            full_spmd_types=parallelism_config.full_spmd_types,
         )
 
     def __post_init__(self):
@@ -71,9 +76,9 @@ class ParallelDims:
         )
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
-        if name == "fsdp":
-            # Always keep fsdp mesh with real backend so fully_shard()
-            # can apply MixedPrecisionPolicy even at degree 1.
+        if name in ("fsdp", "dp_shard"):
+            # Always keep fsdp/dp_shard mesh with real backend so
+            # fully_shard() can apply MixedPrecisionPolicy even at degree 1.
             return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
@@ -161,11 +166,18 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
-        dense_mesh = unflatten_mesh(
-            self._world_mesh,
-            ("pp", "dp_replicate", "fsdp", "tp"),
-            (self.pp, self.dp_replicate, fsdp, self.tp),
-        )
+        if self.full_spmd_types:
+            dense_mesh = unflatten_mesh(
+                self._world_mesh,
+                ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
+                (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
+            )
+        else:
+            dense_mesh = unflatten_mesh(
+                self._world_mesh,
+                ("pp", "dp_replicate", "fsdp", "tp"),
+                (self.pp, self.dp_replicate, fsdp, self.tp),
+            )
         sparse_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "efsdp", "ep"),
@@ -184,12 +196,15 @@ class ParallelDims:
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
             "dp_replicate": dense_mesh["dp_replicate"],
-            "fsdp": dense_mesh["fsdp"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
         }
+        if self.full_spmd_types:
+            self._meshes["dp_shard"] = dense_mesh["dp_shard"]
+        else:
+            self._meshes["fsdp"] = dense_mesh["fsdp"]
 
         # Validate mesh sizes
         self._validate_meshes()
@@ -208,12 +223,15 @@ class ParallelDims:
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
             "dp_replicate": self.dp_replicate,
-            "fsdp": self.dp_shard * self.cp,
             "cp": self.cp,
             "tp": self.tp,
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
         }
+        if self.full_spmd_types:
+            expected_sizes["dp_shard"] = self.dp_shard
+        else:
+            expected_sizes["fsdp"] = self.dp_shard * self.cp
 
         for mesh_name, expected_size in expected_sizes.items():
             actual_size = self._meshes[mesh_name].size()
@@ -318,6 +336,55 @@ class ParallelDims:
         if not self._meshes:
             self.build_mesh()
         return {k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1}
+
+    # ------------------------------------------------------------------
+    # spmd_types accessors
+    # ------------------------------------------------------------------
+
+    def get_spmd_axis(self, name: str) -> Any:
+        """Return the MeshAxis for a named axis, or a trivial axis if disabled."""
+        if name not in self._spmd_axes:
+            from torch.distributed.spmd_types import MeshAxis
+
+            mesh = self.get_optional_mesh(name)
+            if mesh is not None and mesh.size() > 1:
+                pg = mesh.get_group()
+                pg._set_group_desc(name)
+                self._spmd_axes[name] = MeshAxis.of(pg)
+                self._spmd_pgs[name] = pg
+            else:
+                self._spmd_axes[name] = MeshAxis.of(1, 1)
+        return self._spmd_axes[name]
+
+    def get_spmd_pg(self, name: str) -> Any | None:
+        """Return the raw ProcessGroup for a named axis, or None."""
+        self.get_spmd_axis(name)
+        return self._spmd_pgs.get(name)
+
+    def get_spmd_pg_for_axis(self, axis: Any) -> Any | None:
+        """Return the ProcessGroup for a MeshAxis object."""
+        for name, a in self._spmd_axes.items():
+            if a is axis:
+                return self._spmd_pgs.get(name)
+        return None
+
+    def spmd_dp_axes(self) -> list:
+        """Active DP MeshAxis objects."""
+        if self.full_spmd_types:
+            names = ("dp_replicate", "dp_shard", "cp")
+        else:
+            names = ("dp_replicate", "fsdp")
+        return [self.get_spmd_axis(n) for n in names if self.get_spmd_axis(n).size() > 1]
+
+    def spmd_all_axes(self) -> frozenset:
+        """All active axes as a frozenset for set_current_mesh()."""
+        if self.full_spmd_types:
+            names = ("dp_replicate", "dp_shard", "cp", "tp")
+        else:
+            names = ("dp_replicate", "fsdp", "tp", "cp")
+        return frozenset(
+            a for n in names if (a := self.get_spmd_axis(n)).size() > 1
+        )
 
     @property
     def world_mesh(self) -> DeviceMesh:
