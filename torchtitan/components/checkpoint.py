@@ -823,14 +823,18 @@ class CheckpointManager(Configurable):
             self.staging = False
 
     def _find_load_step(self, folder: str = "") -> int:
-        """Find the step to load the checkpoint for.
+        """Find the latest DCP checkpoint step for resume.
+
+        Only considers checkpoints with DCP ``.metadata`` — HF-only
+        safetensors checkpoints (e.g. PEFT adapter exports) are not
+        resumable and are skipped.
 
         Args:
             folder (str, optional): The folder to find the checkpoint for. If ``folder``
             is "", then ``self.folder`` will be used.
 
         Returns:
-            int: The step to load the checkpoint for.
+            int: The step to load the checkpoint for, or -1 if none found.
         """
         folder = folder if folder else self.folder
         pattern = r"step-(\d+)"
@@ -841,14 +845,15 @@ class CheckpointManager(Configurable):
 
         for filename in os.listdir(folder):
             match = re.search(pattern, filename)
+            if not match:
+                continue
             dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
-            safetensors_metadata_probe = os.path.join(
-                folder, filename, "model.safetensors.index.json"
-            )
-            if match and os.path.isfile(dcp_metadata_probe):
+            if os.path.isfile(dcp_metadata_probe):
                 step_counts.append(int(match.group(1)))
-            elif match and os.path.isfile(safetensors_metadata_probe):
-                step_counts.append(int(match.group(1)))
+            else:
+                logger.debug(
+                    "Skipping %s for resume (no DCP .metadata).", filename
+                )
         if not step_counts:
             return -1
         return max(step_counts)

@@ -11,7 +11,7 @@ from typing import Literal
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.quantization import QuantizationConverter
+from torchtitan.config import Configurable
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -22,7 +22,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.model_spec import ModelSpec, validate_converter_order
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .parallelize import parallelize_deepseekv3
@@ -525,15 +525,19 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str = "standard",
-    quantization: list[QuantizationConverter.Config] | None = None,
+    converters: list[Configurable.Config] | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    built_converters: list = []
+    if converters is not None:
+        for c in converters:
+            built_converters.append(c.build())
+        validate_converter_order(built_converters)
+        for converter in built_converters:
+            converter.convert(config)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,
@@ -542,4 +546,5 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
+        converters=built_converters,
     )
