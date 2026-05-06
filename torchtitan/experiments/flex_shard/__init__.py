@@ -4,14 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .flex_shard import (
+from .buckets import (
     auto_buckets,
     BucketSpec,
-    flex_shard,
+    MixedPrecisionPolicy,
+)
+from .flex_shard import flex_shard
+from .metadata import (
     get_global_shape,
     get_placements,
     is_flex_shard_param,
-    MixedPrecisionPolicy,
     set_sharding_info,
 )
 from .placements import (

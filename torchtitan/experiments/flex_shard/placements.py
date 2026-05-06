@@ -20,7 +20,7 @@ from torch._prims_common import make_contiguous_strides_for
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .flex_shard import ParamInfo
+    from .storage import ParamInfo
 
 
 class StreamHandoff:
