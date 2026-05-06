@@ -173,6 +173,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     checkpointer: CheckpointManager
 
     # runtime utilities
+    device: torch.device
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.TrainContext
     gradient_accumulation_steps: int
@@ -195,6 +196,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
+        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)

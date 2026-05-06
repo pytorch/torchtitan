@@ -63,7 +63,7 @@ def _get_lora_cls(parent_cls: type) -> type:
     if parent_cls in _lora_class_cache:
         return _lora_class_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
 
     class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
@@ -130,7 +130,7 @@ class LoRAConfig(Configurable.Config):
         lora_cls = _get_lora_cls(inner._owner)
 
         lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(inner.sharding_config)
-        config = lora_cls.Config(
+        config = lora_cls.Config(  # pyrefly: ignore [missing-attribute]
             **{f.name: getattr(inner, f.name) for f in fields(inner)},
             lora_a=Linear.Config(
                 in_features=inner.in_features,
@@ -286,7 +286,7 @@ class LoRAConverter(Configurable):
         """
         if not _lora_class_cache or sd_adapter is None:
             return None
-        from_hf_map = sd_adapter.from_hf_map
+        from_hf_map = sd_adapter.from_hf_map  # pyrefly: ignore [missing-attribute]
 
         return {
             "to_external": lambda sd: remap_lora_keys_to_hf(sd, from_hf_map),
