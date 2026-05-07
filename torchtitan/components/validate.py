@@ -256,11 +256,6 @@ class Validator(BaseValidator):
                 input_dict[k] = v.to(device_type)
             labels = labels.to(device_type)
 
-            # Process data (extract inputs, handle attention masks, CP sharding)
-            inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-                input_dict, labels, model_parts
-            )
-
             # Count valid tokens for this batch
             local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
             local_valid_tokens += (labels != IGNORE_INDEX).sum()
@@ -273,6 +268,11 @@ class Validator(BaseValidator):
                 )
             else:
                 global_valid_tokens = local_valid_tokens.float()
+
+           # Process data (extract inputs, handle attention masks, CP sharding)
+            inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+                input_dict, labels, model_parts
+            )
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
