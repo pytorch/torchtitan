@@ -7,10 +7,7 @@
 import pytest
 import torch
 
-from torchtitan.components.lora import (
-    _get_lora_cls,
-    LoRAConverter,
-)
+from torchtitan.components.lora import _get_lora_cls, LoRAConverter
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
