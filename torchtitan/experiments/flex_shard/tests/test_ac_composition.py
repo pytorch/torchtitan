@@ -54,20 +54,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-class SimpleMLP(nn.Module):
-    def __init__(self, dim=16):
-        super().__init__()
-        self.layers = nn.ModuleList(
-            [nn.Sequential(nn.Linear(dim, dim), nn.ReLU()) for _ in range(3)]
-        )
-        self.output = nn.Linear(dim, dim)
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = x + layer(x)
-        return self.output(x)
-
-
 def apply_selective_ac(model):
     """Apply selective AC to each layer (simulates torchtitan's apply_ac)."""
     save_ops = {
@@ -139,6 +125,20 @@ def _transformer_bucket_specs(num_layers):
     )
 
 
+def _small_transformer_args():
+    return ModelArgs(
+        n_layers=2,
+        vocab_size=32,
+        max_seq_len=8,
+        dim=16,
+        n_heads=4,
+        dropout_p=0.0,
+        use_attn_mask=True,
+        weight_tying=False,
+        checkpoint_activations=False,
+    )
+
+
 def _unwrap_checkpoint(module):
     while hasattr(module, "_checkpoint_wrapped_module"):
         module = module._checkpoint_wrapped_module
@@ -162,10 +162,13 @@ def test_no_nested_wrappers():
     """AC + FlexShard produces a single CheckpointWrapper per layer, not nested."""
     world_size = dist.get_world_size()
     mesh = _init_flex_mesh(world_size)
+    device = torch.device("cuda", torch.cuda.current_device())
+    model_args = _small_transformer_args()
 
     torch.manual_seed(42)
-    model = SimpleMLP().cuda()
-    dist.broadcast(model.layers[0][0].weight.data, src=0)
+    model = Transformer(model_args).to(device)
+    for param in model.parameters():
+        dist.broadcast(param.data, src=0)
 
     # Apply AC first (as torchtitan does)
     apply_selective_ac(model)
@@ -175,7 +178,12 @@ def test_no_nested_wrappers():
         assert isinstance(layer, CheckpointWrapper), f"layers.{i} not AC-wrapped"
 
     # Apply FlexShard with reshard_after_forward
-    _flex_shard(model, mesh, shard_placement_fn=per_param_placements)
+    _flex_shard(
+        model,
+        mesh,
+        shard_placement_fn=per_param_placements,
+        buckets=_transformer_bucket_specs(model_args.n_layers),
+    )
 
     # Verify: single wrapper, not nested
     for i, layer in enumerate(model.layers):
@@ -194,25 +202,37 @@ def test_numerics_ac_plus_flexshard():
     world_size = dist.get_world_size()
     mesh = _init_flex_mesh(world_size)
     device = torch.device("cuda", torch.cuda.current_device())
+    model_args = _small_transformer_args()
 
     # FlexShard + AC model
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
-    model = SimpleMLP().to(device)
+    model = Transformer(model_args).to(device)
     apply_selective_ac(model)
-    _flex_shard(model, mesh, shard_placement_fn=per_param_placements)
+    _flex_shard(
+        model,
+        mesh,
+        shard_placement_fn=per_param_placements,
+        buckets=_transformer_bucket_specs(model_args.n_layers),
+    )
 
     # DDP reference
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
-    ref_model = DDP(SimpleMLP().to(device), device_ids=[rank])
+    ref_model = DDP(Transformer(model_args).to(device), device_ids=[rank])
 
     opt = torch.optim.SGD(model.parameters(), lr=1e-3)
     ref_opt = torch.optim.SGD(ref_model.parameters(), lr=1e-3)
 
     for step in range(3):
         torch.manual_seed(42 + rank + step)
-        inp = torch.randn(4, 16, device=device)
+        inp = torch.randint(
+            0,
+            model_args.vocab_size,
+            (4, model_args.max_seq_len),
+            device=device,
+        )
+        dist.broadcast(inp, src=0)
 
         opt.zero_grad()
         loss = model(inp).sum()
@@ -239,21 +259,33 @@ def test_flexshard_only():
     world_size = dist.get_world_size()
     mesh = _init_flex_mesh(world_size)
     device = torch.device("cuda", torch.cuda.current_device())
+    model_args = _small_transformer_args()
 
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
-    model = SimpleMLP().to(device)
-    _flex_shard(model, mesh, shard_placement_fn=per_param_placements)
+    model = Transformer(model_args).to(device)
+    _flex_shard(
+        model,
+        mesh,
+        shard_placement_fn=per_param_placements,
+        buckets=_transformer_bucket_specs(model_args.n_layers),
+    )
 
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
-    ref_model = DDP(SimpleMLP().to(device), device_ids=[rank])
+    ref_model = DDP(Transformer(model_args).to(device), device_ids=[rank])
 
     opt = torch.optim.SGD(model.parameters(), lr=1e-3)
     ref_opt = torch.optim.SGD(ref_model.parameters(), lr=1e-3)
 
     torch.manual_seed(42 + rank)
-    inp = torch.randn(4, 16, device=device)
+    inp = torch.randint(
+        0,
+        model_args.vocab_size,
+        (4, model_args.max_seq_len),
+        device=device,
+    )
+    dist.broadcast(inp, src=0)
 
     opt.zero_grad()
     loss = model(inp).sum()

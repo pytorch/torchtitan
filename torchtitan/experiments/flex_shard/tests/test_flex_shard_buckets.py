@@ -24,7 +24,18 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.experiments.flex_shard import BucketSpec
+from torchtitan.experiments.flex_shard import BucketSpec, is_flex_shard_param
+from torchtitan.experiments.flex_shard.bucket_storage import (
+    _assign_params_to_buckets,
+    _create_param_infos,
+    _materialize_bucket_storages,
+)
+from torchtitan.experiments.flex_shard.placements import Shard
+from torchtitan.experiments.flex_shard.tests.common import (
+    make_transformer_model,
+    transformer_bucket_specs,
+    transformer_inputs,
+)
 
 
 class _FakeMesh:
@@ -41,6 +52,20 @@ class _FakeMesh:
 
     def _flatten(self, name):
         return _FakeMesh((name,))
+
+
+class _FakeRankMesh:
+    """DeviceMesh stand-in with rank/world-size methods for storage tests."""
+
+    def __init__(self, rank: int = 0, world_size: int = 2) -> None:
+        self.rank = rank
+        self.world_size = world_size
+
+    def get_local_rank(self) -> int:
+        return self.rank
+
+    def size(self) -> int:
+        return self.world_size
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +401,95 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Bucket storage layout tests (single-process, no NCCL)
+# ---------------------------------------------------------------------------
+
+
+class TestBucketStorageLayout(unittest.TestCase):
+    """Test ParamInfo and DStorage layout for bucket materialization."""
+
+    def test_create_param_infos_uses_sequential_byte_offsets(self):
+        mesh = _FakeRankMesh(rank=0, world_size=2)
+        args, model = make_transformer_model()
+        named_params = [
+            ("tok_embeddings.weight", model.tok_embeddings.weight),
+            ("pos_embeddings.weight", model.pos_embeddings.weight),
+        ]
+        placements = {fqn: (Shard(0),) for fqn, _ in named_params}
+
+        infos, total_bytes = _create_param_infos(named_params, mesh, placements)
+
+        tok_embeddings = infos["tok_embeddings.weight"]
+        pos_embeddings = infos["pos_embeddings.weight"]
+        self.assertEqual(
+            tok_embeddings.local_shape,
+            torch.Size([args.vocab_size // 2, args.dim]),
+        )
+        self.assertEqual(tok_embeddings.byte_offset, 0)
+        self.assertEqual(
+            pos_embeddings.local_shape,
+            torch.Size([args.max_seq_len // 2, args.dim]),
+        )
+        self.assertEqual(
+            pos_embeddings.byte_offset,
+            (args.vocab_size // 2) * args.dim * torch.float32.itemsize,
+        )
+        self.assertEqual(
+            total_bytes,
+            ((args.vocab_size // 2) + (args.max_seq_len // 2))
+            * args.dim
+            * torch.float32.itemsize,
+        )
+
+    def test_materialized_params_are_views_into_bucket_storage(self):
+        mesh = _FakeRankMesh(rank=1, world_size=2)
+        args, model = make_transformer_model()
+        named_params = list(model.named_parameters())
+        placements = {fqn: (Shard(0),) for fqn, _ in named_params}
+        buckets = transformer_bucket_specs(
+            args.n_layers,
+            reshard_after_forward=False,
+        )
+        assignments = _assign_params_to_buckets(
+            [fqn for fqn, _ in named_params],
+            buckets,
+        )
+
+        storages, fqn_to_bucket_spec = _materialize_bucket_storages(
+            model,
+            named_params,
+            assignments,
+            buckets,
+            placements,
+            mesh,
+            torch.device("cpu"),
+        )
+
+        self.assertEqual(len(storages), len(buckets))
+        self.assertIs(fqn_to_bucket_spec["tok_embeddings.weight"], buckets[0])
+        self.assertIs(fqn_to_bucket_spec["output.weight"], buckets[-1])
+
+        current_params = dict(model.named_parameters())
+        for storage in storages:
+            storage_ptr = storage.byte_storage.untyped_storage().data_ptr()
+            for fqn, info in storage.param_infos.items():
+                param = current_params[fqn]
+                local_view = storage.get_local_view(fqn)
+
+                self.assertEqual(param.shape, info.local_shape)
+                self.assertEqual(
+                    param.untyped_storage().data_ptr(),
+                    storage_ptr,
+                )
+                self.assertEqual(
+                    local_view.untyped_storage().data_ptr(),
+                    storage_ptr,
+                )
+                torch.testing.assert_close(param, local_view)
+                self.assertTrue(is_flex_shard_param(param))
+
+
+# ---------------------------------------------------------------------------
 # BucketSpec tests (single-process, no NCCL)
 # ---------------------------------------------------------------------------
 
@@ -466,30 +580,21 @@ class TestDistributedBuckets(unittest.TestCase):
     def test_multi_bucket_forward_correct(self):
         """Model with explicit buckets produces correct forward output."""
         mesh = self._init_mesh()
-
-        class TwoLayer(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear1 = nn.Linear(8, 4, bias=False, device="cuda")
-                self.linear2 = nn.Linear(4, 2, bias=False, device="cuda")
-
-            def forward(self, x):
-                return self.linear2(self.linear1(x))
-
-        model = TwoLayer()
-        # Broadcast weights so all ranks start identically
+        args, model = make_transformer_model(device="cuda")
         for p in model.parameters():
             torch.distributed.broadcast(p.data, src=0)
 
-        # Reference output before sharding
-        x = torch.randn(2, 8, device="cuda")
+        x = transformer_inputs(args, device="cuda")
         torch.distributed.broadcast(x, src=0)
         ref_output = model(x).clone()
 
         self._flex_shard(
             model,
             mesh,
-            buckets=[BucketSpec(["linear1.*"]), BucketSpec(["linear2.*"])],
+            buckets=transformer_bucket_specs(
+                args.n_layers,
+                reshard_after_forward=False,
+            ),
         )
 
         output = model(x)
@@ -498,103 +603,79 @@ class TestDistributedBuckets(unittest.TestCase):
     def test_multi_bucket_state_dict_sharded(self):
         """state_dict returns sharded params across all buckets."""
         mesh = self._init_mesh()
-
-        model = nn.Sequential(
-            nn.Linear(8, 4, bias=False, device="cuda"),
-            nn.Linear(4, 2, bias=False, device="cuda"),
-        )
+        args, model = make_transformer_model(device="cuda")
         for p in model.parameters():
             torch.distributed.broadcast(p.data, src=0)
 
         self._flex_shard(
             model,
             mesh,
-            buckets=[BucketSpec(["0.*"]), BucketSpec(["1.*"])],
+            buckets=transformer_bucket_specs(
+                args.n_layers,
+                reshard_after_forward=False,
+            ),
         )
 
         sd = model.state_dict()
-        # Both layers should be sharded along dim 0
-        self.assertEqual(sd["0.weight"].shape, (4 // self.world_size, 8))
-        self.assertEqual(sd["1.weight"].shape, (2 // self.world_size, 4))
+        self.assertEqual(
+            sd["tok_embeddings.weight"].shape,
+            (args.vocab_size // self.world_size, args.dim),
+        )
+        self.assertEqual(
+            sd["output.weight"].shape,
+            (args.vocab_size // self.world_size, args.dim),
+        )
 
-    def test_single_bucket_explicit_matches_helper_default(self):
-        """Explicit single bucket produces same result as the test helper default."""
+    def test_whole_transformer_bucket_requires_matching_hook_boundary(self):
+        """A whole-Transformer RAF bucket has no matching recompute hook boundary."""
         mesh = self._init_mesh()
 
-        # Model A: no buckets
-        model_a = nn.Linear(8, 4, bias=False, device="cuda")
-        torch.distributed.broadcast(model_a.weight.data, src=0)
-        ref_weight = model_a.weight.data.clone()
-        self._flex_shard(model_a, mesh)
+        args, model = make_transformer_model(device="cuda")
+        for param in model.parameters():
+            torch.distributed.broadcast(param.data, src=0)
+        self._flex_shard(model, mesh, buckets=[BucketSpec(["*"])])
 
-        # Model B: explicit single bucket
-        model_b = nn.Linear(8, 4, bias=False, device="cuda")
-        model_b.weight.data.copy_(ref_weight)
-        self._flex_shard(model_b, mesh, buckets=[BucketSpec(["*"])])
-
-        x = torch.randn(2, 8, device="cuda")
+        x = transformer_inputs(args, device="cuda")
         torch.distributed.broadcast(x, src=0)
 
-        out_a = model_a(x)
-        out_b = model_b(x)
-        torch.testing.assert_close(out_a, out_b)
+        with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+            model(x)
 
     def test_multi_bucket_dstorages_count(self):
         """Module has one DStorage per non-empty bucket."""
         mesh = self._init_mesh()
-
-        class TwoLayer(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear1 = nn.Linear(8, 4, bias=False, device="cuda")
-                self.linear2 = nn.Linear(4, 2, bias=False, device="cuda")
-
-            def forward(self, x):
-                return self.linear2(self.linear1(x))
-
-        model = TwoLayer()
+        args, model = make_transformer_model(device="cuda")
         for p in model.parameters():
             torch.distributed.broadcast(p.data, src=0)
 
+        buckets = transformer_bucket_specs(args.n_layers, reshard_after_forward=False)
         self._flex_shard(
             model,
             mesh,
-            buckets=[BucketSpec(["linear1.*"]), BucketSpec(["linear2.*"])],
+            buckets=buckets,
         )
 
-        self.assertEqual(len(model.dstorages), 2)
+        self.assertEqual(len(model.dstorages), len(buckets))
         self.assertIs(model.dstorage, model.dstorages[0])
 
     def test_bucket_spec_reshard_policy_wired_to_dstorages(self):
         """Each bucket's reshard policy is stored on its DStorage."""
-        from torchtitan.experiments.flex_shard import BucketSpec
-
         mesh = self._init_mesh()
-
-        class TwoLayer(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear1 = nn.Linear(8, 4, bias=False, device="cuda")
-                self.linear2 = nn.Linear(4, 2, bias=False, device="cuda")
-
-            def forward(self, x):
-                return self.linear2(self.linear1(x))
-
-        model = TwoLayer()
+        args, model = make_transformer_model(device="cuda")
         for p in model.parameters():
             torch.distributed.broadcast(p.data, src=0)
 
+        buckets = transformer_bucket_specs(args.n_layers, reshard_after_forward=False)
+        buckets[0] = BucketSpec(["tok_embeddings.*"], reshard_after_forward=True)
         self._flex_shard(
             model,
             mesh,
-            buckets=[
-                BucketSpec(["linear1.*"], reshard_after_forward=True),
-                BucketSpec(["linear2.*"], reshard_after_forward=False),
-            ],
+            buckets=buckets,
         )
 
         self.assertTrue(model.dstorages[0]._reshard_after_forward)
-        self.assertFalse(model.dstorages[1]._reshard_after_forward)
+        for storage in model.dstorages[1:]:
+            self.assertFalse(storage._reshard_after_forward)
 
 
 if __name__ == "__main__":

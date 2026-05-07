@@ -157,46 +157,6 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# BucketSpec mp_policy wiring tests (single-process, no NCCL)
-# ---------------------------------------------------------------------------
-
-
-class TestBucketSpecMpPolicy(unittest.TestCase):
-    """Test mp_policy wiring from BucketSpec to eager parameter access state."""
-
-    def test_mp_policy_type(self):
-        """BucketSpec.mp_policy accepts MixedPrecisionPolicy."""
-        from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
-
-        mp = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
-        spec = BucketSpec(patterns=["*"], mp_policy=mp)
-        self.assertEqual(spec.mp_policy.param_dtype, torch.bfloat16)
-
-    def test_param_state_receives_dtypes(self):
-        """Eager param access state carries param_dtype/reduce_dtype."""
-        from torchtitan.experiments.flex_shard.module_wrapping import (
-            EagerParamAccessState,
-        )
-
-        state = EagerParamAccessState(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
-        )
-        self.assertEqual(state.param_dtype, torch.bfloat16)
-        self.assertEqual(state.reduce_dtype, torch.float32)
-
-    def test_param_state_default_no_mp(self):
-        """Eager param access state without mp has None dtypes."""
-        from torchtitan.experiments.flex_shard.module_wrapping import (
-            EagerParamAccessState,
-        )
-
-        state = EagerParamAccessState()
-        self.assertIsNone(state.param_dtype)
-        self.assertIsNone(state.reduce_dtype)
-
-
-# ---------------------------------------------------------------------------
 # Distributed mixed precision tests (torchrun only)
 # ---------------------------------------------------------------------------
 

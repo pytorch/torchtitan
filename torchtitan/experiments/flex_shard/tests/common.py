@@ -11,10 +11,15 @@ from contextlib import contextmanager
 from datetime import timedelta
 from tempfile import NamedTemporaryFile
 
+import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import DataParallelMeshDims
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    ModelArgs,
+    Transformer,
+)
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
@@ -61,15 +66,85 @@ def flex_shard_cpu(
     )
 
 
-def flex_shard_tiny_model(mesh) -> nn.Sequential:
-    """Return a small CPU model sharded into per-layer buckets."""
-    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2))
+def flex_shard_transformer_model(mesh) -> tuple[ModelArgs, Transformer]:
+    """Return a small CPU Transformer and args after applying FlexShard."""
+    args, model = make_transformer_model()
     flex_shard_cpu(
         model,
         mesh,
-        buckets=[
-            BucketSpec(["0.*"], reshard_after_forward=False),
-            BucketSpec(["2.*"], reshard_after_forward=False),
-        ],
+        buckets=transformer_bucket_specs(args.n_layers, reshard_after_forward=False),
     )
-    return model
+    return args, model
+
+
+def make_transformer_model(
+    *,
+    device: torch.device | str | None = None,
+    n_layers: int = 1,
+    vocab_size: int = 16,
+    max_seq_len: int = 8,
+    dim: int = 8,
+    n_heads: int = 2,
+) -> tuple[ModelArgs, Transformer]:
+    """Build the small internal Transformer used across FlexShard tests."""
+    args = ModelArgs(
+        n_layers=n_layers,
+        vocab_size=vocab_size,
+        max_seq_len=max_seq_len,
+        dim=dim,
+        n_heads=n_heads,
+        dropout_p=0.0,
+        use_attn_mask=True,
+        weight_tying=False,
+        checkpoint_activations=False,
+    )
+    model = Transformer(args)
+    if device is not None:
+        model = model.to(device)
+    return args, model
+
+
+def transformer_inputs(
+    args: ModelArgs,
+    *,
+    batch_size: int = 2,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Create token inputs for the shared test Transformer."""
+    return torch.randint(
+        0,
+        args.vocab_size,
+        (batch_size, args.max_seq_len),
+        device=device,
+    )
+
+
+def transformer_bucket_specs(
+    num_layers: int,
+    *,
+    reshard_after_forward: bool = False,
+) -> list[BucketSpec]:
+    """Bucket the shared Transformer by top-level execution units."""
+    return (
+        [
+            BucketSpec(
+                ["tok_embeddings.*"],
+                reshard_after_forward=reshard_after_forward,
+            ),
+            BucketSpec(
+                ["pos_embeddings.*"],
+                reshard_after_forward=reshard_after_forward,
+            ),
+        ]
+        + [
+            BucketSpec(
+                [f"layers.{idx}.*"],
+                reshard_after_forward=reshard_after_forward,
+            )
+            for idx in range(num_layers)
+        ]
+        + [
+            BucketSpec(["norm.*"], reshard_after_forward=reshard_after_forward),
+            BucketSpec(["output.*"], reshard_after_forward=reshard_after_forward),
+        ]
+    )

@@ -8,49 +8,35 @@ import copy
 import unittest
 
 import torch
-import torch.nn as nn
 
-from torchtitan.experiments.flex_shard import BucketSpec
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
+    make_transformer_model,
     single_rank_cpu_mesh,
+    transformer_bucket_specs,
+    transformer_inputs,
 )
-
-
-class TinyResidualMLP(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.in_proj = nn.Linear(4, 8)
-        self.hidden = nn.Linear(8, 8)
-        self.out_proj = nn.Linear(8, 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = torch.relu(self.in_proj(x))
-        h = h + torch.relu(self.hidden(h))
-        return self.out_proj(h)
-
-
-def _flex_shard_training_model(model: nn.Module, mesh) -> nn.Module:
-    return flex_shard_cpu(
-        model,
-        mesh,
-        buckets=[
-            BucketSpec(["in_proj.*"], reshard_after_forward=False),
-            BucketSpec(["hidden.*"], reshard_after_forward=False),
-            BucketSpec(["out_proj.*"], reshard_after_forward=False),
-        ],
-    )
 
 
 class TestFlexShardTraining(unittest.TestCase):
     def test_two_microbatch_gradient_accumulation_matches_reference(self):
         with single_rank_cpu_mesh() as mesh:
             torch.manual_seed(0)
-            model = TinyResidualMLP()
+            args, model = make_transformer_model()
             reference = copy.deepcopy(model)
-            _flex_shard_training_model(model, mesh)
+            flex_shard_cpu(
+                model,
+                mesh,
+                buckets=transformer_bucket_specs(
+                    args.n_layers,
+                    reshard_after_forward=False,
+                ),
+            )
 
-            inputs = [torch.randn(3, 4), torch.randn(2, 4)]
+            inputs = [
+                transformer_inputs(args, batch_size=3),
+                transformer_inputs(args, batch_size=2),
+            ]
             optim = torch.optim.SGD(model.parameters(), lr=0.1)
             ref_optim = torch.optim.SGD(reference.parameters(), lr=0.1)
 

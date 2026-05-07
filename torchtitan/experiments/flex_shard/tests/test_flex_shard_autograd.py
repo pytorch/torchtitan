@@ -13,7 +13,10 @@ import torch.nn as nn
 from torchtitan.experiments.flex_shard import BucketSpec
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
+    make_transformer_model,
     single_rank_cpu_mesh,
+    transformer_bucket_specs,
+    transformer_inputs,
 )
 
 
@@ -42,28 +45,6 @@ class OptionalBranchModel(nn.Module):
         if use_inactive:
             out = out + self.inactive(x)
         return out
-
-
-class FrozenTailModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.trainable = nn.Linear(4, 4)
-        self.frozen = nn.Linear(4, 2)
-        self.frozen.requires_grad_(False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.frozen(torch.relu(self.trainable(x)))
-
-
-class SharedParamModel(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.left = nn.Linear(4, 4, bias=False)
-        self.right = nn.Linear(4, 4, bias=False)
-        self.right.weight = self.left.weight
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.left(x) + self.right(x)
 
 
 class TestFlexShardAutograd(unittest.TestCase):
@@ -122,7 +103,8 @@ class TestFlexShardAutograd(unittest.TestCase):
     def test_mixed_requires_grad_bucket_matches_reference(self):
         with single_rank_cpu_mesh() as mesh:
             torch.manual_seed(0)
-            model = FrozenTailModel()
+            args, model = make_transformer_model()
+            model.output.requires_grad_(False)
             reference = copy.deepcopy(model)
             flex_shard_cpu(
                 model,
@@ -130,29 +112,34 @@ class TestFlexShardAutograd(unittest.TestCase):
                 buckets=[BucketSpec(["*"], reshard_after_forward=False)],
             )
 
-            x = torch.randn(5, 4)
+            x = transformer_inputs(args, batch_size=5)
             model(x).sum().backward()
             reference(x).sum().backward()
 
             for key, param in dict(model.named_parameters()).items():
                 ref_param = dict(reference.named_parameters())[key]
-                if key.startswith("trainable."):
-                    self.assertIsNotNone(param.grad)
-                    self.assertIsNotNone(ref_param.grad)
-                    torch.testing.assert_close(param.grad, ref_param.grad)
-                else:
+                if key.startswith("output."):
                     self.assertFalse(param.requires_grad)
                     self.assertFalse(ref_param.requires_grad)
                     self.assertIsNone(param.grad)
                     self.assertIsNone(ref_param.grad)
+                else:
+                    self.assertIsNotNone(param.grad)
+                    self.assertIsNotNone(ref_param.grad)
+                    torch.testing.assert_close(param.grad, ref_param.grad)
 
     def test_shared_parameters_are_rejected(self):
         with single_rank_cpu_mesh() as mesh:
+            args, model = make_transformer_model()
+            model.output.weight = model.tok_embeddings.weight
             with self.assertRaisesRegex(ValueError, "shared parameters"):
                 flex_shard_cpu(
-                    SharedParamModel(),
+                    model,
                     mesh,
-                    buckets=[BucketSpec(["*"], reshard_after_forward=False)],
+                    buckets=transformer_bucket_specs(
+                        args.n_layers,
+                        reshard_after_forward=False,
+                    ),
                 )
 
 

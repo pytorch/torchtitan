@@ -9,9 +9,8 @@ from contextlib import nullcontext
 from unittest.mock import patch
 
 import torch
-import torch.nn as nn
 
-from torchtitan.experiments.flex_shard import BucketSpec
+from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.comm_buffer_lifetime import (
     AsyncAllGatherResult,
     AsyncReduceScatterResult,
@@ -20,7 +19,11 @@ from torchtitan.experiments.flex_shard.comm_buffer_lifetime import (
 from torchtitan.experiments.flex_shard.placements import Shard
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
+    flex_shard_transformer_model,
+    make_transformer_model,
     single_rank_cpu_mesh,
+    transformer_bucket_specs,
+    transformer_inputs,
 )
 
 
@@ -42,16 +45,80 @@ class _FakeDeviceHandle:
 
 
 class TestFlexShardEagerRuntime(unittest.TestCase):
+    def test_eager_forward_backward_on_cpu_mesh(self):
+        with single_rank_cpu_mesh() as mesh:
+            args, model = flex_shard_transformer_model(mesh)
+
+            loss = model(transformer_inputs(args)).sum()
+            loss.backward()
+
+            for param in model.parameters():
+                self.assertTrue(is_flex_shard_param(param))
+                self.assertIsNotNone(param.grad)
+
+    def test_param_access_outside_forward_raises(self):
+        with single_rank_cpu_mesh() as mesh:
+            _, model = flex_shard_transformer_model(mesh)
+
+            with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+                _ = model.output.weight
+
+    def test_graph_capture_raises(self):
+        with single_rank_cpu_mesh() as mesh:
+            args, model = flex_shard_transformer_model(mesh)
+
+            with patch.object(torch.compiler, "is_compiling", return_value=True):
+                with self.assertRaisesRegex(ValueError, "eager execution only"):
+                    model(transformer_inputs(args))
+
+    def test_graph_capture_error_does_not_poison_next_eager_forward(self):
+        with single_rank_cpu_mesh() as mesh:
+            args, model = flex_shard_transformer_model(mesh)
+            inp = transformer_inputs(args)
+
+            with patch.object(torch.compiler, "is_compiling", return_value=True):
+                with self.assertRaisesRegex(ValueError, "eager execution only"):
+                    model(inp)
+
+            loss = model(inp).sum()
+            loss.backward()
+
+            for param in model.parameters():
+                self.assertIsNotNone(param.grad)
+
+    def test_graph_capture_raises_before_collectives(self):
+        with single_rank_cpu_mesh() as mesh:
+            args, model = flex_shard_transformer_model(mesh)
+
+            with (
+                patch.object(torch.compiler, "is_compiling", return_value=True),
+                patch.object(
+                    Shard,
+                    "unshard",
+                    side_effect=AssertionError("unshard should not run"),
+                ) as unshard,
+                patch.object(
+                    Shard,
+                    "begin_unshard",
+                    side_effect=AssertionError("begin_unshard should not run"),
+                ) as begin_unshard,
+            ):
+                with self.assertRaisesRegex(ValueError, "eager execution only"):
+                    model(transformer_inputs(args))
+
+            unshard.assert_not_called()
+            begin_unshard.assert_not_called()
+
     def test_cpu_runtime_runs_one_unshard_and_reduce_per_bucket(self):
         with single_rank_cpu_mesh() as mesh:
-            model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2))
+            args, model = make_transformer_model()
             flex_shard_cpu(
                 model,
                 mesh,
-                buckets=[
-                    BucketSpec(["0.*"], reshard_after_forward=False),
-                    BucketSpec(["2.*"], reshard_after_forward=False),
-                ],
+                buckets=transformer_bucket_specs(
+                    args.n_layers,
+                    reshard_after_forward=False,
+                ),
             )
             unshard_calls = []
             reduce_calls = []
@@ -74,15 +141,13 @@ class TestFlexShardEagerRuntime(unittest.TestCase):
                     side_effect=_count_reduce_grad,
                 ),
             ):
-                model(torch.randn(3, 4)).sum().backward()
+                model(transformer_inputs(args)).sum().backward()
 
-            self.assertEqual(
-                unshard_calls,
-                [["0.weight", "0.bias"], ["2.weight", "2.bias"]],
-            )
-            self.assertEqual(
-                reduce_calls,
-                [["2.weight", "2.bias"], ["0.weight", "0.bias"]],
+            expected_calls = [list(storage.param_infos) for storage in model.dstorages]
+            self.assertEqual(unshard_calls, expected_calls)
+            self.assertCountEqual(
+                [tuple(call) for call in reduce_calls],
+                [tuple(call) for call in expected_calls],
             )
 
     def test_release_unshard_buffers_clears_cpu_tensors(self):
