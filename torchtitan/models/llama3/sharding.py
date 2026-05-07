@@ -114,6 +114,8 @@ def _set_inner_attention_local_spmd(
     """Install a LocalSpmdConfig for inner attention with DP and/or TP axes."""
     from spmd_types import S, V
 
+    from torchtitan.protocols.sharding import SpmdAnnotation
+
     # q/k/v shape: (batch, seq, heads, head_dim)
     batch_axes: list = []
     heads_axis = None
@@ -136,17 +138,17 @@ def _set_inner_attention_local_spmd(
         qkv_type: dict = {axis: V for axis in sharded_axes}
         batch_entry = tuple(batch_axes) if len(batch_axes) > 1 else batch_axes[0]
         spec_template = (batch_entry, None, heads_axis, None)
-        leaf = (qkv_type, spec_template)
+        annotation = SpmdAnnotation(types=qkv_type, partition_spec=spec_template)
     else:
         qkv_type = {}
         if batch_axes:
             qkv_type[batch_axes[0]] = S(0)
         if heads_axis:
             qkv_type[heads_axis] = S(2)
-        leaf = qkv_type
+        annotation = SpmdAnnotation(types=qkv_type)
 
     set_gqa_inner_attention_local_spmd(
         inner_attention_cfg,
-        in_specs=(leaf, leaf, leaf),
-        out_specs=leaf,
+        inputs=(annotation, annotation, annotation),
+        out=annotation,
     )

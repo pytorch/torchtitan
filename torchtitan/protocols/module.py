@@ -6,6 +6,7 @@
 
 import inspect
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -16,15 +17,13 @@ from torch.distributed.tensor.experimental import local_map
 
 import spmd_types as spmd
 from torchtitan.config import Configurable
-from torch.distributed.tensor import Replicate
 from torchtitan.protocols.sharding import (
+    GlobalSpmdConfig,
     LocalSpmdConfig,
-    placement_to_spmd_type,
     resolve_placements,
     resolve_spmd,
     ShardingConfig,
 )
-from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -35,145 +34,92 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _install_vocab_parallel_forward(
-    module: nn.Module,
-    tp_pg,
-) -> None:
-    """Replace forward with masked-partial vocab-parallel embedding.
+@contextmanager
+def preserve_buffer_spmd(model: nn.Module):
+    """Save and restore buffer SPMD type annotations.
 
-    The LocalSpmdConfig boundary (set on the sharding config) handles
-    input type assertion and output re-annotation. This just replaces
-    the compute.
+    Use around ``to_empty()`` + ``init_weights()`` to restore buffer
+    annotations lost when meta tensors are replaced with real ones.
+    Params are handled by FSDP's ``_restore_spmd_types`` at compute time.
     """
-    import torch.distributed as dist
-    import torch.nn.functional as F
-
-    tp_rank = dist.get_rank(tp_pg)
-
-    def forward(input: torch.Tensor) -> torch.Tensor:
-        weight = module.weight
-        chunk_size = weight.shape[0]
-        offset = tp_rank * chunk_size
-        mask = (input >= offset) & (input < offset + chunk_size)
-        local_input = (input - offset).clamp(0, chunk_size - 1)
-        out = F.embedding(local_input, weight)
-        out = out * mask.unsqueeze(-1).to(out.dtype)
-        out = spmd.reinterpret(out, tp_pg, src=spmd.V, dst=spmd.P)
-        return out
-
-    module.forward = forward
+    saved = {}
+    for fqn, buf in model.named_buffers():
+        if spmd.has_local_type(buf):
+            saved[fqn] = dict(spmd.get_local_type(buf))
+    yield
+    for fqn, buf in model.named_buffers():
+        if fqn in saved and not spmd.has_local_type(buf):
+            spmd.assert_type(buf, saved[fqn])
 
 
-def _spmd_annotate_tensor(x: torch.Tensor, types: dict) -> None:
-    """Stamp a tensor with spmd_types, handling multi-axis-same-dim via PartitionSpec."""
-    from collections import Counter
-
-    for attr in ("_local_type", "_partition_spec"):
-        if hasattr(x, attr):
-            delattr(x, attr)
-
-    # Filter out trivial axes (size 1)
-    types = {a: t for a, t in types.items() if a.size() > 1}
-    if not types:
-        return
-
-    # Check if multiple axes shard the same dim → need PartitionSpec
-    shard_dims = [t.dim for t in types.values() if isinstance(t, spmd.S)]
-    if any(c > 1 for c in Counter(shard_dims).values()) and x.ndim > 0:
-        entries: list = [None] * x.ndim
-        local_types = {}
-        for axis, t in types.items():
-            if isinstance(t, spmd.S):
-                d = t.dim if t.dim >= 0 else t.dim + x.ndim
-                cur = entries[d]
-                entries[d] = (*cur, axis) if isinstance(cur, tuple) else ((cur, axis) if cur else axis)
-                local_types[axis] = spmd.V
-            else:
-                local_types[axis] = t
-        with spmd.no_typecheck():
-            spmd.assert_type(x, local_types, spmd.PartitionSpec(*entries))
-    else:
-        with spmd.no_typecheck():
-            spmd.assert_type(x, types)
-
-
-def _spmd_redistribute_tensor(
+def redistribute_per_axis(
     x: torch.Tensor,
-    src_types: dict,
-    dst_types: dict,
+    src_types: spmd.PerMeshAxisSpmdTypes,
+    dst_types: spmd.PerMeshAxisSpmdTypes,
     parallel_dims: "ParallelDims",
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
     for axis, dst_t in dst_types.items():
-        if axis.size() <= 1:
-            continue
         src_t = src_types.get(axis)
         if src_t is not None and src_t != dst_t:
-            # Normalize negative shard dims
-            if isinstance(src_t, spmd.S) and src_t.dim < 0:
-                src_t = spmd.S(src_t.dim + x.ndim)
-            if isinstance(dst_t, spmd.S) and dst_t.dim < 0:
-                dst_t = spmd.S(dst_t.dim + x.ndim)
             pg = parallel_dims.get_spmd_pg_for_axis(axis)
             bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
             x = spmd.redistribute(x, pg, src=src_t, dst=dst_t, backward_options=bwd)
     return x
 
 
-def _wrap_local_spmd(
+def lspmd_parallelize(
     fn: Callable,
     config: LocalSpmdConfig,
     parallel_dims: "ParallelDims",
 ) -> Callable:
     """Wrap forward with ``spmd.local_map`` for local typechecking."""
-    from spmd_types import Infer, local_map as spmd_local_map
+    resolved_out = config.out.resolve(parallel_dims)
+    resolved_in = (
+        tuple(a.resolve(parallel_dims) for a in config.inputs)
+        if config.inputs is not None else spmd.Infer
+    )
 
-    from torchtitan.protocols.sharding import resolve_local_spmd_spec_leaf
-
-    def _resolve_specs(specs):
-        if specs is None:
-            return None
-        return tuple(resolve_local_spmd_spec_leaf(leaf, parallel_dims) for leaf in specs)
-
-    resolved_in = _resolve_specs(config.in_specs)
-    resolved_out = resolve_local_spmd_spec_leaf(config.out_specs, parallel_dims)
-
-    if config.in_dst_specs is not None:
-        from torchtitan.protocols.sharding import resolve_spmd_types
-
-        resolved_in_dst = tuple(
-            resolve_spmd_types(s, parallel_dims) for s in config.in_dst_specs
-        )
-
-        def _src_types(spec):
-            """Extract the type dict from a resolved spec leaf."""
-            if isinstance(spec, tuple):
-                return spec[0]
-            return spec
-
-        @spmd_local_map(out_types=resolved_out)
-        def body(*args, **kwargs):
-            return fn(*args, **kwargs)
-
-        def wrapper(*args, **kwargs):
-            if not spmd.is_type_checking():
-                return fn(*args, **kwargs)
-            args = tuple(
-                _spmd_redistribute_tensor(a, _src_types(s), d, parallel_dims)
-                if isinstance(a, torch.Tensor) else a
-                for a, s, d in zip(args, resolved_in, resolved_in_dst)
-            )
-            return body(*args, **kwargs)
-
-        return wrapper
-
-    in_types = resolved_in if resolved_in is not None else Infer
-
-    @spmd_local_map(in_types=in_types, out_types=resolved_out)
+    @spmd.local_map(in_types=resolved_in, out_types=resolved_out)
     def body(*args, **kwargs):
         return fn(*args, **kwargs)
 
     return body
+
+
+def gspmd_parallelize(
+    fn: Callable,
+    config: GlobalSpmdConfig,
+    parallel_dims: "ParallelDims",
+) -> Callable:
+    """Build a forward wrapper that redistributes inputs and/or outputs."""
+    resolved_inputs = None
+    if config.inputs is not None:
+        resolved_inputs = tuple(
+            r.resolve(parallel_dims) if r is not None else None
+            for r in config.inputs
+        )
+
+    resolved_output = (
+        config.output.resolve(parallel_dims) if config.output is not None else None
+    )
+
+    def wrapper(*args, **kwargs):
+        if resolved_inputs is not None:
+            args = list(args)
+            for i, redist in enumerate(resolved_inputs):
+                if redist is not None and isinstance(args[i], torch.Tensor):
+                    args[i] = redistribute_per_axis(args[i], *redist, parallel_dims)
+            args = tuple(args)
+
+        outputs = fn(*args, **kwargs)
+
+        if resolved_output is not None and isinstance(outputs, torch.Tensor):
+            outputs = redistribute_per_axis(outputs, *resolved_output, parallel_dims)
+
+        return outputs
+
+    return wrapper
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -195,12 +141,14 @@ class Module(nn.Module, Configurable):
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
+    _spmd_config: LocalSpmdConfig | GlobalSpmdConfig | None = None
     _pos_arg_list: list[str] | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: dict | None = None
         sharding_config: ShardingConfig | None = None
+        spmd_config: LocalSpmdConfig | GlobalSpmdConfig | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -211,6 +159,8 @@ class Module(nn.Module, Configurable):
                 instance._param_init = self.param_init
             if self.sharding_config is not None:
                 instance._sharding_config = self.sharding_config
+            if self.spmd_config is not None:
+                instance._spmd_config = self.spmd_config
             return instance
 
     def init_states(
@@ -349,7 +299,7 @@ class Module(nn.Module, Configurable):
                 # Look through non-Module wrappers, e.g., CheckpointWrapper
                 queue.extend(child.children())
 
-        if self._sharding_config is None:
+        if self._sharding_config is None and self._spmd_config is None:
             return
 
         from torchtitan.distributed.parallel_dims import ParallelDims
@@ -435,144 +385,26 @@ class Module(nn.Module, Configurable):
     # ----- spmd_types path -----
 
     def _parallelize_spmd(self, parallel_dims: "ParallelDims") -> None:
-        from torch.distributed.tensor import Shard as DtShard
-
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-
-        # Shard states: physically slice TP-sharded params, annotate all.
-        # Replicate -> R for params (different data per DP rank).
-        # Replicate on TP -> I (no grad reduction).
-        i_to_r_params: list[str] = []
-        tp_pg = parallel_dims.get_spmd_pg("tp")
-
-        for name, param in self.named_parameters(recurse=False):
-            if name not in sharding_config.state_shardings:
-                continue
-            named_p = sharding_config.state_shardings[name]
-
-            # Physical TP weight slicing (only when TP is enabled)
-            if tp_pg is not None:
-                for axis_name, placement in named_p.items():
-                    if axis_name.value == "tp" and isinstance(placement, DtShard):
-                        param = nn.Parameter(parallel_dims.tp_shard(param, placement.dim))
-                        self.register_parameter(name, param)
-                        break
-
-            resolved = resolve_spmd(named_p, parallel_dims)
-            # Replicate -> R only on DP axes (different data per rank).
-            # TP-replicated params stay I (identical computation).
-            dp_axes_set = set(parallel_dims.spmd_dp_axes())
-            resolved = {
-                a: (spmd.R if t is spmd.I and a in dp_axes_set else t)
-                for a, t in resolved.items()
-            }
-            spmd.assert_type(param, resolved)
-
-            # Track params that are I@tp for I→R conversion at forward time.
-            # Only convert when activations flowing through this module
-            # are V@tp (sharded), so R*V→V works. When activations are
-            # also I@tp (no SP), I*I→I is valid and no conversion needed.
-            has_sharded_activation = False
-            if sharding_config.in_src_shardings:
-                for iname, isrc in sharding_config.in_src_shardings.items():
-                    tp_placement = isrc.get(MeshAxisName.TP)
-                    if isinstance(tp_placement, DtShard):
-                        has_sharded_activation = True
-                        break
-            if tp_pg is not None and has_sharded_activation:
-                tp_axis = parallel_dims.get_spmd_axis("tp")
-                tp_type = placement_to_spmd_type(named_p.get(MeshAxisName.TP, Replicate()))
-                if tp_type is spmd.I:
-                    i_to_r_params.append(name)
-
-        # Buffers are not annotated here — they're on meta device and get
-        # re-created by to_empty(). _reannotate_buffers_spmd_types in the
-        # trainer handles real buffer annotation after init_weights().
+        if self._sharding_config is not None:
+            for name, param in self.named_parameters(recurse=False):
+                if name not in self._sharding_config.state_shardings:
+                    continue
+                resolved = resolve_spmd(
+                    self._sharding_config.state_shardings[name], parallel_dims,
+                )
+                spmd.assert_type(param, resolved)
 
         self._cache_pos_arg_names()
 
-        # Vocab-parallel embedding: replace forward with masked-partial logic.
-        # The LocalSpmdConfig boundary + out_src/dst redistribution handle types.
-        tp_placement = sharding_config.state_shardings.get("weight", {}).get(MeshAxisName.TP)
-        if (
-            tp_pg is not None
-            and isinstance(self, nn.Embedding)
-            and isinstance(tp_placement, DtShard)
-        ):
-            _install_vocab_parallel_forward(self, tp_pg)
-
-        # Local boundary
-        fn = self.forward
-        if sharding_config.local_spmd is not None:
-            fn = _wrap_local_spmd(fn, sharding_config.local_spmd, parallel_dims)
-        elif sharding_config.local_map is not None:
-            raise ValueError(
-                f"{type(self).__name__} has local_map but full_spmd_types=True. "
-                "Use local_spmd instead."
+        spmd_config = self._spmd_config
+        if isinstance(spmd_config, LocalSpmdConfig):
+            self.forward = lspmd_parallelize(
+                self.forward, spmd_config, parallel_dims,
             )
-
-        # Forward wrapper with input/output redistribution
-        has_in = sharding_config.in_src_shardings is not None and sharding_config.in_dst_shardings is not None
-        has_out = sharding_config.out_dst_shardings is not None
-
-        if not has_in and not has_out and not i_to_r_params:
-            if fn is not self.forward:
-                self.forward = fn
-            return
-
-        pos_names = self._cache_pos_arg_names()
-
-        in_redist = {
-            n: (resolve_spmd(sharding_config.in_src_shardings[n], parallel_dims),
-                resolve_spmd(sharding_config.in_dst_shardings[n], parallel_dims))
-            for n in sharding_config.in_src_shardings if n in sharding_config.in_dst_shardings
-        } if has_in else {}
-        out_src_shardings = sharding_config.out_src_shardings or sharding_config.out_dst_shardings
-        out_src = resolve_spmd(out_src_shardings, parallel_dims)
-        out_dst = resolve_spmd(sharding_config.out_dst_shardings, parallel_dims)
-
-        def wrapper(*args, **kwargs):
-            # I→R conversion for TP-replicated params (Megatron SP pattern)
-            for sname in i_to_r_params:
-                p = getattr(self, sname, None)
-                if p is None:
-                    continue
-                bwd = {"op_dtype": torch.float32} if p.dtype != torch.float32 else None
-                converted = spmd.convert(p, tp_pg, src=spmd.I, dst=spmd.R, backward_options=bwd)
-                if isinstance(p, nn.Parameter):
-                    new_p = nn.Parameter(converted, requires_grad=p.requires_grad)
-                    for attr in ("_local_type", "_partition_spec"):
-                        v = getattr(converted, attr, None)
-                        if v is not None:
-                            setattr(new_p, attr, v)
-                    converted = new_p
-                setattr(self, sname, converted)
-
-            if in_redist:
-                merged = dict(zip(
-                    [n for n in pos_names if n not in kwargs], args
-                ))
-                merged.update(kwargs)
-                for name, (src, dst) in in_redist.items():
-                    val = merged.get(name)
-                    if isinstance(val, torch.Tensor):
-                        merged[name] = _spmd_redistribute_tensor(val, src, dst, parallel_dims)
-                args = tuple(merged.pop(n) for n in pos_names if n in merged)
-                kwargs = merged
-
-            outputs = fn(*args, **kwargs)
-
-            if out_dst and isinstance(outputs, torch.Tensor):
-                if out_src:
-                    _spmd_annotate_tensor(outputs, out_src)
-                    outputs = _spmd_redistribute_tensor(outputs, out_src, out_dst, parallel_dims)
-                else:
-                    _spmd_annotate_tensor(outputs, out_dst)
-
-            return outputs
-
-        self.forward = wrapper
+        elif isinstance(spmd_config, GlobalSpmdConfig):
+            self.forward = gspmd_parallelize(
+                self.forward, spmd_config, parallel_dims,
+            )
 
     # ----- DTensor input/output helpers (unchanged from main) -----
 
@@ -713,3 +545,5 @@ class Sequential(nn.Sequential, Module):
     """Module-protocol-compatible version of ``nn.Sequential``."""
 
     pass
+
+

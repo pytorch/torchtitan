@@ -12,6 +12,7 @@ from torchtitan.protocols.sharding import (
     LocalSpmdConfig,
     NamedPlacement,
     ShardingConfig,
+    SpmdAnnotation,
 )
 from torchtitan.protocols.types import MeshAxisName
 
@@ -84,7 +85,6 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
             "weight": dense_param_placement(tp=Shard(1)),
             "bias": dense_param_placement(tp=Replicate()),
         },
-        out_src_shardings=dense_activation_placement(tp=Partial()),
         out_dst_shardings=dense_activation_placement(tp=out_tp),
     )
 
@@ -184,18 +184,16 @@ def set_gqa_inner_attention_local_map(
 
 def set_gqa_inner_attention_local_spmd(
     inner_attention_cfg,
-    in_specs: tuple,
-    out_specs,
+    inputs: tuple[SpmdAnnotation, ...],
+    out: SpmdAnnotation,
 ) -> None:
     """Install a ``LocalSpmdConfig`` on an inner-attention config.
 
     spmd_types counterpart to ``set_gqa_inner_attention_local_map``.
     """
-    inner_attention_cfg.sharding_config = ShardingConfig(
-        local_spmd=LocalSpmdConfig(
-            in_specs=in_specs,
-            out_specs=out_specs,
-        ),
+    inner_attention_cfg.spmd_config = LocalSpmdConfig(
+        inputs=inputs,
+        out=out,
     )
 
 
@@ -243,29 +241,24 @@ def set_decoder_sharding_config(
     )
     from torch.distributed.tensor import Partial
 
-    tok_emb_local_spmd = None
-    if full_spmd_types:
-        from spmd_types import P as spmd_P, R as spmd_R, S as spmd_S
-
-        tok_emb_local_spmd = LocalSpmdConfig(
-            in_specs=({DP_SHARD: spmd_S(0), TP: spmd_R},),
-            out_specs={DP_SHARD: spmd_S(0), TP: spmd_P},
-        )
-
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
-        out_src_shardings=dense_activation_placement(tp=Partial()),
         out_dst_shardings=dense_activation_placement(tp=activation_tp),
-        local_spmd=tok_emb_local_spmd,
     )
+    if full_spmd_types:
+        from spmd_types import P as spmd_P, R as spmd_R, S as spmd_S
+
+        config.tok_embeddings.spmd_config = LocalSpmdConfig(
+            inputs=(SpmdAnnotation(types={DP_SHARD: spmd_S(0), TP: spmd_R}),),
+            out=SpmdAnnotation(types={DP_SHARD: spmd_S(0), TP: spmd_P}),
+        )
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=activation_tp)},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
-        out_src_shardings=dense_activation_placement(tp=Shard(-1)),
         out_dst_shardings=dense_activation_placement(tp=loss_tp),
     )
