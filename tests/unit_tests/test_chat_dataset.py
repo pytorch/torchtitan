@@ -53,8 +53,12 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
+        # Single-sample dataset so the buffer doesn't greedy-pack the
+        # next conversation into the tail; that lets us assert the
+        # post-conversation region is pure IGNORE_INDEX padding.
+        sample = _load_dataset()[0]
         chat_ds = ChatDataset(
-            dataset=_load_dataset(),
+            dataset=Dataset.from_list([sample]),
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=2048,
@@ -65,9 +69,6 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         input_ids = batch["input"]
         label_ids = labels
 
-        # Tokenize the first sample directly to get ground truth tokens. ChatDataset shuffles the
-        # dataset internally at init, and ChatDataset._original_data is the post-shuffle dataset.
-        sample = chat_ds._original_data[0]
         messages = _process_sample(sample)
         full_tokens = _get_full_tokens(tokenizer, messages)
 
