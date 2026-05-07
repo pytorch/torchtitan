@@ -202,26 +202,6 @@ class TestBucketSpecMpPolicy(unittest.TestCase):
         self.assertIsNone(p.param_dtype)
         self.assertIsNone(p.reduce_dtype)
 
-    def test_guard_disabled_returns_raw_with_mp(self):
-        """With guard disabled, parametrization returns input unchanged."""
-        from torchtitan.experiments.flex_shard import disable_active_parametrization
-        from torchtitan.experiments.flex_shard.placements import (
-            ShardParametrization,
-        )
-
-        param = ShardParametrization(
-            shard_dim=0,
-            group_name="fake",
-            world_size=2,
-            param_dtype=torch.bfloat16,
-        )
-        shard = torch.randn(4, 8, dtype=torch.float32)
-        with disable_active_parametrization():
-            result = param(shard)
-        # Should return raw shard, no cast
-        self.assertIs(result, shard)
-        self.assertEqual(result.dtype, torch.float32)
-
 
 # ---------------------------------------------------------------------------
 # Distributed mixed precision tests (torchrun only)
@@ -338,7 +318,6 @@ class TestDistributedMixedPrecision(unittest.TestCase):
         """After backward, param.grad is in reduce_dtype."""
         from torchtitan.experiments.flex_shard import (
             BucketSpec,
-            disable_active_parametrization,
             MixedPrecisionPolicy,
         )
 
@@ -365,8 +344,7 @@ class TestDistributedMixedPrecision(unittest.TestCase):
         # The reduce-scatter produces gradients in reduce_dtype
         # Since parametrization backward casts to fp32 before reduce-scatter,
         # the local grad shard is fp32
-        with disable_active_parametrization():
-            grad = model.weight.grad
+        grad = model._parameters["weight"].grad
         self.assertIsNotNone(grad)
         self.assertEqual(grad.dtype, torch.float32)
 

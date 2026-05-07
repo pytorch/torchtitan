@@ -19,7 +19,7 @@ from .collectives import (
     AsyncReduceScatterResult,
     StreamHandoff,
 )
-from .utils import _active_parametrization_enabled, _with_fqn
+from .utils import _with_fqn
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -74,8 +74,6 @@ class ShardParametrization(nn.Module):
         self.global_dim_size = global_dim_size
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization_enabled():
-            return local_shard
         if (
             self.compute_device is not None
             and local_shard.device != self.compute_device
@@ -134,8 +132,6 @@ class FlatShardParametrization(nn.Module):
         self.global_numel = global_numel
 
     def forward(self, flat_shard: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization_enabled():
-            return flat_shard
         if self.compute_device is not None and flat_shard.device != self.compute_device:
             flat_shard = flat_shard.to(self.compute_device, non_blocking=True)
 
@@ -205,8 +201,6 @@ class OwnedParametrization(nn.Module):
         self.compute_device = compute_device
 
     def forward(self, param: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization_enabled():
-            return param
         if self.compute_device is not None and param.device != self.compute_device:
             param = param.to(self.compute_device, non_blocking=True)
         full = _OwnedBroadcast.apply(
@@ -241,8 +235,6 @@ class RaggedShardParametrization(nn.Module):
         self.compute_device = compute_device
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
-        if not _active_parametrization_enabled():
-            return local_shard
         if (
             self.compute_device is not None
             and local_shard.device != self.compute_device

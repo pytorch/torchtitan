@@ -21,13 +21,11 @@ from .placements import (
     Placement,
     Shard,
 )
-from .utils import disable_active_parametrization
 
 
 __all__ = [
     "auto_buckets",
     "BucketSpec",
-    "disable_active_parametrization",
     "flex_shard",
     "get_global_shape",
     "get_placements",

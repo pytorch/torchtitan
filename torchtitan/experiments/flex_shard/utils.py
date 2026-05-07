@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -91,29 +89,6 @@ def _get_storage_debug_fqn(storage: DStorage) -> str | None:
     if not top_level_paths:
         return None
     return ", ".join(top_level_paths)
-
-
-_active_parametrization = True
-
-
-@contextmanager
-def disable_active_parametrization() -> Generator[None, None, None]:
-    """Disable parametrization forward (returns raw sharded tensor).
-
-    Use during initialization, checkpointing, or any context where
-    parameter access should not trigger collective communication.
-    """
-    global _active_parametrization
-    try:
-        _active_parametrization = False
-        yield
-    finally:
-        _active_parametrization = True
-
-
-def _active_parametrization_enabled() -> bool:
-    """Return whether placement parametrization forwards are active."""
-    return _active_parametrization
 
 
 def _is_graph_capture_active() -> bool:
