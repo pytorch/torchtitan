@@ -28,7 +28,6 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from .eager_runtime import AllGatherContext
     from .storage import DStorage
 
 
@@ -44,11 +43,6 @@ class FlexShardModule:
     def dstorages(self) -> list:
         """All DStorage instances (one per bucket)."""
         return getattr(self, _DSTORAGES_ATTR)
-
-    @property
-    def eager_comm_contexts(self) -> dict[torch.device, AllGatherContext]:
-        """Root-owned eager communication contexts keyed by CUDA device."""
-        return getattr(self, _EAGER_COMM_CONTEXTS_ATTR)
 
 
 def _check_not_already_flex_sharded(module: nn.Module) -> None:

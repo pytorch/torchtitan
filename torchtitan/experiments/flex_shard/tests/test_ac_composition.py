@@ -42,6 +42,7 @@ from torchtitan.experiments.flex_shard import (
     flex_shard,
     per_param_placements,
 )
+from torchtitan.experiments.flex_shard.state import _EAGER_COMM_CONTEXTS_ATTR
 
 
 class SimpleMLP(nn.Module):
@@ -294,7 +295,7 @@ def _run_transformer_checkpoint_raf_recompute_prefetch(apply_ac_fn, label):
         buckets=bucket_specs,
     )
 
-    context = next(iter(model.eager_comm_contexts.values()))
+    context = next(iter(getattr(model, _EAGER_COMM_CONTEXTS_ATTR).values()))
     for i, layer in enumerate(model.layers):
         assert isinstance(layer, CheckpointWrapper), f"layers.{i} not wrapped"
         assert not isinstance(
