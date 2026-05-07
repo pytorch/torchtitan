@@ -9,6 +9,7 @@ import unittest
 
 import torch
 import torch.nn as nn
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -49,14 +50,22 @@ def _get_param_names_in_group(model, group):
     return {param_to_name[p] for p in group["params"]}
 
 
+def _get_default_groups(model, config):
+    """Helper: build param groups and return the default optimizer's groups."""
+    default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
+    groups_by_opt = OptimizersContainer._build_param_groups(
+        model, config, default_kwargs
+    )
+    return groups_by_opt.get(config.name, [])
+
+
 class TestParamGroupConfig(unittest.TestCase):
     def test_default_no_param_groups(self):
         """Empty param_groups produces a single group with all params."""
         model = SimpleModel()
-        config = OptimizersContainer.Config(lr=1e-3, weight_decay=0.1)
-        default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
+        config = OptimizersContainer.Config(lr=1e-3)
 
-        groups = OptimizersContainer._build_param_groups(model, config, default_kwargs)
+        groups = _get_default_groups(model, config)
 
         self.assertEqual(len(groups), 1)
         all_params = [p for p in model.parameters() if p.requires_grad]
@@ -65,17 +74,18 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertEqual(groups[0]["weight_decay"], 0.1)
 
     def test_single_pattern_weight_decay_zero(self):
-        """Pattern matching bias params with weight_decay_multiplier=0."""
+        """Pattern matching bias params with weight_decay=0 via optimizer_kwargs."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             lr=1e-3,
-            weight_decay=0.1,
             param_groups=[
-                ParamGroupConfig(pattern=r".*\.bias$", weight_decay_multiplier=0.0),
+                ParamGroupConfig(
+                    pattern=r".*\.bias$",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
             ],
         )
-        default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
-        groups = OptimizersContainer._build_param_groups(model, config, default_kwargs)
+        groups = _get_default_groups(model, config)
 
         # Should have 2 groups: default + bias group
         self.assertEqual(len(groups), 2)
@@ -95,20 +105,18 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertEqual(groups[1]["lr"], 1e-3)
 
     def test_embed_tokens_pattern(self):
-        """Pattern matching embed_tokens with weight_decay_multiplier=0."""
+        """Pattern matching embed_tokens with weight_decay=0."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             lr=1e-3,
-            weight_decay=0.1,
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"embed_tokens\.",
-                    weight_decay_multiplier=0.0,
+                    optimizer_kwargs={"weight_decay": 0.0},
                 ),
             ],
         )
-        default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
-        groups = OptimizersContainer._build_param_groups(model, config, default_kwargs)
+        groups = _get_default_groups(model, config)
 
         self.assertEqual(len(groups), 2)
 
@@ -119,25 +127,23 @@ class TestParamGroupConfig(unittest.TestCase):
         )
         self.assertEqual(groups[1]["weight_decay"], 0.0)
 
-    def test_lr_multiplier(self):
-        """lr_multiplier correctly scales the base lr."""
+    def test_lr_override(self):
+        """lr override via optimizer_kwargs correctly sets the lr."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             lr=1e-3,
-            weight_decay=0.1,
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"embed_tokens\.",
-                    lr_multiplier=0.1,
+                    optimizer_kwargs={"lr": 1e-4},
                 ),
             ],
         )
-        default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
-        groups = OptimizersContainer._build_param_groups(model, config, default_kwargs)
+        groups = _get_default_groups(model, config)
 
         # Default group keeps base lr
         self.assertEqual(groups[0]["lr"], 1e-3)
-        # Embed group gets 10% of base lr
+        # Embed group gets overridden lr
         self.assertAlmostEqual(groups[1]["lr"], 1e-4)
 
     def test_first_match_wins(self):
@@ -145,48 +151,53 @@ class TestParamGroupConfig(unittest.TestCase):
         model = SimpleModel()
         config = OptimizersContainer.Config(
             lr=1e-3,
-            weight_decay=0.1,
             param_groups=[
                 # First pattern: all norm params get wd=0
-                ParamGroupConfig(pattern=r".*norm.*", weight_decay_multiplier=0.0),
+                ParamGroupConfig(
+                    pattern=r".*norm.*",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
                 # Second pattern: broader match that also covers norm
-                ParamGroupConfig(pattern=r".*layers.*", lr_multiplier=0.5),
+                ParamGroupConfig(
+                    pattern=r".*layers.*",
+                    optimizer_kwargs={"lr": 5e-4},
+                ),
             ],
         )
-        default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
-        groups = OptimizersContainer._build_param_groups(model, config, default_kwargs)
+        groups = _get_default_groups(model, config)
 
-        # Norm params should be in group index 0 (the norm pattern), not group 1
-        norm_group = groups[1]  # first matched group (after default)
+        # Norm params should be in group index 1 (first matched group after default)
+        norm_group = groups[1]
         norm_names = _get_param_names_in_group(model, norm_group)
         self.assertTrue(all("norm" in n for n in norm_names))
         # Norm group should have weight_decay=0 (from first pattern)
         self.assertEqual(norm_group["weight_decay"], 0.0)
-        # And default lr (lr_multiplier=1.0 from first pattern)
+        # And default lr (not overridden by first pattern)
         self.assertEqual(norm_group["lr"], 1e-3)
 
     def test_betas_override(self):
-        """Per-group betas override works correctly."""
+        """Per-group betas override via optimizer_kwargs works correctly."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             lr=1e-3,
-            beta1=0.9,
-            beta2=0.95,
             param_groups=[
-                # Override both betas
-                ParamGroupConfig(pattern=r"embed_tokens\.", beta1=0.85, beta2=0.99),
-                # Override only beta2
-                ParamGroupConfig(pattern=r".*\.bias$", beta2=0.999),
+                ParamGroupConfig(
+                    pattern=r"embed_tokens\.",
+                    optimizer_kwargs={"betas": (0.85, 0.99)},
+                ),
+                ParamGroupConfig(
+                    pattern=r".*\.bias$",
+                    optimizer_kwargs={"betas": (0.9, 0.999)},
+                ),
             ],
         )
-        default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
-        groups = OptimizersContainer._build_param_groups(model, config, default_kwargs)
+        groups = _get_default_groups(model, config)
 
         # Default group keeps global betas
         self.assertEqual(groups[0]["betas"], (0.9, 0.95))
         # Embed group: both overridden
         self.assertEqual(groups[1]["betas"], (0.85, 0.99))
-        # Bias group: only beta2 overridden, beta1 stays global
+        # Bias group: overridden
         self.assertEqual(groups[2]["betas"], (0.9, 0.999))
 
     def test_warning_on_zero_matches(self):
@@ -201,7 +212,7 @@ class TestParamGroupConfig(unittest.TestCase):
         default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
 
         with self.assertLogs(level=logging.WARNING) as cm:
-            groups = OptimizersContainer._build_param_groups(
+            groups_by_opt = OptimizersContainer._build_param_groups(
                 model, config, default_kwargs
             )
 
@@ -210,6 +221,7 @@ class TestParamGroupConfig(unittest.TestCase):
             f"Expected warning about unmatched pattern, got: {cm.output}",
         )
         # All params should be in the default group
+        groups = groups_by_opt.get(config.name, [])
         self.assertEqual(len(groups), 1)
 
     def test_all_params_covered(self):
@@ -217,18 +229,26 @@ class TestParamGroupConfig(unittest.TestCase):
         model = SimpleModel()
         config = OptimizersContainer.Config(
             lr=1e-3,
-            weight_decay=0.1,
             param_groups=[
-                ParamGroupConfig(pattern=r".*\.bias$", weight_decay_multiplier=0.0),
-                ParamGroupConfig(pattern=r".*norm.*", weight_decay_multiplier=0.0),
+                ParamGroupConfig(
+                    pattern=r".*\.bias$",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
+                ParamGroupConfig(
+                    pattern=r".*norm.*",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
             ],
         )
         default_kwargs = OptimizersContainer._build_optimizer_kwargs(config)
-        groups = OptimizersContainer._build_param_groups(model, config, default_kwargs)
+        groups_by_opt = OptimizersContainer._build_param_groups(
+            model, config, default_kwargs
+        )
 
         all_grouped_params = []
-        for g in groups:
-            all_grouped_params.extend(g["params"])
+        for opt_groups in groups_by_opt.values():
+            for g in opt_groups:
+                all_grouped_params.extend(g["params"])
         all_model_params = [p for p in model.parameters() if p.requires_grad]
 
         self.assertEqual(len(all_grouped_params), len(all_model_params))
@@ -244,16 +264,18 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
         config = OptimizersContainer.Config(
             name="AdamW",
             lr=1e-3,
-            weight_decay=0.1,
             implementation="for-loop",
             param_groups=[
-                ParamGroupConfig(pattern=r".*\.bias$", weight_decay_multiplier=0.0),
+                ParamGroupConfig(
+                    pattern=r".*\.bias$",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
             ],
         )
         container = config.build(model_parts=[model])
         self.assertIsInstance(container, OptimizersContainer)
 
-        # Should have 1 optimizer (one model_part)
+        # Should have 1 optimizer (one model_part, same optimizer type)
         self.assertEqual(len(container.optimizers), 1)
         opt = container.optimizers[0]
         # Should have 2 param groups
@@ -265,7 +287,6 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
         config = OptimizersContainer.Config(
             name="AdamW",
             lr=1e-3,
-            weight_decay=0.1,
             implementation="for-loop",
         )
         container = config.build(model_parts=[model])
@@ -280,10 +301,12 @@ class TestOptimizersInBackwardWithParamGroups(unittest.TestCase):
         config = OptimizersInBackwardContainer.Config(
             name="AdamW",
             lr=1e-3,
-            weight_decay=0.1,
             implementation="for-loop",
             param_groups=[
-                ParamGroupConfig(pattern=r".*\.bias$", weight_decay_multiplier=0.0),
+                ParamGroupConfig(
+                    pattern=r".*\.bias$",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
             ],
         )
         container = config.build(model_parts=[model])
@@ -310,11 +333,16 @@ class TestDCPWithParamGroups(unittest.TestCase):
         config = OptimizersContainer.Config(
             name="AdamW",
             lr=1e-3,
-            weight_decay=0.1,
             implementation="for-loop",
             param_groups=[
-                ParamGroupConfig(pattern=r".*\.bias$", weight_decay_multiplier=0.0),
-                ParamGroupConfig(pattern=r"embed_tokens\.", lr_multiplier=0.1),
+                ParamGroupConfig(
+                    pattern=r".*\.bias$",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
+                ParamGroupConfig(
+                    pattern=r"embed_tokens\.",
+                    optimizer_kwargs={"lr": 1e-4},
+                ),
             ],
         )
         container = config.build(model_parts=[model])
@@ -347,6 +375,209 @@ class TestDCPWithParamGroups(unittest.TestCase):
                     torch.equal(v1, v2),
                     f"State mismatch for key {key}",
                 )
+
+
+class TestMixedOptimizers(unittest.TestCase):
+    def test_mixed_optimizer_types(self):
+        """Different optimizer for a param group."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="SGD",
+                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        opt_types = {type(opt).__name__ for opt in container.optimizers}
+        self.assertEqual(opt_types, {"AdamW", "SGD"})
+
+        sgd = next(
+            opt for opt in container.optimizers if isinstance(opt, torch.optim.SGD)
+        )
+        self.assertEqual(sgd.param_groups[0]["lr"], 5e-4)
+        self.assertEqual(sgd.param_groups[0]["momentum"], 0.9)
+
+    def test_mixed_optimizers_all_params_covered(self):
+        """All parameters should be covered across all optimizers."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="SGD",
+                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        all_opt_params = set()
+        for opt in container.optimizers:
+            for group in opt.param_groups:
+                for p in group["params"]:
+                    all_opt_params.add(id(p))
+        model_params = {id(p) for p in model.parameters() if p.requires_grad}
+        self.assertEqual(all_opt_params, model_params)
+
+    def test_model_part_indices(self):
+        """_model_part_indices correctly maps optimizers to model parts."""
+        model1 = SimpleModel()
+        model2 = SimpleModel()
+        config = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="SGD",
+                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model1, model2])
+        self.assertEqual(len(container.optimizers), 4)
+        self.assertEqual(container._model_part_indices[0], 0)
+        self.assertEqual(container._model_part_indices[1], 0)
+        self.assertEqual(container._model_part_indices[2], 1)
+        self.assertEqual(container._model_part_indices[3], 1)
+
+    def test_param_group_labels(self):
+        """Param groups have correct _label for logging."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_kwargs={"weight_decay": 0.0},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        adamw = container.optimizers[0]
+        self.assertEqual(adamw.param_groups[0]["_label"], "default")
+        self.assertEqual(adamw.param_groups[1]["_label"], "output.")
+
+    def test_mixed_optimizer_state_dict_round_trip(self):
+        """State dict save/load works with mixed optimizer types."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="SGD",
+                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+
+        dummy_input = torch.randint(0, 32, (2, 4))
+        output = model(dummy_input)
+        output.sum().backward()
+        container.step()
+
+        state_dict = container.state_dict()
+        self.assertTrue(len(state_dict) > 0)
+
+        model2 = SimpleModel()
+        container2 = config.build(model_parts=[model2])
+        container2.load_state_dict(state_dict)
+
+        state_dict2 = container2.state_dict()
+        self.assertEqual(set(state_dict.keys()), set(state_dict2.keys()))
+        for key in state_dict:
+            v1 = state_dict[key]
+            v2 = state_dict2[key]
+            if isinstance(v1, torch.Tensor):
+                self.assertTrue(torch.equal(v1, v2), f"State mismatch for key {key}")
+
+
+class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
+    def _build_scheduler(self, config, lr_config, model, training_steps=100):
+        container = config.build(model_parts=[model])
+        for opt in container.optimizers:
+            opt._opt_called = True
+        return (
+            lr_config.build(
+                optimizers=container,
+                training_steps=training_steps,
+            ),
+            container,
+        )
+
+    def test_default_schedule(self):
+        """Default schedule should work the same as before."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(lr=1e-3, implementation="for-loop")
+        lr_config = LRSchedulersContainer.Config(
+            warmup_steps=10,
+            decay_type="linear",
+        )
+        scheduler, container = self._build_scheduler(config, lr_config, model)
+        self.assertEqual(len(scheduler.schedulers), 1)
+        for _ in range(10):
+            scheduler.step()
+        lr = scheduler.schedulers[0].optimizer.param_groups[0]["lr"]
+        self.assertAlmostEqual(lr, 1e-3, places=6)
+
+    def test_mixed_optimizer_gets_separate_schedulers(self):
+        """Mixed optimizers should each get their own scheduler."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="SGD",
+                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                ),
+            ],
+        )
+        lr_config = LRSchedulersContainer.Config(
+            warmup_steps=10,
+            decay_type="linear",
+        )
+        scheduler, container = self._build_scheduler(config, lr_config, model)
+        self.assertEqual(len(scheduler.schedulers), 2)
+
+    def test_mixed_optimizer_same_schedule_different_base_lr(self):
+        """Same schedule applied to different base lrs produces different absolute lrs."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"output\.",
+                    optimizer_name="SGD",
+                    optimizer_kwargs={"lr": 5e-4, "momentum": 0.9},
+                ),
+            ],
+        )
+        lr_config = LRSchedulersContainer.Config(
+            warmup_steps=10,
+            decay_type="linear",
+        )
+        scheduler, container = self._build_scheduler(config, lr_config, model)
+        for _ in range(10):
+            scheduler.step()
+        for opt in container.optimizers:
+            base_lr = opt.param_groups[0]["lr"]
+            if isinstance(opt, torch.optim.SGD):
+                self.assertAlmostEqual(base_lr, 5e-4, places=6)
+            else:
+                self.assertAlmostEqual(base_lr, 1e-3, places=6)
 
 
 if __name__ == "__main__":
