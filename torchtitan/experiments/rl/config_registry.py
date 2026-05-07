@@ -216,6 +216,9 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
         model_spec=model_registry("debugmodel_moe", attn_backend="varlen"),
         hf_assets_path="/tmp/debug_moe_ckpt",
         num_steps=5,
+        # MoE EP all-to-all path issues unpinned D2H copies that block
+        # torch.compile and CUDA graph capture; disable both.
+        compile=CompileConfig(enable=False),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -231,7 +234,6 @@ def rl_grpo_qwen3_moe_debug_ep() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -271,6 +273,9 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
         ),
         hf_assets_path="tests/assets/qwen3_moe_debug",
         num_steps=5,
+        # MoE EP all-to-all path issues unpinned D2H copies that block
+        # torch.compile and CUDA graph capture; disable both.
+        compile=CompileConfig(enable=False, backend="aot_eager"),
         env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
@@ -289,7 +294,6 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=False, backend="aot_eager"),
             debug=debug_config,
             loss=GRPOLoss.Config(),
         ),
@@ -324,6 +328,7 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
         model_spec=model_registry("30B-A3B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-30B-A3B",
         num_steps=10,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -335,7 +340,6 @@ def rl_grpo_qwen3_30b_a3b() -> RLTrainer.Config:
                 tensor_parallel_degree=4,
                 disable_loss_parallel=True,
             ),
-            compile=CompileConfig(enable=True, backend="aot_eager"),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
