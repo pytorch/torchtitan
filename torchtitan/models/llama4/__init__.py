@@ -28,6 +28,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.models.common.moe import BatchWiseAuxLoss
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -93,6 +94,9 @@ def _build_llama4_layers(
 
     Handles iRoPE (NoPE on every N layers) and MoE interleaving. For each
     layer, depth-scaled inits are computed using the layer index.
+
+    Aux loss ref:
+    - https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/configuration_llama4.py
     """
     inner_attention, mask_type = get_attention_config(attn_backend)
     if every_n_layers_nope <= 1:
@@ -150,6 +154,7 @@ def _build_llama4_layers(
                 router=router,
                 experts=experts,
                 shared_experts=shared_experts,
+                aux_loss=BatchWiseAuxLoss.Config(weight=1e-3),
             )
             ffn_cfg = None
         else:

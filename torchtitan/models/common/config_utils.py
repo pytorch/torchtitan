@@ -11,6 +11,7 @@ fields set at config creation time.
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Literal
 
 from torchtitan.models.common.attention import (
@@ -23,7 +24,13 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    BatchWiseAuxLoss,
+    GroupedExperts,
+    MoE,
+    MoELoadBalanceAuxLoss,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
@@ -152,14 +159,18 @@ def make_moe_config(
     experts: GroupedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
+    aux_loss: MoELoadBalanceAuxLoss.Config | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    if aux_loss:
+        aux_loss = replace(aux_loss, top_k=router.top_k)
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
         experts=experts,
         shared_experts=shared_experts,
+        aux_loss=aux_loss,
     )
 
 
@@ -265,3 +276,30 @@ def make_experts_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
     )
+
+
+def update_moe_aux_loss_configs(
+    layers: list,
+    *,
+    pp_enabled: bool,
+    global_batch_size: int,
+) -> None:
+    """Update aux loss configs for all MoE layers from trainer config.
+
+    Call this from each model's ``update_from_config`` to set
+    ``global_batch_size`` for gradient normalization across PP microbatches,
+    gradient accumulation steps, and DP ranks (FSDP sum). Also validates
+    that batch-wise aux loss is not used with PP.
+    """
+    for layer_cfg in layers:
+        moe_cfg = getattr(layer_cfg, "moe", None)
+        if moe_cfg is None:
+            continue
+        aux_loss = moe_cfg.aux_loss
+        if aux_loss.weight > 0:
+            if isinstance(aux_loss, BatchWiseAuxLoss.Config) and pp_enabled:
+                raise ValueError(
+                    "batch_wise MoE aux loss is incompatible with pipeline "
+                    "parallelism. Use sequence_wise instead."
+                )
+            aux_loss.global_batch_size = global_batch_size
