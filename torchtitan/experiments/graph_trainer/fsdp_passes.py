@@ -39,7 +39,6 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
-    _is_recomputed_node,
     _MODULE_FQN,
 )
 from torchtitan.tools.logging import logger
@@ -449,7 +448,7 @@ def joint_transformer_block_bucketing_reordering_pass(
     """
 
     def _is_backward(node: torch.fx.Node) -> bool:
-        return _is_backward_node(node) or _is_recomputed_node(node)
+        return _is_backward_node(node)
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
