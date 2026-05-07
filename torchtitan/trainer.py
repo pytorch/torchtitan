@@ -385,15 +385,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-                model.train()
-
                 if config.parallelism.full_spmd_types:
-                    self._reannotate_buffers_spmd_types(model)
+                    from torchtitan.protocols.module import preserve_buffer_spmd
+
+                    buffer_ctx = preserve_buffer_spmd(model)
+                else:
+                    buffer_ctx = contextlib.nullcontext()
+
+                with buffer_ctx:
+                    model.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                model.train()
 
                 self.model_parts = [model]
 
@@ -476,13 +481,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
         self.full_spmd_types: bool = config.parallelism.full_spmd_types
-        if self.full_spmd_types:
-            from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
-                RegisterPostBackwardFunction,
-            )
-
-            spmd.register_local_autograd_function(RegisterPostBackwardFunction)
-
         # Build validator if validation is configured
         if config.validator.enable:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
@@ -657,22 +655,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # spmd_types helpers
     # ------------------------------------------------------------------
 
-    def _reannotate_buffers_spmd_types(self, model: torch.nn.Module) -> None:
-        """Re-annotate buffers after to_empty + init_weights.
-
-        Params are handled by FSDP's _restore_spmd_types. Buffers are not
-        FSDP-managed, so their annotations are lost by to_empty.
-        """
-        from torch.distributed.tensor import DTensor
-
-        dp_axes = self.parallel_dims.spmd_dp_axes()
-        if not dp_axes:
-            return
-        spmd_type = {axis: spmd.R for axis in dp_axes}
-        for buf in model.buffers():
-            if not isinstance(buf, DTensor):
-                spmd.assert_type(buf, spmd_type)
-
     def _annotate_inputs_spmd_types(
         self,
         inputs: torch.Tensor,
@@ -759,9 +741,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if self.full_spmd_types
                 else contextlib.nullcontext()
             )
-            with self.train_context(), current_mesh, typechecker:
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
+            with self.train_context(), current_mesh:
+                with typechecker:
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 loss.backward()
 
