@@ -11,9 +11,10 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import _get_device_handle
 
-from .placements import PlacementReduceGradHandle, PlacementUnshardHandle
+from .placements import PlacementReduceGradHandle
 from .utils import _with_fqn
 
 if TYPE_CHECKING:
@@ -71,8 +72,24 @@ class StreamHandoff:
             pass
 
 
+class AllGatherUnshardHandle:
+    """Handle for a FlexShard bucket all-gather unshard operation."""
+
+    def finish(self) -> list[torch.Tensor]:
+        """Wait for the unshard and return full parameters."""
+        raise NotImplementedError
+
+    def wait(self) -> None:
+        """Wait until the unshard result is usable on the current stream."""
+        raise NotImplementedError
+
+    def release_buffers(self) -> None:
+        """Release temporary buffers owned by the unshard operation."""
+        raise NotImplementedError
+
+
 @dataclass
-class AsyncAllGatherResult(PlacementUnshardHandle):
+class AsyncAllGatherResult(AllGatherUnshardHandle):
     """State needed to finish an async all-gather launched on a side stream."""
 
     gathered: list[torch.Tensor]
@@ -150,6 +167,62 @@ class AsyncAllGatherResult(PlacementUnshardHandle):
             )
         for handoff in handoffs:
             handoff.release()
+
+
+def begin_all_gather_unshard(
+    tensors: list[torch.Tensor],
+    infos: list[ParamInfo],
+    mesh: DeviceMesh,
+    all_gather_stream: torch.Stream,
+    debug_fqn: str | None = None,
+) -> AllGatherUnshardHandle:
+    """Begin a bucket all-gather and return a handle for full params."""
+    ws = mesh.size()
+    pg = mesh.get_group()
+    dtype = tensors[0].dtype
+    device = tensors[0].device
+    device_handle = _get_device_handle(device.type)
+
+    with torch.profiler.record_function(
+        _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
+    ):
+        send_buf = torch.cat([t.reshape(-1) for t in tensors])
+
+        per_rank_sizes: list[int] = []
+        per_rank_param_offsets: list[list[int]] = []
+        for r in range(ws):
+            offset = 0
+            offsets_r: list[int] = []
+            for info in infos:
+                offsets_r.append(offset)
+                offset += info.placement.compute_local_numel(info.global_shape, r, ws)
+            per_rank_sizes.append(offset)
+            per_rank_param_offsets.append(offsets_r)
+
+        gathered = [
+            torch.empty(per_rank_sizes[r], dtype=dtype, device=device)
+            for r in range(ws)
+        ]
+
+    copy_in_done = device_handle.Event()
+    copy_in_done.record(device_handle.current_stream(device))
+    with device_handle.stream(all_gather_stream):
+        all_gather_stream.wait_event(copy_in_done)
+        label = _with_fqn("FlexShard::all_gather", debug_fqn)
+        with dist.record_comm(label):
+            dist.all_gather(gathered, send_buf, group=pg)
+        event = device_handle.Event()
+        event.record(all_gather_stream)
+    return AsyncAllGatherResult(
+        gathered=gathered,
+        infos=infos,
+        mesh=mesh,
+        per_rank_param_offsets=per_rank_param_offsets,
+        event=event,
+        send_buf=send_buf,
+        device_handle=device_handle,
+        debug_fqn=debug_fqn,
+    )
 
 
 @dataclass

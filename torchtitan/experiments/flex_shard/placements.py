@@ -33,22 +33,6 @@ class LocalStorageLayout:
     storage_nbytes: int
 
 
-class PlacementUnshardHandle:
-    """Handle for a placement-owned unshard operation."""
-
-    def finish(self) -> list[torch.Tensor]:
-        """Wait for the unshard and return full parameters."""
-        raise NotImplementedError
-
-    def wait(self) -> None:
-        """Wait until the unshard result is usable on the current stream."""
-        raise NotImplementedError
-
-    def release_buffers(self) -> None:
-        """Release temporary buffers owned by the unshard operation."""
-        raise NotImplementedError
-
-
 class PlacementReduceGradHandle:
     """Handle for a placement-owned gradient reduction operation."""
 
@@ -69,8 +53,7 @@ class Placement:
     """Base class for FlexShard placement strategies.
 
     Each subclass implements per-param sharding (extract_local_shard,
-    assemble_from_shards) and batched communication (begin_unshard,
-    begin_reduce_grad).
+    assemble_from_shards), storage layout, and gradient reduction.
     """
 
     def validate_param(self, fqn: str, param: nn.Parameter) -> None:
@@ -191,17 +174,6 @@ class Placement:
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
 
-    def begin_unshard(
-        self,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-        all_gather_stream: torch.Stream,
-        debug_fqn: str | None = None,
-    ) -> PlacementUnshardHandle:
-        """Begin an unshard operation, possibly asynchronously."""
-        raise NotImplementedError
-
     def begin_reduce_grad(
         self,
         tensors: list[torch.Tensor],
@@ -318,69 +290,6 @@ class Shard(Placement):
         return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
 
     @override
-    def begin_unshard(
-        self,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-        all_gather_stream: torch.Stream,
-        debug_fqn: str | None = None,
-    ) -> PlacementUnshardHandle:
-        from .collective_results import AsyncAllGatherResult
-
-        ws = mesh.size()
-        pg = mesh.get_group()
-        dtype = tensors[0].dtype
-        device = tensors[0].device
-        device_handle = _get_device_handle(device.type)
-
-        # Pack local shards into one flat buffer
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
-        ):
-            send_buf = torch.cat([t.reshape(-1) for t in tensors])
-
-            # Compute per-rank buffer sizes and param offsets
-            per_rank_sizes: list[int] = []
-            per_rank_param_offsets: list[list[int]] = []
-            for r in range(ws):
-                offset = 0
-                offsets_r: list[int] = []
-                for info in infos:
-                    offsets_r.append(offset)
-                    offset += info.placement.compute_local_numel(
-                        info.global_shape, r, ws
-                    )
-                per_rank_sizes.append(offset)
-                per_rank_param_offsets.append(offsets_r)
-
-            # Variable-size all_gather outputs
-            gathered = [
-                torch.empty(per_rank_sizes[r], dtype=dtype, device=device)
-                for r in range(ws)
-            ]
-
-        copy_in_done = device_handle.Event()
-        copy_in_done.record(device_handle.current_stream(device))
-        with device_handle.stream(all_gather_stream):
-            all_gather_stream.wait_event(copy_in_done)
-            label = _with_fqn("FlexShard::all_gather", debug_fqn)
-            with dist.record_comm(label):
-                dist.all_gather(gathered, send_buf, group=pg)
-            event = device_handle.Event()
-            event.record(all_gather_stream)
-        return AsyncAllGatherResult(
-            gathered=gathered,
-            infos=infos,
-            mesh=mesh,
-            per_rank_param_offsets=per_rank_param_offsets,
-            event=event,
-            send_buf=send_buf,
-            device_handle=device_handle,
-            debug_fqn=debug_fqn,
-        )
-
-    @override
     def begin_reduce_grad(
         self,
         tensors: list[torch.Tensor],
@@ -474,6 +383,5 @@ __all__ = [
     "per_param_placements",
     "Placement",
     "PlacementReduceGradHandle",
-    "PlacementUnshardHandle",
     "Shard",
 ]

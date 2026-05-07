@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 
+from .collective_results import AllGatherUnshardHandle, begin_all_gather_unshard
 from .module_wrapping import EagerParamAccessState
 from .sharding_metadata import (
     _BUCKET_FQN_ATTR,
@@ -33,7 +34,6 @@ if TYPE_CHECKING:
     from .placements import (
         Placement,
         PlacementReduceGradHandle,
-        PlacementUnshardHandle,
     )
 
 
@@ -59,7 +59,7 @@ class PendingAllGather:
     """The single one-bucket-ahead all-gather in flight."""
 
     bucket: AllGatherBucket
-    result: PlacementUnshardHandle
+    result: AllGatherUnshardHandle
     recompute: bool
 
 
@@ -87,7 +87,7 @@ class AllGatherContext:
 class BucketAllGatherRuntime:
     """Runtime metadata passed to RAF bucket autograd."""
 
-    prefetched_result: PlacementUnshardHandle | None
+    prefetched_result: AllGatherUnshardHandle | None
     placement: Placement
     infos: list[ParamInfo]
     param_refs: list[tuple[nn.Module, str]]
@@ -172,7 +172,7 @@ class _BucketAllGather(torch.autograd.Function):
         result = runtime.prefetched_result
         runtime.prefetched_result = None
         if result is None:
-            result = runtime.placement.begin_unshard(
+            result = begin_all_gather_unshard(
                 [shard.detach() for shard in local_shards],
                 runtime.infos,
                 runtime.mesh,
@@ -436,7 +436,7 @@ def _install_batched_allgather_hooks(
     """Install pre/post forward hooks for batched per-bucket all-gather.
 
     In eager mode, each DStorage's pre-forward hook starts a single batched
-    Placement.begin_unshard() call (one collective per bucket), then sets
+    all-gather unshard call (one collective per bucket), then sets
     _pre_gathered on each parameter access state so the property getter can
     return the hook-provided tensor.
 
@@ -492,7 +492,7 @@ def _install_batched_allgather_hooks(
                 local_shards = [
                     leaf._parameters[name].data for leaf, name, _, _ in bucket.entries
                 ]
-                return bucket.placement.begin_unshard(
+                return begin_all_gather_unshard(
                     local_shards,
                     bucket.infos,
                     bucket.storage._mesh,
@@ -636,7 +636,7 @@ def _install_batched_allgather_hooks(
                         with torch.no_grad():
                             result = _take_pending_for_current_bucket()
                             if result is None:
-                                result = all_gather_bucket.placement.begin_unshard(
+                                result = begin_all_gather_unshard(
                                     local_shards,
                                     entry_infos,
                                     s._mesh,
@@ -648,7 +648,7 @@ def _install_batched_allgather_hooks(
                 else:
                     with torch.no_grad():
                         device_handle = _get_device_handle(local_shards[0].device.type)
-                        result = bucket_placement.begin_unshard(
+                        result = begin_all_gather_unshard(
                             local_shards,
                             entry_infos,
                             s._mesh,

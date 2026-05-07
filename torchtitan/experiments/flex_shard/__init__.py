@@ -19,7 +19,6 @@ from .placements import (
     per_param_placements,
     Placement,
     PlacementReduceGradHandle,
-    PlacementUnshardHandle,
     Shard,
 )
 
@@ -34,7 +33,6 @@ __all__ = [
     "per_param_placements",
     "Placement",
     "PlacementReduceGradHandle",
-    "PlacementUnshardHandle",
     "set_sharding_info",
     "Shard",
 ]
