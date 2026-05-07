@@ -18,6 +18,8 @@ from .sharding_metadata import (
 from .placements import (
     per_param_placements,
     Placement,
+    PlacementReduceGradResult,
+    PlacementUnshardResult,
     Shard,
 )
 
@@ -31,6 +33,8 @@ __all__ = [
     "MixedPrecisionPolicy",
     "per_param_placements",
     "Placement",
+    "PlacementReduceGradResult",
+    "PlacementUnshardResult",
     "set_sharding_info",
     "Shard",
 ]

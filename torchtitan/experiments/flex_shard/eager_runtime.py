@@ -28,7 +28,11 @@ from .utils import _get_storage_debug_fqn, _with_fqn
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placements import Placement
+    from .placements import (
+        Placement,
+        PlacementReduceGradResult,
+        PlacementUnshardResult,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -53,16 +57,15 @@ class PendingAllGather:
     """The single one-bucket-ahead all-gather in flight."""
 
     bucket: AllGatherBucket
-    result: Any
+    result: PlacementUnshardResult
     recompute: bool
 
 
 @dataclass
 class PendingReduceGrad:
-    """One in-flight reduce-grad result and the placement that owns it."""
+    """One in-flight reduce-grad result."""
 
-    placement: Placement
-    result: Any
+    result: PlacementReduceGradResult
 
 
 @dataclass
@@ -81,7 +84,7 @@ class AllGatherContext:
 class BucketAllGatherRuntime:
     """Runtime metadata passed to RAF bucket autograd."""
 
-    prefetched_result: Any | None
+    prefetched_result: PlacementUnshardResult | None
     placement: Placement
     infos: list[ParamInfo]
     param_refs: list[tuple[nn.Module, str]]
@@ -99,9 +102,8 @@ def _queue_reduce_scatter_wait(context: AllGatherContext) -> None:
     def _wait_for_reduce_scatter() -> None:
         try:
             for pending in context.reduce_scatter_states:
-                pending.placement.wait_for_reduce_grad(pending.result)
-                pending.placement.release_reduce_grad_buffers(
-                    pending.result,
+                pending.result.wait()
+                pending.result.release_buffers(
                     release_sharded_grads=True,
                 )
         finally:
@@ -122,9 +124,8 @@ def _wait_and_clear_reduce_scatter_states(
         _with_fqn("FlexShard::post_backward_rs_wait", debug_fqn)
     ):
         for pending in context.reduce_scatter_states:
-            pending.placement.wait_for_reduce_grad(pending.result)
-            pending.placement.release_reduce_grad_buffers(
-                pending.result,
+            pending.result.wait()
+            pending.result.release_buffers(
                 release_sharded_grads=True,
             )
         context.reduce_scatter_states.clear()
@@ -175,7 +176,7 @@ class _BucketAllGather(torch.autograd.Function):
                 runtime.context.all_gather_stream,
                 debug_fqn=runtime.debug_fqn,
             )
-        full_params = runtime.placement.finish_unshard(result)
+        full_params = result.finish()
         return tuple(full_params)
 
     @staticmethod
@@ -213,15 +214,14 @@ class _BucketAllGather(torch.autograd.Function):
                     debug_fqn=runtime.debug_fqn,
                 )
                 with torch.cuda.stream(runtime.context.reduce_scatter_stream):
+                    sharded_grads = result.finish()
                     result.sharded_grads = _accumulate_sharded_grads(
                         valid_param_refs,
-                        result.sharded_grads,
+                        sharded_grads,
                     )
                     result.event = torch.cuda.Event()
                     result.event.record(runtime.context.reduce_scatter_stream)
-                runtime.context.reduce_scatter_states.append(
-                    PendingReduceGrad(runtime.placement, result)
-                )
+                runtime.context.reduce_scatter_states.append(PendingReduceGrad(result))
                 _queue_reduce_scatter_wait(runtime.context)
 
         # Gradients are accumulated into the original sharded parameters above
@@ -493,9 +493,9 @@ def _install_batched_allgather_hooks(
                     debug_fqn=bucket.debug_fqn,
                 )
 
-            def _wait_bucket_unshard(bucket, result):
-                bucket.placement.wait_for_unshard(result)
-                bucket.placement.release_unshard_buffers(result)
+            def _wait_bucket_unshard(result):
+                result.wait()
+                result.release_buffers()
 
             def _prefetch_next_bucket():
                 if all_gather_context.pending is not None:
@@ -528,7 +528,7 @@ def _install_batched_allgather_hooks(
                 ):
                     all_gather_context.pending = None
                     return pending.result
-                _wait_bucket_unshard(pending.bucket, pending.result)
+                _wait_bucket_unshard(pending.result)
                 all_gather_context.pending = None
                 return None
 
@@ -560,16 +560,17 @@ def _install_batched_allgather_hooks(
                         with torch.cuda.stream(
                             all_gather_context.reduce_scatter_stream
                         ):
+                            sharded_grads = result.finish()
                             result.sharded_grads = _accumulate_sharded_grads(
                                 [(leaf, name) for leaf, name, _ in valid],
-                                result.sharded_grads,
+                                sharded_grads,
                             )
                             result.event = torch.cuda.Event()
                             result.event.record(
                                 all_gather_context.reduce_scatter_stream
                             )
                         all_gather_context.reduce_scatter_states.append(
-                            PendingReduceGrad(all_gather_bucket.placement, result)
+                            PendingReduceGrad(result)
                         )
                         _queue_reduce_scatter_wait(all_gather_context)
                     else:
@@ -629,9 +630,7 @@ def _install_batched_allgather_hooks(
                                     all_gather_context.all_gather_stream,
                                     debug_fqn=all_gather_bucket.debug_fqn,
                                 )
-                            full_params = all_gather_bucket.placement.finish_unshard(
-                                result
-                            )
+                            full_params = result.finish()
                             _prefetch_next_bucket()
                 else:
                     with torch.no_grad():

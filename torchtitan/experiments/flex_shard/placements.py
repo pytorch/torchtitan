@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Hashable, TYPE_CHECKING
+from typing import Hashable, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -17,7 +17,8 @@ from torch._prims_common import make_contiguous_strides_for
 from .comm_buffer_lifetime import (
     AsyncAllGatherResult,
     AsyncReduceScatterResult,
-    StreamHandoff,
+    PlacementReduceGradResult,
+    PlacementUnshardResult,
 )
 from .utils import _with_fqn
 
@@ -190,19 +191,9 @@ class Placement:
         mesh: DeviceMesh,
         all_gather_stream: torch.Stream | None,
         debug_fqn: str | None = None,
-    ) -> Any:
+    ) -> PlacementUnshardResult:
         """Begin an unshard operation, possibly asynchronously."""
         raise NotImplementedError
-
-    def finish_unshard(self, result: Any) -> list[torch.Tensor]:
-        """Finish a result returned by begin_unshard()."""
-        raise NotImplementedError
-
-    def wait_for_unshard(self, result: Any) -> None:
-        """Wait for a begin_unshard() result to become usable."""
-
-    def release_unshard_buffers(self, result: Any) -> None:
-        """Release temporary buffers owned by an unshard result."""
 
     def begin_reduce_grad(
         self,
@@ -211,23 +202,9 @@ class Placement:
         mesh: DeviceMesh,
         reduce_scatter_stream: torch.Stream | None,
         debug_fqn: str | None = None,
-    ) -> Any:
+    ) -> PlacementReduceGradResult:
         """Begin a gradient reduction operation, possibly asynchronously."""
         raise NotImplementedError
-
-    def finish_reduce_grad(self, result: Any) -> list[torch.Tensor]:
-        """Finish a result returned by begin_reduce_grad()."""
-        raise NotImplementedError
-
-    def wait_for_reduce_grad(self, result: Any) -> None:
-        """Wait for a begin_reduce_grad() result to become usable."""
-
-    def release_reduce_grad_buffers(
-        self,
-        result: Any,
-        release_sharded_grads: bool,
-    ) -> None:
-        """Release temporary buffers owned by a reduce-grad result."""
 
 
 def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
@@ -339,7 +316,7 @@ class Shard(Placement):
             all_gather_stream=None,
             debug_fqn=None,
         )
-        return self.finish_unshard(result)
+        return result.finish()
 
     def begin_unshard(
         self,
@@ -348,7 +325,7 @@ class Shard(Placement):
         mesh: DeviceMesh,
         all_gather_stream: torch.Stream | None,
         debug_fqn: str | None = None,
-    ) -> AsyncAllGatherResult:
+    ) -> PlacementUnshardResult:
         ws = mesh.size()
         pg = mesh.get_group()
         dtype = tensors[0].dtype
@@ -417,68 +394,6 @@ class Shard(Placement):
             debug_fqn=debug_fqn,
         )
 
-    def finish_unshard(self, result: AsyncAllGatherResult) -> list[torch.Tensor]:
-        self.wait_for_unshard(result)
-        ws = result.mesh.size()
-        device = result.gathered[0].device
-        # Unpack: per param, extract shard from each rank, assemble_from_shards
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_out", result.debug_fqn)
-        ):
-            results: list[torch.Tensor] = []
-            for i, info in enumerate(result.infos):
-                p = info.placement
-                per_rank_shards: list[torch.Tensor] = []
-                for r in range(ws):
-                    numel = p.compute_local_numel(info.global_shape, r, ws)
-                    shape = p.compute_local_shape(info.global_shape, r, ws)
-                    if numel > 0:
-                        off = result.per_rank_param_offsets[r][i]
-                        per_rank_shards.append(
-                            result.gathered[r][off : off + numel].view(shape)
-                        )
-                    else:
-                        per_rank_shards.append(
-                            torch.empty(shape, dtype=info.dtype, device=device)
-                        )
-                results.append(
-                    p.assemble_from_shards(
-                        per_rank_shards, info.global_shape, info.dtype
-                    )
-                )
-                del per_rank_shards
-            self.release_unshard_buffers(result)
-            return results
-
-    def wait_for_unshard(self, result: AsyncAllGatherResult) -> None:
-        device = result.gathered[0].device
-        if device.type == "cuda" and result.event is not None:
-            torch.cuda.current_stream(device).wait_event(result.event)
-
-    def release_unshard_buffers(self, result: AsyncAllGatherResult) -> None:
-        """Release raw all-gather buffers after current-stream work is queued."""
-        if not result.gathered and result.send_buf is None:
-            return
-        device = (
-            result.gathered[0].device if result.gathered else result.send_buf.device  # type: ignore[union-attr]
-        )
-        if device.type != "cuda":
-            result.gathered.clear()
-            result.send_buf = None
-            return
-
-        stream = torch.cuda.current_stream(device)
-        event = torch.cuda.Event()
-        event.record(stream)
-        handoffs: list[StreamHandoff] = []
-        if result.send_buf is not None:
-            handoffs.append(StreamHandoff(result.send_buf, event, stream))
-            result.send_buf = None
-        while result.gathered:
-            handoffs.append(StreamHandoff(result.gathered.pop(), event, stream))
-        for handoff in handoffs:
-            handoff.release()
-
     def reduce_grad(
         self,
         tensors: list[torch.Tensor],
@@ -492,7 +407,7 @@ class Shard(Placement):
             reduce_scatter_stream=None,
             debug_fqn=None,
         )
-        return self.finish_reduce_grad(result)
+        return result.finish()
 
     def begin_reduce_grad(
         self,
@@ -501,7 +416,7 @@ class Shard(Placement):
         mesh: DeviceMesh,
         reduce_scatter_stream: torch.Stream | None,
         debug_fqn: str | None = None,
-    ) -> AsyncReduceScatterResult:
+    ) -> PlacementReduceGradResult:
         ws = mesh.size()
         rank = mesh.get_local_rank()
         pg = mesh.get_group()
@@ -592,51 +507,6 @@ class Shard(Placement):
             debug_fqn=debug_fqn,
         )
 
-    def finish_reduce_grad(
-        self, result: AsyncReduceScatterResult
-    ) -> list[torch.Tensor]:
-        self.wait_for_reduce_grad(result)
-        return result.sharded_grads
-
-    def wait_for_reduce_grad(self, result: AsyncReduceScatterResult) -> None:
-        device = (
-            result.recv_buf.device
-            if result.recv_buf is not None
-            else result.sharded_grads[0].device
-        )
-        if device.type == "cuda" and result.event is not None:
-            torch.cuda.current_stream(device).wait_event(result.event)
-
-    def release_reduce_grad_buffers(
-        self,
-        result: AsyncReduceScatterResult,
-        release_sharded_grads: bool,
-    ) -> None:
-        """Release pending reduce-scatter buffers after its completion wait."""
-        tensors: list[torch.Tensor] = []
-        if result.send_buf is not None:
-            tensors.append(result.send_buf)
-            result.send_buf = None
-        if result.recv_buf is not None:
-            tensors.append(result.recv_buf)
-            result.recv_buf = None
-        if release_sharded_grads:
-            tensors.extend(result.sharded_grads)
-            result.sharded_grads.clear()
-        if not tensors:
-            return
-        device = tensors[0].device
-        if device.type != "cuda":
-            return
-
-        stream = torch.cuda.current_stream(device)
-        event = torch.cuda.Event()
-        event.record(stream)
-        handoffs = [StreamHandoff(tensor, event, stream) for tensor in tensors]
-        tensors.clear()
-        for handoff in handoffs:
-            handoff.release()
-
 
 def per_param_placements(
     named_params: list[tuple[str, nn.Parameter]],
@@ -650,5 +520,7 @@ __all__ = [
     "LocalStorageLayout",
     "per_param_placements",
     "Placement",
+    "PlacementReduceGradResult",
+    "PlacementUnshardResult",
     "Shard",
 ]
