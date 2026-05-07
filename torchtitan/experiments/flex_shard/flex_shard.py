@@ -14,17 +14,17 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from .eager_runtime import (
+from .bucket_runtime import (
     _create_eager_param_states,
     _install_batched_allgather_hooks,
 )
-from .sharding_metadata import (
+from .param_metadata import (
     get_global_shape,
     get_placements,
     is_flex_shard_param,
     set_sharding_info,
 )
-from .module_wrapping import (
+from .param_access import (
     _attach_flex_shard_module_state,
     _check_not_already_flex_sharded,
     _register_module_param_accessors,

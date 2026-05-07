@@ -21,8 +21,8 @@ from .bucket_collectives import (
     begin_all_gather_unshard,
     begin_reduce_scatter_grad,
 )
-from .module_wrapping import EagerParamAccessState
-from .sharding_metadata import (
+from .param_access import EagerParamAccessState
+from .param_metadata import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,

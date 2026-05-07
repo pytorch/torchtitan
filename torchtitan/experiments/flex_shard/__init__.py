@@ -9,7 +9,7 @@ from .bucket_storage import (
     MixedPrecisionPolicy,
 )
 from .flex_shard import flex_shard
-from .sharding_metadata import (
+from .param_metadata import (
     get_global_shape,
     get_placements,
     is_flex_shard_param,

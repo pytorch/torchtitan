@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from .sharding_metadata import (
+from .param_metadata import (
     _BUCKET_FQN_ATTR,
     _DSTORAGE_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,

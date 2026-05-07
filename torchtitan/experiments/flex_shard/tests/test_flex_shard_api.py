@@ -13,7 +13,7 @@ from torchtitan.experiments.flex_shard import (
     get_placements,
     is_flex_shard_param,
 )
-from torchtitan.experiments.flex_shard.module_wrapping import FlexShardModule
+from torchtitan.experiments.flex_shard.param_access import FlexShardModule
 from torchtitan.experiments.flex_shard.bucket_storage import OffloadPolicy
 from torchtitan.experiments.flex_shard.placements import Shard
 from torchtitan.experiments.flex_shard.tests.common import (
