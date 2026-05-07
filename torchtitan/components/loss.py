@@ -359,13 +359,11 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
 
     Forward takes hidden_states (connected to decoder graph), the accumulated
     gradient from chunked lm_head backward, and the loss value. Returns a
-    detached copy of the loss with this Function as its grad_fn.
+    detached loss with this Function as its grad_fn.
 
     Backward returns accumulated_grad as the gradient for hidden_states.
     Autograd then propagates this through the decoder layers automatically —
     no explicit hidden_states.backward() needed.
-
-    Note: the caller must not modify the loss tensor in-place after apply().
     """
 
     @staticmethod
