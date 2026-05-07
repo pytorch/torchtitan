@@ -12,6 +12,7 @@ from typing import Any, cast, TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
+
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
@@ -20,6 +21,7 @@ from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -201,9 +203,7 @@ class Validator(BaseValidator):
             extra_kwargs["attention_masks"] = cast(
                 BaseModel, model_parts[0]
             ).get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
+                positions=extra_kwargs.get("positions"),
             )
         except TypeError:
             pass
@@ -220,12 +220,14 @@ class Validator(BaseValidator):
 
         return inputs, labels, extra_inputs, extra_kwargs
 
+    @sl.log_trace_span("eval")
     @torch.no_grad()
     def validate(
         self,
         model_parts: list[nn.Module],
         step: int,
     ) -> None:
+        sl.add_step_tag("eval")
         # Set model to eval mode
         for model in model_parts:
             model.eval()

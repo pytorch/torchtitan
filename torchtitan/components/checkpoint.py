@@ -37,14 +37,15 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
-
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
@@ -550,8 +551,9 @@ class CheckpointManager(Configurable):
             if MODEL in self.states:
                 self.states[MODEL].load_state_dict(state_dict)
 
+    @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
-    def save(self, curr_step: int, last_step: bool = False) -> None:
+    def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
         This function will save the checkpoint for the current step. If ``last_step`` is
@@ -564,11 +566,13 @@ class CheckpointManager(Configurable):
             last_step (bool, optional): Whether this is the last step of training.
 
         Returns:
-            None
+            bool: True if a checkpoint was written (or staged, for async modes) on
+            this step.
         """
         if not self._should_save(curr_step, last_step):
-            return
+            return False
 
+        sl.add_step_tag("checkpoint_save")
         begin = time.monotonic()
         logger.info("Saving the checkpoint (or staging if async is enabled).")
         checkpoint_id = self._create_checkpoint_id(curr_step)
@@ -578,7 +582,7 @@ class CheckpointManager(Configurable):
         # freed until _async_wait()
         if last_step:
             self._save_last_step(curr_step)
-            return
+            return True
 
         states = self._flattened_model_states_sd()
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
@@ -613,7 +617,9 @@ class CheckpointManager(Configurable):
             "Finished saving the checkpoint (or staging if async is enabled) "
             f"in {time.monotonic() - begin:.2f} seconds."
         )
+        return True
 
+    @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.

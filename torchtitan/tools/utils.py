@@ -14,6 +14,8 @@ from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
+
+from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 
 
@@ -55,15 +57,23 @@ class GarbageCollection:
             if torch.distributed.get_rank() == 0:
                 warn_tensor_cycles()
 
-    def run(self, step_count: int):
+    @sl.log_trace_span("gc_collect")
+    def run(self, step_count: int) -> bool:
+        """Run a GC cycle if this step should collect. Returns True when a
+        collection actually ran, False otherwise."""
         if self.debug:
             self.collect(
                 "Force GC to perform collection to obtain debug information",
                 generation=2,
             )
             gc.collect()
-        elif step_count > 1 and step_count % self.gc_freq == 0:
+            sl.add_step_tag("gc")
+            return True
+        if step_count > 1 and step_count % self.gc_freq == 0:
             self.collect("Performing periodic GC collection")
+            sl.add_step_tag("gc")
+            return True
+        return False
 
     @staticmethod
     def collect(reason: str, generation: int = 1):

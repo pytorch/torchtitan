@@ -64,6 +64,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -240,9 +241,7 @@ def _precompile_aot(
     joint_custom_passes = get_joint_custom_passes_from_config(
         parallel_dims, compile_config, fsdp_reshard_after_forward
     )
-    compiler_passes = get_compiler_passes_from_config(
-        model, compile_config, parallel_dims
-    )
+    compiler_passes = get_compiler_passes_from_config(model, compile_config)
     fw_compiler, bw_compiler = make_compiler_with_passes(
         compiler_passes, dump_folder=config.dump_folder
     )
@@ -337,34 +336,23 @@ def _precompile_aot_fx_trace(
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         attn_config = model_config.layers[0].attention
-        mask_type = getattr(attn_config, "mask_type", "causal")
+        inner_attention = attn_config.inner_attention
 
-        if mask_type == "block_causal" or parallel_dims.cp_enabled:
-            extra_kwargs["positions"] = torch.arange(
+        if attn_config.mask_type == "block_causal":
+            positions = torch.arange(
                 0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
             ).expand(dummy_inputs.shape)
+        else:
+            positions = torch.arange(
+                dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
+            ).repeat(dummy_inputs.shape[0], 1)
 
-        inner_attention = getattr(attn_config, "inner_attention", None)
-        if inner_attention is not None:
-            from torchtitan.models.common.attention import (
-                FlexAttention,
-                VarlenAttention,
+        if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
+            extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
+                positions=positions,
             )
 
-            if isinstance(
-                inner_attention,
-                (FlexAttention.Config, VarlenAttention.Config),
-            ):
-                assert (
-                    tokenizer is not None
-                ), "tokenizer is required for flex/varlen attention"
-                extra_kwargs["attention_masks"] = cast(
-                    Decoder, model
-                ).get_attention_masks(
-                    input_batch=dummy_inputs,
-                    tokenizer=tokenizer,
-                    extra_inputs=extra_inputs or {},
-                )
+        extra_kwargs["positions"] = positions
 
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
@@ -390,6 +378,12 @@ def _precompile_aot_fx_trace(
         else contextlib.nullcontext()
     )
 
+    from torchtitan.experiments.graph_trainer.common_utils import (
+        maybe_register_blockmask_pytree_node,
+    )
+
+    maybe_register_blockmask_pytree_node()
+
     logger.info("Tracing fwd+loss+bwd via make_fx...")
     with loss_parallel_ctx:
         traced_result = trace_train_step(fwd_bwd_fn)(
@@ -408,7 +402,7 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
-    from torchtitan.experiments.graph_trainer.bucketing import (
+    from torchtitan.experiments.graph_trainer.fsdp_passes import (
         joint_transformer_block_bucketing_reordering_pass,
     )
     from torchtitan.experiments.graph_trainer.passes import (
@@ -417,6 +411,19 @@ def _precompile_aot_fx_trace(
     )
 
     passes = compile_time_passes(traced_result, config)
+
+    # TODO: Remove this filter once upstream manual_overlap_bucketing
+    # supports make_fx-traced graphs where collective group_name args
+    # are FX Node references instead of string literals. The bucketing
+    # and comm_analysis code crashes with
+    # "AttributeError: 'Node' object has no attribute 'size'" or
+    # "assert isinstance(group_name, str)".
+    passes = [
+        p
+        for p in passes
+        if getattr(p, "func", p)
+        is not joint_transformer_block_bucketing_reordering_pass
+    ]
 
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
