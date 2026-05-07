@@ -398,8 +398,6 @@ def apply_cpu_offload_pass(
         ), f"Node {node.name} tagged for offload has no 'val' metadata"
 
         device = val.device
-        node_custom = node.meta.get("custom", {})
-
         # --- Forward: async GPU->CPU offload right after production ---
         with gm.graph.inserting_after(node):
             offload_node = gm.graph.call_function(
@@ -427,7 +425,7 @@ def apply_cpu_offload_pass(
             )
             reload_node.meta["val"] = val
             reload_node.meta["autograd_backward"] = True
-            reload_node.meta["custom"] = dict(node_custom)
+            reload_node.meta["custom"] = dict(node.meta.get("custom", {}))
 
         with gm.graph.inserting_before(first_consumer):
             wait_node = gm.graph.call_function(
@@ -458,7 +456,7 @@ def apply_cpu_offload_pass(
 
     # 5. Per-group backward reload prefetch.
     if prefetch_lookahead > 0:
-        prefetch_reloads(gm, prefetch_lookahead)
+        prefetched = prefetch_reloads(gm, prefetch_lookahead)
 
     gm.graph.lint()
     gm.recompile()
@@ -561,7 +559,7 @@ def defer_offload_waits(
 def prefetch_reloads(
     gm: torch.fx.GraphModule,
     n_layers: int,
-) -> None:
+) -> int:
     """Move ao.reload nodes N layers earlier in the backward for prefetching.
 
     Counts by layer transitions rather than raw regions, because
@@ -593,7 +591,7 @@ def prefetch_reloads(
             current_layer = lid
 
     if not bwd_anchors:
-        return
+        return 0
 
     # Build layer order for counting by layer transitions.
     # Sorted by bwd_idx ascending = backward execution order (descending layer ID).
@@ -615,7 +613,7 @@ def prefetch_reloads(
             reload_info.append((node, layer_id))
 
     if not reload_info:
-        return
+        return 0
 
     moved = 0
     for reload_node, layer_id in reload_info:
@@ -641,3 +639,4 @@ def prefetch_reloads(
         logger.info(
             f"CPU offload prefetch: moved {moved} reloads {n_layers} layer(s) ahead"
         )
+    return moved

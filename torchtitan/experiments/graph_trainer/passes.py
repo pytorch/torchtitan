@@ -25,20 +25,12 @@ from collections.abc import Callable
 
 import torch
 from torch._inductor.compile_fx import compile_fx_inner
-from torch._inductor.fx_passes.bucketing import (
-    is_all_gather_into_tensor as is_all_gather,
-)
-from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
-from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.experiments.graph_trainer.bucketing import (
-    joint_transformer_block_bucketing_reordering_pass,
-)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
     _is_backward_node,
@@ -53,6 +45,13 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
 )
+from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    autobucketing_reordering_pass,
+    fsdp_reshard_after_fwd_pass,
+    joint_transformer_block_bucketing_reordering_pass,
+    overlap_fsdp_ag_rs_pass,
+    transformer_block_bucketing_reordering_pass,
+)
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
 )
@@ -61,9 +60,6 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
-)
-from torchtitan.experiments.graph_trainer.reshard_after_forward import (
-    annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
 
@@ -141,7 +137,13 @@ def compile_time_passes(
     they run at trace time via ``construct_default_graph_passes``.
 
     cudagraph is excluded because it needs to re-capture the graph into
-    an in-memory CUDA graph at runtime
+    an in-memory CUDA graph at runtime.
+
+    ``overlap_fsdp_ag_rs_pass`` runs immediately before
+    ``joint_transformer_block_bucketing_reordering_pass`` so that
+    forward+backward all-gathers end up on a separate CUDA stream from
+    reduce-scatters (enabling AG/RS overlap in backward). It is a no-op
+    when the graph contains no FSDP all-gathers.
     """
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
@@ -164,6 +166,7 @@ def compile_time_passes(
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
         ),
         selective_activation_remat_pass,
+        overlap_fsdp_ag_rs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
@@ -296,36 +299,6 @@ def apply_graph_passes(
             tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
             after_snapshot = snapshot_graph(gm)
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
-    return gm
-
-
-def autobucketing_reordering_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
-) -> torch.fx.GraphModule:
-    """
-    Apply autobucketing and reordering optimization.
-
-    This pass applies schedule_overlap_bucketing with collective_bucketing enabled
-    to optimize comm/compute overlap patterns in the graph.
-    """
-    schedule_overlap_bucketing(gm, collective_bucketing=True)
-    gm.recompile()
-    return gm
-
-
-def transformer_block_bucketing_reordering_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    fsdp_manual_buckets,
-) -> torch.fx.GraphModule:
-    """
-    Apply aten-level manual bucketing and reordering optimization.
-    """
-    manual_overlap_bucketing(
-        gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
-    )
-    gm.recompile()
     return gm
 
 
@@ -862,23 +835,6 @@ def selective_activation_remat_pass(
     return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
-# Apply activation checkpointing on joint graph before partitioner
-def fsdp_reshard_after_fwd_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    reshard_after_forward: bool,
-) -> torch.fx.GraphModule:
-    # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
-    # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
-    #   to CheckpointPolicy.MUST_RECOMPUTE.
-    # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
-    #   to CheckpointPolicy.MUST_SAVE.
-    gm = annotate_fsdp_all_gather(gm, reshard_after_forward)
-    gm.recompile()
-    return gm
-
-
 def full_inductor_compilation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple
 ) -> torch.fx.GraphModule:
@@ -931,46 +887,6 @@ def full_inductor_compilation_pass(
         return output_code(list(args))
 
     gm.forward = _compiled_forward
-    return gm
-
-
-def reassign_to_pg_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    source_pg_name: str,
-    target_pg_name: str,
-) -> torch.fx.GraphModule:
-    """
-    Reassign all-gather nodes from one process group to another.
-
-    This pass rewrites all-gather nodes whose PG matches ``source_pg_name`` to use
-    ``target_pg_name`` instead.  Since each NCCL PG gets its own CUDA stream, this
-    can be used to separate AG and RS onto different streams (e.g. for AG/RS
-    overlap in the backward pass).
-
-    Must be applied BEFORE bucketing passes so that bucketed all-gathers inherit
-    the new PG name.
-
-    Args:
-        gm: The graph module (forward or backward)
-        example_inputs: Example inputs (unused, required by pass interface)
-        source_pg_name: The group_name of the process group to match
-        target_pg_name: The group_name of the process group to assign
-    """
-    count = 0
-    for node in gm.graph.nodes:
-        if is_all_gather(node):
-            # AG args: (input_tensor, group_size, group_name)
-            if node.args[2] == source_pg_name:
-                node.args = (node.args[0], node.args[1], target_pg_name)
-                count += 1
-    if count > 0:
-        logger.info(
-            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
-            f"to PG {target_pg_name}"
-        )
-    gm.recompile()
     return gm
 
 
