@@ -55,6 +55,10 @@ class GraphTrainerCompileConfig(CompileConfig):
             the cpu_offload_budget_gb budget.
     """
 
+    pass_pipeline: str = "default"
+    """Pass pipeline selection. Controls which graph pass pipeline, post-init
+    hooks, and pre-train-step hooks are activated."""
+
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
     Inductor compilation strategy. Mutually exclusive options:
