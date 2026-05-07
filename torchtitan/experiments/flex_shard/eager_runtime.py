@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import _get_device_handle
 
 from .module_wrapping import EagerParamAccessState
 from .sharding_metadata import (
@@ -72,6 +74,7 @@ class PendingReduceGrad:
 class AllGatherContext:
     """Communication streams for batched collectives."""
 
+    device_handle: ModuleType
     all_gather_stream: torch.Stream
     reduce_scatter_stream: torch.Stream
     buckets: list[AllGatherBucket] = field(default_factory=list)
@@ -213,13 +216,15 @@ class _BucketAllGather(torch.autograd.Function):
                     runtime.context.reduce_scatter_stream,
                     debug_fqn=runtime.debug_fqn,
                 )
-                with torch.cuda.stream(runtime.context.reduce_scatter_stream):
+                with runtime.context.device_handle.stream(
+                    runtime.context.reduce_scatter_stream
+                ):
                     sharded_grads = result.finish()
                     result.sharded_grads = _accumulate_sharded_grads(
                         valid_param_refs,
                         sharded_grads,
                     )
-                    result.event = torch.cuda.Event()
+                    result.event = runtime.context.device_handle.Event()
                     result.event.record(runtime.context.reduce_scatter_stream)
                 runtime.context.reduce_scatter_states.append(PendingReduceGrad(result))
                 _queue_reduce_scatter_wait(runtime.context)
@@ -240,9 +245,11 @@ def _get_or_create_comm_context(
 
     context = contexts.get(device)
     if context is None:
+        device_handle = _get_device_handle(device.type)
         context = AllGatherContext(
-            all_gather_stream=torch.cuda.Stream(device=device, priority=-1),
-            reduce_scatter_stream=torch.cuda.Stream(device=device, priority=-1),
+            device_handle=device_handle,
+            all_gather_stream=device_handle.Stream(priority=-1),
+            reduce_scatter_stream=device_handle.Stream(priority=-1),
         )
         contexts[device] = context
     return context
@@ -428,8 +435,8 @@ def _install_batched_allgather_hooks(
 ) -> None:
     """Install pre/post forward hooks for batched per-bucket all-gather.
 
-    In eager mode, each DStorage's pre-forward hook runs a single batched
-    Placement.unshard() call (one NCCL collective per bucket), then sets
+    In eager mode, each DStorage's pre-forward hook starts a single batched
+    Placement.begin_unshard() call (one collective per bucket), then sets
     _pre_gathered on each parameter access state so the property getter can
     return the hook-provided tensor.
 
@@ -454,20 +461,20 @@ def _install_batched_allgather_hooks(
         if not param_entries:
             continue
 
-        ag_context = None
-        if storage.byte_storage.device.type == "cuda":
-            device = storage.byte_storage.device
-            ag_context = _get_or_create_comm_context(storage._module, device)
-        ag_bucket = None
-        if ag_context is not None:
-            ag_bucket = AllGatherBucket(
-                storage=storage,
-                placement=placement,
-                entries=param_entries,
-                infos=infos,
-                debug_fqn=_get_storage_debug_fqn(storage),
-                use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
-            )
+        comm_device = storage.byte_storage.device
+        for _, _, param_state, _ in param_entries:
+            if param_state.compute_device is not None:
+                comm_device = param_state.compute_device
+                break
+        ag_context = _get_or_create_comm_context(storage._module, comm_device)
+        ag_bucket = AllGatherBucket(
+            storage=storage,
+            placement=placement,
+            entries=param_entries,
+            infos=infos,
+            debug_fqn=_get_storage_debug_fqn(storage),
+            use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
+        )
         use_autograd_unshard = _storage_uses_bucket_autograd_unshard(storage)
 
         def make_hooks(
@@ -557,7 +564,7 @@ def _install_batched_allgather_hooks(
                             all_gather_context.reduce_scatter_stream,
                             debug_fqn=all_gather_bucket.debug_fqn,
                         )
-                        with torch.cuda.stream(
+                        with all_gather_context.device_handle.stream(
                             all_gather_context.reduce_scatter_stream
                         ):
                             sharded_grads = result.finish()
@@ -565,7 +572,7 @@ def _install_batched_allgather_hooks(
                                 [(leaf, name) for leaf, name, _ in valid],
                                 sharded_grads,
                             )
-                            result.event = torch.cuda.Event()
+                            result.event = all_gather_context.device_handle.Event()
                             result.event.record(
                                 all_gather_context.reduce_scatter_stream
                             )
@@ -694,7 +701,6 @@ def _install_batched_allgather_hooks(
             continue
         target.register_forward_pre_hook(pre_hook)
         target.register_forward_hook(post_hook)
-        if ag_context is not None and ag_bucket is not None:
-            ag_context.buckets.append(ag_bucket)
+        ag_context.buckets.append(ag_bucket)
         for _, _, param_state, _ in param_entries:
             setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)

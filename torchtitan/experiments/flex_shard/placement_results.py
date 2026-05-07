@@ -11,7 +11,9 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 import torch
+from torch.distributed.device_mesh import _get_device_handle
 
+from .placements import PlacementReduceGradResult, PlacementUnshardResult
 from .utils import _with_fqn
 
 if TYPE_CHECKING:
@@ -39,7 +41,7 @@ class StreamHandoff:
         device_handle: ModuleType | None = None,
     ) -> None:
         if device_handle is None:
-            device_handle = getattr(torch, tensor.device.type)
+            device_handle = _get_device_handle(tensor.device.type)
         self._tensor: torch.Tensor | None = tensor
         self._event = ready_event
         self._release_stream = release_stream
@@ -69,38 +71,6 @@ class StreamHandoff:
             pass
 
 
-class PlacementUnshardResult:
-    """Result handle for a placement-owned unshard operation."""
-
-    def finish(self) -> list[torch.Tensor]:
-        """Wait for the unshard and return full parameters."""
-        raise NotImplementedError
-
-    def wait(self) -> None:
-        """Wait until the unshard result is usable on the current stream."""
-        raise NotImplementedError
-
-    def release_buffers(self) -> None:
-        """Release temporary buffers owned by the unshard operation."""
-        raise NotImplementedError
-
-
-class PlacementReduceGradResult:
-    """Result handle for a placement-owned gradient reduction operation."""
-
-    def finish(self) -> list[torch.Tensor]:
-        """Wait for the reduction and return local gradient shards."""
-        raise NotImplementedError
-
-    def wait(self) -> None:
-        """Wait until the reduce-grad result is usable on the current stream."""
-        raise NotImplementedError
-
-    def release_buffers(self, release_sharded_grads: bool) -> None:
-        """Release temporary buffers owned by the reduce-grad operation."""
-        raise NotImplementedError
-
-
 @dataclass
 class AsyncAllGatherResult(PlacementUnshardResult):
     """State needed to finish an async all-gather launched on a side stream."""
@@ -111,6 +81,7 @@ class AsyncAllGatherResult(PlacementUnshardResult):
     per_rank_param_offsets: list[list[int]]
     event: torch.Event | None
     send_buf: torch.Tensor | None
+    device_handle: ModuleType
     debug_fqn: str | None
 
     def finish(self) -> list[torch.Tensor]:
@@ -152,8 +123,8 @@ class AsyncAllGatherResult(PlacementUnshardResult):
             device = self.send_buf.device
         else:
             return
-        if device.type == "cuda" and self.event is not None:
-            torch.cuda.current_stream(device).wait_event(self.event)
+        if self.event is not None:
+            self.device_handle.current_stream(device).wait_event(self.event)
 
     def release_buffers(self) -> None:
         """Release raw all-gather buffers after current-stream work is queued."""
@@ -163,20 +134,20 @@ class AsyncAllGatherResult(PlacementUnshardResult):
             device = self.send_buf.device
         else:
             return
-        if device.type != "cuda":
-            self.gathered.clear()
-            self.send_buf = None
-            return
 
-        stream = torch.cuda.current_stream(device)
-        event = torch.cuda.Event()
+        stream = self.device_handle.current_stream(device)
+        event = self.device_handle.Event()
         event.record(stream)
         handoffs: list[StreamHandoff] = []
         if self.send_buf is not None:
-            handoffs.append(StreamHandoff(self.send_buf, event, stream))
+            handoffs.append(
+                StreamHandoff(self.send_buf, event, stream, self.device_handle)
+            )
             self.send_buf = None
         while self.gathered:
-            handoffs.append(StreamHandoff(self.gathered.pop(), event, stream))
+            handoffs.append(
+                StreamHandoff(self.gathered.pop(), event, stream, self.device_handle)
+            )
         for handoff in handoffs:
             handoff.release()
 
@@ -189,6 +160,7 @@ class AsyncReduceScatterResult(PlacementReduceGradResult):
     event: torch.Event | None
     send_buf: torch.Tensor | None
     recv_buf: torch.Tensor | None
+    device_handle: ModuleType
     debug_fqn: str | None
 
     def finish(self) -> list[torch.Tensor]:
@@ -204,8 +176,8 @@ class AsyncReduceScatterResult(PlacementReduceGradResult):
             device = self.send_buf.device
         else:
             return
-        if device.type == "cuda" and self.event is not None:
-            torch.cuda.current_stream(device).wait_event(self.event)
+        if self.event is not None:
+            self.device_handle.current_stream(device).wait_event(self.event)
 
     def release_buffers(self, release_sharded_grads: bool) -> None:
         """Release pending reduce-scatter buffers after its completion wait."""
@@ -222,13 +194,14 @@ class AsyncReduceScatterResult(PlacementReduceGradResult):
         if not tensors:
             return
         device = tensors[0].device
-        if device.type != "cuda":
-            return
 
-        stream = torch.cuda.current_stream(device)
-        event = torch.cuda.Event()
+        stream = self.device_handle.current_stream(device)
+        event = self.device_handle.Event()
         event.record(stream)
-        handoffs = [StreamHandoff(tensor, event, stream) for tensor in tensors]
+        handoffs = [
+            StreamHandoff(tensor, event, stream, self.device_handle)
+            for tensor in tensors
+        ]
         tensors.clear()
         for handoff in handoffs:
             handoff.release()

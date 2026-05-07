@@ -10,6 +10,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from .sharding_metadata import (
@@ -235,11 +236,8 @@ def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:
     """Return the current rank's device for ``mesh``."""
     if mesh.device_type == "cpu":
         return torch.device("cpu")
-    if mesh.device_type == "cuda":
-        return torch.device("cuda", torch.cuda.current_device())
-    try:
-        device_module = torch.get_device_module(mesh.device_type)
-    except (AttributeError, RuntimeError):
+    device_module = _get_device_handle(mesh.device_type)
+    if device_module is None:
         return torch.device(mesh.device_type)
     return torch.device(mesh.device_type, device_module.current_device())
 

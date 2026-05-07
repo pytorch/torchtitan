@@ -12,14 +12,10 @@ from typing import Hashable, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.device_mesh import _get_device_handle
 from torch._prims_common import make_contiguous_strides_for
+from typing_extensions import override
 
-from .comm_buffer_lifetime import (
-    AsyncAllGatherResult,
-    AsyncReduceScatterResult,
-    PlacementReduceGradResult,
-    PlacementUnshardResult,
-)
 from .utils import _with_fqn
 
 if TYPE_CHECKING:
@@ -35,6 +31,38 @@ class LocalStorageLayout:
     local_shape: torch.Size
     local_numel: int
     storage_nbytes: int
+
+
+class PlacementUnshardResult:
+    """Result handle for a placement-owned unshard operation."""
+
+    def finish(self) -> list[torch.Tensor]:
+        """Wait for the unshard and return full parameters."""
+        raise NotImplementedError
+
+    def wait(self) -> None:
+        """Wait until the unshard result is usable on the current stream."""
+        raise NotImplementedError
+
+    def release_buffers(self) -> None:
+        """Release temporary buffers owned by the unshard operation."""
+        raise NotImplementedError
+
+
+class PlacementReduceGradResult:
+    """Result handle for a placement-owned gradient reduction operation."""
+
+    def finish(self) -> list[torch.Tensor]:
+        """Wait for the reduction and return local gradient shards."""
+        raise NotImplementedError
+
+    def wait(self) -> None:
+        """Wait until the reduce-grad result is usable on the current stream."""
+        raise NotImplementedError
+
+    def release_buffers(self, release_sharded_grads: bool) -> None:
+        """Release temporary buffers owned by the reduce-grad operation."""
+        raise NotImplementedError
 
 
 class Placement:
@@ -60,10 +88,6 @@ class Placement:
     def bucket_compatibility_key(self) -> Hashable:
         """Return a key for deciding if placements can share one bucket."""
         return (type(self), repr(self))
-
-    def supports_graph_capture(self, device: torch.device) -> bool:
-        """Return whether this placement supports graph capture."""
-        return False
 
     def compute_local_numel(
         self, global_shape: torch.Size, rank: int, world_size: int
@@ -172,8 +196,16 @@ class Placement:
         infos: list[ParamInfo],
         mesh: DeviceMesh,
     ) -> list[torch.Tensor]:
-        """Batched gather communication for all params in a storage unit."""
-        raise NotImplementedError
+        """Convenience wrapper for a same-stream unshard."""
+        device_handle = _get_device_handle(tensors[0].device.type)
+        result = self.begin_unshard(
+            tensors,
+            infos,
+            mesh,
+            device_handle.current_stream(tensors[0].device),
+            debug_fqn=None,
+        )
+        return result.finish()
 
     def reduce_grad(
         self,
@@ -181,15 +213,23 @@ class Placement:
         infos: list[ParamInfo],
         mesh: DeviceMesh,
     ) -> list[torch.Tensor]:
-        """Batched reduce communication for all param gradients in a storage unit."""
-        raise NotImplementedError
+        """Convenience wrapper for a same-stream gradient reduction."""
+        device_handle = _get_device_handle(tensors[0].device.type)
+        result = self.begin_reduce_grad(
+            tensors,
+            infos,
+            mesh,
+            device_handle.current_stream(tensors[0].device),
+            debug_fqn=None,
+        )
+        return result.finish()
 
     def begin_unshard(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
-        all_gather_stream: torch.Stream | None,
+        all_gather_stream: torch.Stream,
         debug_fqn: str | None = None,
     ) -> PlacementUnshardResult:
         """Begin an unshard operation, possibly asynchronously."""
@@ -200,7 +240,7 @@ class Placement:
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
-        reduce_scatter_stream: torch.Stream | None,
+        reduce_scatter_stream: torch.Stream,
         debug_fqn: str | None = None,
     ) -> PlacementReduceGradResult:
         """Begin a gradient reduction operation, possibly asynchronously."""
@@ -234,6 +274,7 @@ class Shard(Placement):
     def __repr__(self) -> str:
         return f"Shard({self.dim})"
 
+    @override
     def validate_param(self, fqn: str, param: nn.Parameter) -> None:
         if self.dim >= param.ndim:
             raise ValueError(
@@ -241,6 +282,7 @@ class Shard(Placement):
                 f"Shard(dim={self.dim}) is out of range."
             )
 
+    @override
     def validate_bucket(
         self,
         bucket_idx: int,
@@ -258,9 +300,11 @@ class Shard(Placement):
                 "placements."
             )
 
+    @override
     def bucket_compatibility_key(self) -> Hashable:
         return (Shard, self.dim)
 
+    @override
     def compute_local_shape(
         self, global_shape: torch.Size, rank: int, world_size: int
     ) -> torch.Size:
@@ -272,6 +316,7 @@ class Shard(Placement):
         shape[self.dim] = local_dim
         return torch.Size(shape)
 
+    @override
     def compute_local_numel(
         self, global_shape: torch.Size, rank: int, world_size: int
     ) -> int:
@@ -281,6 +326,7 @@ class Shard(Placement):
             numel *= d
         return numel
 
+    @override
     def extract_local_shard(
         self,
         param: torch.Tensor,
@@ -292,6 +338,7 @@ class Shard(Placement):
             chunks.append(chunks[0].new_empty(0))
         return chunks[rank].contiguous()
 
+    @override
     def assemble_from_shards(
         self,
         per_rank_shards: list[torch.Tensor],
@@ -303,33 +350,22 @@ class Shard(Placement):
             return torch.cat(non_empty, dim=self.dim)
         return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
 
-    def unshard(
-        self,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        result = self.begin_unshard(
-            tensors,
-            infos,
-            mesh,
-            all_gather_stream=None,
-            debug_fqn=None,
-        )
-        return result.finish()
-
+    @override
     def begin_unshard(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
-        all_gather_stream: torch.Stream | None,
+        all_gather_stream: torch.Stream,
         debug_fqn: str | None = None,
     ) -> PlacementUnshardResult:
+        from .placement_results import AsyncAllGatherResult
+
         ws = mesh.size()
         pg = mesh.get_group()
         dtype = tensors[0].dtype
         device = tensors[0].device
+        device_handle = _get_device_handle(device.type)
 
         # Pack local shards into one flat buffer
         with torch.profiler.record_function(
@@ -357,32 +393,14 @@ class Shard(Placement):
                 for r in range(ws)
             ]
 
-        if all_gather_stream is None or device.type != "cuda":
-            label = _with_fqn("FlexShard::all_gather", debug_fqn)
-            with dist.record_comm(label):
-                dist.all_gather(gathered, send_buf, group=pg)
-            event = None
-            if device.type == "cuda":
-                event = torch.cuda.Event()
-                event.record(torch.cuda.current_stream(device))
-            return AsyncAllGatherResult(
-                gathered=gathered,
-                infos=infos,
-                mesh=mesh,
-                per_rank_param_offsets=per_rank_param_offsets,
-                event=event,
-                send_buf=send_buf,
-                debug_fqn=debug_fqn,
-            )
-
-        copy_in_done = torch.cuda.Event()
-        copy_in_done.record(torch.cuda.current_stream(device))
-        with torch.cuda.stream(all_gather_stream):
+        copy_in_done = device_handle.Event()
+        copy_in_done.record(device_handle.current_stream(device))
+        with device_handle.stream(all_gather_stream):
             all_gather_stream.wait_event(copy_in_done)
             label = _with_fqn("FlexShard::all_gather", debug_fqn)
             with dist.record_comm(label):
                 dist.all_gather(gathered, send_buf, group=pg)
-            event = torch.cuda.Event()
+            event = device_handle.Event()
             event.record(all_gather_stream)
         return AsyncAllGatherResult(
             gathered=gathered,
@@ -391,37 +409,27 @@ class Shard(Placement):
             per_rank_param_offsets=per_rank_param_offsets,
             event=event,
             send_buf=send_buf,
+            device_handle=device_handle,
             debug_fqn=debug_fqn,
         )
 
-    def reduce_grad(
-        self,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        result = self.begin_reduce_grad(
-            tensors,
-            infos,
-            mesh,
-            reduce_scatter_stream=None,
-            debug_fqn=None,
-        )
-        return result.finish()
-
+    @override
     def begin_reduce_grad(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
-        reduce_scatter_stream: torch.Stream | None,
+        reduce_scatter_stream: torch.Stream,
         debug_fqn: str | None = None,
     ) -> PlacementReduceGradResult:
+        from .placement_results import AsyncReduceScatterResult
+
         ws = mesh.size()
         rank = mesh.get_local_rank()
         pg = mesh.get_group()
         dtype = tensors[0].dtype
         device = tensors[0].device
+        device_handle = _get_device_handle(device.type)
 
         with torch.profiler.record_function(
             _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
@@ -459,33 +467,10 @@ class Shard(Placement):
                     flat_offset += padded_size.numel() // ws
                 return results
 
-        if reduce_scatter_stream is None or device.type != "cuda":
-            recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
-            label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
-            with dist.record_comm(label):
-                dist.reduce_scatter_tensor(
-                    output=recv_buf,
-                    input=send_buf,
-                    op=dist.ReduceOp.AVG,
-                    group=pg,
-                )
-            sharded_grads = _copy_out(recv_buf)
-            event = None
-            if device.type == "cuda":
-                event = torch.cuda.Event()
-                event.record(torch.cuda.current_stream(device))
-            return AsyncReduceScatterResult(
-                sharded_grads=sharded_grads,
-                event=event,
-                send_buf=send_buf,
-                recv_buf=recv_buf,
-                debug_fqn=debug_fqn,
-            )
-
-        copy_in_done = torch.cuda.Event()
-        copy_in_done.record(torch.cuda.current_stream(device))
+        copy_in_done = device_handle.Event()
+        copy_in_done.record(device_handle.current_stream(device))
         recv_buf: torch.Tensor
-        with torch.cuda.stream(reduce_scatter_stream):
+        with device_handle.stream(reduce_scatter_stream):
             reduce_scatter_stream.wait_event(copy_in_done)
             recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
             label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
@@ -497,13 +482,14 @@ class Shard(Placement):
                     group=pg,
                 )
             sharded_grads = _copy_out(recv_buf)
-            event = torch.cuda.Event()
+            event = device_handle.Event()
             event.record(reduce_scatter_stream)
         return AsyncReduceScatterResult(
             sharded_grads=sharded_grads,
             event=event,
             send_buf=send_buf,
             recv_buf=recv_buf,
+            device_handle=device_handle,
             debug_fqn=debug_fqn,
         )
 

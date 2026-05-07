@@ -243,7 +243,7 @@ def flex_shard(
         _apply_reshard_after_forward(module, reshard_storages)
 
     # Install batched all-gather hooks for eager mode when the storage layout
-    # supports the batched Placement.unshard() path.
+    # supports the batched Placement.begin_unshard() path.
     _install_batched_allgather_hooks(storages, module_param_map)
 
     return module
