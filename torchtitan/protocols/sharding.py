@@ -51,13 +51,17 @@ class LocalMapConfig:
 
     Attributes:
         in_placements: Per-input NamedPlacements (positional: q, k, v).
-        out_placements: Per-output NamedPlacements.
-        in_grad_placements: Per-input-gradient NamedPlacements.
+            ``None`` for non-tensor args (e.g. ints, lists) -- those pass
+            through ``local_map`` without DTensor conversion.
+        out_placements: Per-output NamedPlacements. ``None`` for non-
+            tensor outputs.
+        in_grad_placements: Per-input-gradient NamedPlacements. ``None``
+            for non-tensor args (no gradient flows through them).
     """
 
-    in_placements: tuple[NamedPlacement, ...]
-    out_placements: tuple[NamedPlacement, ...]
-    in_grad_placements: tuple[NamedPlacement, ...]
+    in_placements: tuple[NamedPlacement | None, ...]
+    out_placements: tuple[NamedPlacement | None, ...]
+    in_grad_placements: tuple[NamedPlacement | None, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}

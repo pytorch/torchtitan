@@ -13,12 +13,9 @@ from einops import rearrange
 from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, SiLU
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.module import Module, Sequential
-
-LayerNorm = Module.from_nn_module(nn.LayerNorm)
-GELU = Module.from_nn_module(nn.GELU)
-SiLU = Module.from_nn_module(nn.SiLU)
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
