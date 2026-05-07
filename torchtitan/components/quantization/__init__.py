@@ -26,12 +26,6 @@ class QuantizedLinearConfig(Linear.Config):
     pass
 
 
-class _QuantizedGroupedExpertsConfig:
-    """Marker base for dynamically created quantized GroupedExperts configs."""
-
-    pass
-
-
 class QuantizationConverter(ModelConfigConverter):
     """Base class for quantization converters.
 
@@ -66,5 +60,4 @@ __all__ = [
     "MXFP8LinearConverter",
     "QuantizationConverter",
     "QuantizedLinearConfig",
-    "_QuantizedGroupedExpertsConfig",
 ]

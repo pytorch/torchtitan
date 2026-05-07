@@ -9,7 +9,6 @@ from importlib.util import find_spec
 from typing import Literal
 
 from torchtitan.components.quantization import (
-    _QuantizedGroupedExpertsConfig,
     QuantizationConverter,
     QuantizedLinearConfig,
 )
@@ -120,7 +119,7 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
 
     class MXFP8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
-        class Config(parent_config_cls, _QuantizedGroupedExpertsConfig):  # type: ignore[misc]
+        class Config(parent_config_cls):  # type: ignore[misc]
             recipe_name: str = "mxfp8_rceil"
 
         def __init__(self, config: Config):
