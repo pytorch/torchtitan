@@ -320,6 +320,11 @@ class ChatDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._sample_processor = sample_processor
+        # Token IDs whose presence right after an assistant content span
+        # marks an end-of-turn boundary we want supervision to cover (EOS
+        # plus any model-specific EOT marker). Treating every special token
+        # as a terminator is broad, but verified safe for the in-tree
+        # templates: llama3, llama4, qwen3, deepseek_v3, gpt_oss.
         self._assistant_end_token_ids = {self._eos_id}
         if isinstance(tokenizer, HuggingFaceTokenizer):
             self._assistant_end_token_ids.update(
@@ -393,46 +398,33 @@ class ChatDataset(IterableDataset, Stateful):
         messages: list[dict[str, Any]],
         full_tokens: list[int],
     ) -> list[tuple[int, int]]:
-        """Find token spans for each assistant turn's rendered content."""
-        spans = []
+        """Token spans of each assistant turn's rendered content in full_tokens.
 
-        for assistant_idx, message in enumerate(messages):
+        Re-render the conversation with one assistant turn blanked at a time
+        and take the longest common prefix and suffix against full_tokens.
+        The diverging region in the middle is that turn's content. Because
+        both renderings share the same chat template structure, per-turn
+        conditionals (Qwen3's <think> block, etc.) fire identically and
+        cancel out — only the swapped content is left to diff.
+
+        Each span is then extended by one token if the next token is special
+        so supervision covers per-model turn terminators (EOS, <|eot_id|>,
+        <|im_end|>, ...).
+        """
+        spans = []
+        for i, message in enumerate(messages):
             if message["role"] != "assistant":
                 continue
 
-            # Same conversation structure, just empty content for this turn.
-            # Strips extra fields (e.g. reasoning_content) so template
-            # conditionals like Qwen3's <think> insertion also differ.
-            blanked_messages = [
-                {"role": msg["role"], "content": ""} if idx == assistant_idx else msg
-                for idx, msg in enumerate(messages)
+            # Strip extra fields (e.g. reasoning_content) so template
+            # conditionals see the same shape in both renderings.
+            blanked = [
+                {"role": m["role"], "content": ""} if j == i else m
+                for j, m in enumerate(messages)
             ]
+            _, blanked_tokens = self._render_conversation(blanked)
 
-            _, dummy_tokens = self._render_conversation(blanked_messages)
-
-            # Scan from front to find where they diverge.
-            start = 0
-            max_prefix = min(len(full_tokens), len(dummy_tokens))
-            while start < max_prefix and full_tokens[start] == dummy_tokens[start]:
-                start += 1
-
-            # Scan from back to find where they reconverge.
-            end = len(full_tokens)
-            dummy_end = len(dummy_tokens)
-            while (
-                end > start
-                and dummy_end > start
-                and full_tokens[end - 1] == dummy_tokens[dummy_end - 1]
-            ):
-                end -= 1
-                dummy_end -= 1
-
-            if end <= start:
-                raise ValueError("Blanked assistant turn did not produce a token diff")
-
-            # Heuristic: if the next token is a special token, include it so
-            # assistant-only supervision can cover turn terminators such as
-            # EOS or model-specific end-of-turn markers.
+            start, end = self._content_diff(full_tokens, blanked_tokens)
             if (
                 end < len(full_tokens)
                 and full_tokens[end] in self._assistant_end_token_ids
@@ -443,19 +435,42 @@ class ChatDataset(IterableDataset, Stateful):
 
         return spans
 
+    @staticmethod
+    def _content_diff(full: list[int], blanked: list[int]) -> tuple[int, int]:
+        """Return [start, end) — the unique diverging region of `full` vs `blanked`.
+
+        Assumes a single contiguous diff (a property of the blanking
+        construction in `_get_assistant_spans`). Raises if the two
+        sequences are identical.
+        """
+        n = min(len(full), len(blanked))
+        start = 0
+        while start < n and full[start] == blanked[start]:
+            start += 1
+
+        end, blanked_end = len(full), len(blanked)
+        while (
+            end > start
+            and blanked_end > start
+            and full[end - 1] == blanked[blanked_end - 1]
+        ):
+            end -= 1
+            blanked_end -= 1
+
+        if end <= start:
+            raise ValueError("Blanked assistant turn did not produce a token diff")
+
+        return start, end
+
     def _tokenize_sample(
         self, sample: dict[str, Any]
     ) -> tuple[list[int], list[int]] | None:
-        """Tokenize a chat sample and create input/label pairs.
+        """Tokenize a chat sample into (input_ids, label_ids).
 
-        Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
-        label_ids = tokens[1:]. Assistant-only supervision keeps rendered
-        assistant spans and masks everything else with IGNORE_INDEX by diffing
-        the rendered conversation against versions with each assistant turn
-        blanked. We extend each assistant span by one token when the next
-        token is EOS or another special token, allowing supervision of
-        end-of-turn markers. Returns None if the sample exceeds seq_len
-        (dropped to avoid training on truncated responses).
+        input_ids = tokens[:-1], label_ids = tokens[1:]. Positions outside
+        the spans returned by `_get_assistant_spans` are masked with
+        IGNORE_INDEX. Returns None if the sample exceeds seq_len (dropped
+        to avoid training on truncated responses).
         """
         messages = self._sample_processor(sample)
         self._validate_messages(messages)
