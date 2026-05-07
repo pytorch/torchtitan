@@ -210,7 +210,12 @@ class FTCheckpointManager(CheckpointManager):
         begin = time.monotonic()
         logger.info(f"Loading the FT checkpoint at step {step}.")
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        self._load_from_dcp(self.ft_states, checkpoint_id)
+        self.dcp_load(
+            self.ft_states,
+            checkpoint_id=checkpoint_id,
+            from_hf=False,
+            from_quantized=False,
+        )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the ft checkpoint in "

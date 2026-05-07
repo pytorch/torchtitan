@@ -553,36 +553,44 @@ class CheckpointManager(Configurable):
 
         return ret
 
-    def _load_from_hf(
+    def dcp_load(
         self,
         state_dict: dict[str, Any],
         checkpoint_id: str,
-        from_quantized: bool = False,
+        from_hf: bool,
+        from_quantized: bool,
     ) -> None:
-        """Load weights from a HuggingFace checkpoint into ``state_dict``.
-
-        Pure I/O — the caller provides the container (via
-        ``model_wrapper.state_dict()`` then ``model.to_hf()``) and
-        handles conversion back via ``model.from_hf()`` afterward.
+        """Load the checkpoint with dcp.
+        Args:
+            state_dict (dict): The state dict to load.
+            checkpoint_id (str): The checkpoint id to load.
+            from_hf (bool): Whether to load from HuggingFace checkpoint with
+                its own model definition and safetensors format.
         """
-        assert (
-            self.model.sd_adapter is not None
-        ), "trying to load checkpoint in HF safetensors format, but model has no sd_adapter."
-        hf_storage_reader = self.model.sd_adapter.get_hf_storage_reader(
-            checkpoint_id, from_quantized
-        )
-        dcp.load(state_dict, storage_reader=hf_storage_reader)
 
-    def _load_from_dcp(
-        self,
-        state_dict: dict[str, Any],
-        checkpoint_id: str,
-    ) -> None:
-        """Load weights from a DCP checkpoint into ``state_dict``.
+        if from_hf:
+            assert (
+                self.model.sd_adapter is not None
+            ), "trying to load checkpoint in HF safetensors format, but model has no sd_adapter."
+            hf_state_dict = self.model.sd_adapter.to_hf(state_dict)
+            hf_storage_reader = self.model.sd_adapter.get_hf_storage_reader(
+                checkpoint_id, from_quantized
+            )
 
-        Pure I/O — the caller provides the container.
-        """
-        dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            dcp.load(
+                hf_state_dict,
+                storage_reader=hf_storage_reader,
+            )
+
+            state_dict = self.model.sd_adapter.from_hf(hf_state_dict)
+            self.model_wrapper.load_state_dict(state_dict)
+        else:
+            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+
+            # TODO: Since we flatten the model states in state_dict, we need to
+            # manually call load_state_dict() for the model. Need to fix this.
+            if MODEL in self.states:
+                self.model_wrapper.load_state_dict(state_dict)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -699,8 +707,10 @@ class CheckpointManager(Configurable):
             logger.info(f"Loading checkpoint from {checkpoint_id}.")
             self.model_wrapper.mode = StateDictMode.FULL
             states = self._states_to_load(model_only)
-            self._load_from_dcp(states, checkpoint_id)
-            self.model_wrapper.load_state_dict(states)
+            self.dcp_load(
+                states, checkpoint_id=checkpoint_id,
+                from_hf=False, from_quantized=False,
+            )
 
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -756,10 +766,10 @@ class CheckpointManager(Configurable):
 
             self.model_wrapper.mode = load_mode
             sd = self.model_wrapper.state_dict()
-            hf_sd = self.model.to_hf(sd)
-            self._load_from_hf(hf_sd, checkpoint_id, from_quantized)
-            native_sd = self.model.from_hf(hf_sd)
-            self.model_wrapper.load_state_dict(native_sd)
+            self.dcp_load(
+                sd, checkpoint_id=checkpoint_id,
+                from_hf=True, from_quantized=from_quantized,
+            )
             return True
 
         if self.initial_load_path:
@@ -775,8 +785,10 @@ class CheckpointManager(Configurable):
                 sd = self.model_wrapper.state_dict()
             else:
                 sd = self._flattened_model_states_sd()
-            self._load_from_dcp(sd, checkpoint_id)
-            self.model_wrapper.load_state_dict(sd)
+            self.dcp_load(
+                sd, checkpoint_id=checkpoint_id,
+                from_hf=False, from_quantized=False,
+            )
             return True
 
         return False
@@ -846,6 +858,7 @@ class CheckpointManager(Configurable):
         Resume always loads FULL model (base + adapters if present).
         The caller sets ``self.model_wrapper.mode`` to FULL before calling.
         """
+        # For the first step, we will only load the model.
         if model_only:
             return self.states[MODEL].state_dict()
 
@@ -860,6 +873,10 @@ class CheckpointManager(Configurable):
         return self._flattened_model_states_sd(states_to_load)
 
     def _save_last_step(self, curr_step: int) -> None:
+        # We only consider saving model only at the end of the training. So this
+        # won't affect preemption and training resume. We also only allow dtype
+        # conversion when we are checkpointing model only and the current dtype
+        # is not the same as the export dtype at the end of the training.
         if self.last_save_trainable_only:
             save_mode = StateDictMode.TRAINABLE
         else:

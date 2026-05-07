@@ -584,6 +584,7 @@ class TestCheckpointManager(unittest.TestCase):
                 super().__init__()
                 self.weight = nn.Parameter(torch.randn(2, 2))
                 self.bias = nn.Parameter(torch.randn(2))
+                # Register freqs_cis as a buffer (common pattern in transformer models)
                 self.register_buffer("freqs_cis", torch.randn(10, 5), persistent=False)
                 self.other_param = nn.Parameter(torch.randn(3, 3))
 
