@@ -40,6 +40,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model import BaseModel, StateDictMode
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -592,6 +593,7 @@ class CheckpointManager(Configurable):
             if MODEL in self.states:
                 self.model_wrapper.load_state_dict(state_dict)
 
+    @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
         """Save the checkpoint for the current step.
@@ -657,6 +659,7 @@ class CheckpointManager(Configurable):
             f"in {time.monotonic() - begin:.2f} seconds."
         )
 
+    @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.
@@ -708,8 +711,10 @@ class CheckpointManager(Configurable):
             self.model_wrapper.mode = StateDictMode.FULL
             states = self._states_to_load(model_only)
             self.dcp_load(
-                states, checkpoint_id=checkpoint_id,
-                from_hf=False, from_quantized=False,
+                states,
+                checkpoint_id=checkpoint_id,
+                from_hf=False,
+                from_quantized=False,
             )
 
         GarbageCollection.collect("GC collection for checkpoint loading.")
@@ -767,8 +772,10 @@ class CheckpointManager(Configurable):
             self.model_wrapper.mode = load_mode
             sd = self.model_wrapper.state_dict()
             self.dcp_load(
-                sd, checkpoint_id=checkpoint_id,
-                from_hf=True, from_quantized=from_quantized,
+                sd,
+                checkpoint_id=checkpoint_id,
+                from_hf=True,
+                from_quantized=from_quantized,
             )
             return True
 
@@ -786,8 +793,10 @@ class CheckpointManager(Configurable):
             else:
                 sd = self._flattened_model_states_sd()
             self.dcp_load(
-                sd, checkpoint_id=checkpoint_id,
-                from_hf=False, from_quantized=False,
+                sd,
+                checkpoint_id=checkpoint_id,
+                from_hf=False,
+                from_quantized=False,
             )
             return True
 
