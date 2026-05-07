@@ -376,28 +376,26 @@ class ChunkedCELoss(BaseLoss):
 
 
 def _maybe_redistribute_multiply(g: torch.Tensor, grad_output: torch.Tensor) -> torch.Tensor:
-    """Multiply ``g`` by ``grad_output`` for the autograd chain rule,
-    redistributing ``grad_output``'s mesh to match ``g``'s first when both
-    are DTensors on different meshes.
+    """Multiply ``g`` by ``grad_output`` for the autograd chain rule.
 
-    Required because for FSDP+TP layouts ``grad_output`` (= ``ones_like(loss)``
-    at the autograd start) lives on the loss output's mesh — typically the
-    activation mesh ``(tp,)`` — while saved param grads live on the params'
-    mesh ``(fsdp, tp)``. DTensor refuses cross-mesh ``aten.mul.Tensor`` so a
-    naive ``g * grad_output`` would crash. For the only ``grad_output`` shape
-    we actually encounter (a ``Replicate()`` scalar, which is what
-    ``torch.autograd.grad`` constructs for a scalar loss output), the
-    redistribute is a no-op at runtime — no collective fires.
+    Forward returns the scalar loss, so ``grad_output`` here is always a
+    ``Replicate()`` scalar DTensor (or a plain scalar tensor) — a 0-dim
+    tensor cannot be sharded, and ``torch.autograd.grad`` seeds the
+    backward with ``ones_like(loss)``. We extract the local scalar via
+    ``to_local`` rather than ``redistribute``: DTensor's redistribute
+    does not implement cross-mesh comm (raises
+    ``NotImplementedError("Cross device mesh comm not supported yet!")``),
+    so a naive ``g * grad_output`` crashes whenever ``g`` (saved param
+    grad on, e.g., ``(fsdp, tp)``) and ``grad_output`` (loss on, e.g.,
+    ``(tp,)``) live on different meshes. ``to_local`` on a Replicate
+    scalar is local-only — no collective fires — and ``g * scalar`` then
+    broadcasts cleanly regardless of ``g``'s mesh.
     """
-    from torch.distributed.tensor import DTensor, Replicate
+    from torch.distributed.tensor import DTensor
 
-    if (
-        isinstance(g, DTensor)
-        and isinstance(grad_output, DTensor)
-        and g.device_mesh != grad_output.device_mesh
-    ):
-        grad_output = grad_output.redistribute(
-            g.device_mesh, [Replicate()] * g.device_mesh.ndim
+    if isinstance(grad_output, DTensor):
+        grad_output = grad_output.to_local(
+            grad_placements=grad_output.placements
         )
     return g * grad_output
 
