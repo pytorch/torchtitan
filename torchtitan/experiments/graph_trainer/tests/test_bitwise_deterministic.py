@@ -25,8 +25,11 @@ from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
-from torchtitan.components.loss import CrossEntropyLoss
+from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedCELossWithParamGrads,
+)
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
@@ -78,6 +81,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
     annotate_model: Callable
     model_flavor: str
     attn_backend: str = "sdpa"
+
+    def _build_loss_fn(self, trainer_cls: type) -> object:
+        return CrossEntropyLoss.Config().build()
 
     def setUp(self):
         # Disable max_autotune for FlexAttention to ensure bitwise-identical
@@ -132,6 +138,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             model,
             self.model_config,
             trainer_cls,
+            loss_fn=self._build_loss_fn(trainer_cls),
             compile_enable_passes=enable_passes,
             compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
@@ -179,8 +186,13 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)
-        loss_fn = CrossEntropyLoss.Config().build()
+        loss_fn = self._build_loss_fn(GraphTrainer)
         fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+        if isinstance(loss_fn, ChunkedCELoss):
+            lm_head = model.lm_head
+            assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
+            loss_fn.set_lm_head(lm_head)
+            model._skip_lm_head = True
 
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
@@ -349,6 +361,38 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
         )
 
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+
+class TestLlama3ChunkedLossBitwiseDeterministic(BitwiseDeterministicBase):
+    """Bitwise determinism tests for Llama3 with chunked cross-entropy loss."""
+
+    model_registry = staticmethod(llama3_model_registry)
+    model_flavor = "debugmodel"
+    annotate_model = staticmethod(annotate_llama)
+
+    def _build_loss_fn(self, trainer_cls: type) -> ChunkedCELoss:
+        loss_cls = (
+            ChunkedCELossWithParamGrads
+            if trainer_cls is GraphTrainer
+            else ChunkedCELoss
+        )
+        return loss_cls(loss_cls.Config(num_chunks=4))
+
+    def test_aot_fx_trace_vs_eager(self):
+        """aot_fx_trace and eager produce bitwise identical losses and grads."""
+        run_eager = self._run_steps(copy.deepcopy(self.model), Trainer)
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+
+        self._assert_runs_match(run_eager, run_traced, "chunked loss eager vs trace: ")
+
+    def test_precompile_vs_trace(self):
+        """Precompiled aot_fx_trace with chunked loss matches direct trace."""
+        run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
+        run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
+
+        self._assert_runs_match(
+            run_traced, run_precompile, "chunked loss trace vs precompile: "
+        )
 
 
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
