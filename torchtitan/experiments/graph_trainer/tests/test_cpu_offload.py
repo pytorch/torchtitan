@@ -147,8 +147,10 @@ class TestCpuOffloadPass(TestCase):
         )
 
     def test_offload_pass_noop_when_no_tags(self):
-        """cpu_offload_pass should be a no-op when no nodes are tagged."""
-        from torchtitan.experiments.graph_trainer.cpu_offload import cpu_offload_pass
+        """apply_cpu_offload_pass should be a no-op when no nodes are tagged."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+        )
 
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
@@ -159,7 +161,7 @@ class TestCpuOffloadPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         node_count_before = len(list(gm.graph.nodes))
-        gm = cpu_offload_pass(gm)
+        gm = apply_cpu_offload_pass(gm)
         node_count_after = len(list(gm.graph.nodes))
 
         self.assertEqual(
@@ -301,6 +303,235 @@ class TestCpuOffloadPass(TestCase):
             if n.meta.get("recompute") is CheckpointPolicy.MUST_CPU_OFFLOAD
         ]
         self.assertEqual(len(tagged), 0, "Small tensors should not be tagged")
+
+    def test_prefetch_moves_reloads_earlier(self):
+        """Prefetch should move ao.reload N layers earlier in backward."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            _get_reload_layer,
+            apply_cpu_offload_pass,
+            prefetch_reloads,
+            tag_all_offloadable_activations,
+        )
+
+        gm, fwd_nodes, bwd_nodes = self._build_joint_graph(num_layers=4)
+        tag_all_offloadable_activations(gm)
+        apply_cpu_offload_pass(gm, prefetch_lookahead=0)
+
+        # Record pre-prefetch reload positions
+        nodes_before = list(gm.graph.nodes)
+        reload_positions_before = {
+            n: nodes_before.index(n)
+            for n in nodes_before
+            if n.op == "call_function" and n.target is torch.ops.ao.reload.default
+        }
+        self.assertGreater(len(reload_positions_before), 0)
+
+        prefetch_reloads(gm, n_layers=1)
+
+        nodes = list(gm.graph.nodes)
+        moved_count = 0
+        for node in nodes:
+            if not (
+                node.op == "call_function"
+                and node.target is torch.ops.ao.reload.default
+            ):
+                continue
+            wait_node = next(
+                u for u in node.users if u.target is torch.ops.ao.wait_tensor.default
+            )
+            # Reload must always precede its wait
+            self.assertLess(nodes.index(node), nodes.index(wait_node))
+
+            # Check that moved reloads are now earlier than before
+            layer_id = _get_reload_layer(node)
+            if node in reload_positions_before:
+                new_pos = nodes.index(node)
+                old_pos = reload_positions_before[node]
+                if new_pos < old_pos:
+                    moved_count += 1
+
+        self.assertGreater(moved_count, 0, "Expected at least one reload to be moved")
+
+    def test_prefetch_noop_without_offloads(self):
+        """Prefetch should be a no-op when no offload ops exist."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import prefetch_reloads
+
+        gm, _, _ = self._build_joint_graph(num_layers=3)
+        nodes_before = len(list(gm.graph.nodes))
+        prefetch_reloads(gm, n_layers=1)
+        nodes_after = len(list(gm.graph.nodes))
+        self.assertEqual(nodes_before, nodes_after)
+
+    def test_prefetch_via_apply_pass(self):
+        """apply_cpu_offload_pass with prefetch_lookahead should insert and move reloads."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
+        )
+
+        def _reload_positions(graph_module):
+            nodes = list(graph_module.graph.nodes)
+            return [
+                nodes.index(n)
+                for n in nodes
+                if n.op == "call_function" and n.target is torch.ops.ao.reload.default
+            ]
+
+        gm_no_prefetch, _, _ = self._build_joint_graph(num_layers=4)
+        tag_all_offloadable_activations(gm_no_prefetch)
+        gm_no_prefetch = apply_cpu_offload_pass(gm_no_prefetch, prefetch_lookahead=0)
+        pos_no_prefetch = _reload_positions(gm_no_prefetch)
+
+        gm_prefetch, _, _ = self._build_joint_graph(num_layers=4)
+        tag_all_offloadable_activations(gm_prefetch)
+        gm_prefetch = apply_cpu_offload_pass(gm_prefetch, prefetch_lookahead=1)
+        pos_prefetch = _reload_positions(gm_prefetch)
+
+        self.assertGreater(len(pos_prefetch), 0)
+        self.assertEqual(len(pos_no_prefetch), len(pos_prefetch))
+        # With prefetch, reloads should be earlier in the graph
+        earlier_count = sum(1 for a, b in zip(pos_prefetch, pos_no_prefetch) if a < b)
+        self.assertGreater(
+            earlier_count,
+            0,
+            "prefetch_lookahead=1 should move reloads earlier than prefetch_lookahead=0",
+        )
+
+    def test_prefetch_n_layers_2(self):
+        """n_layers=2 should move reloads further than n_layers=1."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
+        )
+
+        def _reload_positions(graph_module):
+            nodes = list(graph_module.graph.nodes)
+            return [
+                nodes.index(n)
+                for n in nodes
+                if n.op == "call_function" and n.target is torch.ops.ao.reload.default
+            ]
+
+        gm1, _, _ = self._build_joint_graph(num_layers=5)
+        tag_all_offloadable_activations(gm1)
+        gm1 = apply_cpu_offload_pass(gm1, prefetch_lookahead=1)
+        pos_1 = _reload_positions(gm1)
+
+        gm2, _, _ = self._build_joint_graph(num_layers=5)
+        tag_all_offloadable_activations(gm2)
+        gm2 = apply_cpu_offload_pass(gm2, prefetch_lookahead=2)
+        pos_2 = _reload_positions(gm2)
+
+        self.assertEqual(len(pos_1), len(pos_2))
+        # n_layers=2 should move at least some reloads further than n_layers=1
+        further_count = sum(1 for a, b in zip(pos_2, pos_1) if a < b)
+        self.assertGreater(
+            further_count,
+            0,
+            "prefetch_lookahead=2 should move reloads further than prefetch_lookahead=1",
+        )
+
+    def test_wait_after_last_forward_consumer(self):
+        """Forward waits should be placed after the last forward consumer."""
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            _is_backward_node,
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
+        )
+
+        gm, _, _ = self._build_joint_graph(num_layers=4)
+        tag_all_offloadable_activations(gm)
+        apply_cpu_offload_pass(gm, prefetch_lookahead=0)
+
+        nodes = list(gm.graph.nodes)
+        node_pos = {n: i for i, n in enumerate(nodes)}
+
+        for node in nodes:
+            if not (
+                node.op == "call_function"
+                and node.target is torch.ops.ao.wait_tensor.default
+                and not node.meta.get("autograd_backward")
+            ):
+                continue
+            gpu_tensor = node.args[1] if len(node.args) > 1 else None
+            if gpu_tensor is None:
+                continue
+            wait_pos = node_pos[node]
+            ao_ops = {
+                torch.ops.ao.offload.default,
+                torch.ops.ao.reload.default,
+                torch.ops.ao.wait_tensor.default,
+            }
+            for user in gpu_tensor.users:
+                if user.op != "call_function":
+                    continue
+                if _is_backward_node(user) or user.target in ao_ops:
+                    continue
+                self.assertLess(
+                    node_pos[user],
+                    wait_pos,
+                    f"Forward consumer {user.name} at pos {node_pos[user]} "
+                    f"should precede wait at pos {wait_pos}",
+                )
+
+    def test_view_chain_only_backward_users_not_offloaded(self):
+        """Nodes whose only backward users come through a view chain are not offloaded.
+
+        Views are excluded from offloading, and the base tensor (mm) has no
+        direct backward users — only indirect ones through the view. Since
+        apply_cpu_offload_pass only collects direct backward users, the base
+        tensor won't get offload ops inserted even if tagged.
+        """
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        x.meta["val"] = self._make_fake_val()
+
+        # Forward layer 0: mm -> view -> relu
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(x, x))
+        mm.meta["autograd_backward"] = False
+        mm.meta["custom"] = {"module_fqn": "layers.0.block"}
+        mm.meta["val"] = self._make_fake_val()
+
+        view = graph.call_function(torch.ops.aten.view.default, args=(mm, [64, 64]))
+        view.meta["autograd_backward"] = False
+        view.meta["custom"] = {"module_fqn": "layers.0.block"}
+        view.meta["val"] = self._make_fake_val()
+
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(view,))
+        relu.meta["autograd_backward"] = False
+        relu.meta["custom"] = {"module_fqn": "layers.0.block"}
+        relu.meta["val"] = self._make_fake_val()
+
+        # Forward layer 1
+        mm2 = graph.call_function(torch.ops.aten.mm.default, args=(relu, relu))
+        mm2.meta["autograd_backward"] = False
+        mm2.meta["custom"] = {"module_fqn": "layers.1.block"}
+        mm2.meta["val"] = self._make_fake_val()
+
+        # Backward: uses view output (NOT mm directly)
+        bwd = graph.call_function(torch.ops.aten.mm.default, args=(mm2, view))
+        bwd.meta["autograd_backward"] = True
+        bwd.meta["custom"] = {"module_fqn": "layers.0.block"}
+        bwd.meta["val"] = self._make_fake_val()
+
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_all_offloadable_activations(gm)
+        gm = apply_cpu_offload_pass(gm)
+
+        # No view replay — only one view op (the original forward one)
+        view_ops = [
+            n
+            for n in gm.graph.nodes
+            if n.op == "call_function" and n.target is torch.ops.aten.view.default
+        ]
+        self.assertEqual(len(view_ops), 1, "Expected only the original view op")
 
     def test_single_layer_tagged(self):
         """With only one layer, nodes are still tagged (last-layer skip only applies with multiple layers)."""

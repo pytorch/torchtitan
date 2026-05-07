@@ -160,9 +160,11 @@ def compile_time_passes(
             tag_with_memory_policy_pass,
             config=config,
         ),
-        # TODO: currently either SAC or CPU offload is used, not both at the
-        # same time. Composability between these two passes is untested.
-        apply_cpu_offload_pass,
+        functools.partial(
+            apply_cpu_offload_pass,
+            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        ),
         selective_activation_remat_pass,
         overlap_fsdp_ag_rs_pass,
         functools.partial(
@@ -787,12 +789,12 @@ def tag_with_memory_policy_pass(
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
         eager: SAC alternating mm ops between save/recompute.
-        cpu_offload_all: tag all eligible activations for CPU offload.
+        budget_limited_offload: SAC + CPU offload within budget.
 
     Other memory policies combining SAC and CPU offload can be added here.
     """
     memory_policy = config.compile.memory_policy
-    if memory_policy == "default":
+    if memory_policy in ("default", "budget_limited_offload"):
         fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
             config.parallelism.fsdp_reshard_after_forward,
             pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
@@ -802,10 +804,12 @@ def tag_with_memory_policy_pass(
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
         )
         apply_sac_pass(gm, policy_fn=default_policy_fn())
+        if memory_policy == "budget_limited_offload":
+            tag_all_offloadable_activations(
+                gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
+            )
     elif memory_policy == "eager":
         apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
-    elif memory_policy == "cpu_offload_all":
-        tag_all_offloadable_activations(gm)
     else:
         raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
 
