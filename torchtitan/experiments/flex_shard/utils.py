@@ -267,7 +267,7 @@ def _validate_placements(
     mesh: DeviceMesh,
 ) -> None:
     """Validate that placements are compatible with eager FlexShard."""
-    from .placements import FlatShard, Owned, RaggedShard, Shard
+    from .placements import Shard
 
     param_dict = dict(named_params)
     expected_fqns = set(param_dict)
@@ -285,35 +285,14 @@ def _validate_placements(
             f"parameters; {', '.join(msg_parts)}."
         )
 
-    world_size = mesh.size()
-
     for fqn, placements in param_placements.items():
         for placement in placements:
-            if isinstance(placement, Owned):
-                if placement.owner_rank >= mesh.size():
-                    raise ValueError(
-                        f"Parameter {fqn!r} uses Owned({placement.owner_rank}) "
-                        f"but world_size is {mesh.size()}."
-                    )
-            if isinstance(placement, RaggedShard):
-                if len(placement.local_units) != world_size:
-                    raise ValueError(
-                        f"Parameter {fqn!r} uses RaggedShard with "
-                        f"{len(placement.local_units)} local_units but "
-                        f"world_size is {world_size}."
-                    )
             if isinstance(placement, Shard):
                 param = param_dict[fqn]
                 if placement.dim >= param.ndim:
                     raise ValueError(
                         f"Parameter {fqn!r} has {param.ndim} dimensions but "
                         f"Shard(dim={placement.dim}) is out of range."
-                    )
-            if isinstance(placement, FlatShard):
-                param = param_dict[fqn]
-                if param.numel() == 0:
-                    raise ValueError(
-                        f"Parameter {fqn!r} has 0 elements, cannot apply FlatShard."
                     )
 
 

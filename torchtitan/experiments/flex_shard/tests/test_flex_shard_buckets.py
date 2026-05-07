@@ -244,16 +244,20 @@ class TestBucketPlacementValidation(unittest.TestCase):
             )
 
     def test_rejects_non_shard0_placement(self):
-        """FlatShard in a bucket raises ValueError."""
+        """Unsupported placement in a bucket raises ValueError."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
-        from torchtitan.experiments.flex_shard.placements import FlatShard, Shard
+        from torchtitan.experiments.flex_shard.placements import Placement, Shard
+
+        class UnsupportedPlacement(Placement):
+            def __repr__(self):
+                return "UnsupportedPlacement()"
 
         assignments = [["a.weight", "b.weight"]]
         placements = {
             "a.weight": (Shard(0),),
-            "b.weight": (FlatShard(),),
+            "b.weight": (UnsupportedPlacement(),),
         }
         buckets = [BucketSpec(["*"])]
         with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
@@ -307,16 +311,20 @@ class TestBucketPlacementValidation(unittest.TestCase):
         )
 
     def test_rejects_non_shard0_in_separate_bucket(self):
-        """FlatShard is rejected even when isolated to its own bucket."""
+        """Unsupported placement is rejected even when isolated to its own bucket."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
-        from torchtitan.experiments.flex_shard.placements import FlatShard, Shard
+        from torchtitan.experiments.flex_shard.placements import Placement, Shard
+
+        class UnsupportedPlacement(Placement):
+            def __repr__(self):
+                return "UnsupportedPlacement()"
 
         assignments = [["a.weight"], ["b.weight"]]
         placements = {
             "a.weight": (Shard(0),),
-            "b.weight": (FlatShard(),),
+            "b.weight": (UnsupportedPlacement(),),
         }
         buckets = [BucketSpec(["a.*"]), BucketSpec(["b.*"])]
         with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
