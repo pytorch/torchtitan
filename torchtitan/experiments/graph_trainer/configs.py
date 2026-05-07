@@ -6,74 +6,13 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
-from typing import Annotated, Literal, Union
-
-import tyro
+from typing import Literal
 
 from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
-
-
-# ---------------------------------------------------------------------------
-# Memory policy config dataclasses (built-in)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(kw_only=True, slots=True)
-class DefaultMemoryPolicy:
-    """Default SAC: save all compute-intensive ops and FSDP all_gathers."""
-
-    pass
-
-
-@dataclass(kw_only=True, slots=True)
-class EagerMemoryPolicy:
-    """Eager SAC: alternate mm ops between save/recompute."""
-
-    pass
-
-
-@dataclass(kw_only=True, slots=True)
-class CpuOffloadAllMemoryPolicy:
-    """Offload all eligible activations to CPU (WIP)."""
-
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Memory policy config registration
-# ---------------------------------------------------------------------------
-
-_MEMORY_POLICY_TYPES: list = [
-    Annotated[DefaultMemoryPolicy, tyro.conf.subcommand("default")],
-    Annotated[EagerMemoryPolicy, tyro.conf.subcommand("eager")],
-    Annotated[CpuOffloadAllMemoryPolicy, tyro.conf.subcommand("cpu_offload_all")],
-]
-
-
-def register_memory_policy_config(name: str):
-    """Register a memory policy config dataclass for CLI selection.
-
-    Use as a decorator on the policy dataclass. Call this before tyro parses
-    CLI args (i.e., at module import time).
-    The registered type becomes available as ``compile.memory_policy:<name>``.
-    """
-
-    def decorator(cls: type) -> type:
-        _MEMORY_POLICY_TYPES.append(Annotated[cls, tyro.conf.subcommand(name)])
-        # Patch the annotation on GraphTrainerCompileConfig so tyro sees the
-        # updated Union when it parses CLI args.
-        GraphTrainerCompileConfig.__annotations__[
-            "memory_policy"
-        ] = Union[  # noqa: NU001
-            tuple(_MEMORY_POLICY_TYPES)
-        ]
-        return cls
-
-    return decorator
 
 
 @dataclass(kw_only=True, slots=True)
@@ -105,26 +44,20 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Union[tuple(_MEMORY_POLICY_TYPES)] = field(  # noqa: NU001
-        default_factory=DefaultMemoryPolicy
-    )
+    memory_policy: Literal["default", "eager", "budget_limited_offload"] = "default"
     """
-    Memory optimization policy for activation management (SAC, offload, etc.).
-
-    Built-in policies:
-        default: save all compute-intensive ops and FSDP all_gathers.
-        eager: alternate mm ops between save/recompute, matching the eager
-            AC policy in torchtitan.distributed.activation_checkpoint.
-        cpu_offload_all: offload all eligible activations to CPU.
-            Work in progress — for development and testing only.
-
-    Additional policies can be registered via ``register_memory_policy_config``
-    in ``graph_trainer/configs.py``. Use tyro subcommand syntax to select::
-
-        compile.memory_policy:default
-        compile.memory_policy:paged_stash
-        compile.memory_policy:paged_stash --compile.memory_policy.buffer_size_factor 0.3
+    Memory optimization policy for activation management (SAC, offload).
+        default: SAC — save all compute-intensive ops and FSDP all_gathers.
+        eager: SAC alternating mm ops between save/recompute, matching the
+            eager AC policy in torchtitan.distributed.activation_checkpoint.
+        budget_limited_offload: SAC + CPU offload — apply default SAC first,
+            then offload surviving MUST_SAVE activations to CPU within
+            the cpu_offload_budget_gb budget.
     """
+
+    pass_pipeline: str = "default"
+    """Pass pipeline selection. Controls which graph pass pipeline, post-init
+    hooks, and pre-train-step hooks are activated."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
@@ -142,6 +75,18 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     enable_cudagraph: bool = True
     """When False, skip the cudagraph pass even if the graph is compatible."""
+
+    cpu_offload_prefetch_n_layers: int = 1
+    """Prefetch reloads this many layers ahead in the backward graph
+    to overlap H2D transfers with compute."""
+
+    cpu_offload_defer_n_layers: int = 1
+    """Defer forward wait_tensor ops this many layers past the last consumer
+    to overlap D2H transfers with compute."""
+
+    cpu_offload_budget_gb: float = 100.0
+    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
+    Tensors are selected largest-first until the budget is exhausted."""
 
     precompile_artifact_dir: str = ""
     """

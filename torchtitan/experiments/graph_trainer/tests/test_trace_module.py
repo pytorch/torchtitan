@@ -83,20 +83,36 @@ def _apply_regional_inductor(traced_result):
         flex_compile_config=FlexAttention.inductor_configs,
     )
 
-    fake_mode = None
-    for node in traced_result.gm.graph.nodes:
-        if node.op == "placeholder" and "val" in node.meta:
-            val = node.meta["val"]
-            if isinstance(val, torch.Tensor) and hasattr(val, "fake_mode"):
-                fake_mode = val.fake_mode
-                break
-
-    context = torch._guards.TracingContext(fake_mode)
-    with torch._guards.tracing(context):
+    fake_inputs = _graph_placeholder_fake_inputs(traced_result.gm)
+    fake_mode = _graph_fake_mode(fake_inputs)
+    with torch._guards.tracing(torch._guards.TracingContext(fake_mode)):
         traced_result.gm = regional_inductor(traced_result.gm)
 
     traced_result.gm.graph.set_codegen(CodeGen())
     traced_result.gm.recompile()
+
+
+def _graph_placeholder_fake_inputs(gm):
+    fake_inputs = []
+    for node in gm.graph.nodes:
+        if node.op != "placeholder":
+            continue
+        val = node.meta.get("val")
+        if val is None:
+            raise RuntimeError(f"Missing placeholder meta val for {node}")
+        fake_inputs.append(val)
+    return fake_inputs
+
+
+def _graph_fake_mode(fake_inputs):
+    return next(
+        (
+            val.fake_mode
+            for val in fake_inputs
+            if isinstance(val, torch.Tensor) and hasattr(val, "fake_mode")
+        ),
+        None,
+    )
 
 
 class SimpleMLP(nn.Module):
@@ -108,6 +124,197 @@ class SimpleMLP(nn.Module):
 
     def forward(self, x):
         return self.fc2(torch.relu(self.fc1(self.embed(x))))
+
+
+class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
+    def test_mark_unbacked_mixed_with_static_input_replay(self):
+        from torch._dynamo.decorators import mark_unbacked
+
+        def forward(_state, dynamic_x, static_y):
+            return dynamic_x.cos() + static_y.sin()
+
+        dynamic_x = torch.randn(2, 4)
+        static_y = torch.randn(2, 4)
+        mark_unbacked(dynamic_x, 0)
+
+        traced = minimal_fx_tracer(forward)({}, dynamic_x, static_y)
+        dynamic_x_other = torch.randn(3, 4)
+        static_y_other = torch.randn(3, 4)
+
+        self.assertTrue(
+            torch.equal(
+                forward({}, dynamic_x, static_y),
+                run_traced(traced, {}, dynamic_x, static_y),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                forward({}, dynamic_x_other, static_y_other),
+                run_traced(traced, {}, dynamic_x_other, static_y_other),
+            )
+        )
+
+    def test_mark_unbacked_shape_branch_rejected(self):
+        from torch._dynamo.decorators import mark_unbacked
+        from torch.fx.experimental.symbolic_shapes import GuardOnDataDependentSymNode
+
+        def forward(_state, x):
+            if x.shape[0] > 100:
+                return x.cos()
+            return x.sin()
+
+        x = torch.randn(4, 4)
+        mark_unbacked(x, 0)
+
+        with self.assertRaisesRegex(
+            GuardOnDataDependentSymNode,
+            "Could not guard on data-dependent expression",
+        ):
+            minimal_fx_tracer(forward)({}, x)
+
+    def test_mark_unbacked_min_max_preserves_unbacked_placeholder_dim(self):
+        from torch._dynamo.decorators import mark_unbacked
+        from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols
+
+        def forward(_state, x):
+            if x.size(0) >= 2 and x.size(0) <= 5:
+                return x.sin()
+            return x.cos()
+
+        x = torch.randn(3, 4)
+        mark_unbacked(x, 0, min=2, max=5)
+
+        traced = minimal_fx_tracer(forward)({}, x)
+        fake_x = next(
+            node.meta["val"]
+            for node in traced.gm.graph.nodes
+            if node.op == "placeholder"
+        )
+        x_min = torch.randn(2, 4)
+        x_max = torch.randn(5, 4)
+
+        self.assertIsInstance(fake_x.size(0), torch.SymInt)
+        self.assertTrue(free_unbacked_symbols(fake_x.size(0)))
+        self.assertEqual(fake_x.size(1), 4)
+        self.assertTrue(torch.equal(forward({}, x_min), run_traced(traced, {}, x_min)))
+        self.assertTrue(torch.equal(forward({}, x_max), run_traced(traced, {}, x_max)))
+
+    def test_mark_unbacked_preserves_unbacked_placeholder_dim(self):
+        from torch._dynamo.decorators import mark_unbacked
+        from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols
+
+        def forward(_state, x):
+            return x.sin()
+
+        x = torch.randn(2, 4)
+        mark_unbacked(x, 0)
+
+        traced = minimal_fx_tracer(forward)({}, x)
+        fake_x = next(
+            node.meta["val"]
+            for node in traced.gm.graph.nodes
+            if node.op == "placeholder"
+        )
+        x_other = torch.randn(3, 4)
+
+        self.assertIsInstance(fake_x.size(0), torch.SymInt)
+        self.assertTrue(free_unbacked_symbols(fake_x.size(0)))
+        self.assertEqual(fake_x.size(1), 4)
+        self.assertTrue(torch.equal(forward({}, x), run_traced(traced, {}, x)))
+        self.assertTrue(
+            torch.equal(
+                forward({}, x_other),
+                run_traced(traced, {}, x_other),
+            )
+        )
+
+    def test_mark_unbacked_multiple_inputs_replay(self):
+        from torch._dynamo.decorators import mark_unbacked
+
+        def forward(_state, x, y):
+            return x.sin() + y.cos()
+
+        x = torch.randn(2, 4)
+        y = torch.randn(2, 4)
+        mark_unbacked(x, 0)
+        mark_unbacked(y, 0)
+
+        traced = minimal_fx_tracer(forward)({}, x, y)
+        x_other = torch.randn(3, 4)
+        y_other = torch.randn(3, 4)
+
+        self.assertTrue(torch.equal(forward({}, x, y), run_traced(traced, {}, x, y)))
+        self.assertTrue(
+            torch.equal(
+                forward({}, x_other, y_other),
+                run_traced(traced, {}, x_other, y_other),
+            )
+        )
+
+    def test_data_dependent_check_emits_runtime_asserts(self):
+        """torch._check on a data-dependent .item() symbol becomes _assert_scalar nodes."""
+
+        def forward(_state, x, n):
+            v = n.item()
+            torch._check(v > 0)
+            torch._check(v < 100)
+            return x.sin().sum() + v
+
+        x = torch.randn(8, 4)
+        n = torch.tensor([5])
+
+        traced = minimal_fx_tracer(forward, _insert_runtime_asserts=True)({}, x, n)
+        assert_count = sum(
+            1
+            for node in traced.gm.graph.nodes
+            if node.op == "call_function"
+            and node.target is torch.ops.aten._assert_scalar.default
+        )
+        # Both inline (gt/lt) and bound-style (>= 1, <= 99) asserts are emitted.
+        self.assertEqual(assert_count, 4)
+
+    def test_no_runtime_asserts_when_no_constraints(self):
+        """Tracing without data-dependent _check produces no _assert_scalar nodes."""
+        from torch._dynamo.decorators import mark_unbacked
+
+        def forward(_state, x):
+            return x.sin()
+
+        x = torch.randn(4, 4)
+        mark_unbacked(x, 0)
+
+        traced = minimal_fx_tracer(forward)({}, x)
+        assert_count = sum(
+            1
+            for node in traced.gm.graph.nodes
+            if node.op == "call_function"
+            and node.target is torch.ops.aten._assert_scalar.default
+        )
+        self.assertEqual(assert_count, 0)
+
+    def test_mark_unbacked_shape_id_multiple_inputs_replay(self):
+        from torch._dynamo.decorators import mark_unbacked
+
+        def forward(_state, x, y):
+            if x.size(0) == y.size(0):
+                return x.sin() + y.cos()
+            return x.cos() + y.sin()
+
+        x = torch.randn(2, 4)
+        y = torch.randn(2, 4)
+        mark_unbacked(x, 0, shape_id="batch")
+        mark_unbacked(y, 0, shape_id="batch")
+
+        traced = minimal_fx_tracer(forward)({}, x, y)
+        x_other = torch.randn(3, 4)
+        y_other = torch.randn(3, 4)
+
+        self.assertTrue(
+            torch.equal(
+                forward({}, x_other, y_other),
+                run_traced(traced, {}, x_other, y_other),
+            )
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -279,6 +486,84 @@ class TestTraceModule(unittest.TestCase):
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr, gt))
 
+    def test_flex_attention_block_mask_mark_unbacked(self):
+        from torch._dynamo.decorators import mark_unbacked
+        from torch.nn.attention.flex_attention import (
+            AuxRequest,
+            BlockMask,
+            flex_attention,
+        )
+
+        maybe_register_blockmask_pytree_node()
+
+        def make_mask_fn(attn_regions, document_ids):
+            def mask_mod(b, h, q_idx, kv_idx):
+                return (
+                    (q_idx >= kv_idx)
+                    & (attn_regions[q_idx] == attn_regions[kv_idx])
+                    & (document_ids[q_idx] == document_ids[kv_idx])
+                )
+
+            return mask_mod
+
+        def make_mask(ntoks=256, block_size=128):
+            nblocks = (ntoks + block_size - 1) // block_size
+            width = 2
+
+            kv_indices = (
+                torch.arange(width, dtype=torch.int32, device=self.DEVICE)
+                .expand(nblocks, width)
+                .clone()
+            )
+            full_kv_indices = kv_indices.clone()
+            q_indices = kv_indices.clone()
+            full_q_indices = kv_indices.clone()
+            kv_num_blocks = torch.full(
+                (nblocks,), width, dtype=torch.int32, device=self.DEVICE
+            )
+            full_kv_num_blocks = kv_num_blocks.clone()
+            q_num_blocks = kv_num_blocks.clone()
+            full_q_num_blocks = kv_num_blocks.clone()
+
+            mark_unbacked(kv_indices, 1)
+            mark_unbacked(full_kv_indices, 1)
+            mark_unbacked(q_indices, 1)
+            mark_unbacked(full_q_indices, 1)
+
+            attn_regions = torch.arange(ntoks, dtype=torch.int32, device=self.DEVICE)
+            document_ids = torch.zeros(ntoks, dtype=torch.int32, device=self.DEVICE)
+            return BlockMask(
+                kv_num_blocks=kv_num_blocks,
+                kv_indices=kv_indices,
+                full_kv_num_blocks=full_kv_num_blocks,
+                full_kv_indices=full_kv_indices,
+                q_num_blocks=q_num_blocks,
+                q_indices=q_indices,
+                full_q_num_blocks=full_q_num_blocks,
+                full_q_indices=full_q_indices,
+                BLOCK_SIZE=(block_size, block_size),
+                mask_mod=make_mask_fn(attn_regions, document_ids),
+                seq_lengths=(ntoks, ntoks),
+            )
+
+        q = torch.randn(1, 2, 256, 32, device=self.DEVICE)
+        k = torch.randn(1, 2, 256, 32, device=self.DEVICE)
+        v = torch.randn(1, 2, 256, 32, device=self.DEVICE)
+        mask = make_mask()
+        cflex = torch.compile(flex_attention, dynamic=False, fullgraph=True)
+
+        def forward(_state, q, k, v, block_mask):
+            out, aux = cflex(
+                q,
+                k,
+                v,
+                block_mask=block_mask,
+                return_aux=AuxRequest(max_scores=True),
+            )
+            return out.sum().detach(), aux.max_scores.max().detach()
+
+        minimal_fx_tracer(forward)({}, q, k, v, mask)
+
     def test_additional_module_arg_raises(self):
         def forward(model, other_model, tokens):
             del other_model
@@ -352,6 +637,25 @@ class TestTraceDTensor(unittest.TestCase):
         out_eager = model(tokens_dt)
         wrapped = run_traced_train_step(traced, model, tokens_dt)
         self.assertTrue(torch.equal(out_eager.full_tensor(), wrapped.full_tensor()))
+
+    def test_dtensor_mark_unbacked_rejected(self):
+        from torch._dynamo.decorators import mark_unbacked
+        from torch.distributed._tensor import DTensor, Replicate
+        from torch.distributed.device_mesh import init_device_mesh
+
+        mesh = init_device_mesh(self.DEVICE, (1,))
+        tokens = torch.randn(2, 32, device=self.DEVICE)
+        tokens_dt = DTensor.from_local(tokens, mesh, [Replicate()])
+        mark_unbacked(tokens_dt, 0)
+
+        def forward(_state, tokens):
+            return tokens
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "only supports mark_unbacked\\(\\) on plain tensor inputs",
+        ):
+            minimal_fx_tracer(forward)({}, tokens_dt)
 
     def test_dtensor_train_step(self):
         from torch.distributed._tensor import DTensor, Replicate
