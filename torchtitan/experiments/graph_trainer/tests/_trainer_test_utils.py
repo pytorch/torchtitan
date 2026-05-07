@@ -12,7 +12,6 @@ import torch.nn as nn
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.distributed.utils import get_train_context
-from torchtitan.experiments.graph_trainer.configs import DefaultMemoryPolicy
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
 
@@ -51,11 +50,15 @@ def build_minimal_trainer(
                     [] if compile_joint_passes is None else list(compile_joint_passes)
                 ),
                 precompile_artifact_dir="",
-                memory_policy=DefaultMemoryPolicy(),
+                memory_policy="default",
+                pass_pipeline="default",
                 inductor_compilation="regional",
                 numerics_changing_optim=compile_numerics_changing_optim,
                 enable_cudagraph=True,
                 debug_graph_passes=False,
+                cpu_offload_prefetch_n_layers=1,
+                cpu_offload_defer_n_layers=1,
+                cpu_offload_budget_gb=100.0,
             ),
             model_spec=SimpleNamespace(model=model_config),
             activation_checkpoint=ActivationCheckpointConfig(

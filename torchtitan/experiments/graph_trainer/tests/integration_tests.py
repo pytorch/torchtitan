@@ -335,21 +335,27 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
         ),
+        # TODO: Disabled due to upstream PyTorch cuDNN regression in nightly
+        # dev20260506. _scaled_dot_product_cudnn_attention fails with
+        # "mha_graph.execute ... is_good() to be true, but got false" on A10G
+        # when attention inputs are CPU-offloaded and reloaded. Re-enable once
+        # the upstream fix lands.
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    "--compile.memory_policy budget_limited_offload",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
-                    "compile.memory-policy:cpu-offload-all",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+cpu_offload_all",
-            "aot_fx_trace_llama3_fsdp_tp_cpu_offload_all",
+            "aot_fx_trace llama3 FSDP+TP+budget_limited_offload",
+            "aot_fx_trace_llama3_fsdp_tp_budget_limited_offload",
             ngpu=8,
             skip_rocm_test=True,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -514,10 +520,11 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
-                    "compile.memory-policy:paged-stash",
-                    "--compile.memory-policy.buffer-size-factor 1.1",
-                    "--compile.memory-policy.host-buffer-size-factor 0.5",
-                    "--compile.memory-policy.page-size 64",
+                    "--compile.memory_policy paged_stash",
+                    "--compile.pass_pipeline paged_stash",
+                    "--compile.paged_stash.buffer_size_factor 1.1",
+                    "--compile.paged_stash.host_buffer_size_factor 0.5",
+                    "--compile.paged_stash.page_size 64",
                 ],
             ],
             "aot_fx_trace deepseek_v3 HybridEP paged_stash",
