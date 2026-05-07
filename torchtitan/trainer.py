@@ -661,25 +661,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Annotate inputs, labels, and positions with spmd_types.
 
-        DP axes get S(0) (batch-sharded). TP axis gets I (invariant —
-        each TP rank sees the same tokens).
+        DP axes get S(0) (batch-sharded).
         """
         dp_axes = self.parallel_dims.spmd_dp_axes()
-        tp_axis = self.parallel_dims.get_spmd_axis("tp")
-
-        spmd_type: dict = {}
-        if tp_axis.size() > 1:
-            spmd_type[tp_axis] = spmd.R
 
         if len(dp_axes) <= 1:
-            for axis in dp_axes:
-                spmd_type[axis] = spmd.S(0)
+            spmd_type = {dp_axes[0]: spmd.S(0)} if dp_axes else {}
             if spmd_type:
                 for t in (inputs, labels, positions):
                     spmd.assert_type(t, spmd_type)
         else:
-            for axis in dp_axes:
-                spmd_type[axis] = spmd.V
+            spmd_type = {axis: spmd.V for axis in dp_axes}
             for t in (inputs, labels, positions):
                 spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
                 spmd.assert_type(t, spmd_type, spec)
