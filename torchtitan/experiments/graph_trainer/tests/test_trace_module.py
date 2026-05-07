@@ -14,6 +14,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
+from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     extract_module_state,
@@ -167,6 +168,49 @@ class TestTraceModule(unittest.TestCase):
         self.assertTrue(torch.equal(loss_ref, loss_tr))
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr, gt))
+
+    def test_chunked_ce_loss_train_step(self):
+        D, V, num_chunks = 32, 257, 4
+        lm_head_ref = nn.Linear(D, V, bias=False).to(
+            device=self.DEVICE, dtype=self.DTYPE
+        )
+        lm_head_test = nn.Linear(D, V, bias=False).to(
+            device=self.DEVICE, dtype=self.DTYPE
+        )
+        lm_head_test.load_state_dict(lm_head_ref.state_dict())
+        hidden_states = torch.randn(
+            self.BATCH_SIZE,
+            self.SEQ_LEN,
+            D,
+            device=self.DEVICE,
+            dtype=self.DTYPE,
+            requires_grad=True,
+        )
+        labels = torch.randint(
+            0, V, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
+        )
+
+        def train_step(lm_head, hidden_states, labels):
+            loss_fn = ChunkedCELoss(
+                ChunkedCELoss.Config(
+                    num_chunks=num_chunks, support_autograd_grad=True
+                )
+            )
+            loss_fn.set_lm_head(lm_head)
+            loss = loss_fn(hidden_states, labels)
+            grads = torch.autograd.grad(
+                loss, [hidden_states, *lm_head.parameters()]
+            )
+            return [loss, *grads]
+
+        eager_out = train_step(lm_head_ref, hidden_states, labels)
+        traced = trace_train_step(train_step)(lm_head_test, hidden_states, labels)
+        replay_out = run_traced_train_step(
+            traced, lm_head_test, hidden_states, labels
+        )
+
+        for ref, tr in zip(eager_out, replay_out, strict=True):
+            self.assertTrue(torch.equal(ref, tr))
 
     def test_mlp_multistep_bitwise(self):
         model_ref, tokens, labels, loss_fn = self._make_mlp()
