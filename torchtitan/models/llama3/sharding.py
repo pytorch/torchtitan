@@ -14,10 +14,16 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
 )
+from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
     from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
+
+DP_REPLICATE = MeshAxisName.DP_REPLICATE
+DP_SHARD = MeshAxisName.DP_SHARD
+FSDP = MeshAxisName.FSDP
 
 
 def set_llama3_sharding_config(
@@ -25,6 +31,8 @@ def set_llama3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
+    full_spmd_types: bool = False,
+    dp_replicate_enabled: bool = False,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
@@ -35,18 +43,26 @@ def set_llama3_sharding_config(
 
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
     ``loss_parallel`` controls whether the output projection is vocab-parallel.
+    ``full_spmd_types`` uses LocalSpmdConfig instead of LocalMapConfig.
     """
     set_decoder_sharding_config(
         config, loss_parallel=loss_parallel, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
-        _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_llama3_layer_sharding(
+            layer_cfg,
+            enable_sp=enable_sp,
+            full_spmd_types=full_spmd_types,
+            dp_replicate_enabled=dp_replicate_enabled,
+        )
 
 
 def _set_llama3_layer_sharding(
     layer_cfg: "Llama3TransformerBlock.Config",
     *,
     enable_sp: bool,
+    full_spmd_types: bool = False,
+    dp_replicate_enabled: bool = False,
 ) -> None:
     """Set sharding on one Llama3 transformer layer.
 
@@ -62,11 +78,43 @@ def _set_llama3_layer_sharding(
     attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
+    if full_spmd_types:
+        _set_inner_attention_local_spmd(
+            layer_cfg.attention.inner_attention,
+            dp_replicate_enabled=dp_replicate_enabled,
+        )
+    else:
+        set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(
         layer_cfg.feed_forward,
         attn_x_placement=attn_x_placement,
         enable_sp=enable_sp,
+    )
+
+
+def _set_inner_attention_local_spmd(
+    inner_attention_cfg,
+    *,
+    dp_replicate_enabled: bool = False,
+) -> None:
+    """Install a LocalSpmdConfig for inner attention with DP axes."""
+    from spmd_types import S, V
+
+    from torchtitan.protocols.sharding import SpmdAnnotation
+
+    # q/k/v shape: (batch, seq, heads, head_dim)
+    if dp_replicate_enabled:
+        qkv_type: dict = {DP_REPLICATE: V, DP_SHARD: V}
+        spec = ((DP_REPLICATE, DP_SHARD), None, None, None)
+    else:
+        qkv_type = {DP_SHARD: S(0)}
+        spec = None
+
+    annotation = SpmdAnnotation(types=qkv_type, partition_spec=spec)
+    set_gqa_inner_attention_local_spmd(
+        inner_attention_cfg,
+        inputs=(annotation, annotation, annotation),
+        out=annotation,
     )
