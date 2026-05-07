@@ -8,7 +8,7 @@ import inspect
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -466,8 +466,8 @@ class Module(nn.Module, Configurable):
     def _shard_outputs(
         self,
         mesh: DeviceMesh,
-        outputs: Any,
-    ) -> Any:
+        outputs: torch.Tensor,
+    ) -> torch.Tensor:
         """Redistribute output to desired placement.
 
         TODO: Currently only handles a single DTensor output. Extend to
@@ -513,10 +513,10 @@ class Module(nn.Module, Configurable):
         if nn_module_cls in _created_classes:
             return _created_classes[nn_module_cls]
 
-        attrs: dict[str, Any] = {}
+        attrs: dict = {}
         if hasattr(nn_module_cls, "reset_parameters"):
 
-            def _init_self_parameters(self: Any) -> None:
+            def _init_self_parameters(self: "Module") -> None:
                 self.reset_parameters()
 
             attrs["_init_self_parameters"] = _init_self_parameters
