@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import inspect
+import itertools
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -386,13 +387,23 @@ class Module(nn.Module, Configurable):
 
     def _parallelize_spmd(self, parallel_dims: "ParallelDims") -> None:
         if self._sharding_config is not None:
-            for name, param in self.named_parameters(recurse=False):
+            dp_axes_set = set(parallel_dims.spmd_dp_axes())
+            for name, state in itertools.chain(
+                self.named_parameters(recurse=False),
+                self.named_buffers(recurse=False),
+            ):
                 if name not in self._sharding_config.state_shardings:
                     continue
                 resolved = resolve_spmd(
                     self._sharding_config.state_shardings[name], parallel_dims,
                 )
-                spmd.assert_type(param, resolved)
+                # DP-replicated states need R (not I) because each rank
+                # processes different data — gradients need reduction.
+                resolved = {
+                    a: (spmd.R if t is spmd.I and a in dp_axes_set else t)
+                    for a, t in resolved.items()
+                }
+                spmd.assert_type(state, resolved)
 
         self._cache_pos_arg_names()
 

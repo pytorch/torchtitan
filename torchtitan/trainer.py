@@ -4,16 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import dataclasses
 import json
 import os
 import time
 from collections.abc import Iterable, Iterator
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
@@ -24,6 +25,7 @@ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhausted
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
+from torchtitan.protocols.module import preserve_buffer_spmd
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -50,7 +52,6 @@ from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-import torch.distributed.spmd_types as spmd
 from torchtitan.tools.profiler import Profiler
 
 
@@ -385,14 +386,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                if config.parallelism.full_spmd_types:
-                    from torchtitan.protocols.module import preserve_buffer_spmd
-
-                    buffer_ctx = preserve_buffer_spmd(model)
-                else:
-                    buffer_ctx = contextlib.nullcontext()
-
-                with buffer_ctx:
+                preserve_buffer_types = (
+                    preserve_buffer_spmd(model) if config.parallelism.full_spmd_types else nullcontext()
+                )
+                with preserve_buffer_types:
                     model.to_empty(device=init_device)
                     with torch.no_grad():
                         # TODO: Change this back to init_weights once
@@ -481,6 +478,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
         self.full_spmd_types: bool = config.parallelism.full_spmd_types
+
         # Build validator if validation is configured
         if config.validator.enable:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
@@ -661,18 +659,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         labels: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Annotate inputs, labels, and positions with spmd_types {dp: S(0)}."""
+        """Annotate inputs, labels, and positions with spmd_types.
 
+        DP axes get S(0) (batch-sharded). TP axis gets I (invariant —
+        each TP rank sees the same tokens).
+        """
         dp_axes = self.parallel_dims.spmd_dp_axes()
-        if not dp_axes:
-            return inputs, labels
+        tp_axis = self.parallel_dims.get_spmd_axis("tp")
 
-        if len(dp_axes) == 1:
-            spmd_type = {dp_axes[0]: spmd.S(0)}
-            for t in (inputs, labels, positions):
-                spmd.assert_type(t, spmd_type)
+        spmd_type: dict = {}
+        if tp_axis.size() > 1:
+            spmd_type[tp_axis] = spmd.R
+
+        if len(dp_axes) <= 1:
+            for axis in dp_axes:
+                spmd_type[axis] = spmd.S(0)
+            if spmd_type:
+                for t in (inputs, labels, positions):
+                    spmd.assert_type(t, spmd_type)
         else:
-            spmd_type = {axis: spmd.V for axis in dp_axes}
+            for axis in dp_axes:
+                spmd_type[axis] = spmd.V
             for t in (inputs, labels, positions):
                 spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
                 spmd.assert_type(t, spmd_type, spec)

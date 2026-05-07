@@ -344,7 +344,7 @@ class ParallelDims:
     def get_spmd_axis(self, name: str) -> Any:
         """Return the MeshAxis for a named axis, or a trivial axis if disabled."""
         if name not in self._spmd_axes:
-            from torch.distributed.spmd_types import MeshAxis
+            from spmd_types import MeshAxis
 
             mesh = self.get_optional_mesh(name)
             if mesh is not None and mesh.size() > 1:
