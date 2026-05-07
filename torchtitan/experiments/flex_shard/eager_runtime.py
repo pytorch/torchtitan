@@ -15,7 +15,12 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 
-from .collective_results import AllGatherUnshardHandle, begin_all_gather_unshard
+from .collective_results import (
+    AllGatherUnshardHandle,
+    ReduceScatterGradHandle,
+    begin_all_gather_unshard,
+    begin_reduce_scatter_grad,
+)
 from .module_wrapping import EagerParamAccessState
 from .sharding_metadata import (
     _BUCKET_FQN_ATTR,
@@ -31,11 +36,6 @@ from .utils import _get_storage_debug_fqn, _with_fqn
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placements import (
-        Placement,
-        PlacementReduceGradHandle,
-    )
-
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +47,9 @@ class AllGatherBucket:
     """Runtime metadata for one batched all-gather bucket."""
 
     storage: DStorage
-    placement: Placement
     entries: list[ParamEntry]
     infos: list[ParamInfo]
     debug_fqn: str | None
-    use_autograd_unshard: bool
 
 
 @dataclass
@@ -67,7 +65,7 @@ class PendingAllGather:
 class PendingReduceGrad:
     """One in-flight reduce-grad result."""
 
-    result: PlacementReduceGradHandle
+    result: ReduceScatterGradHandle
 
 
 @dataclass
@@ -88,7 +86,6 @@ class BucketAllGatherRuntime:
     """Runtime metadata passed to RAF bucket autograd."""
 
     prefetched_result: AllGatherUnshardHandle | None
-    placement: Placement
     infos: list[ParamInfo]
     param_refs: list[tuple[nn.Module, str]]
     mesh: DeviceMesh
@@ -209,7 +206,7 @@ class _BucketAllGather(torch.autograd.Function):
                     runtime.context,
                     runtime.debug_fqn,
                 )
-                result = runtime.placement.begin_reduce_grad(
+                result = begin_reduce_scatter_grad(
                     grads,
                     valid_infos,
                     runtime.mesh,
@@ -220,12 +217,13 @@ class _BucketAllGather(torch.autograd.Function):
                     runtime.context.reduce_scatter_stream
                 ):
                     sharded_grads = result.finish()
-                    result.sharded_grads = _accumulate_sharded_grads(
-                        valid_param_refs,
-                        sharded_grads,
+                    result.record_sharded_grads(
+                        _accumulate_sharded_grads(
+                            valid_param_refs,
+                            sharded_grads,
+                        ),
+                        runtime.context.reduce_scatter_stream,
                     )
-                    result.event = runtime.context.device_handle.Event()
-                    result.event.record(runtime.context.reduce_scatter_stream)
                 runtime.context.reduce_scatter_states.append(PendingReduceGrad(result))
                 _queue_reduce_scatter_wait(runtime.context)
 
@@ -448,7 +446,6 @@ def _install_batched_allgather_hooks(
         if not infos:
             continue
 
-        placement = infos[0].placement
         if not _storage_requires_batched_unshard(storage):
             continue
         if storage._reshard_after_forward and not _storage_uses_bucket_autograd_unshard(
@@ -469,18 +466,15 @@ def _install_batched_allgather_hooks(
         ag_context = _get_or_create_comm_context(storage._module, comm_device)
         ag_bucket = AllGatherBucket(
             storage=storage,
-            placement=placement,
             entries=param_entries,
             infos=infos,
             debug_fqn=_get_storage_debug_fqn(storage),
-            use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
         )
         use_autograd_unshard = _storage_uses_bucket_autograd_unshard(storage)
 
         def make_hooks(
             s,
             entries,
-            bucket_placement,
             all_gather_context,
             all_gather_bucket,
             use_autograd_bucket,
@@ -557,7 +551,7 @@ def _install_batched_allgather_hooks(
                             all_gather_context,
                             all_gather_bucket.debug_fqn,
                         )
-                        result = all_gather_bucket.placement.begin_reduce_grad(
+                        result = begin_reduce_scatter_grad(
                             grads,
                             valid_infos,
                             s._mesh,
@@ -568,13 +562,12 @@ def _install_batched_allgather_hooks(
                             all_gather_context.reduce_scatter_stream
                         ):
                             sharded_grads = result.finish()
-                            result.sharded_grads = _accumulate_sharded_grads(
-                                [(leaf, name) for leaf, name, _ in valid],
-                                sharded_grads,
-                            )
-                            result.event = all_gather_context.device_handle.Event()
-                            result.event.record(
-                                all_gather_context.reduce_scatter_stream
+                            result.record_sharded_grads(
+                                _accumulate_sharded_grads(
+                                    [(leaf, name) for leaf, name, _ in valid],
+                                    sharded_grads,
+                                ),
+                                all_gather_context.reduce_scatter_stream,
                             )
                         all_gather_context.reduce_scatter_states.append(
                             PendingReduceGrad(result)
@@ -582,7 +575,7 @@ def _install_batched_allgather_hooks(
                         _queue_reduce_scatter_wait(all_gather_context)
                     else:
                         device_handle = _get_device_handle(grads[0].device.type)
-                        result = bucket_placement.begin_reduce_grad(
+                        result = begin_reduce_scatter_grad(
                             grads,
                             valid_infos,
                             s._mesh,
@@ -594,6 +587,7 @@ def _install_batched_allgather_hooks(
                             [(leaf, name) for leaf, name, _ in valid],
                             reduced,
                         )
+                        result.release_buffers(release_sharded_grads=True)
 
             def pre_forward_hook(mod, args):
                 if torch.compiler.is_compiling():
@@ -621,7 +615,6 @@ def _install_batched_allgather_hooks(
                         prefetched_result = _take_pending_for_current_bucket()
                         runtime = BucketAllGatherRuntime(
                             prefetched_result=prefetched_result,
-                            placement=all_gather_bucket.placement,
                             infos=entry_infos,
                             param_refs=[(leaf, name) for leaf, name, _, _ in entries],
                             mesh=s._mesh,
@@ -702,7 +695,6 @@ def _install_batched_allgather_hooks(
         pre_hook, post_hook = make_hooks(
             storage,
             param_entries,
-            placement,
             ag_context,
             ag_bucket,
             use_autograd_unshard,

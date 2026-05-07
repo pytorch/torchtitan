@@ -7,16 +7,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Hashable, TYPE_CHECKING
+from typing import Any, Hashable, TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.device_mesh import _get_device_handle
 from torch._prims_common import make_contiguous_strides_for
 from typing_extensions import override
-
-from .utils import _with_fqn
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -33,27 +29,11 @@ class LocalStorageLayout:
     storage_nbytes: int
 
 
-class PlacementReduceGradHandle:
-    """Handle for a placement-owned gradient reduction operation."""
-
-    def finish(self) -> list[torch.Tensor]:
-        """Wait for the reduction and return local gradient shards."""
-        raise NotImplementedError
-
-    def wait(self) -> None:
-        """Wait until the reduce-grad result is usable on the current stream."""
-        raise NotImplementedError
-
-    def release_buffers(self, release_sharded_grads: bool) -> None:
-        """Release temporary buffers owned by the reduce-grad operation."""
-        raise NotImplementedError
-
-
 class Placement:
     """Base class for FlexShard placement strategies.
 
     Each subclass implements per-param sharding (extract_local_shard,
-    assemble_from_shards), storage layout, and gradient reduction.
+    assemble_from_shards), storage layout, and gradient-reduction packing.
     """
 
     def validate_param(self, fqn: str, param: nn.Parameter) -> None:
@@ -174,16 +154,30 @@ class Placement:
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
 
-    def begin_reduce_grad(
+    def pack_reduce_grad(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
-        mesh: DeviceMesh,
-        reduce_scatter_stream: torch.Stream,
-        debug_fqn: str | None = None,
-    ) -> PlacementReduceGradHandle:
-        """Begin a gradient reduction operation, possibly asynchronously."""
+        world_size: int,
+    ) -> tuple[torch.Tensor, Any]:
+        """Pack full gradients into a flat reduce-scatter input buffer."""
         raise NotImplementedError
+
+    def unpack_reduced_grad(
+        self,
+        recv_buf: torch.Tensor,
+        infos: list[ParamInfo],
+        layout: Any,
+        rank: int,
+        world_size: int,
+    ) -> list[torch.Tensor]:
+        """Unpack a flat reduce-scatter output buffer into local grad shards."""
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class _ShardReduceGradLayout:
+    padded_sizes: list[torch.Size]
 
 
 def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
@@ -290,84 +284,57 @@ class Shard(Placement):
         return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
 
     @override
-    def begin_reduce_grad(
+    def pack_reduce_grad(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
-        mesh: DeviceMesh,
-        reduce_scatter_stream: torch.Stream,
-        debug_fqn: str | None = None,
-    ) -> PlacementReduceGradHandle:
-        from .collective_results import AsyncReduceScatterResult
-
-        ws = mesh.size()
-        rank = mesh.get_local_rank()
-        pg = mesh.get_group()
+        world_size: int,
+    ) -> tuple[torch.Tensor, _ShardReduceGradLayout]:
         dtype = tensors[0].dtype
         device = tensors[0].device
-        device_handle = _get_device_handle(device.type)
+        padded_sizes: list[torch.Size] = []
+        for tensor in tensors:
+            padded_size = list(tensor.shape)
+            padded_size[self.dim] = (
+                (tensor.size(self.dim) + world_size - 1) // world_size
+            ) * world_size
+            padded_sizes.append(torch.Size(padded_size))
 
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
-        ):
-            padded_sizes = []
-            for tensor in tensors:
-                padded_dim0 = ((tensor.size(0) + ws - 1) // ws) * ws
-                padded_sizes.append(torch.Size([padded_dim0] + list(tensor.shape[1:])))
+        input_numel = sum(s.numel() for s in padded_sizes)
+        send_buf = torch.empty(input_numel, dtype=dtype, device=device)
+        send_buf_2d = send_buf.view(world_size, -1)
+        torch._chunk_cat(tensors, dim=self.dim, num_chunks=world_size, out=send_buf_2d)
+        return send_buf, _ShardReduceGradLayout(padded_sizes)
 
-            input_numel = sum(s.numel() for s in padded_sizes)
-            output_numel = input_numel // ws
-
-            send_buf = torch.empty(input_numel, dtype=dtype, device=device)
-            send_buf_2d = send_buf.view(ws, -1)
-            torch._chunk_cat(tensors, dim=0, num_chunks=ws, out=send_buf_2d)
-
-        def _copy_out(recv_buf: torch.Tensor) -> list[torch.Tensor]:
-            with torch.profiler.record_function(
-                _with_fqn("FlexShard::reduce_scatter_copy_out", debug_fqn)
-            ):
-                results: list[torch.Tensor] = []
-                flat_offset = 0
-                for info, padded_size in zip(infos, padded_sizes, strict=True):
-                    local_shape = info.placement.compute_local_shape(
-                        info.global_shape, rank, ws
-                    )
-                    stride = make_contiguous_strides_for(local_shape)
-                    shard = torch.as_strided(
-                        recv_buf,
-                        size=local_shape,
-                        stride=stride,
-                        storage_offset=flat_offset,
-                    ).contiguous()
-                    results.append(shard)
-                    flat_offset += padded_size.numel() // ws
-                return results
-
-        copy_in_done = device_handle.Event()
-        copy_in_done.record(device_handle.current_stream(device))
-        recv_buf: torch.Tensor
-        with device_handle.stream(reduce_scatter_stream):
-            reduce_scatter_stream.wait_event(copy_in_done)
-            recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
-            label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
-            with dist.record_comm(label):
-                dist.reduce_scatter_tensor(
-                    output=recv_buf,
-                    input=send_buf,
-                    op=dist.ReduceOp.AVG,
-                    group=pg,
-                )
-            sharded_grads = _copy_out(recv_buf)
-            event = device_handle.Event()
-            event.record(reduce_scatter_stream)
-        return AsyncReduceScatterResult(
-            sharded_grads=sharded_grads,
-            event=event,
-            send_buf=send_buf,
-            recv_buf=recv_buf,
-            device_handle=device_handle,
-            debug_fqn=debug_fqn,
-        )
+    @override
+    def unpack_reduced_grad(
+        self,
+        recv_buf: torch.Tensor,
+        infos: list[ParamInfo],
+        layout: Any,
+        rank: int,
+        world_size: int,
+    ) -> list[torch.Tensor]:
+        if not isinstance(layout, _ShardReduceGradLayout):
+            raise AssertionError(
+                f"Expected _ShardReduceGradLayout, got {type(layout).__name__}"
+            )
+        results: list[torch.Tensor] = []
+        flat_offset = 0
+        for info, padded_size in zip(infos, layout.padded_sizes, strict=True):
+            local_shape = info.placement.compute_local_shape(
+                info.global_shape, rank, world_size
+            )
+            stride = make_contiguous_strides_for(local_shape)
+            shard = torch.as_strided(
+                recv_buf,
+                size=local_shape,
+                stride=stride,
+                storage_offset=flat_offset,
+            ).contiguous()
+            results.append(shard)
+            flat_offset += padded_size.numel() // world_size
+        return results
 
 
 def per_param_placements(
@@ -382,6 +349,5 @@ __all__ = [
     "LocalStorageLayout",
     "per_param_placements",
     "Placement",
-    "PlacementReduceGradHandle",
     "Shard",
 ]

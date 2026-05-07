@@ -14,7 +14,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import _get_device_handle
 
-from .placements import PlacementReduceGradHandle
 from .utils import _with_fqn
 
 if TYPE_CHECKING:
@@ -85,6 +84,30 @@ class AllGatherUnshardHandle:
 
     def release_buffers(self) -> None:
         """Release temporary buffers owned by the unshard operation."""
+        raise NotImplementedError
+
+
+class ReduceScatterGradHandle:
+    """Handle for a FlexShard bucket reduce-scatter grad operation."""
+
+    def finish(self) -> list[torch.Tensor]:
+        """Wait for the reduction and return local gradient shards."""
+        raise NotImplementedError
+
+    def wait(self) -> None:
+        """Wait until the reduce-grad result is usable on the current stream."""
+        raise NotImplementedError
+
+    def release_buffers(self, release_sharded_grads: bool) -> None:
+        """Release temporary buffers owned by the reduce-grad operation."""
+        raise NotImplementedError
+
+    def record_sharded_grads(
+        self,
+        sharded_grads: list[torch.Tensor],
+        stream: torch.Stream,
+    ) -> None:
+        """Track sharded grads until queued work on stream is complete."""
         raise NotImplementedError
 
 
@@ -226,7 +249,7 @@ def begin_all_gather_unshard(
 
 
 @dataclass
-class AsyncReduceScatterResult(PlacementReduceGradHandle):
+class AsyncReduceScatterResult(ReduceScatterGradHandle):
     """State needed to finish an async reduce-scatter launched on a side stream."""
 
     sharded_grads: list[torch.Tensor]
@@ -278,3 +301,74 @@ class AsyncReduceScatterResult(PlacementReduceGradHandle):
         tensors.clear()
         for handoff in handoffs:
             handoff.release()
+
+    def record_sharded_grads(
+        self,
+        sharded_grads: list[torch.Tensor],
+        stream: torch.Stream,
+    ) -> None:
+        self.sharded_grads = sharded_grads
+        self.event = self.device_handle.Event()
+        self.event.record(stream)
+
+
+def begin_reduce_scatter_grad(
+    tensors: list[torch.Tensor],
+    infos: list[ParamInfo],
+    mesh: DeviceMesh,
+    reduce_scatter_stream: torch.Stream,
+    debug_fqn: str | None = None,
+) -> ReduceScatterGradHandle:
+    """Begin a bucket reduce-scatter and return a handle for local grad shards."""
+    ws = mesh.size()
+    rank = mesh.get_local_rank()
+    pg = mesh.get_group()
+    placement = infos[0].placement
+
+    with torch.profiler.record_function(
+        _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
+    ):
+        send_buf, layout = placement.pack_reduce_grad(tensors, infos, ws)
+        if send_buf.numel() % ws != 0:
+            raise AssertionError(
+                f"Packed reduce-scatter buffer has {send_buf.numel()} elements, "
+                f"which is not divisible by world size {ws}."
+            )
+
+    device = send_buf.device
+    device_handle = _get_device_handle(device.type)
+    copy_in_done = device_handle.Event()
+    copy_in_done.record(device_handle.current_stream(device))
+
+    recv_buf: torch.Tensor
+    with device_handle.stream(reduce_scatter_stream):
+        reduce_scatter_stream.wait_event(copy_in_done)
+        recv_buf = torch.empty(
+            send_buf.numel() // ws,
+            dtype=send_buf.dtype,
+            device=device,
+        )
+        label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
+        with dist.record_comm(label):
+            dist.reduce_scatter_tensor(
+                output=recv_buf,
+                input=send_buf,
+                op=dist.ReduceOp.AVG,
+                group=pg,
+            )
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::reduce_scatter_copy_out", debug_fqn)
+        ):
+            sharded_grads = placement.unpack_reduced_grad(
+                recv_buf, infos, layout, rank, ws
+            )
+        event = device_handle.Event()
+        event.record(reduce_scatter_stream)
+    return AsyncReduceScatterResult(
+        sharded_grads=sharded_grads,
+        event=event,
+        send_buf=send_buf,
+        recv_buf=recv_buf,
+        device_handle=device_handle,
+        debug_fqn=debug_fqn,
+    )
