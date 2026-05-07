@@ -822,9 +822,7 @@ def selective_activation_remat_pass(
     Wraps ``remat_using_tags_for_fwd_loss_bwd_graph`` with the graph pass
     signature ``(gm, example_inputs)``.
     """
-    # TODO: remove this wrapper when upstream remat_using_tags_for_fwd_loss_bwd_graph
-    # accepts example_inputs (matching the graph pass signature).
-    from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
+    from torchtitan.experiments.graph_trainer.selective_activation_remat import (
         remat_using_tags_for_fwd_loss_bwd_graph,
     )
 
