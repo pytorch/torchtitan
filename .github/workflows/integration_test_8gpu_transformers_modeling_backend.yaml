@@ -66,8 +66,9 @@ jobs:
         if [ -n "${{ matrix.torch-version }}" ]; then
           TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
-        # NOTE: reinstall torchvision alongside torch so their ABIs stay in sync;
-        # otherwise transformers' transitive `import torchvision` fails at test time.
+        # torchvision must be installed from the nightly channel alongside torch
+        # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
+        # transformers pulls in torchvision transitively via image_utils.
         python -m pip install --force-reinstall --pre \
           "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
 
@@ -78,6 +79,11 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
         python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+
+        # MoE parallelism requires transformers >= 5.0.0 (grouped experts format).
+        # Install here rather than in the shared Docker image to avoid affecting
+        # other CI workflows (e.g. unit_test_cpu tokenizer tests).
+        python -m pip install transformers==5.3.0
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"

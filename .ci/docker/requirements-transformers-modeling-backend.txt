@@ -1,1 +1,3 @@
 transformers==4.57.1
+# NOTE: grouped_mm experts (config._experts_implementation="grouped_mm")
+# requires transformers >= 5.0.0. With 4.x, the eager for-loop is used.

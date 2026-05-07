@@ -7,7 +7,7 @@
 import copy
 import importlib
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, MISSING
 
 import torch
 from torch import nn
@@ -67,7 +67,9 @@ _TT_TO_HF_MAPPINGS = {
         "norm_eps": "rms_norm_eps",
         "max_seq_len": "max_position_embeddings",
         "eos_id": "eos_token_id",
-    }
+    },
+    # MoE attrs use the same names in TorchTitan and HuggingFace, no remapping needed
+    "moe": {},
 }
 
 # Declarative list of TorchTitan-only attributes (no HF equivalent)
@@ -94,7 +96,7 @@ class HFTransformerModel(BaseModel):
 
         def __init__(
             self,
-            titan_dense_config,
+            model_config,
             # HuggingFace specific args
             attn_implementation: str = "sdpa_torchtitan",
             **kwargs,
@@ -112,15 +114,21 @@ class HFTransformerModel(BaseModel):
             )
             self.sharding_config = None
 
-            assert titan_dense_config is not None, "titan_dense_config is required"
+            assert model_config is not None, "model_config is required"
+
+            from torchtitan.experiments.transformers_modeling_backend import (
+                TitanMoeModelConfig,
+            )
+
+            self.is_moe = isinstance(model_config, TitanMoeModelConfig)
 
             # Create getter/setter dynamically for TT <-> HF attribute mappings
-            self._create_getter_setter_dynamically(has_moe=False)
+            self._create_getter_setter_dynamically(is_moe=self.is_moe)
 
             self._titan_injected_model_args = {}
             self._configure_hf_attention(attn_implementation)
 
-            self._initialize_dense_attributes(titan_dense_config)
+            self._initialize_attributes(model_config)
 
         def build(self, **kwargs):
             """Override build() to use _replace() instead of dataclasses.replace().
@@ -139,7 +147,7 @@ class HFTransformerModel(BaseModel):
 
             ``dataclasses.replace()`` re-invokes ``__init__``, which is
             incompatible with the custom ``__init__`` here (it expects
-            ``titan_dense_config`` and calls ``PretrainedConfig.__init__``).
+            ``model_config`` and calls ``PretrainedConfig.__init__``).
             A shallow copy preserves all dynamically-set HF attributes.
             """
             clone = copy.copy(self)
@@ -157,21 +165,49 @@ class HFTransformerModel(BaseModel):
                     )
             return clone
 
-        def _initialize_dense_attributes(self, titan_dense_config):
-            """Initialize all dense model attributes."""
-            # Set mapped attributes (TorchTitan <-> HuggingFace)
+        def _initialize_attributes(self, model_config):
+            """Initialize all model attributes from the config.
+
+            Only stores explicitly-set (non-default) fields in
+            ``_titan_injected_model_args`` so that ``update_from_config``
+            only overrides HF config values the user intentionally set
+            in the flavor, preserving model-specific HF attrs like
+            ``qk_head_dim`` or ``n_routed_experts``.
+            """
+            # Determine which fields were explicitly set (not defaults)
+            explicit_overrides = {}
+            for field in fields(model_config):
+                value = getattr(model_config, field.name)
+                default = field.default
+                if default is MISSING:
+                    # No default — always explicit
+                    explicit_overrides[field.name] = value
+                elif value != default:
+                    explicit_overrides[field.name] = value
+
+            # Set mapped attributes (TorchTitan -> HuggingFace)
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
-                if hasattr(titan_dense_config, titan_name):
-                    value = getattr(titan_dense_config, titan_name)
-                    setattr(self, hf_name, value)
+                if hasattr(model_config, titan_name):
+                    setattr(self, hf_name, getattr(model_config, titan_name))
 
-            # Set TorchTitan-only attributes
-            for attr_name in _TT_SPECIFIC_ATTRIBUTES:
-                if hasattr(titan_dense_config, attr_name):
-                    setattr(self, attr_name, getattr(titan_dense_config, attr_name))
+            # Set all remaining attributes directly (TorchTitan-only + MoE)
+            for attr_name, value in vars(model_config).items():
+                if (
+                    not attr_name.startswith("_")
+                    and attr_name not in self._tt_to_hf_attribute_map
+                ):
+                    setattr(self, attr_name, value)
 
-            # Update passed_args
-            self._titan_injected_model_args.update(titan_dense_config.__dict__)
+            # Store only EXPLICIT overrides for re-application after HF
+            # config load. Mapped attrs use HF names; others use titan names.
+            for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
+                if titan_name in explicit_overrides:
+                    self._titan_injected_model_args[hf_name] = explicit_overrides[
+                        titan_name
+                    ]
+            for attr_name, value in explicit_overrides.items():
+                if attr_name not in self._tt_to_hf_attribute_map:
+                    self._titan_injected_model_args[attr_name] = value
 
         def _configure_hf_attention(self, attn_implementation: str):
             """Configure HuggingFace attention settings."""
@@ -182,7 +218,7 @@ class HFTransformerModel(BaseModel):
                 attn_implementation
             ] = sdpa_attention_forward
 
-        def _create_getter_setter_dynamically(self, has_moe: bool):
+        def _create_getter_setter_dynamically(self, is_moe: bool):
             """
             Create properties dynamically based on tt and hf attribute mappings.
             For example, creates a property 'dim' that reads/writes to 'hidden_size'.
@@ -199,7 +235,7 @@ class HFTransformerModel(BaseModel):
 
             # Setup attribute mappings
             self._tt_to_hf_attribute_map = dict(_TT_TO_HF_MAPPINGS["dense"])
-            if has_moe:
+            if is_moe:
                 self._tt_to_hf_attribute_map.update(_TT_TO_HF_MAPPINGS["moe"])
 
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
@@ -231,7 +267,6 @@ class HFTransformerModel(BaseModel):
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
-                trust_remote_code=True,
             )
 
             # Explicitly update attributes based on mappings
@@ -239,14 +274,25 @@ class HFTransformerModel(BaseModel):
                 if hasattr(hf_model_config, hf_name):
                     setattr(self, titan_name, getattr(hf_model_config, hf_name))
 
-            # Copy any other attributes that might not be in the mapping
-            for key, value in hf_model_config.to_dict().items():
-                setattr(self, key, value)
-
-            # Update our attributes with the passed args from flavors
-            for key, value in self._titan_injected_model_args.items():
-                if hasattr(self, key) and value is not None:
+            # Copy all HF config attributes including computed ones.
+            # to_dict() misses attrs computed in __init__ (e.g., DeepSeek V3's
+            # qk_head_dim), so we copy from vars() which has them.
+            for key, value in vars(hf_model_config).items():
+                if not key.startswith("_"):
                     setattr(self, key, value)
+
+            # Copy attribute_map for models that alias config names
+            # (e.g., DeepSeek V3 maps num_local_experts → n_routed_experts)
+            if hf_model_config.attribute_map:
+                self.attribute_map.update(hf_model_config.attribute_map)
+
+            # Re-apply explicitly-set flavor overrides (not defaults)
+            for key, value in self._titan_injected_model_args.items():
+                setattr(self, key, value)
+                # Sync expert count aliases for models that use different naming
+                # (e.g., DeepSeek V3 uses n_routed_experts, GLM uses num_local_experts)
+                if key == "num_experts" and hasattr(self, "n_routed_experts"):
+                    self.n_routed_experts = value
 
             self.max_seq_len = training.seq_len
 
@@ -259,7 +305,7 @@ class HFTransformerModel(BaseModel):
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
 
-            if not hasattr(self, "inter_dim"):  # Only for llama model
+            if not getattr(self, "is_moe", False) and not hasattr(self, "inter_dim"):
                 ffn_hidden_size = 4 * self.dim
                 ffn_hidden_size = int(2 * ffn_hidden_size / 3)
                 if self.ffn_dim_multiplier is not None:
@@ -268,7 +314,24 @@ class HFTransformerModel(BaseModel):
                     (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
                 )
 
-            self.head_dim = self.dim // self.num_attention_heads
+            # MLA models (DeepSeek V3, GLM-5) set head_dim = qk_rope_head_dim
+            # in the HF config for RoPE; don't clobber it with the standard
+            # computation. Also force num_key_value_heads = num_attention_heads
+            # because MLA has no GQA — the KV LoRA path always produces
+            # num_attention_heads heads.
+            if hasattr(self, "qk_rope_head_dim"):
+                self.num_key_value_heads = self.num_attention_heads
+            else:
+                self.head_dim = self.dim // self.num_attention_heads
+
+            # Ensure expert groups are consistent with (possibly overridden)
+            # num_experts for models with group-level routing (DeepSeek V3).
+            # Each group needs >= 2 experts for the in-group topk(2).
+            if hasattr(self, "n_group") and hasattr(self, "n_routed_experts"):
+                while self.n_group > 1 and self.n_routed_experts // self.n_group < 2:
+                    self.n_group //= 2
+                if hasattr(self, "topk_group"):
+                    self.topk_group = min(self.topk_group, self.n_group)
 
             return self
 
@@ -298,11 +361,30 @@ class HFTransformerModel(BaseModel):
             try:
                 transformers_mod = importlib.import_module("transformers")
                 model_cls = getattr(transformers_mod, model_class_name)
-            except (ImportError, AttributeError) as e:
+            except (ImportError, AttributeError):
+                model_cls = None
+
+        if model_cls is None:
+            # Fallback: resolve via model_type → Auto mapping.
+            # Handles cases where the config's architecture name doesn't match
+            # the actual class name (e.g. PhiMoEForCausalLM vs PhimoeForCausalLM).
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+            )
+
+            model_type = getattr(config, "model_type", "")
+            resolved_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type)
+            if resolved_name:
+                transformers_mod = importlib.import_module("transformers")
+                model_cls = getattr(transformers_mod, resolved_name, None)
+                if model_cls is not None:
+                    model_class_name = resolved_name
+
+            if model_cls is None:
                 raise ImportError(
                     f"Could not find model class '{model_class_name}' in globals or transformers. "
-                    f"Make sure the class is available. Original error: {e}"
-                ) from e
+                    f"Make sure the class is available."
+                )
 
         # Attempt to patch model weight initialization based on architecture type
         try:
@@ -315,6 +397,10 @@ class HFTransformerModel(BaseModel):
                 model_module, f"{model_name_prefix}DecoderLayer", None
             )
 
+            # Discover MoE-specific classes
+            experts_cls = getattr(model_module, f"{model_name_prefix}Experts", None)
+            router_cls = getattr(model_module, f"{model_name_prefix}TopKRouter", None)
+
             required_classes = {
                 "Attention": attention_cls,
                 "DecoderLayer": decoder_layer_cls,
@@ -326,6 +412,8 @@ class HFTransformerModel(BaseModel):
                     decoder_layer_cls=decoder_layer_cls,
                     attention_cls=attention_cls,
                     mlp_cls=mlp_cls,  # mlp_cls can be None
+                    experts_cls=experts_cls,
+                    router_cls=router_cls,
                 )
             else:
                 missing = [name for name, cls in required_classes.items() if not cls]
@@ -340,6 +428,14 @@ class HFTransformerModel(BaseModel):
                 "Weight initialization might not match TorchTitan."
             )
 
+        # Select the HF experts forward kernel. Default is "grouped_mm"
+        # (fused, deterministic via reshape+sum instead of index_add_).
+        # Override via TitanMoeModelConfig.experts_implementation. Works
+        # transparently with hook-based EP/TP because all hooks preserve
+        # the standard (hidden_states, top_k_index, top_k_weights) interface.
+        if config.is_moe and hasattr(config, "_experts_implementation"):
+            config._experts_implementation = config.experts_implementation
+
         self.model = model_cls(config=config)
         self.max_seq_len = config.max_seq_len
         self.cp_mesh = None
@@ -352,12 +448,21 @@ class HFTransformerModel(BaseModel):
             )
 
         for layer in self.model.model.layers.values():
-            layer.moe_enabled = False
+            # Detect MoE layers by checking for gate/router and experts sub-modules
+            has_gate = hasattr(layer.mlp, "gate") or hasattr(layer.mlp, "router")
+            layer.moe_enabled = has_gate and hasattr(layer.mlp, "experts")
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
 
-    def _patch_hf_llama_like(self, decoder_layer_cls, attention_cls, mlp_cls=None):
+    def _patch_hf_llama_like(
+        self,
+        decoder_layer_cls,
+        attention_cls,
+        mlp_cls=None,
+        experts_cls=None,
+        router_cls=None,
+    ):
         """
         This patch modifies a Hugging Face Llama-like model's weight initialization to match
         the initialization scheme used in TorchTitan. This is crucial for ensuring
@@ -384,6 +489,11 @@ class HFTransformerModel(BaseModel):
             # some models might not have mlp in each layer
             if hasattr(self, "mlp") and self.mlp is not None:
                 self.mlp.layer_idx = layer_idx
+                # Propagate to shared experts (e.g., Qwen2 MoE, DeepSeek V3)
+                for shared_name in ("shared_expert", "shared_experts"):
+                    shared = getattr(self.mlp, shared_name, None)
+                    if shared is not None:
+                        shared.layer_idx = layer_idx
 
         def _initialize_weights_patched(self, module):
             # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
@@ -427,8 +537,11 @@ class HFTransformerModel(BaseModel):
 
             if isinstance(module, attention_cls):
                 # Initialize weights and biases for q, k, v projections
+                # (some models use q_a_proj/q_b_proj instead of q_proj)
                 for proj_name in ["q_proj", "k_proj", "v_proj"]:
-                    proj = getattr(module, proj_name)
+                    proj = getattr(module, proj_name, None)
+                    if proj is None:
+                        continue
                     nn.init.trunc_normal_(proj.weight, mean=0.0, std=0.02)
                     if proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(proj.weight)
@@ -471,6 +584,17 @@ class HFTransformerModel(BaseModel):
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                         init.uniform_(down_proj.bias, -bound, bound)
 
+            elif experts_cls and isinstance(module, experts_cls):
+                # MoE expert weights are 3D parameter tensors (not nn.Linear)
+                if hasattr(module, "gate_up_proj"):
+                    nn.init.trunc_normal_(module.gate_up_proj, mean=0.0, std=0.02)
+                if hasattr(module, "down_proj"):
+                    nn.init.trunc_normal_(module.down_proj, mean=0.0, std=0.02)
+
+            elif router_cls and isinstance(module, router_cls):
+                if hasattr(module, "weight"):
+                    nn.init.trunc_normal_(module.weight, mean=0.0, std=0.02)
+
             elif module is getattr(
                 self, "lm_head", None
             ):  # TODO(3outeille): find a better way to detect lm_head
@@ -504,9 +628,6 @@ class HFTransformerModel(BaseModel):
                 else:
                     std = config.initializer_range
                     module.weight.data.normal_(mean=0.0, std=std)
-
-                if module.padding_idx is not None:
-                    module.weight.data[module.padding_idx].zero_()
 
             elif (
                 isinstance(

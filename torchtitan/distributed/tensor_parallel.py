@@ -78,15 +78,21 @@ class NoParallel(ParallelStyle):
         output_layout: Placement,
         local_output_grad_placements: Sequence[Placement] | None,
         mod: nn.Module,
-        outputs: DTensor,
+        outputs: DTensor | tuple,
         device_mesh: DeviceMesh,
-    ) -> torch.Tensor | DTensor:
-        if outputs.placements != (output_layout,):
-            outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
-        if local_output_grad_placements is not None:
-            return outputs.to_local(grad_placements=local_output_grad_placements)
-        else:
-            return outputs
+    ) -> torch.Tensor | DTensor | tuple | None:
+        def _process(t):
+            if t is None or not isinstance(t, DTensor):
+                return t
+            if t.placements != (output_layout,):
+                t = t.redistribute(placements=(output_layout,), async_op=True)
+            if local_output_grad_placements is not None:
+                return t.to_local(grad_placements=local_output_grad_placements)
+            return t
+
+        if isinstance(outputs, tuple):
+            return tuple(_process(o) for o in outputs)
+        return _process(outputs)
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(

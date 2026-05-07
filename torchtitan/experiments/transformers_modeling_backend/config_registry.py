@@ -20,7 +20,6 @@ from torchtitan.experiments.transformers_modeling_backend.configs import (
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools.profiler import Profiler
-
 from . import model_registry
 
 
@@ -49,6 +48,70 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
         checkpoint=CheckpointManager.Config(
             interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
+        ),
+    )
+
+
+def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
+    return TransformersBackendConfig(
+        loss=CrossEntropyLoss.Config(),
+        hf_assets_path="./tests/assets/tokenizer",
+        hf_model="Qwen/Qwen3-30B-A3B",
+        debug=DebugConfig(print_config=True),
+        model_spec=model_registry("debugmodel_moe"),
+        profiler=Profiler.Config(profile_freq=5),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=2048,
+            steps=10,
+        ),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        checkpoint=CheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="selective",
+        ),
+    )
+
+
+def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
+    return TransformersBackendConfig(
+        hf_model="Qwen/Qwen3-30B-A3B",
+        debug=DebugConfig(print_config=True),
+        model_spec=model_registry("full_moe"),
+        profiler=Profiler.Config(profile_freq=5),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=200,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=2048,
+            steps=1000,
+        ),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        metrics=MetricsProcessor.Config(log_freq=10),
+        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
             last_save_model_only=False,
         ),
         activation_checkpoint=ActivationCheckpointConfig(
