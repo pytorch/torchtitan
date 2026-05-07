@@ -181,7 +181,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
     def convert(self, model_config) -> None:
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
-            base_module_cls = type(config)._owner  # pyrefly: ignore [missing-attribute]
+            base_module_cls = type(config)._owner
             quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
             new_config = quantized_cls.Config(  # pyrefly: ignore [missing-attribute]
                 **{f.name: getattr(config, f.name) for f in fields(config)},
