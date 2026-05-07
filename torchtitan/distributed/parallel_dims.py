@@ -356,11 +356,6 @@ class ParallelDims:
                 self._spmd_axes[name] = MeshAxis.of(1, 1)
         return self._spmd_axes[name]
 
-    def get_spmd_pg(self, name: str) -> Any | None:
-        """Return the raw ProcessGroup for a named axis, or None."""
-        self.get_spmd_axis(name)
-        return self._spmd_pgs.get(name)
-
     def get_spmd_pg_for_axis(self, axis: Any) -> Any | None:
         """Return the ProcessGroup for a MeshAxis object."""
         for name, a in self._spmd_axes.items():

@@ -102,6 +102,8 @@ def _set_inner_attention_local_spmd(
     """Install a LocalSpmdConfig for inner attention with DP axes."""
     from spmd_types import S, V
 
+    from torchtitan.protocols.sharding import SpmdAnnotation
+
     # q/k/v shape: (batch, seq, heads, head_dim)
     if dp_replicate_enabled:
         qkv_type: dict = {DP_REPLICATE: V, DP_SHARD: V}
@@ -110,10 +112,9 @@ def _set_inner_attention_local_spmd(
         qkv_type = {DP_SHARD: S(0)}
         spec = None
 
+    annotation = SpmdAnnotation(types=qkv_type, partition_spec=spec)
     set_gqa_inner_attention_local_spmd(
         inner_attention_cfg,
-        in_types=(qkv_type, qkv_type, qkv_type),
-        out_types=(qkv_type,),
-        in_partition_specs=(spec, spec, spec) if spec else None,
-        out_partition_specs=(spec,) if spec else None,
+        inputs=(annotation, annotation, annotation),
+        out=annotation,
     )
