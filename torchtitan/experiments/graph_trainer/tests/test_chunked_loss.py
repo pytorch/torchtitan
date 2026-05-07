@@ -84,7 +84,9 @@ class TestChunkedCELossWithParamGrads(TestCase):
         loss = chunked_loss(h, labels)
         torch.autograd.grad(loss, [h, model.output.weight])
         self.assertIsNone(h.grad)  # pyrefly: ignore[missing-attribute]
-        self.assertIsNone(model.output.weight.grad)  # pyrefly: ignore[missing-attribute]
+        self.assertIsNone(
+            model.output.weight.grad
+        )  # pyrefly: ignore[missing-attribute]
 
 
 if __name__ == "__main__":
