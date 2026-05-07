@@ -25,12 +25,13 @@ The folder should be organized as follows
     - In post-training, `to_hf()` helps convert a torchtitan model to HF model, which can be used for inference by other frameworks.
   - This is optional for offline exploration.
 - `sharding.py`
-  - Define `set_<model>_sharding_spec(config, *, loss_parallel, enable_sp, ...)` that populates `sharding_spec` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention `LocalMapConfig` placements are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
+  - Define `set_<model>_sharding_config(config, *, loss_parallel, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention `LocalMapConfig` placements are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
   - Call the helper from `Model.Config.update_from_config()` so placements depend on the trainer's `parallelism` settings.
-  - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_spec`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_spec`, `dense_param_placement`, `dense_activation_placement`) where possible.
+  - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_config`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_config`, `dense_param_placement`, `dense_activation_placement`) where possible.
+  - Under `--training.full_dtensor`, declare the mesh axes in canonical outer-to-inner SPMD order: `(dp_replicate, dp_shard, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module.parallelize` resolves the mesh by the declared order and validates it matches one of the SPMD meshes; declaring axes out of order raises `ValueError`.
 - `parallelize.py`
   - apply training techniques in the following order
-    - `model.parallelize(mesh)` — auto-recursive declarative sharding driven by `sharding_spec` (TP, SP, attention `local_map`). Replaces per-model `parallelize_module` plan dicts.
+    - `model.parallelize(parallel_dims)` — auto-recursive declarative sharding driven by `sharding_config` (TP, SP, attention `local_map`). Replaces per-model `parallelize_module` plan dicts.
     - (MoE models) `apply_moe_ep_tp` for expert-parallel + TP on MoE experts (not yet config-based).
     - activation checkpointing
     - `torch.compile`
