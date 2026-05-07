@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 
     from .placements import (
         Placement,
-        PlacementReduceGradResult,
-        PlacementUnshardResult,
+        PlacementReduceGradHandle,
+        PlacementUnshardHandle,
     )
 
 
@@ -59,7 +59,7 @@ class PendingAllGather:
     """The single one-bucket-ahead all-gather in flight."""
 
     bucket: AllGatherBucket
-    result: PlacementUnshardResult
+    result: PlacementUnshardHandle
     recompute: bool
 
 
@@ -67,7 +67,7 @@ class PendingAllGather:
 class PendingReduceGrad:
     """One in-flight reduce-grad result."""
 
-    result: PlacementReduceGradResult
+    result: PlacementReduceGradHandle
 
 
 @dataclass
@@ -87,7 +87,7 @@ class AllGatherContext:
 class BucketAllGatherRuntime:
     """Runtime metadata passed to RAF bucket autograd."""
 
-    prefetched_result: PlacementUnshardResult | None
+    prefetched_result: PlacementUnshardHandle | None
     placement: Placement
     infos: list[ParamInfo]
     param_refs: list[tuple[nn.Module, str]]

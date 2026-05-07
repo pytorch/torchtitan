@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch.distributed.device_mesh import _get_device_handle
 
-from .placements import PlacementReduceGradResult, PlacementUnshardResult
+from .placements import PlacementReduceGradHandle, PlacementUnshardHandle
 from .utils import _with_fqn
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ class StreamHandoff:
 
 
 @dataclass
-class AsyncAllGatherResult(PlacementUnshardResult):
+class AsyncAllGatherResult(PlacementUnshardHandle):
     """State needed to finish an async all-gather launched on a side stream."""
 
     gathered: list[torch.Tensor]
@@ -153,7 +153,7 @@ class AsyncAllGatherResult(PlacementUnshardResult):
 
 
 @dataclass
-class AsyncReduceScatterResult(PlacementReduceGradResult):
+class AsyncReduceScatterResult(PlacementReduceGradHandle):
     """State needed to finish an async reduce-scatter launched on a side stream."""
 
     sharded_grads: list[torch.Tensor]

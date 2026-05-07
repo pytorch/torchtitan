@@ -33,8 +33,8 @@ class LocalStorageLayout:
     storage_nbytes: int
 
 
-class PlacementUnshardResult:
-    """Result handle for a placement-owned unshard operation."""
+class PlacementUnshardHandle:
+    """Handle for a placement-owned unshard operation."""
 
     def finish(self) -> list[torch.Tensor]:
         """Wait for the unshard and return full parameters."""
@@ -49,8 +49,8 @@ class PlacementUnshardResult:
         raise NotImplementedError
 
 
-class PlacementReduceGradResult:
-    """Result handle for a placement-owned gradient reduction operation."""
+class PlacementReduceGradHandle:
+    """Handle for a placement-owned gradient reduction operation."""
 
     def finish(self) -> list[torch.Tensor]:
         """Wait for the reduction and return local gradient shards."""
@@ -231,7 +231,7 @@ class Placement:
         mesh: DeviceMesh,
         all_gather_stream: torch.Stream,
         debug_fqn: str | None = None,
-    ) -> PlacementUnshardResult:
+    ) -> PlacementUnshardHandle:
         """Begin an unshard operation, possibly asynchronously."""
         raise NotImplementedError
 
@@ -242,7 +242,7 @@ class Placement:
         mesh: DeviceMesh,
         reduce_scatter_stream: torch.Stream,
         debug_fqn: str | None = None,
-    ) -> PlacementReduceGradResult:
+    ) -> PlacementReduceGradHandle:
         """Begin a gradient reduction operation, possibly asynchronously."""
         raise NotImplementedError
 
@@ -358,8 +358,8 @@ class Shard(Placement):
         mesh: DeviceMesh,
         all_gather_stream: torch.Stream,
         debug_fqn: str | None = None,
-    ) -> PlacementUnshardResult:
-        from .placement_results import AsyncAllGatherResult
+    ) -> PlacementUnshardHandle:
+        from .collective_results import AsyncAllGatherResult
 
         ws = mesh.size()
         pg = mesh.get_group()
@@ -421,8 +421,8 @@ class Shard(Placement):
         mesh: DeviceMesh,
         reduce_scatter_stream: torch.Stream,
         debug_fqn: str | None = None,
-    ) -> PlacementReduceGradResult:
-        from .placement_results import AsyncReduceScatterResult
+    ) -> PlacementReduceGradHandle:
+        from .collective_results import AsyncReduceScatterResult
 
         ws = mesh.size()
         rank = mesh.get_local_rank()
@@ -506,7 +506,7 @@ __all__ = [
     "LocalStorageLayout",
     "per_param_placements",
     "Placement",
-    "PlacementReduceGradResult",
-    "PlacementUnshardResult",
+    "PlacementReduceGradHandle",
+    "PlacementUnshardHandle",
     "Shard",
 ]
