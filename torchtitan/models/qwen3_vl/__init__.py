@@ -193,7 +193,13 @@ def _build_qwen3_vl_moe_layers(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
-    """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
+    """
+    Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits.
+    
+    Aux loss ref:
+    - load_balancing_func (batch-wise): https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_vl_moe/modeling_qwen3_vl_moe.py
+    - https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_vl_moe/configuration_qwen3_vl_moe.py
+    """
     inner_attention, mask_type = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):

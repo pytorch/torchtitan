@@ -167,6 +167,10 @@ def _build_gptoss_layers(
 
     Even-indexed layers (0, 2, 4, ...) use sliding window attention.
     All dimensional fields are set directly.
+
+    Aux loss ref: 
+    - load_balancing_loss_func (batch-wise): https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt_oss/modeling_gpt_oss.py
+    - https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt_oss/configuration_gpt_oss.py
     """
     layers = []
     for layer_id in range(n_layers):
