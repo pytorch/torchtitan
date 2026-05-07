@@ -214,7 +214,15 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
                 ):
                     def build(self, **kwargs):
                         instance = base_cls.build(self, **kwargs)
-                        quantize_(instance, config=Float8TrainingOpConfig())
+                        # torchao's quantize_ defaults filter_fn to _is_linear,
+                        # which skips GroupedExperts. Match the built module so
+                        # its nn.Parameters (w1/w2/w3) get wrapped for FP8
+                        # grouped GEMMs.
+                        quantize_(
+                            instance,
+                            config=Float8TrainingOpConfig(),
+                            filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+                        )
                         return instance
 
                 _converted_config_cache[base_cls] = Float8GroupedExpertsConfig
