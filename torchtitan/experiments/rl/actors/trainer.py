@@ -20,12 +20,14 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import (
+from torchtitan.config import (
     ActivationCheckpointConfig,
+    CommConfig,
     CompileConfig,
+    Configurable,
     DebugConfig,
     ParallelismConfig,
+    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils

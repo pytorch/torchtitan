@@ -23,8 +23,12 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.config.configs import CompileConfig, DebugConfig
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
@@ -84,93 +88,6 @@ def _patched_node_ref(arg):
 _codegen._node_ref = _patched_node_ref
 
 
-def create_torchtitan_config_from_vllm_config(
-    vllm_config: VllmConfig,
-) -> tuple[ParallelDims, ParallelismConfig]:
-    """
-    Create ParallelDims and ParallelismConfig from vLLM configuration.
-
-    Maps vLLM parallelism settings to TorchTitan's config objects so that
-    TorchTitan's parallelize functions can be called with the correct kwargs.
-
-    This is needed because vLLM doesn't separate model creation and parallelism
-    application — it requires parallelization inside the model constructor
-    (TorchTitanVLLMModelWrapper.__init__).
-
-    Args:
-        vllm_config: vLLM configuration object
-
-    Returns:
-        Tuple of (ParallelDims, ParallelismConfig) mapped from vLLM config
-
-    Note:
-        vLLM doesn't use FSDP sharding (dp_shard=1) in inference.
-        Expert parallelism is enabled when vLLM's enable_expert_parallel
-        flag is set, repurposing TP ranks for EP (ep=tp_size).
-    """
-    world_size = dist.get_world_size()
-    parallel_config = vllm_config.parallel_config
-
-    # CP and PP are not supported on the vLLM inference path yet
-    if parallel_config.pipeline_parallel_size != 1:
-        raise ValueError(
-            "vLLM pipeline_parallel_size must be 1 for the torchtitan wrapper, "
-            f"got {parallel_config.pipeline_parallel_size}"
-        )
-    if (
-        parallel_config.prefill_context_parallel_size != 1
-        or parallel_config.decode_context_parallel_size != 1
-    ):
-        raise ValueError(
-            "vLLM context-parallel sizes must be 1 for the torchtitan wrapper, "
-            f"got prefill={parallel_config.prefill_context_parallel_size}, "
-            f"decode={parallel_config.decode_context_parallel_size}"
-        )
-
-    # When EP is enabled, all TP ranks are repurposed for expert parallelism
-    # (each rank holds a shard of experts): ep_size = tp_size.
-    tp_size = parallel_config.tensor_parallel_size
-    dp_size = parallel_config.data_parallel_size
-
-    # When EP is enabled, it spans all ranks within a DP*TP group:
-    # each rank holds a shard of experts.
-    ep_size = dp_size * tp_size if parallel_config.enable_expert_parallel else 1
-
-    # Map vLLM DP to dp_shard for two purposes (no actual FSDP wrapping):
-    # 1. Mesh math: efsdp = dp_shard * tp / ep — makes EP dims work
-    # 2. Data routing: vLLM routes different requests to different DP groups
-    # FSDP is skipped for inference (skip_dp=True) — no backward, no grad sync.
-    parallel_dims = ParallelDims(
-        dp_replicate=1,
-        dp_shard=dp_size,
-        cp=1,
-        tp=tp_size,
-        pp=1,
-        ep=ep_size,
-        world_size=world_size,
-    )
-
-    parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=dp_size,
-        context_parallel_degree=1,
-        tensor_parallel_degree=tp_size,
-        pipeline_parallel_degree=1,
-        expert_parallel_degree=ep_size,
-        disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
-        enable_sequence_parallel=False,
-    )
-
-    logger.info(
-        f"Created TorchTitan config from vLLM: "
-        f"DP={dp_size}, TP={parallel_dims.tp}, "
-        f"CP={parallel_dims.cp}, PP={parallel_dims.pp}, "
-        f"EP={parallel_dims.ep}"
-    )
-
-    return parallel_dims, parallelism
-
-
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -200,6 +117,8 @@ class TorchTitanVLLMModelWrapper(Module):
         self,
         *,
         model_spec: ModelSpec,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
@@ -207,13 +126,18 @@ class TorchTitanVLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # Reconstruct typed config dataclasses from dicts stamped
-        # ``_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES`` onto
-        # hf_config by the torchtitan ConfigParser.
-        compile_config = CompileConfig(
-            **vllm_config.model_config.hf_config.compile_config
-        )
-        debug_config = DebugConfig(**vllm_config.model_config.hf_config.debug_config)
+        # PP and CP are not supported on this inference path
+        if parallelism.pipeline_parallel_degree != 1:
+            raise ValueError(
+                "torchtitan pipeline_parallel_degree must be 1 for the "
+                "vLLM wrapper, got "
+                f"{parallelism.pipeline_parallel_degree}"
+            )
+        if parallelism.context_parallel_degree != 1:
+            raise ValueError(
+                "torchtitan context_parallel_degree must be 1 for the "
+                f"vLLM wrapper, got {parallelism.context_parallel_degree}"
+            )
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -247,9 +171,21 @@ class TorchTitanVLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Create ParallelDims and configs from vLLM config at runtime.
-        self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
-            vllm_config
+        # Build ParallelDims directly from the torchtitan-side parallelism
+        # config (the controller's source of truth). vLLM's ``parallel_config``
+        # carries the same TP/EP values translated for vLLM's scheduler, but
+        # we don't reconstruct from it — that round-trip is lossy and couples
+        # the wrapper to vLLM's internal naming. ``world_size`` comes from
+        # the live process group, which the caller has already set up to
+        # match TP × EP-effective ranks.
+        self.parallel_dims = ParallelDims(
+            dp_replicate=parallelism.data_parallel_replicate_degree,
+            dp_shard=1,
+            cp=1,
+            tp=parallelism.tensor_parallel_degree,
+            pp=1,
+            ep=parallelism.expert_parallel_degree,
+            world_size=dist.get_world_size(),
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module
@@ -279,11 +215,6 @@ class TorchTitanVLLMModelWrapper(Module):
 
         # RoPE config from model for cache extension
         self.rope_config = self.config.rope
-
-        # Apply parallelism using the model's own parallelize function.
-        # AC is disabled; skip_dp=True skips FSDP. compile_config is passed
-        # through so apply_compile runs per-layer after TP.
-        from torchtitan.config import ActivationCheckpointConfig
 
         # With TP, collectives may return AsyncCollectiveTensor (overlap
         # path) or plain Tensor (sync path) depending on timing.  Dynamo
