@@ -43,7 +43,7 @@ class _FakeRLTrainer:
         self.events.append("close")
 
 
-def test_main_closes_after_success(monkeypatch):
+def test_main_shuts_down_after_success(monkeypatch):
     _FakeConfigManager.config = object()
     _FakeRLTrainer.instances = []
     monkeypatch.setattr(grpo, "ConfigManager", _FakeConfigManager)
@@ -54,7 +54,7 @@ def test_main_closes_after_success(monkeypatch):
     assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
 
 
-def test_main_closes_after_train_failure(monkeypatch):
+def test_main_shuts_down_after_train_failure(monkeypatch):
     class FailingConfig:
         fail_train = True
 
@@ -69,7 +69,7 @@ def test_main_closes_after_train_failure(monkeypatch):
     assert _FakeRLTrainer.instances[0].events == ["setup", "train", "close"]
 
 
-def test_main_closes_after_setup_failure(monkeypatch):
+def test_main_shuts_down_after_setup_failure(monkeypatch):
     class FailingConfig:
         fail_setup = True
 
@@ -84,7 +84,7 @@ def test_main_closes_after_setup_failure(monkeypatch):
     assert _FakeRLTrainer.instances[0].events == ["setup", "close"]
 
 
-def test_rl_trainer_close_is_noop_before_meshes_spawn():
+def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
     trainer = grpo.RLTrainer(object())
 
     asyncio.run(trainer.close())
@@ -94,7 +94,7 @@ def test_rl_trainer_close_is_noop_before_meshes_spawn():
     assert trainer._proc_meshes == []
 
 
-def test_main_swallows_cancellation_after_close(monkeypatch):
+def test_main_swallows_cancellation_after_shutdown(monkeypatch):
     """Signal-driven cancellation surfaces as ``CancelledError`` from the
     running task; ``main`` runs ``close`` in ``finally`` and the explicit
     ``except`` clause swallows the interrupt so the process exits 0
@@ -144,7 +144,7 @@ class _StubMesh:
         self._events.append(self._name)
 
 
-def test_close_calls_actor_close_before_mesh_stop():
+def test_shutdown_calls_actor_close_before_mesh_stop():
     events: list[str] = []
     rl_trainer = grpo.RLTrainer(object())
     rl_trainer.trainer = _StubActor("trainer.close", events)
@@ -165,7 +165,7 @@ def test_close_calls_actor_close_before_mesh_stop():
     assert rl_trainer._proc_meshes == []
 
 
-def test_close_continues_after_actor_close_failure():
+def test_shutdown_continues_after_actor_close_failure():
     events: list[str] = []
     rl_trainer = grpo.RLTrainer(object())
     rl_trainer.trainer = _StubActor("trainer.close", events, raises=True)

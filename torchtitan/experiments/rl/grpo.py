@@ -22,13 +22,11 @@ python3 torchtitan/experiments/rl/grpo.py \
 """
 
 import asyncio
-import contextlib
 import logging
 import math
 import os
-import signal
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # must run before torch import
@@ -464,17 +462,17 @@ class RLTrainer(Configurable):
         await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
         # push weights from trainer
-        self.trainer.push_model_state_dict.call().get()
+        await self.trainer.push_model_state_dict.call()
         # pull weights for policy version 0 (initial weights)
-        self.generator.pull_model_state_dict.call(0).get()
+        await self.generator.pull_model_state_dict.call(0)
 
-    def _collect_rollouts(self, num_groups: int, step: int) -> list[Trajectory]:
+    async def _collect_rollouts(self, num_groups: int, step: int) -> list[Trajectory]:
         """Collect group rollouts: one single-use env per group, scored and returned."""
         envs = [
             self.config.env.build(step=step, group_idx=i) for i in range(num_groups)
         ]
         completions = self._get_rank_0_value(
-            self.generator.generate.call([env.prompt for env in envs]).get()
+            await self.generator.generate.call([env.prompt for env in envs])
         )
         trajectories: list[Trajectory] = []
         for c in completions:
@@ -527,9 +525,9 @@ class RLTrainer(Configurable):
             max_tokens=self.config.generator.sampling.max_tokens,
         )
         completions = self._get_rank_0_value(
-            self.generator.generate.call(
+            await self.generator.generate.call(
                 [env.prompt for env in envs], sampling_config=greedy
-            ).get()
+            )
         )
 
         steps = [env.step(completions[i].text) for i, env in enumerate(envs)]
@@ -552,14 +550,10 @@ class RLTrainer(Configurable):
         logger.info(f"Pre:  {_format_validation(pre_validation)}")
 
         for step in range(num_steps):
-            # Ctrl-C cancellation is only observed between blocking Monarch RPCs.
-            # Yield here before starting the next step's RPCs.
-            await asyncio.sleep(0)
-
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
-            trajectories = self._collect_rollouts(num_groups, step=step)
+            trajectories = await self._collect_rollouts(num_groups, step=step)
             episodes = self._build_episodes(trajectories)
 
             if self.config.log_samples:
@@ -571,16 +565,16 @@ class RLTrainer(Configurable):
                 for per_rank_episodes in self._shard_episodes(episodes)
             ]
             fwd_bwd_metrics = self._get_rank_0_value(
-                self.trainer.forward_backward.call(batches).get()
+                await self.trainer.forward_backward.call(batches)
             )
-            optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
+            optim_metrics = self._get_rank_0_value(await self.trainer.optim_step.call())
             metrics = {**fwd_bwd_metrics, **optim_metrics}
 
             # --- Weight sync --- #
             t0 = time.perf_counter()
-            self.trainer.push_model_state_dict.call().get()
+            await self.trainer.push_model_state_dict.call()
             t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            await self.generator.pull_model_state_dict.call(metrics["policy_version"])
             t_sync = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_sync:.3f}s")
 
@@ -609,44 +603,12 @@ class RLTrainer(Configurable):
         )
 
 
-@contextlib.contextmanager
-def _cancel_on_signal() -> Iterator[None]:
-    """Route Ctrl-C and SIGTERM through asyncio cancellation so close can run.
-
-    Flow: signal -> cancel the current task -> the next step-boundary yield
-    raises CancelledError -> main() runs close in its finally block.
-
-    SIGINT covers Ctrl-C in the terminal; SIGTERM covers polite termination
-    from process managers (e.g. ``kill <pid>``, ``docker stop``, SLURM/k8s
-    asking the job to wrap up before SIGKILL).
-    """
-    loop = asyncio.get_running_loop()
-    task = asyncio.current_task()
-
-    def _on_signal(sig: int) -> None:
-        name = "KeyboardInterrupt" if sig == signal.SIGINT else "SIGTERM"
-        logger.info("%s received; attempting graceful close.", name)
-        task.cancel()
-
-    signals = (signal.SIGINT, signal.SIGTERM)
-    for sig in signals:
-        with contextlib.suppress(NotImplementedError, RuntimeError):
-            loop.add_signal_handler(sig, _on_signal, sig)
-    try:
-        yield
-    finally:
-        for sig in signals:
-            with contextlib.suppress(NotImplementedError, RuntimeError):
-                loop.remove_signal_handler(sig)
-
-
 async def main():
     config = ConfigManager().parse_args()
     rl_trainer = RLTrainer(config)
     try:
-        with _cancel_on_signal():
-            await rl_trainer.setup()
-            await rl_trainer.train()
+        await rl_trainer.setup()
+        await rl_trainer.train()
     except (KeyboardInterrupt, asyncio.CancelledError):
         # Signal-driven cancel; close() runs in finally below, then exit cleanly.
         pass
