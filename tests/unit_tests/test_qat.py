@@ -46,17 +46,17 @@ def test_qat_all_schemes(scheme, group_size, expected_linear_cls):
     converter = QATConverter(QATConverter.Config(**config_kwargs))
     converter.convert(model)
 
-    assert type(model.fc1).__name__ == expected_linear_cls, (
-        f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc1).__name__}"
-    )
-    assert type(model.fc2).__name__ == expected_linear_cls, (
-        f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc2).__name__}"
-    )
+    assert (
+        type(model.fc1).__name__ == expected_linear_cls
+    ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc1).__name__}"
+    assert (
+        type(model.fc2).__name__ == expected_linear_cls
+    ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc2).__name__}"
 
     for name, param in model.named_parameters():
-        assert param.dtype == original_dtypes[name], (
-            f"'{name}' dtype changed from {original_dtypes[name]} to {param.dtype}"
-        )
+        assert (
+            param.dtype == original_dtypes[name]
+        ), f"'{name}' dtype changed from {original_dtypes[name]} to {param.dtype}"
 
 
 def test_qat_unknown_scheme_raises():
