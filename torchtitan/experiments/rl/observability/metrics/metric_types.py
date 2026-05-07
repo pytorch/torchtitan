@@ -53,10 +53,12 @@ class MetricReduction(Protocol):
         return f"{type(self).__name__}({kvs})"
 
     @classmethod
-    def from_list(cls, values: Sequence[Any]): ...
+    def from_list(cls, values: Sequence[Any]):
+        ...
 
     @classmethod
-    def reduce(cls, metrics: Sequence[object]) -> dict[str, float]: ...
+    def reduce(cls, metrics: Sequence[object]) -> dict[str, float]:
+        ...
 
 
 @dataclass
