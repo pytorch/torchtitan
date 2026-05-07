@@ -169,6 +169,15 @@ def _get_module_paths_to_wrap(storage: DStorage) -> list[str]:
 
     common = _module_path_common_prefix(owner_paths)
     if common:
+        top_level_paths = sorted(
+            {
+                _top_level_owner_path(storage._module, owner_path)
+                for owner_path in owner_paths
+            }
+        )
+        top_level_paths = [path for path in top_level_paths if path]
+        if len(top_level_paths) == 1 and top_level_paths[0] != common:
+            return top_level_paths
         target = _get_module_by_path(storage._module, common)
         if isinstance(target, (nn.ModuleDict, nn.ModuleList)):
             return sorted(

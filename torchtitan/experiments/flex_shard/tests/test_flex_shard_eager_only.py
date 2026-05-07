@@ -5,64 +5,22 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from contextlib import contextmanager
-from datetime import timedelta
-from tempfile import NamedTemporaryFile
 from unittest.mock import patch
 
 import torch
-import torch.distributed as dist
-import torch.nn as nn
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import DataParallelMeshDims
 
-from torchtitan.experiments.flex_shard import (
-    BucketSpec,
-    flex_shard,
-    is_flex_shard_param,
-    per_param_placements,
+from torchtitan.experiments.flex_shard import is_flex_shard_param
+from torchtitan.experiments.flex_shard.placements import Shard
+from torchtitan.experiments.flex_shard.tests.common import (
+    flex_shard_tiny_model,
+    single_rank_cpu_mesh,
 )
-
-
-@contextmanager
-def _single_rank_cpu_mesh():
-    created_pg = False
-    with NamedTemporaryFile() as store:
-        if not dist.is_initialized():
-            dist.init_process_group(
-                "gloo",
-                init_method=f"file://{store.name}",
-                rank=0,
-                world_size=1,
-                timeout=timedelta(seconds=20),
-            )
-            created_pg = True
-        try:
-            yield init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
-        finally:
-            if created_pg and dist.is_initialized():
-                dist.destroy_process_group()
-
-
-def _flex_shard_tiny_model(mesh):
-    model = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 2))
-    flex_shard(
-        model,
-        mesh,
-        DataParallelMeshDims(shard="fsdp"),
-        shard_placement_fn=per_param_placements,
-        buckets=[
-            BucketSpec(["0.*"], reshard_after_forward=False),
-            BucketSpec(["2.*"], reshard_after_forward=False),
-        ],
-    )
-    return model
 
 
 class TestFlexShardEagerOnly(unittest.TestCase):
     def test_eager_forward_backward_on_cpu_mesh(self):
-        with _single_rank_cpu_mesh() as mesh:
-            model = _flex_shard_tiny_model(mesh)
+        with single_rank_cpu_mesh() as mesh:
+            model = flex_shard_tiny_model(mesh)
 
             loss = model(torch.randn(3, 4)).sum()
             loss.backward()
@@ -72,19 +30,57 @@ class TestFlexShardEagerOnly(unittest.TestCase):
                 self.assertIsNotNone(param.grad)
 
     def test_param_access_outside_forward_raises(self):
-        with _single_rank_cpu_mesh() as mesh:
-            model = _flex_shard_tiny_model(mesh)
+        with single_rank_cpu_mesh() as mesh:
+            model = flex_shard_tiny_model(mesh)
 
             with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
                 _ = model[0].weight
 
     def test_graph_capture_raises(self):
-        with _single_rank_cpu_mesh() as mesh:
-            model = _flex_shard_tiny_model(mesh)
+        with single_rank_cpu_mesh() as mesh:
+            model = flex_shard_tiny_model(mesh)
 
             with patch.object(torch.compiler, "is_compiling", return_value=True):
                 with self.assertRaisesRegex(ValueError, "eager execution only"):
                     model(torch.randn(3, 4))
+
+    def test_graph_capture_error_does_not_poison_next_eager_forward(self):
+        with single_rank_cpu_mesh() as mesh:
+            model = flex_shard_tiny_model(mesh)
+            inp = torch.randn(3, 4)
+
+            with patch.object(torch.compiler, "is_compiling", return_value=True):
+                with self.assertRaisesRegex(ValueError, "eager execution only"):
+                    model(inp)
+
+            loss = model(inp).sum()
+            loss.backward()
+
+            for param in model.parameters():
+                self.assertIsNotNone(param.grad)
+
+    def test_graph_capture_raises_before_collectives(self):
+        with single_rank_cpu_mesh() as mesh:
+            model = flex_shard_tiny_model(mesh)
+
+            with (
+                patch.object(torch.compiler, "is_compiling", return_value=True),
+                patch.object(
+                    Shard,
+                    "unshard",
+                    side_effect=AssertionError("unshard should not run"),
+                ) as unshard,
+                patch.object(
+                    Shard,
+                    "begin_unshard",
+                    side_effect=AssertionError("begin_unshard should not run"),
+                ) as begin_unshard,
+            ):
+                with self.assertRaisesRegex(ValueError, "eager execution only"):
+                    model(torch.randn(3, 4))
+
+            unshard.assert_not_called()
+            begin_unshard.assert_not_called()
 
 
 if __name__ == "__main__":

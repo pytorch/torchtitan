@@ -43,9 +43,9 @@ class MixedPrecisionPolicy:
 class OffloadPolicy:
     """CPU offload policy for FlexShard buckets.
 
-    When set on a BucketSpec, the bucket's byte storage is allocated on
-    CPU (optionally pinned). The eager all-gather hook handles H2D transfer
-    before all-gather; backward autograd handles D2H automatically.
+    This is a placeholder for future CPU offload support. The minimal eager
+    FlexShard path currently rejects non-None offload policies before storage
+    materialization.
 
     Args:
         pin_memory: Whether to pin CPU memory for faster H2D/D2H
@@ -70,7 +70,8 @@ class BucketSpec:
             those apply to a module's forward args/outputs, not to an individual
             parameter bucket. Keeping them out of BucketSpec avoids ambiguous
             behavior when multiple buckets share the same hooked module.
-        offload_policy: CPU offload policy for this bucket.
+        offload_policy: CPU offload policy for this bucket. TODO: implement
+            and test CPU offload before allowing this in flex_shard().
         reshard_after_forward: Whether to free this bucket's unsharded
             parameters after forward and recompute them in backward.
     """

@@ -166,11 +166,22 @@ def _get_managed_named_params(
             # This child is already wrapped; skip its parameters
             wrapped_prefixes.add(name + ".")
 
-    # Collect parameters not in wrapped submodules
-    for fqn, param in module.named_parameters():
+    seen_params: dict[int, str] = {}
+
+    # Collect parameters not in wrapped submodules. Use remove_duplicate=False
+    # so shared parameters are rejected instead of leaving one alias unmanaged.
+    for fqn, param in module.named_parameters(remove_duplicate=False):
         is_wrapped = any(fqn.startswith(prefix) for prefix in wrapped_prefixes)
-        if not is_wrapped:
-            managed_params.append((fqn, param))
+        if is_wrapped:
+            continue
+        param_id = id(param)
+        if param_id in seen_params:
+            raise ValueError(
+                "FlexShard eager mode does not support shared parameters; "
+                f"{fqn!r} shares storage with {seen_params[param_id]!r}."
+            )
+        seen_params[param_id] = fqn
+        managed_params.append((fqn, param))
 
     return managed_params
 

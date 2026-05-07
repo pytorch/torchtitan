@@ -391,6 +391,7 @@ def _create_eager_param_states(
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
             param_state = EagerParamAccessState(
+                requires_grad=info.requires_grad,
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
@@ -651,21 +652,20 @@ def _install_batched_allgather_hooks(
                             leaf_indices.append((idx, u))
 
                     if leaf_indices:
-                        grad_count = [0]
-                        n = len(leaf_indices)
+                        indices = [idx for idx, _ in leaf_indices]
+                        leaves = [leaf for _, leaf in leaf_indices]
 
-                        def _make_hook(i):
-                            def _on_grad(grad):
-                                collected_grads[i] = grad
-                                grad_count[0] += 1
-                                if grad_count[0] >= n:
-                                    _reduce_fn()
-                                    grad_count[0] = 0
+                        def _on_grads(grads):
+                            collected_grads.clear()
+                            for idx, grad in zip(indices, grads, strict=True):
+                                if grad is not None:
+                                    collected_grads[idx] = grad
+                            _reduce_fn()
 
-                            return _on_grad
-
-                        for idx, leaf in leaf_indices:
-                            leaf.register_hook(_make_hook(idx))
+                        torch.autograd.graph.register_multi_grad_hook(
+                            leaves,
+                            _on_grads,
+                        )
 
             return pre_forward_hook, post_forward_hook
 

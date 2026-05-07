@@ -55,6 +55,7 @@ class _MixedPrecisionCast(torch.autograd.Function):
 class EagerParamAccessState:
     """Mutable state for eager-only FlexShard parameter access."""
 
+    requires_grad: bool = True
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
     compute_device: torch.device | None = None
@@ -141,9 +142,10 @@ def _register_param_accessors(
 
                 if param_dtype is not None and pre.dtype != param_dtype:
                     pre = pre.to(param_dtype)
-                unsharded = pre.detach().requires_grad_(True)
+                unsharded = pre.detach().requires_grad_(param_state.requires_grad)
                 if (
                     torch.is_grad_enabled()
+                    and param_state.requires_grad
                     and param_state._unsharded_for_reduce is None
                 ):
                     param_state._unsharded_for_reduce = unsharded

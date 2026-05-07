@@ -116,6 +116,11 @@ def _prepare_flex_shard_inputs(
         raise ValueError("flex_shard requires at least one BucketSpec in buckets.")
     if not all(isinstance(bucket, BucketSpec) for bucket in buckets):
         raise TypeError("flex_shard buckets must be a list of BucketSpec objects.")
+    for bucket in buckets:
+        if bucket.offload_policy is not None:
+            raise NotImplementedError(
+                "FlexShard eager mode does not yet support BucketSpec.offload_policy."
+            )
 
     param_fqns = [fqn for fqn, _ in named_params]
     bucket_assignments = _assign_params_to_buckets(param_fqns, buckets)

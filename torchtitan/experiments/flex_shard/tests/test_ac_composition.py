@@ -21,6 +21,7 @@ Usage:
 import traceback
 from datetime import timedelta
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -44,6 +45,12 @@ from torchtitan.experiments.flex_shard import (
 )
 from torchtitan.experiments.flex_shard.sharding_metadata import (
     _EAGER_COMM_CONTEXTS_ATTR,
+)
+
+
+pytestmark = pytest.mark.skipif(
+    not dist.is_initialized() or not torch.cuda.is_available(),
+    reason="AC composition tests require torchrun with an initialized CUDA PG",
 )
 
 
