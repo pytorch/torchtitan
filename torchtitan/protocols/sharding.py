@@ -98,6 +98,26 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
+        local_input_grad_placements: Per-input ``NamedPlacement`` declaring
+            the placement of the **input gradient** when the plain input is
+            wrapped via ``DTensor.from_local`` at the input boundary. Keyed
+            by ``forward()`` arg name. Mirrors
+            ``ColwiseParallelWithGradPlacement(local_input_grad_placements=...)``.
+            Only effective for inputs that arrive as plain tensors and have
+            an entry in ``in_src_shardings``.
+            e.g. ``{"x": {TP: Partial()}}`` to keep d_x as Partial in
+            backward instead of all-reducing to Replicate.
+            ``None`` means default ``from_local`` grad behavior.
+        local_output_grad_placements: ``NamedPlacement`` declaring the
+            placement of the **output gradient** when the DTensor output is
+            unwrapped via ``to_local(grad_placements=...)`` at the output
+            boundary. When set, the module's effective return type becomes
+            a local tensor (the wrapper calls ``to_local`` after any
+            ``out_dst_shardings`` redistribute). Mirrors
+            ``NoParallel(local_output_grad_placements=...)``.
+            e.g. ``{TP: Partial()}`` to receive the upstream local d_output
+            as Partial on TP in backward.
+            ``None`` leaves the output as DTensor.
         local_map: If set, wraps forward with ``local_map()``.
 
     TODO: add ``out_src_shardings`` to declare the output's source placement
@@ -109,6 +129,8 @@ class ShardingConfig:
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_dst_shardings: NamedPlacement | None = None
+    local_input_grad_placements: dict[str, NamedPlacement] | None = None
+    local_output_grad_placements: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:

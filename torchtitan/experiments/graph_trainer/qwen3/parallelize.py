@@ -20,7 +20,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.qwen3.model import GraphTrainerQwen3Model
-from torchtitan.models.llama4.parallelize import apply_moe_ep_tp
 
 
 def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
@@ -74,19 +73,10 @@ def parallelize_qwen3(
 
     annotate_qwen3(model)
 
-    if parallel_dims.tp_enabled:
-        # Config-based sharding: ShardingConfig is populated on the model
-        # config in Trainer.Config.__post_init__; Module.parallelize applies it.
-        model.parallelize(parallel_dims)
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=parallelism.enable_sequence_parallel,
-        )
+        model.parallelize(parallel_dims)
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
