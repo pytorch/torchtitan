@@ -374,6 +374,11 @@ class ParallelDims:
                 self._spmd_axes[name] = MeshAxis.of(1, 1)
         return self._spmd_axes[name]
 
+    def get_spmd_pg(self, name: str) -> Any | None:
+        """Return the raw ProcessGroup for a named axis, or None."""
+        self.get_spmd_axis(name)
+        return self._spmd_pgs.get(name)
+
     def get_spmd_pg_for_axis(self, axis: Any) -> Any | None:
         """Return the ProcessGroup for a MeshAxis object."""
         for name, a in self._spmd_axes.items():
@@ -382,14 +387,14 @@ class ParallelDims:
         return None
 
     def tp_shard(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
-        """Slice tensor along dim by TP rank. No DTensor involved."""
-        import torch.distributed as dist
+        """Shard tensor along dim across TP ranks, matching DTensor's sharding."""
+        from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 
-        tp_pg = self.get_spmd_pg("tp")
-        assert tp_pg is not None, "TP is not enabled"
-        rank = dist.get_rank(tp_pg)
-        chunks = tensor.chunk(self.tp, dim=dim)
-        return chunks[rank].contiguous()
+        tp_mesh = self.get_mesh("tp")
+        dtensor = distribute_tensor(
+            tensor, tp_mesh, placements=[Shard(dim)]
+        )
+        return dtensor._local_tensor
 
     def spmd_dp_axes(self) -> list:
         """Active DP MeshAxis objects."""

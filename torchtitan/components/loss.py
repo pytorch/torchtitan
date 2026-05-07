@@ -250,10 +250,14 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
+        self._full_spmd_types: bool = False
         self._spmd_dp_axes: list = []
+        self._spmd_tp_axis = None
+        self._spmd_tp_pg = None
 
     def enable_spmd_types(self, dp_axes: list, tp_axis=None, tp_pg=None) -> None:
         """Store spmd_types axes for type annotation during loss computation."""
+        self._full_spmd_types = True
         self._spmd_dp_axes = dp_axes
         self._spmd_tp_axis = tp_axis
         self._spmd_tp_pg = tp_pg
@@ -301,11 +305,26 @@ class ChunkedCELoss(BaseLoss):
                     placements[tp_dim] = Replicate()
                     hidden_states = hidden_states.redistribute(mesh, tuple(placements))
 
+        # SPMD path: all-gather S(1)@tp -> R@tp before chunking.
+        tp_axis = getattr(self, '_spmd_tp_axis', None)
+        if tp_axis is not None and tp_axis.size() > 1 and self._full_spmd_types:
+            bwd = (
+                {"op_dtype": torch.float32}
+                if hidden_states.dtype != torch.float32
+                else None
+            )
+            hidden_states = spmd.redistribute(
+                hidden_states, self._spmd_tp_pg,
+                src=spmd.S(1), dst=spmd.R, backward_options=bwd,
+            )
+
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
 
         # Split hidden states and labels into chunks along seq dim.
         # Use .contiguous() to break shared storage from torch.chunk().
+        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
+        # directly with Shard(1) on CP. Need local_map to operate on local tensors
         h_detached = hidden_states.detach().requires_grad_(requires_grad)
 
         def _chunk_tensors(h, lbls):
@@ -316,13 +335,11 @@ class ChunkedCELoss(BaseLoss):
             l_cs = list(torch.chunk(lbls, num_chunks, dim=1))
             return (*h_cs, *l_cs)
 
-        if spmd.is_type_checking() and spmd.has_local_type(h_detached):
-            from spmd_types import local_map as spmd_local_map
-
+        if self._full_spmd_types:
             h_leaf = _spmd_spec_leaf(h_detached)
             l_leaf = _spmd_spec_leaf(labels)
             out_types = (h_leaf,) * num_chunks + (l_leaf,) * num_chunks
-            all_chunks = spmd_local_map(out_types=out_types)(
+            all_chunks = spmd.local_map(out_types=out_types)(
                 _chunk_tensors
             )(h_detached, labels)
         else:
@@ -340,14 +357,12 @@ class ChunkedCELoss(BaseLoss):
 
         # spmd_types: chunk_loss is P on DP axes. Reinterpret total_loss
         # from R to P so P + P = P accumulates without per-chunk all-reduces.
-
-        if spmd.is_type_checking():
+        if self._full_spmd_types:
             for axis in self._spmd_dp_axes:
                 total_loss = spmd.reinterpret(
                     total_loss, axis, src=spmd.R, dst=spmd.P, expert_mode=True
                 )
-            # TP: loss is identical across TP ranks (after all-gather)
-            tp_axis = self._spmd_tp_axis if hasattr(self, '_spmd_tp_axis') else None
+            tp_axis = getattr(self, '_spmd_tp_axis', None)
             if tp_axis is not None and tp_axis.size() > 1:
                 total_loss = spmd.convert(
                     total_loss, self._spmd_tp_pg, src=spmd.R, dst=spmd.I,
@@ -372,7 +387,8 @@ class ChunkedCELoss(BaseLoss):
 
             logits = lm_head(h_chunk)
             chunk_loss = self.fn(logits, label_chunk)
-            if self._spmd_tp_axis is not None and self._spmd_tp_axis.size() > 1:
+            tp_axis = getattr(self, '_spmd_tp_axis', None)
+            if tp_axis is not None and tp_axis.size() > 1:
                 chunk_loss = spmd.convert(
                     chunk_loss, self._spmd_tp_pg, src=spmd.R, dst=spmd.I,
                     expert_mode=True,
@@ -383,10 +399,10 @@ class ChunkedCELoss(BaseLoss):
 
             if requires_grad:
                 with spmd.no_typecheck():
-                chunk_loss.backward()
-                assert h_chunk.grad is not None
-                grad_accumulator.add(h_chunk.grad)
-                h_chunk.grad = None
+                    chunk_loss.backward()
+                    assert h_chunk.grad is not None
+                    grad_accumulator.add(h_chunk.grad)
+                    h_chunk.grad = None
 
         if fsdp_enabled:
             lm_head.set_reshard_after_forward(True)
