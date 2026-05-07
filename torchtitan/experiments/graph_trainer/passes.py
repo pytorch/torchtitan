@@ -234,9 +234,7 @@ def construct_default_graph_passes(
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
     cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
-    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(
-        traced_result.gm
-    )
+    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
