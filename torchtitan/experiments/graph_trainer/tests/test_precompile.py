@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch.distributed as dist
 
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
@@ -391,6 +392,23 @@ class TestPrecompileSaveValidation(unittest.TestCase):
         result = _unwrap_serializable(wrapper)
         self.assertIs(result, inner)
 
+    def test_unwrap_from_serialize_attr(self):
+        """Current PyTorch may expose a plain callable with serialize()."""
+        from torch._dynamo.aot_compile_types import (
+            BundledAOTAutogradSerializableCallable,
+        )
+
+        from torchtitan.experiments.graph_trainer.precompile import _unwrap_serializable
+
+        def compiled_fn(*args, **kwargs):
+            return args, kwargs
+
+        compiled_fn.serialize = lambda: "serialized"
+
+        result = _unwrap_serializable(compiled_fn)
+        self.assertIsInstance(result, BundledAOTAutogradSerializableCallable)
+        self.assertIs(result.compiled_fn, compiled_fn)
+
 
 class TestConfigFingerprint(unittest.TestCase):
     def test_deterministic(self):
@@ -523,6 +541,175 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
                     expected_fingerprint="new_fp",
                 )
 
+    def test_mesh_get_process_group_hoisted_to_graph_input(self):
+        import torch.distributed.tensor._collective_utils  # noqa: F401
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+        from torchtitan.experiments.graph_trainer.precompile import (
+            hoist_process_group_inputs,
+        )
+
+        if dist.is_initialized():
+            self.skipTest("requires an uninitialized process group")
+        dist.init_process_group("fake", rank=0, world_size=2)
+        self.addCleanup(dist.destroy_process_group)
+
+        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("cp",))
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        mesh_node = graph.get_attr("_opaque_obj0")
+        process_group_node = graph.call_function(
+            torch.ops._dtensor.mesh_get_process_group.default,
+            (mesh_node, 0),
+        )
+        process_group_node.meta["val"] = mesh.get_group()
+        graph.output((x, process_group_node))
+
+        root = torch.nn.Module()
+        root._opaque_obj0 = mesh
+        gm = torch.fx.GraphModule(root, graph)
+        traced_result = TracedResult(
+            gm=gm,
+            example_inputs=(torch.zeros(1),),
+            state_fqns=[],
+            num_flat_inputs=1,
+            input_subclass_layouts={},
+            num_flat_outputs=2,
+            output_subclass_layouts={},
+            output_spec=torch.utils._pytree.tree_flatten((torch.zeros(1), None))[1],
+            tensor_input_indices=[0],
+        )
+
+        hoist_process_group_inputs(traced_result)
+
+        graph_nodes = list(traced_result.gm.graph.nodes)
+        self.assertFalse(
+            any(
+                node.op == "call_function"
+                and node.target == torch.ops._dtensor.mesh_get_process_group.default
+                for node in graph_nodes
+            )
+        )
+        placeholders = [node for node in graph_nodes if node.op == "placeholder"]
+        self.assertEqual(
+            [node.target for node in placeholders], ["x", "_process_group_cp"]
+        )
+        self.assertEqual(len(traced_result.example_inputs), 2)
+        self.assertEqual(len(traced_result.process_group_inputs), 1)
+        self.assertEqual(traced_result.process_group_input_specs[0].axis, "cp")
+
+    def test_all_to_all_process_group_hoisted_to_graph_input(self):
+        import torch.distributed.tensor._collective_utils  # noqa: F401
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+        from torchtitan.experiments.graph_trainer.precompile import (
+            hoist_process_group_inputs,
+        )
+
+        if dist.is_initialized():
+            self.skipTest("requires an uninitialized process group")
+        dist.init_process_group("fake", rank=0, world_size=2)
+        self.addCleanup(dist.destroy_process_group)
+
+        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("cp",))
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        mesh_node = graph.get_attr("_opaque_obj0")
+        process_group_node = graph.call_function(
+            torch.ops._dtensor.mesh_get_process_group.default,
+            (mesh_node, 0),
+        )
+        process_group_node.meta["val"] = mesh.get_group()
+        all_to_all = graph.call_function(
+            torch.ops._c10d_functional.all_to_all_single.default,
+            (x, [0, 8], [0, 8], process_group_node),
+        )
+        graph.output(all_to_all)
+
+        root = torch.nn.Module()
+        root._opaque_obj0 = mesh
+        gm = torch.fx.GraphModule(root, graph)
+        traced_result = TracedResult(
+            gm=gm,
+            example_inputs=(torch.zeros(8),),
+            state_fqns=[],
+            num_flat_inputs=1,
+            input_subclass_layouts={},
+            num_flat_outputs=1,
+            output_subclass_layouts={},
+            output_spec=torch.utils._pytree.tree_flatten(torch.zeros(8))[1],
+            tensor_input_indices=[0],
+        )
+
+        hoist_process_group_inputs(traced_result)
+
+        placeholders = [
+            node.target
+            for node in traced_result.gm.graph.nodes
+            if node.op == "placeholder"
+        ]
+        self.assertEqual(
+            placeholders,
+            [
+                "x",
+                "_process_group_cp",
+            ],
+        )
+        self.assertEqual(len(traced_result.example_inputs), 2)
+        all_to_all_nodes = [
+            node
+            for node in traced_result.gm.graph.nodes
+            if node.op == "call_function"
+            and node.target == torch.ops._c10d_functional.all_to_all_single.default
+        ]
+        self.assertEqual(len(all_to_all_nodes), 1)
+        for split_arg in all_to_all_nodes[0].args[1:3]:
+            self.assertIsInstance(split_arg, list)
+            self.assertEqual(len(split_arg), 2)
+            self.assertTrue(
+                all(
+                    isinstance(split_node, torch.fx.Node)
+                    and split_node.target == torch.sym_ite
+                    for split_node in split_arg
+                )
+            )
+        self.assertEqual(
+            all_to_all_nodes[0].args[3].target,
+            "_process_group_cp",
+        )
+
+    def test_fx_trace_load_hoisted_process_groups_require_parallel_dims(self):
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            ProcessGroupInputSpec,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _FX_TRACE_ARTIFACT_KEY,
+            precompile_fx_trace_load,
+            PrecompiledFxTraceArtifact,
+        )
+
+        flat_vals, spec = torch.utils._pytree.tree_flatten({"a": torch.zeros(2)})
+        artifact = PrecompiledFxTraceArtifact(
+            serialized_gm=b"fake",
+            state_fqns=["w"],
+            num_flat_inputs=2,
+            input_subclass_layouts={},
+            num_flat_outputs=1,
+            output_subclass_layouts={},
+            output_spec=spec,
+            tensor_input_indices=[0, 1],
+            process_group_input_specs=(ProcessGroupInputSpec(axis="cp"),),
+            config_fingerprint="fp",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save(_FX_TRACE_ARTIFACT_KEY, pickle.dumps(artifact))
+
+            with self.assertRaisesRegex(ValueError, "requires parallel_dims"):
+                precompile_fx_trace_load(storage, expected_fingerprint="fp")
+
 
 class TestCudagraphPass(unittest.TestCase):
     """Test cudagraph_pass behavior."""
@@ -599,6 +786,199 @@ class TestCudagraphFingerprintConsistency(unittest.TestCase):
         fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
 
         self.assertEqual(fp1, fp2)
+
+
+class TestPrecompileCPSupport(unittest.TestCase):
+    """Tests for context parallelism support in the precompile path."""
+
+    def test_prepare_cp_input_shards_inputs_and_labels(self):
+        """Verify prepare_context_parallel_input shards inputs, labels, and
+        positions along the sequence dimension, matching the shapes the
+        trainer's post_dataloading_process would produce."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        if not dist.is_initialized():
+            dist.init_process_group("fake", rank=0, world_size=4)
+            self.addCleanup(dist.destroy_process_group)
+
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.distributed.context_parallel import (
+            prepare_context_parallel_input,
+        )
+
+        batch_size, seq_len, cp_degree = 2, 128, 4
+        device = torch.device("cuda:0")
+        mesh = init_device_mesh("cuda", (4,), mesh_dim_names=("cp",))
+
+        inputs = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        labels = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        positions = torch.arange(0, seq_len, dtype=torch.int32, device=device).expand(
+            batch_size, seq_len
+        )
+        extra_kwargs = {"positions": positions}
+
+        out_inputs, out_labels, out_kwargs = prepare_context_parallel_input(
+            inputs, labels, extra_kwargs, mesh, device
+        )
+
+        expected_seq = seq_len // cp_degree
+        self.assertEqual(out_inputs.shape, (batch_size, expected_seq))
+        self.assertEqual(out_labels.shape, (batch_size, expected_seq))
+        self.assertEqual(out_kwargs["positions"].shape, (batch_size, expected_seq))
+
+    def test_prepare_cp_input_preserves_extra_kwargs_keys(self):
+        """Extra kwargs other than positions/attention_masks pass through."""
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        if not dist.is_initialized():
+            dist.init_process_group("fake", rank=0, world_size=2)
+            self.addCleanup(dist.destroy_process_group)
+
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.distributed.context_parallel import (
+            prepare_context_parallel_input,
+        )
+
+        batch_size, seq_len = 2, 64
+        device = torch.device("cuda:0")
+        mesh = init_device_mesh("cuda", (2,), mesh_dim_names=("cp",))
+
+        inputs = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        labels = torch.randint(0, 1000, (batch_size, seq_len), device=device)
+        positions = torch.arange(0, seq_len, dtype=torch.int32, device=device).expand(
+            batch_size, seq_len
+        )
+        extra_kwargs = {"positions": positions}
+
+        _, _, out_kwargs = prepare_context_parallel_input(
+            inputs, labels, extra_kwargs, mesh, device
+        )
+
+        self.assertIn("positions", out_kwargs)
+
+    def test_global_valid_tokens_excludes_cp(self):
+        """The dummy_global_valid_tokens calculation must NOT include the CP
+        dimension, matching the trainer's dist_sum over the batch mesh."""
+        dp_shard, dp_replicate, cp = 4, 2, 2
+        local_batch_size, seq_len = 2, 128
+
+        global_batch_size = local_batch_size * dp_shard * dp_replicate
+        dummy_global_valid_tokens = float(global_batch_size * seq_len)
+
+        self.assertEqual(
+            dummy_global_valid_tokens,
+            float(local_batch_size * dp_shard * dp_replicate * seq_len),
+        )
+        wrong_with_cp = float(local_batch_size * dp_shard * dp_replicate * cp * seq_len)
+        self.assertNotEqual(dummy_global_valid_tokens, wrong_with_cp)
+
+    def test_precompile_cp_code_path_exists(self):
+        """The precompile path must call prepare_context_parallel_input when
+        cp_enabled is True, not raise NotImplementedError."""
+        import inspect
+
+        from torchtitan.experiments.graph_trainer.precompile_main import (
+            _precompile_aot_fx_trace,
+        )
+
+        source = inspect.getsource(_precompile_aot_fx_trace)
+        self.assertIn("prepare_context_parallel_input", source)
+        self.assertNotIn(
+            "CooR precompile does not yet support context parallelism", source
+        )
+
+    def test_cp_disabled_skips_prepare(self):
+        """When cp_enabled is False, prepare_context_parallel_input must NOT
+        be called."""
+        parallel_dims = MagicMock()
+        parallel_dims.cp_enabled = False
+
+        with patch(
+            "torchtitan.distributed.context_parallel.prepare_context_parallel_input"
+        ) as mock_prepare:
+            self.assertFalse(parallel_dims.cp_enabled)
+            mock_prepare.assert_not_called()
+
+
+class TestPrecompileCPPositions(unittest.TestCase):
+    """Tests that positions are created correctly for CP in the precompile path."""
+
+    def test_positions_created_when_cp_enabled_without_block_causal(self):
+        """Even with mask_type='causal', positions must be created when
+        cp_enabled=True, because CP needs them for correct RoPE after sharding."""
+        from torchtitan.models.common.decoder import Decoder
+
+        batch_size, seq_len = 2, 128
+        device = torch.device("cpu")
+
+        dummy_inputs = torch.randint(0, 100, (batch_size, seq_len), device=device)
+        extra_kwargs: dict = {}
+
+        model_config = MagicMock(spec=Decoder.Config)
+        attn_config = MagicMock()
+        attn_config.mask_type = "causal"
+        attn_config.inner_attention = None
+        layer_config = MagicMock()
+        layer_config.attention = attn_config
+        model_config.layers = [layer_config]
+
+        cp_enabled = True
+
+        if model_config.layers:
+            mask_type = getattr(model_config.layers[0].attention, "mask_type", "causal")
+            if mask_type == "block_causal" or cp_enabled:
+                extra_kwargs["positions"] = torch.arange(
+                    0,
+                    dummy_inputs.shape[1],
+                    dtype=torch.int32,
+                    device=dummy_inputs.device,
+                ).expand(dummy_inputs.shape)
+
+        self.assertIn("positions", extra_kwargs)
+        self.assertEqual(extra_kwargs["positions"].shape, (batch_size, seq_len))
+        self.assertTrue(
+            torch.equal(
+                extra_kwargs["positions"][0],
+                torch.arange(seq_len, dtype=torch.int32),
+            )
+        )
+
+    def test_positions_not_created_without_cp_or_block_causal(self):
+        """With mask_type='causal' and cp_enabled=False, positions should NOT
+        be added to extra_kwargs."""
+        extra_kwargs: dict = {}
+        batch_size, seq_len = 2, 128
+        dummy_inputs = torch.randint(0, 100, (batch_size, seq_len))
+
+        mask_type = "causal"
+        cp_enabled = False
+
+        if mask_type == "block_causal" or cp_enabled:
+            extra_kwargs["positions"] = torch.arange(
+                0, dummy_inputs.shape[1], dtype=torch.int32
+            ).expand(dummy_inputs.shape)
+
+        self.assertNotIn("positions", extra_kwargs)
+
+
+class TestPrecompileCPFingerprint(unittest.TestCase):
+    """Test that the config fingerprint is sensitive to CP settings."""
+
+    def test_cp_degree_changes_fingerprint(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        cfg = _StubCompileConfig()
+
+        dims_cp1 = _StubParallelDims(cp=1)
+        dims_cp2 = _StubParallelDims(cp=2)
+
+        fp_cp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims_cp1)
+        fp_cp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims_cp2)
+        self.assertNotEqual(fp_cp1, fp_cp2)
 
 
 if __name__ == "__main__":

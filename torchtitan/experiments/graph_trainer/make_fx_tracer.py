@@ -6,7 +6,7 @@
 
 import copy
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -43,6 +43,14 @@ def _skip_nested_compile() -> Generator[None, None, None]:
         torch._dynamo.config.error_on_nested_fx_trace = prev
 
 
+def _patch_backward_tracing():
+    if hasattr(torch.compiler, "_patch_engine_backward"):
+        return torch.compiler._patch_engine_backward()
+    if hasattr(torch.compiler, "_patch_autograd_grad"):
+        return torch.compiler._patch_autograd_grad()
+    return nullcontext()
+
+
 @dataclass
 class SubclassMeta:
     cls: type
@@ -57,6 +65,11 @@ class SubclassMeta:
 class SubclassLayout:
     num_tensors: int
     meta: SubclassMeta | None
+
+
+@dataclass(frozen=True)
+class ProcessGroupInputSpec:
+    axis: str
 
 
 def _unwrap_subclass(t: torch.Tensor) -> tuple[list[torch.Tensor], SubclassMeta | None]:
@@ -284,6 +297,10 @@ class TracedResult:
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int] = field(default_factory=list)
+    process_group_inputs: tuple[Any, ...] = field(default_factory=tuple)
+    process_group_input_specs: tuple[ProcessGroupInputSpec, ...] = field(
+        default_factory=tuple
+    )
 
     @property
     def num_static_inputs(self) -> int:
@@ -378,7 +395,7 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
 
             state_for_fn = dict(zip(state_fqns, state_wrapped, strict=True))
             user_list = pytree.tree_unflatten(list(user_flat), user_args_spec)
-            with torch.compiler._patch_engine_backward():
+            with _patch_backward_tracing():
                 result = fn(state_for_fn, *user_list)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
@@ -464,6 +481,7 @@ def run_traced(
         )
     all_args = list(state_flat) + list(user_args_flat)
     flat_inputs, _ = _unwrap_subclasses(all_args)
+    flat_inputs.extend(traced_result.process_group_inputs)
 
     with torch.no_grad():
         flat_outputs = traced_result.gm(*flat_inputs)

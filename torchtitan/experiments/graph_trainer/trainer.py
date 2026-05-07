@@ -140,6 +140,7 @@ class GraphTrainer(Trainer):
         self._traced_step = precompile_fx_trace_load(
             storage,
             expected_fingerprint=config_fingerprint,
+            parallel_dims=self.parallel_dims,
         )
 
     def _make_fx_forward_backward_step(

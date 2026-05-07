@@ -66,6 +66,25 @@ def annotate_module_fqns(model: nn.Module) -> None:
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
 
 
+def apply_context_parallel(model: nn.Module, parallel_dims: ParallelDims) -> None:
+    """Apply CP forward wrapping to graph trainer decoder models."""
+    if not parallel_dims.cp_enabled:
+        return
+
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        raise ValueError("Context Parallel requires the model to expose layers.")
+
+    layer_iter = layers.values() if hasattr(layers, "values") else layers
+    attention_modules = [block.attention.inner_attention for block in layer_iter]
+    if not attention_modules:
+        raise ValueError("Context Parallel requires at least one attention module.")
+
+    from torchtitan.distributed.context_parallel import apply_cp_to_forward
+
+    apply_cp_to_forward(attention_modules, parallel_dims.get_mesh("cp"))
+
+
 def parallelize_inputs(parallel_dims, args, kwargs):
     if not parallel_dims.tp_enabled:
         return args, kwargs

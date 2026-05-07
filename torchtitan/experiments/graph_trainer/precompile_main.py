@@ -302,6 +302,7 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
+        hoist_process_group_inputs,
         precompile_fx_trace_save,
     )
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
@@ -320,15 +321,14 @@ def _precompile_aot_fx_trace(
     dummy_labels = torch.randint(
         0, vocab_size, (local_batch_size, seq_len), device=device
     )
-    # The trainer computes global_valid_tokens via dist_sum (an
-    # all-reduce + .item()), which returns a Python float. Use the
-    # same type here so make_fx bakes it as a graph constant — not a
-    # graph input — identical to the non-precompile runtime trace.
+    # Must match Trainer.train_step (trainer.py): local_valid_tokens is
+    # counted from raw dataloader labels BEFORE CP sharding, then
+    # all-reduced over the "batch" mesh (dp_shard × dp_replicate).
+    # The batch mesh is defined as dp_replicate * dp_shard in
+    # ParallelDims.build_mesh and excludes CP, so CP must NOT be
+    # included here.
     global_batch_size = (
-        local_batch_size
-        * parallel_dims.dp_shard
-        * parallel_dims.dp_replicate
-        * parallel_dims.cp
+        local_batch_size * parallel_dims.dp_shard * parallel_dims.dp_replicate
     )
     dummy_global_valid_tokens = float(global_batch_size * seq_len)
     extra_inputs: dict[str, torch.Tensor] = {}
@@ -354,13 +354,18 @@ def _precompile_aot_fx_trace(
 
         extra_kwargs["positions"] = positions
 
-    # TODO: Add CP support — call prepare_context_parallel_input here
-    # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
-    # dimension, matching the trainer's post_dataloading_process.
     if parallel_dims.cp_enabled:
-        raise NotImplementedError(
-            "CooR precompile does not yet support context parallelism. "
-            "Set --parallelism.context_parallel_degree 1."
+        from torchtitan.distributed.context_parallel import (
+            prepare_context_parallel_input,
+        )
+
+        dummy_inputs, dummy_labels, extra_kwargs = prepare_context_parallel_input(
+            dummy_inputs,
+            dummy_labels,
+            extra_kwargs,
+            parallel_dims.get_mesh("cp"),
+            device,
+            config.parallelism.context_parallel_load_balancer,
         )
 
     # Enable loss_parallel when TP is active and loss_parallel is not
@@ -398,6 +403,8 @@ def _precompile_aot_fx_trace(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"
     )
+
+    hoist_process_group_inputs(traced_result, parallel_dims=parallel_dims)
 
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
