@@ -24,7 +24,11 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
-from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
+from torch.testing._internal.common_fsdp import (
+    FSDPTest,
+    FSDPTestMultiThread,
+    get_devtype,
+)
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import BucketSpec, is_flex_shard_param
@@ -36,42 +40,13 @@ from torchtitan.experiments.flex_shard.bucket_storage import (
 from torchtitan.experiments.flex_shard.placements import Shard
 from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,
+    single_rank_cpu_mesh,
     transformer_bucket_specs,
     transformer_inputs,
 )
 
 
 device_type = torch.device(get_devtype())
-
-
-class _FakeMesh:
-    """Minimal DeviceMesh stand-in for mesh-info unit tests."""
-
-    def __init__(self, mesh_dim_names):
-        self.mesh_dim_names = mesh_dim_names
-        self.ndim = len(mesh_dim_names) if mesh_dim_names is not None else 1
-
-    def __getitem__(self, names):
-        if isinstance(names, tuple):
-            return _FakeMesh(names)
-        return _FakeMesh((names,))
-
-    def _flatten(self, name):
-        return _FakeMesh((name,))
-
-
-class _FakeRankMesh:
-    """DeviceMesh stand-in with rank/world-size methods for storage tests."""
-
-    def __init__(self, rank: int = 0, world_size: int = 2) -> None:
-        self.rank = rank
-        self.world_size = world_size
-
-    def get_local_rank(self) -> int:
-        return self.rank
-
-    def size(self) -> int:
-        return self.world_size
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +64,13 @@ class TestDPShardMesh(TestCase):
             _get_dp_shard_mesh,
         )
 
-        mesh = _FakeMesh(("fsdp", "tp"))
-        shard_mesh = _get_dp_shard_mesh(mesh, DataParallelMeshDims(shard="fsdp"))
+        with single_rank_cpu_mesh():
+            mesh = init_device_mesh(
+                "cpu",
+                (1, 1),
+                mesh_dim_names=("fsdp", "tp"),
+            )
+            shard_mesh = _get_dp_shard_mesh(mesh, DataParallelMeshDims(shard="fsdp"))
 
         self.assertEqual(shard_mesh.mesh_dim_names, ("fsdp",))
 
@@ -101,11 +81,16 @@ class TestDPShardMesh(TestCase):
             _get_dp_shard_mesh,
         )
 
-        mesh = _FakeMesh(("dp0", "dp1", "tp"))
-        shard_mesh = _get_dp_shard_mesh(
-            mesh,
-            DataParallelMeshDims(shard=("dp0", "dp1")),
-        )
+        with single_rank_cpu_mesh():
+            mesh = init_device_mesh(
+                "cpu",
+                (1, 1, 1),
+                mesh_dim_names=("dp0", "dp1", "tp"),
+            )
+            shard_mesh = _get_dp_shard_mesh(
+                mesh,
+                DataParallelMeshDims(shard=("dp0", "dp1")),
+            )
 
         self.assertEqual(shard_mesh.mesh_dim_names, ("dp0_dp1",))
 
@@ -116,8 +101,10 @@ class TestDPShardMesh(TestCase):
             _get_dp_shard_mesh,
         )
 
-        with self.assertRaisesRegex(ValueError, "mesh_dim_names"):
-            _get_dp_shard_mesh(_FakeMesh(None), DataParallelMeshDims(shard="fsdp"))
+        with single_rank_cpu_mesh():
+            mesh = init_device_mesh("cpu", (1,))
+            with self.assertRaisesRegex(ValueError, "mesh_dim_names"):
+                _get_dp_shard_mesh(mesh, DataParallelMeshDims(shard="fsdp"))
 
     def test_dp_mesh_dims_rejects_missing_dim(self):
         from torch.distributed.fsdp import DataParallelMeshDims
@@ -126,11 +113,17 @@ class TestDPShardMesh(TestCase):
             _get_dp_shard_mesh,
         )
 
-        with self.assertRaisesRegex(ValueError, "not found"):
-            _get_dp_shard_mesh(
-                _FakeMesh(("fsdp", "tp")),
-                DataParallelMeshDims(shard="missing"),
+        with single_rank_cpu_mesh():
+            mesh = init_device_mesh(
+                "cpu",
+                (1, 1),
+                mesh_dim_names=("fsdp", "tp"),
             )
+            with self.assertRaisesRegex(ValueError, "not found"):
+                _get_dp_shard_mesh(
+                    mesh,
+                    DataParallelMeshDims(shard="missing"),
+                )
 
     def test_dp_mesh_dims_rejects_replicate_until_hsdp_supported(self):
         from torch.distributed.fsdp import DataParallelMeshDims
@@ -139,11 +132,17 @@ class TestDPShardMesh(TestCase):
             _get_dp_shard_mesh,
         )
 
-        with self.assertRaisesRegex(NotImplementedError, "replicate"):
-            _get_dp_shard_mesh(
-                _FakeMesh(("rep", "fsdp", "tp")),
-                DataParallelMeshDims(shard="fsdp", replicate="rep"),
+        with single_rank_cpu_mesh():
+            mesh = init_device_mesh(
+                "cpu",
+                (1, 1, 1),
+                mesh_dim_names=("rep", "fsdp", "tp"),
             )
+            with self.assertRaisesRegex(NotImplementedError, "replicate"):
+                _get_dp_shard_mesh(
+                    mesh,
+                    DataParallelMeshDims(shard="fsdp", replicate="rep"),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -222,24 +221,25 @@ class TestBucketPlacementValidation(TestCase):
         from torchtitan.experiments.flex_shard.utils import _validate_placements
         from torchtitan.experiments.flex_shard.placements import Shard
 
-        named_params = self._named_params()
-        with self.assertRaisesRegex(ValueError, "missing placements"):
-            _validate_placements(
-                {"a.weight": (Shard(0),)},
-                named_params,
-                _FakeMesh(("fsdp",)),
-            )
+        with single_rank_cpu_mesh() as mesh:
+            named_params = self._named_params()
+            with self.assertRaisesRegex(ValueError, "missing placements"):
+                _validate_placements(
+                    {"a.weight": (Shard(0),)},
+                    named_params,
+                    mesh,
+                )
 
-        with self.assertRaisesRegex(ValueError, "unexpected placements"):
-            _validate_placements(
-                {
-                    "a.weight": (Shard(0),),
-                    "b.weight": (Shard(0),),
-                    "extra.weight": (Shard(0),),
-                },
-                named_params,
-                _FakeMesh(("fsdp",)),
-            )
+            with self.assertRaisesRegex(ValueError, "unexpected placements"):
+                _validate_placements(
+                    {
+                        "a.weight": (Shard(0),),
+                        "b.weight": (Shard(0),),
+                        "extra.weight": (Shard(0),),
+                    },
+                    named_params,
+                    mesh,
+                )
 
     def test_rejects_nonzero_shard_dim(self):
         """Shard(1) in a bucket raises ValueError."""
@@ -289,11 +289,15 @@ class TestBucketPlacementValidation(TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestBucketStorageLayout(TestCase):
+class TestBucketStorageLayout(FSDPTestMultiThread):
     """Test ParamInfo and DStorage layout for bucket materialization."""
 
+    @property
+    def world_size(self) -> int:
+        return 2
+
     def test_create_param_infos_uses_sequential_byte_offsets(self):
-        mesh = _FakeRankMesh(rank=0, world_size=2)
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
         args, model = make_transformer_model()
         named_params = [
             ("tok_embeddings.weight", model.tok_embeddings.weight),
@@ -307,12 +311,20 @@ class TestBucketStorageLayout(TestCase):
         pos_embeddings = infos["pos_embeddings.weight"]
         self.assertEqual(
             tok_embeddings.local_shape,
-            torch.Size([args.vocab_size // 2, args.dim]),
+            Shard(0).compute_local_shape(
+                torch.Size([args.vocab_size, args.dim]),
+                self.rank,
+                self.world_size,
+            ),
         )
         self.assertEqual(tok_embeddings.byte_offset, 0)
         self.assertEqual(
             pos_embeddings.local_shape,
-            torch.Size([args.max_seq_len // 2, args.dim]),
+            Shard(0).compute_local_shape(
+                torch.Size([args.max_seq_len, args.dim]),
+                self.rank,
+                self.world_size,
+            ),
         )
         self.assertEqual(
             pos_embeddings.byte_offset,
@@ -326,7 +338,7 @@ class TestBucketStorageLayout(TestCase):
         )
 
     def test_materialized_params_are_views_into_bucket_storage(self):
-        mesh = _FakeRankMesh(rank=1, world_size=2)
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
         args, model = make_transformer_model()
         named_params = list(model.named_parameters())
         placements = {fqn: (Shard(0),) for fqn, _ in named_params}
