@@ -5,46 +5,62 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
-import unittest
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
-from torch.testing._internal.common_fsdp import FSDPTestMultiThread
+from torch.distributed.fsdp import DataParallelMeshDims
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
+from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
+from torch.testing._internal.common_utils import run_tests
 
+from torchtitan.experiments.flex_shard import flex_shard, per_param_placements
 from torchtitan.experiments.flex_shard.tests.common import (
     expected_shard,
-    flex_shard_cpu,
     make_transformer_model,
     transformer_bucket_specs,
 )
 
 
+device_type = torch.device(get_devtype())
+
+
 def _init_params_deterministically(model: torch.nn.Module) -> None:
     with torch.no_grad():
         for idx, param in enumerate(model.parameters()):
-            values = torch.arange(param.numel(), dtype=param.dtype).view_as(param)
+            values = torch.arange(
+                param.numel(),
+                dtype=param.dtype,
+                device=param.device,
+            ).view_as(param)
             param.copy_(values.div(max(param.numel(), 1)).add_(idx))
 
 
-def _deterministic_inputs(args, batch_size: int) -> torch.Tensor:
-    values = torch.arange(batch_size * args.max_seq_len)
+def _deterministic_inputs(args, batch_size: int, device: torch.device) -> torch.Tensor:
+    values = torch.arange(batch_size * args.max_seq_len, device=device)
     return values.view(batch_size, args.max_seq_len).remainder(args.vocab_size)
 
 
-class TestFlexShardTraining(FSDPTestMultiThread):
+class TestFlexShardTraining(FSDPTest):
     @property
     def world_size(self) -> int:
         return 2
 
-    def test_two_microbatch_gradient_accumulation_matches_reference(self):
-        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+    @skip_if_lt_x_gpu(2)
+    def test_gradient_accumulation(self):
+        mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
 
-        args, model = make_transformer_model()
+        args, model = make_transformer_model(device=device_type.type)
         _init_params_deterministically(model)
         reference = copy.deepcopy(model)
-        flex_shard_cpu(
+        flex_shard(
             model,
             mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
             buckets=transformer_bucket_specs(
                 args.n_layers,
                 reshard_after_forward=False,
@@ -52,8 +68,8 @@ class TestFlexShardTraining(FSDPTestMultiThread):
         )
 
         inputs = [
-            _deterministic_inputs(args, batch_size=3),
-            _deterministic_inputs(args, batch_size=2),
+            _deterministic_inputs(args, batch_size=3, device=device_type),
+            _deterministic_inputs(args, batch_size=2, device=device_type),
         ]
         optim = torch.optim.SGD(model.parameters(), lr=0.1)
         ref_optim = torch.optim.SGD(reference.parameters(), lr=0.1)
@@ -96,4 +112,4 @@ class TestFlexShardTraining(FSDPTestMultiThread):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()

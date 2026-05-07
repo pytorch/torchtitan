@@ -19,15 +19,13 @@ Usage:
       torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py
 """
 
-import unittest
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
-from torch.testing._internal.common_utils import TestCase
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import BucketSpec, is_flex_shard_param
 from torchtitan.experiments.flex_shard.bucket_storage import (
@@ -471,4 +469,4 @@ class TestDistributedBuckets(FSDPTest):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()

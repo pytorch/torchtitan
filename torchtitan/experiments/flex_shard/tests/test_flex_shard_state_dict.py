@@ -4,10 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import unittest
-
 import torch
-from torch.testing._internal.common_utils import TestCase
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
@@ -65,4 +63,4 @@ class TestFlexShardStateDict(TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()

@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import unittest
 from unittest.mock import patch
 
 import torch
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.tests.common import (
@@ -17,7 +17,7 @@ from torchtitan.experiments.flex_shard.tests.common import (
 )
 
 
-class TestFlexShardEagerRuntime(unittest.TestCase):
+class TestFlexShardEagerRuntime(TestCase):
     def test_eager_forward_backward_on_cpu_mesh(self):
         with single_rank_cpu_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
@@ -61,4 +61,4 @@ class TestFlexShardEagerRuntime(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()

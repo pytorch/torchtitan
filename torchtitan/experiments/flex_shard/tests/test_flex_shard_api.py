@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import unittest
-
 import torch
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
@@ -26,7 +25,7 @@ from torchtitan.experiments.flex_shard.tests.common import (
 )
 
 
-class TestFlexShardAPI(unittest.TestCase):
+class TestFlexShardAPI(TestCase):
     def test_flex_shard_returns_same_module_with_public_storage_properties(self):
         with single_rank_cpu_mesh() as mesh:
             args, model = make_transformer_model()
@@ -95,4 +94,4 @@ class TestFlexShardAPI(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()
