@@ -51,6 +51,7 @@ def build_minimal_trainer(
                 ),
                 precompile_artifact_dir="",
                 memory_policy="default",
+                pass_pipeline="default",
                 inductor_compilation="regional",
                 numerics_changing_optim=compile_numerics_changing_optim,
                 enable_cudagraph=True,
