@@ -70,6 +70,19 @@ from torchtitan.tools.logging import logger
 aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
 
+def _graph_has_cuda_tensor(gm: torch.fx.GraphModule) -> bool:
+    for node in gm.graph.nodes:
+        val = node.meta.get("val")
+        if isinstance(val, torch.Tensor) and val.device.type == "cuda":
+            return True
+    return False
+
+
+def _example_inputs_have_cuda_tensor(example_inputs: tuple) -> bool:
+    return any(
+        isinstance(inp, torch.Tensor) and inp.device.type == "cuda"
+        for inp in example_inputs
+    )
 
 def normalize_view_ops_as_reshape(
     gm: torch.fx.GraphModule,
@@ -221,9 +234,12 @@ def construct_default_graph_passes(
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    use_cudagraph = config.compile.enable_cudagraph and is_cudagraph_compatible(
-        traced_result.gm
-    )
+    use_cudagraph = (
+    config.compile.enable_cudagraph
+    and torch.cuda.is_available()
+    and _graph_has_cuda_tensor(traced_result.gm)
+    and is_cudagraph_compatible(traced_result.gm)
+)
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
@@ -302,70 +318,24 @@ def autobucketing_reordering_pass(
     acc = torch.accelerator.current_accelerator(check_available=True)
     acc_type = acc.type if acc is not None else None
 
-    if acc_type == "cuda":
-        schedule_overlap_bucketing(gm, collective_bucketing=True)
-        gm.recompile()
-        return gm
-
-    import torch._inductor.fx_passes.node_runtime_estimation as node_runtime_estimation
-    import torch._inductor.fx_passes.overlap_scheduling as overlap_scheduling
-
-    original_estimate_roofline_runtime_ms = getattr(
-        overlap_scheduling, "estimate_roofline_runtime_ms", None
-    )
-    original_estimate_runtime_analytical = getattr(
-        overlap_scheduling, "estimate_runtime_analytical", None
-    )
-    original_log_compute_estimations = getattr(
-        node_runtime_estimation, "_log_compute_estimations", None
-    )
-    scheduler_cls = getattr(overlap_scheduling, "OverlapScheduler", None)
-    original_align = None
-    if scheduler_cls is not None:
-        original_align = getattr(
-            scheduler_cls,
-            "_align_compute_nodes_runtime_estimations_across_all_distributed_ranks",
-            None,
-        )
-
-    try:
-        if original_estimate_roofline_runtime_ms is not None:
-            overlap_scheduling.estimate_roofline_runtime_ms = lambda node: 1e-3
-        if original_estimate_runtime_analytical is not None:
-            overlap_scheduling.estimate_runtime_analytical = lambda node: 1e-3
-        if original_log_compute_estimations is not None:
-            node_runtime_estimation._log_compute_estimations = (
-                lambda compute_nodes, benchmarked_estimations, analytical_estimations: None
-            )
-        if scheduler_cls is not None and original_align is not None:
-            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
-                lambda self: None
-            )
-
+    if acc_type == "xpu":
         schedule_overlap_bucketing(
             gm,
             collective_bucketing=True,
             collective_estimator="analytical",
+            compute_estimator="analytical",
+            custom_runtime_estimation=lambda node, size: 1e-3,
+            log_runtime_estimations=False,
         )
-        gm.recompile()
-        return gm
-    finally:
-        if original_estimate_roofline_runtime_ms is not None:
-            overlap_scheduling.estimate_roofline_runtime_ms = (
-                original_estimate_roofline_runtime_ms
-            )
-        if original_estimate_runtime_analytical is not None:
-            overlap_scheduling.estimate_runtime_analytical = (
-                original_estimate_runtime_analytical
-            )
-        if original_log_compute_estimations is not None:
-            node_runtime_estimation._log_compute_estimations = (
-                original_log_compute_estimations
-            )
-        if scheduler_cls is not None and original_align is not None:
-            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
-                original_align
-            )
+    else:
+        schedule_overlap_bucketing(
+            gm,
+            collective_bucketing=True,
+        )
+
+    gm.recompile()
+    return gm
+
 
 def transformer_block_bucketing_reordering_pass(
     gm: torch.fx.GraphModule,
@@ -379,70 +349,25 @@ def transformer_block_bucketing_reordering_pass(
     acc = torch.accelerator.current_accelerator(check_available=True)
     acc_type = acc.type if acc is not None else None
 
-    if acc_type == "cuda":
+    if acc_type == "xpu":
         manual_overlap_bucketing(
-            gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+            gm,
+            module_bucket_plans=fsdp_manual_buckets,
+            insert_overlap_deps=False,
+            collective_estimator="analytical",
+            compute_estimator="analytical",
+            custom_runtime_estimation=lambda node, size: 0.0,
+            log_runtime_estimations=False,
         )
-        gm.recompile()
-        return gm
-
-    import torch._inductor.fx_passes.node_runtime_estimation as node_runtime_estimation
-    import torch._inductor.fx_passes.overlap_scheduling as overlap_scheduling
-
-    original_estimate_roofline_runtime_ms = getattr(
-        overlap_scheduling, "estimate_roofline_runtime_ms", None
-    )
-    original_estimate_runtime_analytical = getattr(
-        overlap_scheduling, "estimate_runtime_analytical", None
-    )
-    original_log_compute_estimations = getattr(
-        node_runtime_estimation, "_log_compute_estimations", None
-    )
-    scheduler_cls = getattr(overlap_scheduling, "OverlapScheduler", None)
-    original_align = None
-    if scheduler_cls is not None:
-        original_align = getattr(
-            scheduler_cls,
-            "_align_compute_nodes_runtime_estimations_across_all_distributed_ranks",
-            None,
-        )
-
-    try:
-        if original_estimate_roofline_runtime_ms is not None:
-            overlap_scheduling.estimate_roofline_runtime_ms = lambda node: 1e-3
-        if original_estimate_runtime_analytical is not None:
-            overlap_scheduling.estimate_runtime_analytical = lambda node: 1e-3
-        if original_log_compute_estimations is not None:
-            node_runtime_estimation._log_compute_estimations = (
-                lambda compute_nodes, benchmarked_estimations, analytical_estimations: None
-            )
-        if scheduler_cls is not None and original_align is not None:
-            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
-                lambda self: None
-            )
-
+    else:
         manual_overlap_bucketing(
-            gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+            gm,
+            module_bucket_plans=fsdp_manual_buckets,
+            insert_overlap_deps=False,
         )
-        gm.recompile()
-        return gm
-    finally:
-        if original_estimate_roofline_runtime_ms is not None:
-            overlap_scheduling.estimate_roofline_runtime_ms = (
-                original_estimate_roofline_runtime_ms
-            )
-        if original_estimate_runtime_analytical is not None:
-            overlap_scheduling.estimate_runtime_analytical = (
-                original_estimate_runtime_analytical
-            )
-        if original_log_compute_estimations is not None:
-            node_runtime_estimation._log_compute_estimations = (
-                original_log_compute_estimations
-            )
-        if scheduler_cls is not None and original_align is not None:
-            scheduler_cls._align_compute_nodes_runtime_estimations_across_all_distributed_ranks = (
-                original_align
-            )
+
+    gm.recompile()
+    return gm
 
 
 
@@ -687,6 +612,14 @@ def cudagraph_pass(
             f"GraphModule (e.g. full_inductor_compilation)."
         )
 
+    if not torch.cuda.is_available() or not _example_inputs_have_cuda_tensor(
+        example_inputs
+    ):
+        logger.warning(
+            "Skipping cudagraph pass because CUDA is not available or graph inputs "
+            "are not CUDA tensors. This pass is CUDA-only."
+        )
+        return gm
     # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
     # which must happen after torch.cuda.set_device(local_rank).
     from torchtitan.experiments.graph_trainer.cudagraph import (

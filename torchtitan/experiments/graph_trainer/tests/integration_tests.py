@@ -387,7 +387,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "jit_fsdp+ep",
             ngpu=8,
             disabled=_JIT_AOT_DISABLED,
-        ),_``
+        ),
         OverrideDefinitions(
             [
                 [
