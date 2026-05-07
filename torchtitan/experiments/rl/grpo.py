@@ -462,17 +462,17 @@ class RLTrainer(Configurable):
         await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
         # push weights from trainer
-        await self.trainer.push_model_state_dict.call()
+        self.trainer.push_model_state_dict.call().get()
         # pull weights for policy version 0 (initial weights)
-        await self.generator.pull_model_state_dict.call(0)
+        self.generator.pull_model_state_dict.call(0).get()
 
-    async def _collect_rollouts(self, num_groups: int, step: int) -> list[Trajectory]:
+    def _collect_rollouts(self, num_groups: int, step: int) -> list[Trajectory]:
         """Collect group rollouts: one single-use env per group, scored and returned."""
         envs = [
             self.config.env.build(step=step, group_idx=i) for i in range(num_groups)
         ]
         completions = self._get_rank_0_value(
-            await self.generator.generate.call([env.prompt for env in envs])
+            self.generator.generate.call([env.prompt for env in envs]).get()
         )
         trajectories: list[Trajectory] = []
         for c in completions:
@@ -525,9 +525,9 @@ class RLTrainer(Configurable):
             max_tokens=self.config.generator.sampling.max_tokens,
         )
         completions = self._get_rank_0_value(
-            await self.generator.generate.call(
+            self.generator.generate.call(
                 [env.prompt for env in envs], sampling_config=greedy
-            )
+            ).get()
         )
 
         steps = [env.step(completions[i].text) for i, env in enumerate(envs)]
@@ -550,10 +550,14 @@ class RLTrainer(Configurable):
         logger.info(f"Pre:  {_format_validation(pre_validation)}")
 
         for step in range(num_steps):
+            # Yield to the event loop once per step so a pending Ctrl-C
+            # cancellation can land here (between blocking Monarch RPCs).
+            await asyncio.sleep(0)
+
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
-            trajectories = await self._collect_rollouts(num_groups, step=step)
+            trajectories = self._collect_rollouts(num_groups, step=step)
             episodes = self._build_episodes(trajectories)
 
             if self.config.log_samples:
@@ -565,16 +569,16 @@ class RLTrainer(Configurable):
                 for per_rank_episodes in self._shard_episodes(episodes)
             ]
             fwd_bwd_metrics = self._get_rank_0_value(
-                await self.trainer.forward_backward.call(batches)
+                self.trainer.forward_backward.call(batches).get()
             )
-            optim_metrics = self._get_rank_0_value(await self.trainer.optim_step.call())
+            optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
             metrics = {**fwd_bwd_metrics, **optim_metrics}
 
             # --- Weight sync --- #
             t0 = time.perf_counter()
-            await self.trainer.push_model_state_dict.call()
+            self.trainer.push_model_state_dict.call().get()
             t_push = time.perf_counter() - t0
-            await self.generator.pull_model_state_dict.call(metrics["policy_version"])
+            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
             t_sync = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_sync:.3f}s")
 
