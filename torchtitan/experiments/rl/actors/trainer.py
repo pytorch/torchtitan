@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+import torch.distributed._functional_collectives as funcol
 import torch.distributed.checkpoint as dcp
+import torch.distributed.distributed_c10d as c10d
 import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torch.distributed.checkpoint.state_dict import (
@@ -33,8 +35,10 @@ from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
     extract_response_logprobs,
+    LogprobVerificationOutput,
     verify_logprob_identity,
 )
+from torchtitan.experiments.rl.loss.types import LossOutput
 from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.protocols.model_spec import ModelSpec
@@ -175,7 +179,7 @@ class PolicyTrainer(Actor, Configurable):
 
         if not os.path.isdir(checkpoint_path):
             raise FileNotFoundError(
-                f"Checkpoint path '{checkpoint_path}' does not exist. "
+                f"Checkpoint path {checkpoint_path!r} does not exist. "
                 "Please provide a valid path to a HuggingFace checkpoint directory."
             )
 
@@ -248,15 +252,73 @@ class PolicyTrainer(Actor, Configurable):
 
         return model
 
+    def reduce_forward_backward_metrics(
+        self,
+        loss_metric_sums: dict[str, torch.Tensor],
+        verification: LogprobVerificationOutput,
+        *,
+        num_local_valid_tokens: torch.Tensor,
+    ) -> dict[str, float]:
+        """All reduce of metrics with correct calculation of mean-of-means.
+        Packs N values into a tensor and call all_reduce once to avoid N trips.
+
+        Returns:
+            dict[str, float]: Dictionary of reduced metrics.
+        """
+        loss_keys = list(loss_metric_sums)
+        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
+
+        # Pack all metrics into a single tensor for all_reduce
+        # sum_pack
+        sum_pack = torch.stack(
+            [loss_metric_sums[k].detach().to(torch.float64) for k in loss_keys]
+            + [
+                verification.logprob_diff_sum.detach().to(torch.float64),
+                verification.num_tokens_different.detach().to(torch.float64),
+                num_local_valid_tokens.detach().to(torch.float64),
+            ]
+        )
+        # max_value (only one value -- no need to pack)
+        max_value = verification.logprob_diff_max.detach().to(torch.float32)
+
+        # All reduce
+        if loss_mesh is not None:
+            sum_pack = funcol.all_reduce(
+                sum_pack, reduceOp=c10d.ReduceOp.SUM.name, group=loss_mesh
+            )
+            max_value = funcol.all_reduce(
+                max_value, reduceOp=c10d.ReduceOp.MAX.name, group=loss_mesh
+            )
+
+        # Unpack and normalize by global_valid_tokens.
+        # Metrics are expected to already be scaled by local_valid_tokens.
+        global_valid_tokens = sum_pack[-1].clamp(min=1.0)
+
+        # loss metrics
+        out: dict[str, float] = {}
+        for i, k in enumerate(loss_keys):
+            out[k] = float((sum_pack[i] / global_valid_tokens).item())
+
+        # logprob verification metrics
+        n_loss = len(loss_keys)
+        out["bit_wise/logprob_diff/mean"] = float(
+            (sum_pack[n_loss] / global_valid_tokens).item()
+        )
+        out["bit_wise/ratio_tokens_different/mean"] = float(
+            (sum_pack[n_loss + 1] / global_valid_tokens).item()
+        )
+        out["bit_wise/logprob_diff/max"] = float(max_value.item())
+        return out
+
     @endpoint
-    async def forward_backward(self, train_data: list[TrainBatch]) -> dict:
-        """Run forward pass, compute loss, and call backward.
+    async def forward_backward(self, train_data: list[TrainBatch]) -> dict[str, float]:
+        """Run forward pass, compute loss, call backward, and compute metrics.
 
         Args:
             train_data: List of batches, one per DP rank.
 
         Returns:
-            dict with loss metrics, advantage stats, and logprob verification.
+            dict[str, float]: Reduced metrics from loss and logprob verification.
         """
         logger.debug(
             f"{os.getpid()=} PolicyTrainer forward_backward "
@@ -294,50 +356,44 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        loss, loss_metrics = self.loss_fn(
+        loss_output: LossOutput = self.loss_fn(
             policy_logprobs=policy_logprobs,
             advantages=advantages,
         )
 
-        verification_result = verify_logprob_identity(
+        verification: LogprobVerificationOutput = verify_logprob_identity(
             local_batch.token_logprobs,
             policy_logprobs,
+            device=device,
         )
 
-        logger.debug(
-            f"Logprob verification: bitwise_identical={verification_result['logprob_bitwise_identical']}, "
-            f"max_delta={verification_result['logprob_max_delta']:.6e}, "
-            f"diff_mean={verification_result['logprob_diff_mean']:.6e}, "
-            f"diff_max={verification_result['logprob_diff_max']:.6e}, "
-            f"tokens_checked={verification_result['total_tokens_checked']}"
-        )
-
-        # Backward pass
         self.optimizers.zero_grad()
-        loss.backward()
+        loss_output.loss.backward()
 
-        return {
-            "loss": loss.item(),
-            "advantage_mean": advantages.mean().item(),
-            "advantage_std": advantages.std().item(),
-            "logprob_diff_mean": verification_result["logprob_diff_mean"],
-            "logprob_diff_max": verification_result["logprob_diff_max"],
-            "logprob_max_delta": verification_result["logprob_max_delta"],
-            "logprob_bitwise_identical": verification_result[
-                "logprob_bitwise_identical"
-            ],
-            **loss_metrics,
-        }
+        return self.reduce_forward_backward_metrics(
+            loss_output.token_mean_metric_sums,
+            verification,
+            num_local_valid_tokens=loss_output.num_local_valid_tokens,
+        )
 
     @endpoint
     async def optim_step(self) -> dict:
         """Clip gradients, step optimizer and LR scheduler.
 
         Returns:
-            dict with grad_norm and policy_version.
+            Reduced metrics from optimization step.
         """
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules (see Tinker API).
+
+        # capture LR before step
+        current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
+        if len(current_lrs) != 1:
+            raise ValueError(
+                "RL metrics only support a single optimizer LR for "
+                f"train/lr; got {current_lrs}"
+            )
+        current_lr = float(current_lrs[0])
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -357,8 +413,11 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         return {
-            "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
-            "policy_version": self.policy_version,
+            "train/grad_norm/mean": (
+                grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm)
+            ),
+            "train/lr": current_lr,
+            "train/policy_version/mean": float(self.policy_version),
         }
 
     @endpoint

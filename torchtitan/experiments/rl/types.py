@@ -46,6 +46,8 @@ class Completion:
     text: str
     token_ids: list[int]
     token_logprobs: list[float]
+    finish_reason: str | None = None
+    """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
 
 @dataclass(kw_only=True, slots=True)

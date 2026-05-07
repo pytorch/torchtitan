@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
 
@@ -18,7 +22,7 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
 
     # Config-based TP returns logits as a Replicate DTensor. Downstream RL
     # code (gather with plain-tensor indices, slicing per-sample) expects a
-    # plain tensor — materialize once here.
+    # plain tensor - materialize once here.
     if isinstance(logits, DTensor):
         logits = logits.to_local()
     shift_logits = logits[:, :-1, :].float()
@@ -47,68 +51,73 @@ def extract_response_logprobs(
     return result
 
 
+@dataclass(frozen=True)
+class LogprobVerificationOutput:
+    """Holds the outputs of `verify_logprob_identity`."""
+
+    logprob_diff_sum: torch.Tensor
+    logprob_diff_max: torch.Tensor
+    num_tokens_different: torch.Tensor
+
+
 def verify_logprob_identity(
     vllm_token_log_probs: list[list[float]],
     batch_token_log_probs: list[torch.Tensor],
-) -> dict:
-    """
-    Check if vLLM log probs and computed log probs are bit-wise identical,
-    and compute the log ratio (train/generator) between them.
+    *,
+    device: torch.device,
+) -> LogprobVerificationOutput:
+    """Generator/trainer logprob drift metrics.
 
     Args:
         vllm_token_log_probs: Per-token log probs from vLLM (generator)
         batch_token_log_probs: Per-token log probs computed by the trainer model
 
     Returns:
-        Verification result dict with identity status, delta info, and log ratio stats
+        A `LogprobVerificationOutput` instance
     """
-    result = {
-        "logprob_bitwise_identical": True,
-        "num_samples_checked": len(vllm_token_log_probs),
-        "total_tokens_checked": 0,
-        "num_tokens_different": 0,
-        "logprob_max_delta": 0.0,
-        "avg_delta": 0.0,
-        "logprob_diff_mean": 0.0,
-        "logprob_diff_max": 0.0,
-    }
+    # sanity check
+    if len(vllm_token_log_probs) != len(batch_token_log_probs):
+        raise ValueError(
+            f"verify_logprob_identity: sample count mismatch - "
+            f"vllm={len(vllm_token_log_probs)}, "
+            f"trainer={len(batch_token_log_probs)}"
+        )
 
-    all_deltas = []
-    all_log_ratios = []
+    if not vllm_token_log_probs:
+        zero = torch.zeros((), dtype=torch.float32, device=device)
+        return LogprobVerificationOutput(
+            logprob_diff_sum=zero,
+            logprob_diff_max=zero,
+            num_tokens_different=zero,
+        )
 
-    for vllm_lps, titan_lps in zip(vllm_token_log_probs, batch_token_log_probs):
-        # Convert vLLM log probs to tensor
-        vllm_tensor = torch.tensor(vllm_lps, dtype=torch.float32)
-        # Convert titan log probs to float32 for comparison
-        titan_tensor = titan_lps.detach().cpu().float()
+    # Make everything a tensor
+    vllm_flat = torch.tensor(
+        [lp for sample in vllm_token_log_probs for lp in sample],
+        dtype=torch.float32,
+    )
+    titan_flat = torch.cat([t.detach().cpu().float() for t in batch_token_log_probs])
 
-        num_tokens = len(vllm_lps)
-        result["total_tokens_checked"] += num_tokens
+    # sanity check
+    if vllm_flat.numel() != titan_flat.numel():
+        raise ValueError(
+            f"verify_logprob_identity: total token count mismatch - "
+            f"vllm={vllm_flat.numel()}, trainer={titan_flat.numel()}"
+        )
+    if vllm_flat.numel() == 0:
+        zero = torch.zeros((), dtype=torch.float32, device=device)
+        return LogprobVerificationOutput(
+            logprob_diff_sum=zero,
+            logprob_diff_max=zero,
+            num_tokens_different=zero,
+        )
 
-        # Check bitwise identity
-        bitwise_match = torch.equal(vllm_tensor, titan_tensor)
-
-        if not bitwise_match:
-            result["logprob_bitwise_identical"] = False
-            num_different = (vllm_tensor != titan_tensor).sum().item()
-            result["num_tokens_different"] += num_different
-            deltas = (vllm_tensor - titan_tensor).abs()
-            all_deltas.append(deltas)
-
-        # Log ratio: log(pi_train / pi_generator) = logprob_train - logprob_generator
-        # Should be 0 when weights are identical (ratio = 1)
-        all_log_ratios.append(titan_tensor - vllm_tensor)
-
-    # Compute aggregate delta stats
-    if all_deltas:
-        combined_deltas = torch.cat(all_deltas)
-        result["logprob_max_delta"] = combined_deltas.max().item()
-        result["avg_delta"] = combined_deltas.mean().item()
-
-    # Compute log ratio stats
-    if all_log_ratios:
-        combined_log_ratios = torch.cat(all_log_ratios)
-        result["logprob_diff_mean"] = combined_log_ratios.mean().item()
-        result["logprob_diff_max"] = combined_log_ratios.abs().max().item()
-
-    return result
+    # Compute the logprob difference
+    diff = titan_flat - vllm_flat
+    return LogprobVerificationOutput(
+        logprob_diff_sum=diff.sum().to(device),
+        logprob_diff_max=diff.abs().max().to(device),
+        num_tokens_different=(vllm_flat != titan_flat)
+        .sum()
+        .to(device=device, dtype=torch.float32),
+    )
