@@ -119,6 +119,22 @@ def transformer_inputs(
     )
 
 
+def expected_shard(
+    tensor: torch.Tensor,
+    *,
+    rank: int,
+    world_size: int,
+    dim: int = 0,
+) -> torch.Tensor:
+    """Return the Shard(dim) local tensor expected on one rank."""
+    chunks = list(torch.chunk(tensor, world_size, dim=dim))
+    empty_shape = list(tensor.shape)
+    empty_shape[dim] = 0
+    while len(chunks) < world_size:
+        chunks.append(tensor.new_empty(empty_shape))
+    return chunks[rank].contiguous()
+
+
 def transformer_bucket_specs(
     num_layers: int,
     *,

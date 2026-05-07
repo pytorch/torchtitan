@@ -15,14 +15,19 @@ Usage:
       -v -k "not Distributed"
 
     # Distributed correctness tests:
-    torchrun --nproc_per_node=2 \
+    python -m pytest -q -k Distributed \
       torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py
 """
 
 import unittest
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
+from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
+from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.flex_shard import BucketSpec, is_flex_shard_param
 from torchtitan.experiments.flex_shard.bucket_storage import (
@@ -36,6 +41,9 @@ from torchtitan.experiments.flex_shard.tests.common import (
     transformer_bucket_specs,
     transformer_inputs,
 )
+
+
+device_type = torch.device(get_devtype())
 
 
 class _FakeMesh:
@@ -73,7 +81,7 @@ class _FakeRankMesh:
 # ---------------------------------------------------------------------------
 
 
-class TestDPShardMesh(unittest.TestCase):
+class TestDPShardMesh(TestCase):
     """Test FlexShard DP shard mesh derivation."""
 
     def test_dp_mesh_dims_derives_shard_submesh(self):
@@ -145,7 +153,7 @@ class TestDPShardMesh(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestBucketAssignment(unittest.TestCase):
+class TestBucketAssignment(TestCase):
     """Test _assign_params_to_buckets."""
 
     def test_assigns_params_to_correct_bucket(self):
@@ -195,7 +203,7 @@ class TestBucketAssignment(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestBucketPlacementValidation(unittest.TestCase):
+class TestBucketPlacementValidation(TestCase):
     """Test _validate_bucket_placements."""
 
     @staticmethod
@@ -283,7 +291,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestBucketStorageLayout(unittest.TestCase):
+class TestBucketStorageLayout(TestCase):
     """Test ParamInfo and DStorage layout for bucket materialization."""
 
     def test_create_param_infos_uses_sequential_byte_offsets(self):
@@ -363,7 +371,7 @@ class TestBucketStorageLayout(unittest.TestCase):
                     local_view.untyped_storage().data_ptr(),
                     storage_ptr,
                 )
-                torch.testing.assert_close(param, local_view)
+                self.assertEqual(param, local_view)
                 self.assertTrue(is_flex_shard_param(param))
 
 
@@ -372,32 +380,24 @@ class TestBucketStorageLayout(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestDistributedBuckets(unittest.TestCase):
+class TestDistributedBuckets(FSDPTest):
     """Multi-process correctness tests for bucketed FlexShard.
 
     Run with:
-        torchrun --nproc_per_node=2 \
+        python -m pytest -q -k Distributed \
           torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py
     """
 
-    @classmethod
-    def setUpClass(cls):
-        if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
-        cls.rank = torch.distributed.get_rank()
-        cls.world_size = torch.distributed.get_world_size()
-        torch.cuda.set_device(cls.rank % torch.cuda.device_count())
-
-    @classmethod
-    def tearDownClass(cls):
-        if torch.distributed.is_initialized():
-            torch.cuda.synchronize()
-            torch.distributed.destroy_process_group()
+    @property
+    def world_size(self) -> int:
+        return 2
 
     def _init_mesh(self):
-        from torch.distributed.device_mesh import init_device_mesh
-
-        return init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("fsdp",))
+        return init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
 
     def _flex_shard(self, model, mesh, **kwargs):
         from torch.distributed.fsdp import DataParallelMeshDims
@@ -416,15 +416,16 @@ class TestDistributedBuckets(unittest.TestCase):
             **kwargs,
         )
 
+    @skip_if_lt_x_gpu(2)
     def test_multi_bucket_forward_correct(self):
         """Model with explicit buckets produces correct forward output."""
         mesh = self._init_mesh()
-        args, model = make_transformer_model(device="cuda")
+        args, model = make_transformer_model(device=device_type.type)
         for p in model.parameters():
-            torch.distributed.broadcast(p.data, src=0)
+            dist.broadcast(p.data, src=0)
 
-        x = transformer_inputs(args, device="cuda")
-        torch.distributed.broadcast(x, src=0)
+        x = transformer_inputs(args, device=device_type.type)
+        dist.broadcast(x, src=0)
         ref_output = model(x).clone()
 
         self._flex_shard(
@@ -439,14 +440,15 @@ class TestDistributedBuckets(unittest.TestCase):
         self.assertEqual(len(model.dstorages), 5)
         self.assertIs(model.dstorage, model.dstorages[0])
         output = model(x)
-        torch.testing.assert_close(output, ref_output)
+        self.assertEqual(output, ref_output)
 
+    @skip_if_lt_x_gpu(2)
     def test_multi_bucket_state_dict_sharded(self):
         """state_dict returns sharded params across all buckets."""
         mesh = self._init_mesh()
-        args, model = make_transformer_model(device="cuda")
+        args, model = make_transformer_model(device=device_type.type)
         for p in model.parameters():
-            torch.distributed.broadcast(p.data, src=0)
+            dist.broadcast(p.data, src=0)
 
         self._flex_shard(
             model,

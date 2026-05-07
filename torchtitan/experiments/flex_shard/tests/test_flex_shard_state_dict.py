@@ -7,6 +7,7 @@
 import unittest
 
 import torch
+from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
@@ -27,7 +28,7 @@ def _make_flex_sharded_transformer(mesh, **kwargs):
     return args, model
 
 
-class TestFlexShardStateDict(unittest.TestCase):
+class TestFlexShardStateDict(TestCase):
     def test_state_dict_load_round_trip_into_flex_sharded_model(self):
         with single_rank_cpu_mesh() as mesh:
             torch.manual_seed(0)
@@ -42,7 +43,7 @@ class TestFlexShardStateDict(unittest.TestCase):
             self.assertEqual(load_result.unexpected_keys, [])
 
             x = transformer_inputs(args, batch_size=3)
-            torch.testing.assert_close(source(x), target(x))
+            self.assertEqual(source(x), target(x))
 
             source_optim = torch.optim.SGD(source.parameters(), lr=0.05)
             target_optim = torch.optim.SGD(target.parameters(), lr=0.05)
@@ -52,7 +53,7 @@ class TestFlexShardStateDict(unittest.TestCase):
                 optim.step()
 
             for key, value in source.state_dict().items():
-                torch.testing.assert_close(value, target.state_dict()[key])
+                self.assertEqual(value, target.state_dict()[key])
 
     def test_load_state_dict_rejects_incompatible_shapes(self):
         with single_rank_cpu_mesh() as mesh:
