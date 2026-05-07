@@ -316,6 +316,7 @@ class PrecompiledFxTraceArtifact:
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int]
+    user_inputs_spec: pytree.TreeSpec
     config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
 
     @classmethod
@@ -355,6 +356,7 @@ class PrecompiledFxTraceArtifact:
             output_subclass_layouts=traced_result.output_subclass_layouts,
             output_spec=traced_result.output_spec,
             tensor_input_indices=traced_result.tensor_input_indices,
+            user_inputs_spec=traced_result.user_inputs_spec,
             config_fingerprint=config_fingerprint or ConfigFingerprint(""),
         )
 
@@ -381,13 +383,14 @@ class PrecompiledFxTraceArtifact:
         return TracedResult(
             gm=gm,
             example_inputs=(),
-            state_fqns=self.state_fqns,
             num_flat_inputs=self.num_flat_inputs,
             input_subclass_layouts=self.input_subclass_layouts,
+            user_inputs_spec=self.user_inputs_spec,
+            tensor_input_indices=self.tensor_input_indices,
             num_flat_outputs=self.num_flat_outputs,
             output_subclass_layouts=self.output_subclass_layouts,
             output_spec=self.output_spec,
-            tensor_input_indices=self.tensor_input_indices,
+            state_fqns=self.state_fqns,
         )
 
 
