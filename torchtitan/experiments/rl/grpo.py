@@ -36,7 +36,6 @@ import torch
 import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
-
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.config.manager import ConfigManager
@@ -550,8 +549,10 @@ class RLTrainer(Configurable):
         logger.info(f"Pre:  {_format_validation(pre_validation)}")
 
         for step in range(num_steps):
-            # Yield to the event loop once per step so a pending Ctrl-C
-            # cancellation can land here (between blocking Monarch RPCs).
+            # Cancellation point for Ctrl-C (KeyboardInterrupt) handling.
+            # This yields to the event loop to check for cancellation, which
+            # doesn't happen with `.get` calls.
+            # TODO: investigate replacing `.get()` with `await
             await asyncio.sleep(0)
 
             step_start = time.perf_counter()
