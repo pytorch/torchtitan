@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any, Hashable, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -26,12 +27,42 @@ if TYPE_CHECKING:
     from .bucket_storage import ParamInfo
 
 
+@dataclass(frozen=True)
+class LocalStorageLayout:
+    """Placement-owned local storage layout for one parameter."""
+
+    local_shape: torch.Size
+    local_numel: int
+    storage_nbytes: int
+
+
 class Placement:
     """Base class for FlexShard placement strategies.
 
     Each subclass implements per-param sharding (extract_local_shard,
     assemble_from_shards) and batched communication (unshard, reduce_grad).
     """
+
+    def validate_param(self, fqn: str, param: nn.Parameter) -> None:
+        """Validate that this placement can manage one parameter."""
+
+    def validate_bucket(
+        self,
+        bucket_idx: int,
+        bucket_patterns: list[str],
+        fqn: str,
+        param: nn.Parameter,
+        bucket_named_params: list[tuple[str, nn.Parameter]],
+    ) -> None:
+        """Validate that this placement can share a bucket with these params."""
+
+    def bucket_compatibility_key(self) -> Hashable:
+        """Return a key for deciding if placements can share one bucket."""
+        return (type(self), repr(self))
+
+    def supports_graph_capture(self, device: torch.device) -> bool:
+        """Return whether this placement supports graph capture."""
+        return False
 
     def compute_local_numel(
         self, global_shape: torch.Size, rank: int, world_size: int
@@ -81,9 +112,61 @@ class Placement:
         """
         raise NotImplementedError
 
-    @classmethod
+    def local_storage_layout(
+        self,
+        global_shape: torch.Size,
+        dtype: torch.dtype,
+        rank: int,
+        world_size: int,
+    ) -> LocalStorageLayout:
+        """Return the local storage layout for one parameter."""
+        local_shape = self.compute_local_shape(global_shape, rank, world_size)
+        local_numel = self.compute_local_numel(global_shape, rank, world_size)
+        return LocalStorageLayout(
+            local_shape=local_shape,
+            local_numel=local_numel,
+            storage_nbytes=local_numel * dtype.itemsize,
+        )
+
+    def copy_param_to_storage(
+        self,
+        byte_storage: torch.Tensor,
+        info: ParamInfo,
+        param: torch.Tensor,
+        rank: int,
+        world_size: int,
+    ) -> None:
+        """Pack one full parameter into its placement-owned local storage."""
+        param_data = param.detach()
+        if param_data.device.type == "meta":
+            return
+        if not param_data.is_contiguous():
+            param_data = param_data.contiguous()
+        shard = self.extract_local_shard(param_data, rank, world_size)
+        if shard.numel() == 0:
+            return
+        nbytes = shard.numel() * shard.element_size()
+        if nbytes > info.storage_nbytes:
+            raise ValueError(
+                f"Placement {self!r} produced {nbytes} bytes for {info.fqn!r}, "
+                f"but its storage layout only reserved {info.storage_nbytes} bytes."
+            )
+        byte_storage[info.byte_offset : info.byte_offset + nbytes].copy_(
+            shard.reshape(-1).view(torch.uint8)
+        )
+
+    def make_local_storage_view(
+        self,
+        byte_storage: torch.Tensor,
+        info: ParamInfo,
+    ) -> torch.Tensor:
+        """Return the exposed local parameter view from bucket storage."""
+        nbytes = info.local_numel * info.dtype.itemsize
+        byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
+        return byte_view.view(info.dtype).view(info.local_shape)
+
     def unshard(
-        cls,
+        self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
@@ -91,15 +174,70 @@ class Placement:
         """Batched gather communication for all params in a storage unit."""
         raise NotImplementedError
 
-    @classmethod
     def reduce_grad(
-        cls,
+        self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
     ) -> list[torch.Tensor]:
         """Batched reduce communication for all param gradients in a storage unit."""
         raise NotImplementedError
+
+    def begin_unshard(
+        self,
+        tensors: list[torch.Tensor],
+        infos: list[ParamInfo],
+        mesh: DeviceMesh,
+        all_gather_stream: torch.Stream | None,
+        debug_fqn: str | None = None,
+    ) -> Any:
+        """Begin an unshard operation, possibly asynchronously."""
+        raise NotImplementedError
+
+    def finish_unshard(self, result: Any) -> list[torch.Tensor]:
+        """Finish a result returned by begin_unshard()."""
+        raise NotImplementedError
+
+    def wait_for_unshard(self, result: Any) -> None:
+        """Wait for a begin_unshard() result to become usable."""
+
+    def release_unshard_buffers(self, result: Any) -> None:
+        """Release temporary buffers owned by an unshard result."""
+
+    def begin_reduce_grad(
+        self,
+        tensors: list[torch.Tensor],
+        infos: list[ParamInfo],
+        mesh: DeviceMesh,
+        reduce_scatter_stream: torch.Stream | None,
+        debug_fqn: str | None = None,
+    ) -> Any:
+        """Begin a gradient reduction operation, possibly asynchronously."""
+        raise NotImplementedError
+
+    def finish_reduce_grad(self, result: Any) -> list[torch.Tensor]:
+        """Finish a result returned by begin_reduce_grad()."""
+        raise NotImplementedError
+
+    def wait_for_reduce_grad(self, result: Any) -> None:
+        """Wait for a begin_reduce_grad() result to become usable."""
+
+    def release_reduce_grad_buffers(
+        self,
+        result: Any,
+        release_sharded_grads: bool,
+    ) -> None:
+        """Release temporary buffers owned by a reduce-grad result."""
+
+
+def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
+    """Return the only placement supported by the minimal eager path."""
+    if len(placements) != 1:
+        raise ValueError(
+            "FlexShard eager mode currently supports exactly one placement "
+            f"per parameter, but got {len(placements)} placements."
+        )
+    return placements[0]
 
 
 class Shard(Placement):
@@ -118,6 +256,33 @@ class Shard(Placement):
 
     def __repr__(self) -> str:
         return f"Shard({self.dim})"
+
+    def validate_param(self, fqn: str, param: nn.Parameter) -> None:
+        if self.dim >= param.ndim:
+            raise ValueError(
+                f"Parameter {fqn!r} has {param.ndim} dimensions but "
+                f"Shard(dim={self.dim}) is out of range."
+            )
+
+    def validate_bucket(
+        self,
+        bucket_idx: int,
+        bucket_patterns: list[str],
+        fqn: str,
+        param: nn.Parameter,
+        bucket_named_params: list[tuple[str, nn.Parameter]],
+    ) -> None:
+        if self.dim != 0:
+            raise ValueError(
+                f"Bucket {bucket_idx} "
+                f"{bucket_patterns} "
+                f"parameter {fqn!r} uses {self!r}. "
+                "FlexShard eager mode currently supports only Shard(0) "
+                "placements."
+            )
+
+    def bucket_compatibility_key(self) -> Hashable:
+        return (Shard, self.dim)
 
     def compute_local_shape(
         self, global_shape: torch.Size, rank: int, world_size: int
@@ -161,25 +326,23 @@ class Shard(Placement):
             return torch.cat(non_empty, dim=self.dim)
         return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
 
-    @classmethod
     def unshard(
-        cls,
+        self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
     ) -> list[torch.Tensor]:
-        result = cls.begin_unshard(
+        result = self.begin_unshard(
             tensors,
             infos,
             mesh,
             all_gather_stream=None,
             debug_fqn=None,
         )
-        return cls.finish_unshard(result)
+        return self.finish_unshard(result)
 
-    @classmethod
     def begin_unshard(
-        cls,
+        self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
@@ -205,7 +368,7 @@ class Shard(Placement):
                 offsets_r: list[int] = []
                 for info in infos:
                     offsets_r.append(offset)
-                    offset += info.placements[0].compute_local_numel(
+                    offset += info.placement.compute_local_numel(
                         info.global_shape, r, ws
                     )
                 per_rank_sizes.append(offset)
@@ -254,9 +417,8 @@ class Shard(Placement):
             debug_fqn=debug_fqn,
         )
 
-    @classmethod
-    def finish_unshard(cls, result: AsyncAllGatherResult) -> list[torch.Tensor]:
-        cls.wait_for_unshard(result)
+    def finish_unshard(self, result: AsyncAllGatherResult) -> list[torch.Tensor]:
+        self.wait_for_unshard(result)
         ws = result.mesh.size()
         device = result.gathered[0].device
         # Unpack: per param, extract shard from each rank, assemble_from_shards
@@ -265,7 +427,7 @@ class Shard(Placement):
         ):
             results: list[torch.Tensor] = []
             for i, info in enumerate(result.infos):
-                p = info.placements[0]
+                p = info.placement
                 per_rank_shards: list[torch.Tensor] = []
                 for r in range(ws):
                     numel = p.compute_local_numel(info.global_shape, r, ws)
@@ -285,17 +447,15 @@ class Shard(Placement):
                     )
                 )
                 del per_rank_shards
-            cls.release_unshard_buffers(result)
+            self.release_unshard_buffers(result)
             return results
 
-    @classmethod
-    def wait_for_unshard(cls, result: AsyncAllGatherResult) -> None:
+    def wait_for_unshard(self, result: AsyncAllGatherResult) -> None:
         device = result.gathered[0].device
         if device.type == "cuda" and result.event is not None:
             torch.cuda.current_stream(device).wait_event(result.event)
 
-    @classmethod
-    def release_unshard_buffers(cls, result: AsyncAllGatherResult) -> None:
+    def release_unshard_buffers(self, result: AsyncAllGatherResult) -> None:
         """Release raw all-gather buffers after current-stream work is queued."""
         if not result.gathered and result.send_buf is None:
             return
@@ -319,25 +479,23 @@ class Shard(Placement):
         for handoff in handoffs:
             handoff.release()
 
-    @classmethod
     def reduce_grad(
-        cls,
+        self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
     ) -> list[torch.Tensor]:
-        result = cls.begin_reduce_grad(
+        result = self.begin_reduce_grad(
             tensors,
             infos,
             mesh,
             reduce_scatter_stream=None,
             debug_fqn=None,
         )
-        return cls.finish_reduce_grad(result)
+        return self.finish_reduce_grad(result)
 
-    @classmethod
     def begin_reduce_grad(
-        cls,
+        self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
@@ -372,7 +530,7 @@ class Shard(Placement):
                 results: list[torch.Tensor] = []
                 flat_offset = 0
                 for info, padded_size in zip(infos, padded_sizes, strict=True):
-                    local_shape = info.placements[0].compute_local_shape(
+                    local_shape = info.placement.compute_local_shape(
                         info.global_shape, rank, ws
                     )
                     stride = make_contiguous_strides_for(local_shape)
@@ -434,13 +592,13 @@ class Shard(Placement):
             debug_fqn=debug_fqn,
         )
 
-    @classmethod
-    def finish_reduce_grad(cls, result: AsyncReduceScatterResult) -> list[torch.Tensor]:
-        cls.wait_for_reduce_grad(result)
+    def finish_reduce_grad(
+        self, result: AsyncReduceScatterResult
+    ) -> list[torch.Tensor]:
+        self.wait_for_reduce_grad(result)
         return result.sharded_grads
 
-    @classmethod
-    def wait_for_reduce_grad(cls, result: AsyncReduceScatterResult) -> None:
+    def wait_for_reduce_grad(self, result: AsyncReduceScatterResult) -> None:
         device = (
             result.recv_buf.device
             if result.recv_buf is not None
@@ -449,9 +607,8 @@ class Shard(Placement):
         if device.type == "cuda" and result.event is not None:
             torch.cuda.current_stream(device).wait_event(result.event)
 
-    @classmethod
     def release_reduce_grad_buffers(
-        cls,
+        self,
         result: AsyncReduceScatterResult,
         release_sharded_grads: bool,
     ) -> None:
@@ -490,6 +647,7 @@ def per_param_placements(
 
 
 __all__ = [
+    "LocalStorageLayout",
     "per_param_placements",
     "Placement",
     "Shard",

@@ -37,7 +37,11 @@ from torchtitan.experiments.flex_shard.bucket_storage import (
     _create_param_infos,
     _materialize_bucket_storages,
 )
-from torchtitan.experiments.flex_shard.placements import Shard
+from torchtitan.experiments.flex_shard.placements import (
+    LocalStorageLayout,
+    Placement,
+    Shard,
+)
 from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,
     single_rank_cpu_mesh,
@@ -47,6 +51,54 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 
 device_type = torch.device(get_devtype())
+
+
+class _ParamRejectingPlacement(Placement):
+    def validate_param(self, fqn: str, param: nn.Parameter) -> None:
+        raise ValueError(f"custom param validation for {fqn}")
+
+
+class _BucketRejectingPlacement(Placement):
+    def validate_bucket(
+        self,
+        bucket_idx: int,
+        bucket_patterns: list[str],
+        fqn: str,
+        param: nn.Parameter,
+        bucket_named_params: list[tuple[str, nn.Parameter]],
+    ) -> None:
+        raise ValueError(f"custom bucket validation for {fqn}")
+
+
+class _CompatibilityPlacement(Placement):
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+    def bucket_compatibility_key(self):
+        return self.key
+
+
+class _PaddedShard(Shard):
+    def __init__(self, padding_nbytes: int) -> None:
+        super().__init__(0)
+        self.padding_nbytes = padding_nbytes
+
+    def bucket_compatibility_key(self):
+        return (_PaddedShard, self.padding_nbytes)
+
+    def local_storage_layout(
+        self,
+        global_shape: torch.Size,
+        dtype: torch.dtype,
+        rank: int,
+        world_size: int,
+    ) -> LocalStorageLayout:
+        layout = super().local_storage_layout(global_shape, dtype, rank, world_size)
+        return LocalStorageLayout(
+            local_shape=layout.local_shape,
+            local_numel=layout.local_numel,
+            storage_nbytes=layout.storage_nbytes + self.padding_nbytes,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +271,6 @@ class TestBucketPlacementValidation(TestCase):
     def test_rejects_missing_or_extra_placements(self):
         """Placement validation requires exact managed parameter coverage."""
         from torchtitan.experiments.flex_shard.utils import _validate_placements
-        from torchtitan.experiments.flex_shard.placements import Shard
 
         with single_rank_cpu_mesh() as mesh:
             named_params = self._named_params()
@@ -241,12 +292,27 @@ class TestBucketPlacementValidation(TestCase):
                     mesh,
                 )
 
+    def test_uses_placement_owned_param_validation(self):
+        """Placement validation dispatches to the placement implementation."""
+        from torchtitan.experiments.flex_shard.utils import _validate_placements
+
+        with single_rank_cpu_mesh() as mesh:
+            named_params = self._named_params()
+            with self.assertRaisesRegex(ValueError, "custom param validation"):
+                _validate_placements(
+                    {
+                        "a.weight": (_ParamRejectingPlacement(),),
+                        "b.weight": (_ParamRejectingPlacement(),),
+                    },
+                    named_params,
+                    mesh,
+                )
+
     def test_rejects_nonzero_shard_dim(self):
         """Shard(1) in a bucket raises ValueError."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
-        from torchtitan.experiments.flex_shard.placements import Shard
 
         assignments = [["a.weight", "b.weight"]]
         placements = {
@@ -262,12 +328,51 @@ class TestBucketPlacementValidation(TestCase):
                 self._named_params(),
             )
 
+    def test_uses_placement_owned_bucket_validation(self):
+        """Bucket validation dispatches to the placement implementation."""
+        from torchtitan.experiments.flex_shard.utils import (
+            _validate_bucket_placements,
+        )
+
+        assignments = [["a.weight", "b.weight"]]
+        placements = {
+            "a.weight": (_BucketRejectingPlacement(),),
+            "b.weight": (_BucketRejectingPlacement(),),
+        }
+        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        with self.assertRaisesRegex(ValueError, "custom bucket validation"):
+            _validate_bucket_placements(
+                assignments,
+                placements,
+                buckets,
+                self._named_params(),
+            )
+
+    def test_rejects_incompatible_bucket_placements(self):
+        """One bucket must contain placement-compatible parameters."""
+        from torchtitan.experiments.flex_shard.utils import (
+            _validate_bucket_placements,
+        )
+
+        assignments = [["a.weight", "b.weight"]]
+        placements = {
+            "a.weight": (_CompatibilityPlacement("a"),),
+            "b.weight": (_CompatibilityPlacement("b"),),
+        }
+        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        with self.assertRaisesRegex(ValueError, "incompatible placements"):
+            _validate_bucket_placements(
+                assignments,
+                placements,
+                buckets,
+                self._named_params(),
+            )
+
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
         from torchtitan.experiments.flex_shard.utils import (
             _validate_bucket_placements,
         )
-        from torchtitan.experiments.flex_shard.placements import Shard
 
         assignments = [["a.weight", "b.weight"]]
         placements = {
@@ -337,6 +442,39 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             * torch.float32.itemsize,
         )
 
+    def test_create_param_infos_uses_placement_owned_storage_layout(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        args, model = make_transformer_model()
+        named_params = [
+            ("tok_embeddings.weight", model.tok_embeddings.weight),
+            ("pos_embeddings.weight", model.pos_embeddings.weight),
+        ]
+        padding_nbytes = 16
+        placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
+
+        infos, total_bytes = _create_param_infos(named_params, mesh, placements)
+
+        tok_embeddings = infos["tok_embeddings.weight"]
+        pos_embeddings = infos["pos_embeddings.weight"]
+        tok_nbytes = (
+            tok_embeddings.local_numel * tok_embeddings.dtype.itemsize + padding_nbytes
+        )
+        pos_nbytes = (
+            pos_embeddings.local_numel * pos_embeddings.dtype.itemsize + padding_nbytes
+        )
+        self.assertEqual(tok_embeddings.storage_nbytes, tok_nbytes)
+        self.assertEqual(pos_embeddings.byte_offset, tok_nbytes)
+        self.assertEqual(pos_embeddings.storage_nbytes, pos_nbytes)
+        self.assertEqual(total_bytes, tok_nbytes + pos_nbytes)
+        self.assertEqual(
+            tok_embeddings.local_shape,
+            Shard(0).compute_local_shape(
+                torch.Size([args.vocab_size, args.dim]),
+                self.rank,
+                self.world_size,
+            ),
+        )
+
     def test_materialized_params_are_views_into_bucket_storage(self):
         mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
         args, model = make_transformer_model()
@@ -383,6 +521,45 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
                 )
                 self.assertEqual(param, local_view)
                 self.assertTrue(is_flex_shard_param(param))
+
+    def test_materialized_params_use_placement_owned_storage_view(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        _args, model = make_transformer_model()
+        named_params = [
+            ("tok_embeddings.weight", model.tok_embeddings.weight),
+            ("pos_embeddings.weight", model.pos_embeddings.weight),
+        ]
+        padding_nbytes = 16
+        placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
+        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        assignments = [["tok_embeddings.weight", "pos_embeddings.weight"]]
+
+        storages, _ = _materialize_bucket_storages(
+            model,
+            named_params,
+            assignments,
+            buckets,
+            placements,
+            mesh,
+            torch.device("cpu"),
+        )
+
+        storage = storages[0]
+        current_params = dict(model.named_parameters())
+        original_params = dict(named_params)
+        for fqn, info in storage.param_infos.items():
+            param = current_params[fqn]
+            expected = Shard(0).extract_local_shard(
+                original_params[fqn].detach(),
+                self.rank,
+                self.world_size,
+            )
+            self.assertEqual(
+                info.storage_nbytes,
+                expected.numel() * expected.dtype.itemsize + padding_nbytes,
+            )
+            self.assertEqual(param, expected)
+            self.assertEqual(param, storage.get_local_view(fqn))
 
 
 # ---------------------------------------------------------------------------

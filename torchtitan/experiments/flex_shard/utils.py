@@ -278,7 +278,7 @@ def _validate_placements(
     mesh: DeviceMesh,
 ) -> None:
     """Validate that placements are compatible with eager FlexShard."""
-    from .placements import Shard
+    from .placements import _get_single_placement, Placement
 
     param_dict = dict(named_params)
     expected_fqns = set(param_dict)
@@ -297,14 +297,13 @@ def _validate_placements(
         )
 
     for fqn, placements in param_placements.items():
-        for placement in placements:
-            if isinstance(placement, Shard):
-                param = param_dict[fqn]
-                if placement.dim >= param.ndim:
-                    raise ValueError(
-                        f"Parameter {fqn!r} has {param.ndim} dimensions but "
-                        f"Shard(dim={placement.dim}) is out of range."
-                    )
+        placement = _get_single_placement(placements)
+        if not isinstance(placement, Placement):
+            raise TypeError(
+                "shard_placement_fn must return Placement objects, but "
+                f"{fqn!r} uses {type(placement).__name__}."
+            )
+        placement.validate_param(fqn, param_dict[fqn])
 
 
 def _validate_bucket_placements(
@@ -314,31 +313,35 @@ def _validate_bucket_placements(
     named_params: list[tuple[str, nn.Parameter]],
 ) -> None:
     """Validate minimal eager bucket constraints."""
-    from .placements import Shard
+    from .placements import _get_single_placement
 
     param_dict = dict(named_params)
     for bucket_idx, fqns in enumerate(bucket_assignments):
         if not fqns:
             continue
         reference_dtype = param_dict[fqns[0]].dtype
+        bucket_named_params = [(fqn, param_dict[fqn]) for fqn in fqns]
+        compatibility_key = None
         for fqn in fqns:
             placements = param_placements[fqn]
-            if len(placements) != 1:
+            placement = _get_single_placement(placements)
+            placement.validate_bucket(
+                bucket_idx,
+                buckets[bucket_idx].patterns,
+                fqn,
+                param_dict[fqn],
+                bucket_named_params,
+            )
+            key = placement.bucket_compatibility_key()
+            if compatibility_key is None:
+                compatibility_key = key
+            elif key != compatibility_key:
                 raise ValueError(
                     f"Bucket {bucket_idx} "
                     f"{buckets[bucket_idx].patterns} "
-                    f"parameter {fqn!r} has {len(placements)} placements. "
-                    "FlexShard eager mode currently supports exactly one "
-                    "Shard(0) placement per parameter."
-                )
-            placement = placements[0]
-            if not isinstance(placement, Shard) or placement.dim != 0:
-                raise ValueError(
-                    f"Bucket {bucket_idx} "
-                    f"{buckets[bucket_idx].patterns} "
-                    f"parameter {fqn!r} uses {placement!r}. "
-                    "FlexShard eager mode currently supports only Shard(0) "
-                    "placements."
+                    f"contains incompatible placements. Parameter {fqns[0]!r} "
+                    f"uses compatibility key {compatibility_key!r}, but "
+                    f"{fqn!r} uses {key!r}."
                 )
 
             dtype = param_dict[fqn].dtype

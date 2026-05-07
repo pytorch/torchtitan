@@ -13,7 +13,6 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .comm_buffer_lifetime import AsyncAllGatherResult, AsyncReduceScatterResult
 from .module_wrapping import EagerParamAccessState
 from .sharding_metadata import (
     _BUCKET_FQN_ATTR,
@@ -22,13 +21,14 @@ from .sharding_metadata import (
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
 )
-from .placements import Shard
 from .reshard_after_forward import _reshard_after_forward_recompute
 from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .utils import _get_storage_debug_fqn, _with_fqn
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
+
+    from .placements import Placement
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class AllGatherBucket:
     """Runtime metadata for one batched all-gather bucket."""
 
     storage: DStorage
+    placement: Placement
     entries: list[ParamEntry]
     infos: list[ParamInfo]
     debug_fqn: str | None
@@ -52,8 +53,16 @@ class PendingAllGather:
     """The single one-bucket-ahead all-gather in flight."""
 
     bucket: AllGatherBucket
-    result: AsyncAllGatherResult
+    result: Any
     recompute: bool
+
+
+@dataclass
+class PendingReduceGrad:
+    """One in-flight reduce-grad result and the placement that owns it."""
+
+    placement: Placement
+    result: Any
 
 
 @dataclass
@@ -64,7 +73,7 @@ class AllGatherContext:
     reduce_scatter_stream: torch.Stream
     buckets: list[AllGatherBucket] = field(default_factory=list)
     pending: PendingAllGather | None = None
-    reduce_scatter_states: list[AsyncReduceScatterResult] = field(default_factory=list)
+    reduce_scatter_states: list[PendingReduceGrad] = field(default_factory=list)
     reduce_scatter_callback_queued: bool = False
 
 
@@ -72,7 +81,8 @@ class AllGatherContext:
 class BucketAllGatherRuntime:
     """Runtime metadata passed to RAF bucket autograd."""
 
-    prefetched_result: AsyncAllGatherResult | None
+    prefetched_result: Any | None
+    placement: Placement
     infos: list[ParamInfo]
     param_refs: list[tuple[nn.Module, str]]
     mesh: DeviceMesh
@@ -88,10 +98,10 @@ def _queue_reduce_scatter_wait(context: AllGatherContext) -> None:
 
     def _wait_for_reduce_scatter() -> None:
         try:
-            for result in context.reduce_scatter_states:
-                Shard.wait_for_reduce_grad(result)
-                Shard.release_reduce_grad_buffers(
-                    result,
+            for pending in context.reduce_scatter_states:
+                pending.placement.wait_for_reduce_grad(pending.result)
+                pending.placement.release_reduce_grad_buffers(
+                    pending.result,
                     release_sharded_grads=True,
                 )
         finally:
@@ -111,10 +121,10 @@ def _wait_and_clear_reduce_scatter_states(
     with torch.profiler.record_function(
         _with_fqn("FlexShard::post_backward_rs_wait", debug_fqn)
     ):
-        for result in context.reduce_scatter_states:
-            Shard.wait_for_reduce_grad(result)
-            Shard.release_reduce_grad_buffers(
-                result,
+        for pending in context.reduce_scatter_states:
+            pending.placement.wait_for_reduce_grad(pending.result)
+            pending.placement.release_reduce_grad_buffers(
+                pending.result,
                 release_sharded_grads=True,
             )
         context.reduce_scatter_states.clear()
@@ -158,14 +168,14 @@ class _BucketAllGather(torch.autograd.Function):
         result = runtime.prefetched_result
         runtime.prefetched_result = None
         if result is None:
-            result = Shard.begin_unshard(
+            result = runtime.placement.begin_unshard(
                 [shard.detach() for shard in local_shards],
                 runtime.infos,
                 runtime.mesh,
                 runtime.context.all_gather_stream,
                 debug_fqn=runtime.debug_fqn,
             )
-        full_params = Shard.finish_unshard(result)
+        full_params = runtime.placement.finish_unshard(result)
         return tuple(full_params)
 
     @staticmethod
@@ -195,7 +205,7 @@ class _BucketAllGather(torch.autograd.Function):
                     runtime.context,
                     runtime.debug_fqn,
                 )
-                result = Shard.begin_reduce_grad(
+                result = runtime.placement.begin_reduce_grad(
                     grads,
                     valid_infos,
                     runtime.mesh,
@@ -209,7 +219,9 @@ class _BucketAllGather(torch.autograd.Function):
                     )
                     result.event = torch.cuda.Event()
                     result.event.record(runtime.context.reduce_scatter_stream)
-                runtime.context.reduce_scatter_states.append(result)
+                runtime.context.reduce_scatter_states.append(
+                    PendingReduceGrad(runtime.placement, result)
+                )
                 _queue_reduce_scatter_wait(runtime.context)
 
         # Gradients are accumulated into the original sharded parameters above
@@ -259,12 +271,10 @@ def _get_bucket_autograd_unshard_unsupported_reason(
         return None
     if storage.byte_storage.device.type != "cuda":
         return f"storage is on {storage.byte_storage.device.type}"
-    ptype = type(infos[0].placements[0])
-    if ptype is not Shard:
-        return f"placement type is {ptype.__name__}"
-    shard_dims = sorted({info.placements[0].dim for info in infos})
-    if shard_dims != [0]:
-        return f"Shard dimension is {shard_dims}"
+    compatibility_key = infos[0].placement.bucket_compatibility_key()
+    for info in infos[1:]:
+        if info.placement.bucket_compatibility_key() != compatibility_key:
+            return "bucket contains incompatible placements"
     return None
 
 
@@ -273,8 +283,8 @@ def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
     bucket_fqn = _get_storage_debug_fqn(storage)
     bucket_msg = f" for bucket {bucket_fqn!r}" if bucket_fqn else ""
     raise NotImplementedError(
-        "FlexShard eager reshard_after_forward currently supports only CUDA "
-        f"Shard(0) buckets in the custom autograd bucket path{bucket_msg}; "
+        "FlexShard eager reshard_after_forward requires placement support "
+        f"for the custom autograd bucket path{bucket_msg}; "
         f"{reason}. Use reshard_after_forward=False for this bucket or add "
         "support for this placement before using eager RAF."
     )
@@ -431,7 +441,7 @@ def _install_batched_allgather_hooks(
         if not infos:
             continue
 
-        ptype = type(infos[0].placements[0])
+        placement = infos[0].placement
         if not _storage_requires_batched_unshard(storage):
             continue
         if storage._reshard_after_forward and not _storage_uses_bucket_autograd_unshard(
@@ -445,13 +455,14 @@ def _install_batched_allgather_hooks(
             continue
 
         ag_context = None
-        if ptype is Shard and storage.byte_storage.device.type == "cuda":
+        if storage.byte_storage.device.type == "cuda":
             device = storage.byte_storage.device
             ag_context = _get_or_create_comm_context(storage._module, device)
         ag_bucket = None
         if ag_context is not None:
             ag_bucket = AllGatherBucket(
                 storage=storage,
+                placement=placement,
                 entries=param_entries,
                 infos=infos,
                 debug_fqn=_get_storage_debug_fqn(storage),
@@ -462,7 +473,7 @@ def _install_batched_allgather_hooks(
         def make_hooks(
             s,
             entries,
-            pt,
+            bucket_placement,
             all_gather_context,
             all_gather_bucket,
             use_autograd_bucket,
@@ -474,7 +485,7 @@ def _install_batched_allgather_hooks(
                 local_shards = [
                     leaf._parameters[name].data for leaf, name, _, _ in bucket.entries
                 ]
-                return Shard.begin_unshard(
+                return bucket.placement.begin_unshard(
                     local_shards,
                     bucket.infos,
                     bucket.storage._mesh,
@@ -482,9 +493,9 @@ def _install_batched_allgather_hooks(
                     debug_fqn=bucket.debug_fqn,
                 )
 
-            def _wait_bucket_unshard(result):
-                Shard.wait_for_unshard(result)
-                Shard.release_unshard_buffers(result)
+            def _wait_bucket_unshard(bucket, result):
+                bucket.placement.wait_for_unshard(result)
+                bucket.placement.release_unshard_buffers(result)
 
             def _prefetch_next_bucket():
                 if all_gather_context.pending is not None:
@@ -517,7 +528,7 @@ def _install_batched_allgather_hooks(
                 ):
                     all_gather_context.pending = None
                     return pending.result
-                _wait_bucket_unshard(pending.result)
+                _wait_bucket_unshard(pending.bucket, pending.result)
                 all_gather_context.pending = None
                 return None
 
@@ -534,16 +545,12 @@ def _install_batched_allgather_hooks(
                     return
                 valid_infos = [i for _, _, i in valid]
                 with torch.no_grad():
-                    if (
-                        all_gather_context is not None
-                        and all_gather_bucket is not None
-                        and pt is Shard
-                    ):
+                    if all_gather_context is not None and all_gather_bucket is not None:
                         _wait_and_clear_reduce_scatter_states(
                             all_gather_context,
                             all_gather_bucket.debug_fqn,
                         )
-                        result = Shard.begin_reduce_grad(
+                        result = all_gather_bucket.placement.begin_reduce_grad(
                             grads,
                             valid_infos,
                             s._mesh,
@@ -561,10 +568,14 @@ def _install_batched_allgather_hooks(
                             result.event.record(
                                 all_gather_context.reduce_scatter_stream
                             )
-                        all_gather_context.reduce_scatter_states.append(result)
+                        all_gather_context.reduce_scatter_states.append(
+                            PendingReduceGrad(all_gather_bucket.placement, result)
+                        )
                         _queue_reduce_scatter_wait(all_gather_context)
                     else:
-                        reduced = pt.reduce_grad(grads, valid_infos, s._mesh)
+                        reduced = bucket_placement.reduce_grad(
+                            grads, valid_infos, s._mesh
+                        )
                         _accumulate_sharded_grads(
                             [(leaf, name) for leaf, name, _ in valid],
                             reduced,
@@ -591,15 +602,12 @@ def _install_batched_allgather_hooks(
                         )
                     local_shards.append(local_shard)
                 entry_infos = [info for _, _, _, info in entries]
-                if (
-                    all_gather_context is not None
-                    and all_gather_bucket is not None
-                    and pt is Shard
-                ):
+                if all_gather_context is not None and all_gather_bucket is not None:
                     if use_autograd_bucket:
                         prefetched_result = _take_pending_for_current_bucket()
                         runtime = BucketAllGatherRuntime(
                             prefetched_result=prefetched_result,
+                            placement=all_gather_bucket.placement,
                             infos=entry_infos,
                             param_refs=[(leaf, name) for leaf, name, _, _ in entries],
                             mesh=s._mesh,
@@ -614,18 +622,22 @@ def _install_batched_allgather_hooks(
                         with torch.no_grad():
                             result = _take_pending_for_current_bucket()
                             if result is None:
-                                result = Shard.begin_unshard(
+                                result = all_gather_bucket.placement.begin_unshard(
                                     local_shards,
                                     entry_infos,
                                     s._mesh,
                                     all_gather_context.all_gather_stream,
                                     debug_fqn=all_gather_bucket.debug_fqn,
                                 )
-                            full_params = Shard.finish_unshard(result)
+                            full_params = all_gather_bucket.placement.finish_unshard(
+                                result
+                            )
                             _prefetch_next_bucket()
                 else:
                     with torch.no_grad():
-                        full_params = pt.unshard(local_shards, entry_infos, s._mesh)
+                        full_params = bucket_placement.unshard(
+                            local_shards, entry_infos, s._mesh
+                        )
                 for (_, _, param_state, _), full_param in zip(
                     entries, full_params, strict=True
                 ):
@@ -672,7 +684,7 @@ def _install_batched_allgather_hooks(
         pre_hook, post_hook = make_hooks(
             storage,
             param_entries,
-            ptype,
+            placement,
             ag_context,
             ag_bucket,
             use_autograd_unshard,

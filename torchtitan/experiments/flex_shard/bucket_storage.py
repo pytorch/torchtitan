@@ -14,13 +14,14 @@ import torch
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 
+from .placements import _get_single_placement
 from .sharding_metadata import set_sharding_info
 from .utils import _set_param_on_module
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placements import Placement
+    from .placements import LocalStorageLayout, Placement
 
 
 @dataclass(frozen=True)
@@ -147,19 +148,26 @@ class ParamInfo:
     local_shape: torch.Size = field(default_factory=lambda: torch.Size([]))
     local_numel: int = 0
     byte_offset: int = 0  # byte offset into the sharded storage
+    storage_nbytes: int = 0  # bytes reserved for this param's local storage
     global_numel: int = 0  # total elements in unsharded param
+
+    @property
+    def placement(self) -> Placement:
+        """The single placement supported by the minimal eager path."""
+        return _get_single_placement(self.placements)
 
 
 class DStorage:
     """
     Manages a byte buffer that backs one bucket of sharded parameters.
 
-    All parameters in a storage must share the same dtype and use Shard(0)
-    placement. Each parameter's local shard is a typed view into this buffer at
-    its sequential byte offset.
+    All parameters in a storage must share a dtype and placement-compatible
+    local layout. Each placement owns its parameter's local storage layout and
+    exposed tensor view; DStorage only places those layouts sequentially in one
+    byte buffer.
 
     Communication is delegated to eager hooks and parameter accessors; this
-    storage object owns buffer layout and metadata.
+    storage object owns the byte buffer and metadata.
     """
 
     def __init__(
@@ -213,24 +221,20 @@ class DStorage:
     def get_local_view(self, fqn: str) -> torch.Tensor:
         """Get the local tensor view for a parameter by FQN (from sharded storage)."""
         info = self._param_infos[fqn]
-        num_bytes = info.local_numel * info.dtype.itemsize
-        byte_view = self._byte_storage[info.byte_offset : info.byte_offset + num_bytes]
-        typed_flat = byte_view.view(info.dtype)
-        return typed_flat.view(info.local_shape)
+        return info.placement.make_local_storage_view(self._byte_storage, info)
 
 
-def _compute_local_info(
+def _compute_local_storage_layout(
     global_shape: torch.Size,
+    dtype: torch.dtype,
     mesh: DeviceMesh,
     placements: tuple[Placement, ...],
-) -> tuple[torch.Size, int]:
-    """Compute local shape and numel for a parameter on current rank."""
+) -> LocalStorageLayout:
+    """Compute the placement-owned local storage layout."""
     rank = mesh.get_local_rank()
     world_size = mesh.size()
-    placement = placements[0]
-    local_shape = placement.compute_local_shape(global_shape, rank, world_size)
-    local_numel = placement.compute_local_numel(global_shape, rank, world_size)
-    return local_shape, local_numel
+    placement = _get_single_placement(placements)
+    return placement.local_storage_layout(global_shape, dtype, rank, world_size)
 
 
 def _create_param_infos(
@@ -239,10 +243,11 @@ def _create_param_infos(
     param_placements: dict[str, tuple[Placement, ...]],
 ) -> tuple[dict[str, ParamInfo], int]:
     """
-    Create ParamInfo for each parameter, computing local shapes and byte offsets.
+    Create ParamInfo for each parameter, computing local layout and byte offsets.
 
-    The caller validates that each bucket uses Shard(0) and a uniform dtype, so
-    parameters are laid out sequentially in the byte buffer.
+    The caller validates that each bucket uses compatible placements and a
+    uniform dtype. Each placement owns its per-parameter local storage layout;
+    bucket storage only places those layouts sequentially in the byte buffer.
 
     Args:
         named_params: List of (fqn, param) tuples
@@ -260,14 +265,15 @@ def _create_param_infos(
         placements = param_placements[fqn]
         global_shape = param.shape
         global_stride = make_contiguous_strides_for(global_shape)
-        local_shape, local_numel = _compute_local_info(global_shape, mesh, placements)
         dtype = param.dtype
+        local_storage_layout = _compute_local_storage_layout(
+            global_shape, dtype, mesh, placements
+        )
         global_numel = param.numel()
 
-        # Sharded buffer: only allocate if this rank has data
-        if local_numel > 0:
+        if local_storage_layout.storage_nbytes > 0:
             byte_offset = current_byte_offset
-            current_byte_offset += local_numel * dtype.itemsize
+            current_byte_offset += local_storage_layout.storage_nbytes
         else:
             byte_offset = 0
 
@@ -278,9 +284,10 @@ def _create_param_infos(
             dtype=dtype,
             requires_grad=param.requires_grad,
             placements=placements,
-            local_shape=local_shape,
-            local_numel=local_numel,
+            local_shape=local_storage_layout.local_shape,
+            local_numel=local_storage_layout.local_numel,
             byte_offset=byte_offset,
+            storage_nbytes=local_storage_layout.storage_nbytes,
             global_numel=global_numel,
         )
         param_infos[fqn] = info
@@ -304,17 +311,13 @@ def _write_params_to_dstorage(
 
     for fqn, param in named_params:
         info = param_infos[fqn]
-        param_data = param.detach()
-        if param_data.device.type == "meta":
-            continue
-        if not param_data.is_contiguous():
-            param_data = param_data.contiguous()
-        shard = info.placements[0].extract_local_shard(param_data, my_rank, world_size)
-        if shard.numel() > 0:
-            nbytes = shard.numel() * shard.element_size()
-            byte_storage[info.byte_offset : info.byte_offset + nbytes].copy_(
-                shard.reshape(-1).view(torch.uint8)
-            )
+        info.placement.copy_param_to_storage(
+            byte_storage,
+            info,
+            param,
+            my_rank,
+            world_size,
+        )
 
 
 def _materialize_bucket_storages(
@@ -360,9 +363,7 @@ def _materialize_bucket_storages(
         _write_params_to_dstorage(byte_storage, bucket_named_params, param_infos, mesh)
 
         for fqn, info in param_infos.items():
-            num_bytes = info.local_numel * info.dtype.itemsize
-            local_view = byte_storage[info.byte_offset : info.byte_offset + num_bytes]
-            typed_view = local_view.view(info.dtype).view(info.local_shape)
+            typed_view = info.placement.make_local_storage_view(byte_storage, info)
             new_param = nn.Parameter(typed_view, requires_grad=info.requires_grad)
             if new_param.device != expected_param_device:
                 raise AssertionError(
