@@ -21,6 +21,7 @@ from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import utils
@@ -188,6 +189,7 @@ class Validator(BaseValidator):
         positions = extra_inputs.pop("positions", None)
         if isinstance(model_config, Decoder.Config):
             attn_config = model_config.layers[0].attention
+            inner_attention = attn_config.inner_attention
 
             if attn_config.mask_type == "block_causal":
                 assert (
@@ -198,14 +200,13 @@ class Validator(BaseValidator):
                     inputs.shape[1], dtype=torch.int32, device=inputs.device
                 ).repeat(inputs.shape[0], 1)
 
-        try:
-            extra_kwargs["attention_masks"] = cast(
-                Decoder, model_parts[0]
-            ).get_attention_masks(
-                positions=positions,  # pyrefly: ignore [bad-argument-type]
-            )
-        except TypeError:
-            pass
+            if isinstance(
+                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+            ):
+                model = cast(Decoder, model_parts[0])
+                extra_kwargs["attention_masks"] = model.get_attention_masks(
+                    positions=positions,
+                )
 
         extra_kwargs["positions"] = positions
 
