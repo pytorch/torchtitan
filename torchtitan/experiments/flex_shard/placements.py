@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Hashable, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -35,23 +35,6 @@ class Placement:
     Each subclass implements per-param sharding (extract_local_shard,
     assemble_from_shards), storage layout, and gradient-reduction packing.
     """
-
-    def validate_param(self, fqn: str, param: nn.Parameter) -> None:
-        """Validate that this placement can manage one parameter."""
-
-    def validate_bucket(
-        self,
-        bucket_idx: int,
-        bucket_patterns: list[str],
-        fqn: str,
-        param: nn.Parameter,
-        bucket_named_params: list[tuple[str, nn.Parameter]],
-    ) -> None:
-        """Validate that this placement can share a bucket with these params."""
-
-    def bucket_compatibility_key(self) -> Hashable:
-        """Return a key for deciding if placements can share one bucket."""
-        return (type(self), repr(self))
 
     def compute_local_numel(
         self, global_shape: torch.Size, rank: int, world_size: int
@@ -206,36 +189,6 @@ class Shard(Placement):
 
     def __repr__(self) -> str:
         return f"Shard({self.dim})"
-
-    @override
-    def validate_param(self, fqn: str, param: nn.Parameter) -> None:
-        if self.dim >= param.ndim:
-            raise ValueError(
-                f"Parameter {fqn!r} has {param.ndim} dimensions but "
-                f"Shard(dim={self.dim}) is out of range."
-            )
-
-    @override
-    def validate_bucket(
-        self,
-        bucket_idx: int,
-        bucket_patterns: list[str],
-        fqn: str,
-        param: nn.Parameter,
-        bucket_named_params: list[tuple[str, nn.Parameter]],
-    ) -> None:
-        if self.dim != 0:
-            raise ValueError(
-                f"Bucket {bucket_idx} "
-                f"{bucket_patterns} "
-                f"parameter {fqn!r} uses {self!r}. "
-                "FlexShard eager mode currently supports only Shard(0) "
-                "placements."
-            )
-
-    @override
-    def bucket_compatibility_key(self) -> Hashable:
-        return (Shard, self.dim)
 
     @override
     def compute_local_shape(

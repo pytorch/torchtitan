@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 
-from .collective_results import (
+from .bucket_collectives import (
     AllGatherUnshardHandle,
     ReduceScatterGradHandle,
     begin_all_gather_unshard,
@@ -276,10 +276,6 @@ def _get_bucket_autograd_unshard_unsupported_reason(
         return None
     if storage.byte_storage.device.type != "cuda":
         return f"storage is on {storage.byte_storage.device.type}"
-    compatibility_key = infos[0].placement.bucket_compatibility_key()
-    for info in infos[1:]:
-        if info.placement.bucket_compatibility_key() != compatibility_key:
-            return "bucket contains incompatible placements"
     return None
 
 

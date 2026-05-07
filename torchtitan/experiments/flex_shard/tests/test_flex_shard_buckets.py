@@ -53,38 +53,14 @@ from torchtitan.experiments.flex_shard.tests.common import (
 device_type = torch.device(get_devtype())
 
 
-class _ParamRejectingPlacement(Placement):
-    def validate_param(self, fqn: str, param: nn.Parameter) -> None:
-        raise ValueError(f"custom param validation for {fqn}")
-
-
-class _BucketRejectingPlacement(Placement):
-    def validate_bucket(
-        self,
-        bucket_idx: int,
-        bucket_patterns: list[str],
-        fqn: str,
-        param: nn.Parameter,
-        bucket_named_params: list[tuple[str, nn.Parameter]],
-    ) -> None:
-        raise ValueError(f"custom bucket validation for {fqn}")
-
-
-class _CompatibilityPlacement(Placement):
-    def __init__(self, key: str) -> None:
-        self.key = key
-
-    def bucket_compatibility_key(self):
-        return self.key
+class _UnsupportedPlacement(Placement):
+    pass
 
 
 class _PaddedShard(Shard):
     def __init__(self, padding_nbytes: int) -> None:
         super().__init__(0)
         self.padding_nbytes = padding_nbytes
-
-    def bucket_compatibility_key(self):
-        return (_PaddedShard, self.padding_nbytes)
 
     def local_storage_layout(
         self,
@@ -253,7 +229,7 @@ class TestBucketAssignment(TestCase):
 
 
 class TestBucketPlacementValidation(TestCase):
-    """Test _validate_bucket_placements."""
+    """Test explicit placement and bucket validation."""
 
     @staticmethod
     def _named_params(
@@ -292,81 +268,48 @@ class TestBucketPlacementValidation(TestCase):
                     mesh,
                 )
 
-    def test_uses_placement_owned_param_validation(self):
-        """Placement validation dispatches to the placement implementation."""
+    def test_rejects_non_shard_placement(self):
+        """Minimal eager validation accepts Shard placements only."""
         from torchtitan.experiments.flex_shard.utils import _validate_placements
 
         with single_rank_cpu_mesh() as mesh:
             named_params = self._named_params()
-            with self.assertRaisesRegex(ValueError, "custom param validation"):
+            with self.assertRaisesRegex(TypeError, "only Shard"):
                 _validate_placements(
                     {
-                        "a.weight": (_ParamRejectingPlacement(),),
-                        "b.weight": (_ParamRejectingPlacement(),),
+                        "a.weight": (_UnsupportedPlacement(),),
+                        "b.weight": (_UnsupportedPlacement(),),
                     },
                     named_params,
                     mesh,
                 )
 
     def test_rejects_nonzero_shard_dim(self):
-        """Shard(1) in a bucket raises ValueError."""
-        from torchtitan.experiments.flex_shard.utils import (
-            _validate_bucket_placements,
-        )
+        """Minimal eager validation accepts Shard(0) only."""
+        from torchtitan.experiments.flex_shard.utils import _validate_placements
 
-        assignments = [["a.weight", "b.weight"]]
-        placements = {
-            "a.weight": (Shard(0),),
-            "b.weight": (Shard(1),),
-        }
-        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
-        with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
-            _validate_bucket_placements(
-                assignments,
-                placements,
-                buckets,
-                self._named_params(),
-            )
+        with single_rank_cpu_mesh() as mesh:
+            with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
+                _validate_placements(
+                    {
+                        "a.weight": (Shard(0),),
+                        "b.weight": (Shard(1),),
+                    },
+                    self._named_params(),
+                    mesh,
+                )
 
-    def test_uses_placement_owned_bucket_validation(self):
-        """Bucket validation dispatches to the placement implementation."""
-        from torchtitan.experiments.flex_shard.utils import (
-            _validate_bucket_placements,
-        )
+    def test_rejects_shard_dim_out_of_range(self):
+        """Shard(0) requires a parameter dimension 0."""
+        from torchtitan.experiments.flex_shard.utils import _validate_placements
 
-        assignments = [["a.weight", "b.weight"]]
-        placements = {
-            "a.weight": (_BucketRejectingPlacement(),),
-            "b.weight": (_BucketRejectingPlacement(),),
-        }
-        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
-        with self.assertRaisesRegex(ValueError, "custom bucket validation"):
-            _validate_bucket_placements(
-                assignments,
-                placements,
-                buckets,
-                self._named_params(),
-            )
-
-    def test_rejects_incompatible_bucket_placements(self):
-        """One bucket must contain placement-compatible parameters."""
-        from torchtitan.experiments.flex_shard.utils import (
-            _validate_bucket_placements,
-        )
-
-        assignments = [["a.weight", "b.weight"]]
-        placements = {
-            "a.weight": (_CompatibilityPlacement("a"),),
-            "b.weight": (_CompatibilityPlacement("b"),),
-        }
-        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
-        with self.assertRaisesRegex(ValueError, "incompatible placements"):
-            _validate_bucket_placements(
-                assignments,
-                placements,
-                buckets,
-                self._named_params(),
-            )
+        with single_rank_cpu_mesh() as mesh:
+            with self.assertRaisesRegex(ValueError, "out of range"):
+                _validate_placements(
+                    {"scalar": (Shard(0),)},
+                    [("scalar", nn.Parameter(torch.empty(())))],
+                    mesh,
+                )
 
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
