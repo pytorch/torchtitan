@@ -236,15 +236,29 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        self.trainer = None
+        self.generator = None
         self._proc_meshes = []
 
-    async def cleanup(self):
-        """Stop all proc meshes to release GPU memory."""
-        for mesh in self._proc_meshes:
+    async def close(self):
+        """Best-effort: tear down actors, then stop proc meshes."""
+        logger.info("Closing: tearing down actors and process meshes.")
+        for actor_name, actor in (
+            ("trainer", self.trainer),
+            ("generator", self.generator),
+        ):
+            if actor is None:
+                continue
+            try:
+                await actor.close.call()
+            except Exception:
+                logger.exception("%s.close failed", actor_name)
+
+        for i, mesh in enumerate(self._proc_meshes):
             try:
                 await mesh.stop()
             except Exception:
-                pass
+                logger.exception("mesh.stop[%d] failed", i)
         self._proc_meshes = []
 
     def _get_rank_0_value(self, result, has_gpus: bool = True):
@@ -448,17 +462,17 @@ class RLTrainer(Configurable):
         await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
         # push weights from trainer
-        self.trainer.push_model_state_dict.call().get()
+        await self.trainer.push_model_state_dict.call()
         # pull weights for policy version 0 (initial weights)
-        self.generator.pull_model_state_dict.call(0).get()
+        await self.generator.pull_model_state_dict.call(0)
 
-    def _collect_rollouts(self, num_groups: int, step: int) -> list[Trajectory]:
+    async def _collect_rollouts(self, num_groups: int, step: int) -> list[Trajectory]:
         """Collect group rollouts: one single-use env per group, scored and returned."""
         envs = [
             self.config.env.build(step=step, group_idx=i) for i in range(num_groups)
         ]
         completions = self._get_rank_0_value(
-            self.generator.generate.call([env.prompt for env in envs]).get()
+            await self.generator.generate.call([env.prompt for env in envs])
         )
         trajectories: list[Trajectory] = []
         for c in completions:
@@ -511,9 +525,9 @@ class RLTrainer(Configurable):
             max_tokens=self.config.generator.sampling.max_tokens,
         )
         completions = self._get_rank_0_value(
-            self.generator.generate.call(
+            await self.generator.generate.call(
                 [env.prompt for env in envs], sampling_config=greedy
-            ).get()
+            )
         )
 
         steps = [env.step(completions[i].text) for i, env in enumerate(envs)]
@@ -539,7 +553,7 @@ class RLTrainer(Configurable):
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
-            trajectories = self._collect_rollouts(num_groups, step=step)
+            trajectories = await self._collect_rollouts(num_groups, step=step)
             episodes = self._build_episodes(trajectories)
 
             if self.config.log_samples:
@@ -551,16 +565,16 @@ class RLTrainer(Configurable):
                 for per_rank_episodes in self._shard_episodes(episodes)
             ]
             fwd_bwd_metrics = self._get_rank_0_value(
-                self.trainer.forward_backward.call(batches).get()
+                await self.trainer.forward_backward.call(batches)
             )
-            optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
+            optim_metrics = self._get_rank_0_value(await self.trainer.optim_step.call())
             metrics = {**fwd_bwd_metrics, **optim_metrics}
 
             # --- Weight sync --- #
             t0 = time.perf_counter()
-            self.trainer.push_model_state_dict.call().get()
+            await self.trainer.push_model_state_dict.call()
             t_push = time.perf_counter() - t0
-            self.generator.pull_model_state_dict.call(metrics["policy_version"]).get()
+            await self.generator.pull_model_state_dict.call(metrics["policy_version"])
             t_sync = time.perf_counter() - t0
             logger.info(f"Weight sync: push={t_push:.3f}s, total={t_sync:.3f}s")
 
@@ -590,11 +604,15 @@ class RLTrainer(Configurable):
 
 
 async def main():
-    """Run the distributed RL training loop using Monarch."""
     config = ConfigManager().parse_args()
     rl_trainer = RLTrainer(config)
-    await rl_trainer.setup()
-    await rl_trainer.train()
+    try:
+        await rl_trainer.setup()
+        await rl_trainer.train()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Interrupted; attempting graceful shutdown...")
+    finally:
+        await rl_trainer.close()
 
 
 if __name__ == "__main__":
