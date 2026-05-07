@@ -610,8 +610,7 @@ async def main():
         await rl_trainer.setup()
         await rl_trainer.train()
     except (KeyboardInterrupt, asyncio.CancelledError):
-        # Signal-driven cancel; close() runs in finally below, then exit cleanly.
-        pass
+        logger.info("Interrupted; attempting graceful shutdown...")
     finally:
         await rl_trainer.close()
 
