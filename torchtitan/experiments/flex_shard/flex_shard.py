@@ -15,7 +15,7 @@ import torch.nn as nn
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from .eager_runtime import (
-    _create_eager_parametrizations,
+    _create_eager_param_states,
     _install_batched_allgather_hooks,
 )
 from .state import (
@@ -27,7 +27,7 @@ from .state import (
 from .module_wrapping import (
     _attach_flex_shard_module_state,
     _check_not_already_flex_sharded,
-    _register_module_parametrizations,
+    _register_module_param_accessors,
     FlexShardModule,
 )
 from .reshard import (
@@ -151,7 +151,7 @@ def flex_shard(
     2. Groups parameters into communication buckets (one per bucket, or all in one)
     3. Creates a unified byte buffer per bucket for all its parameters
     4. Replaces each parameter with a plain tensor annotated with placement metadata
-    5. Registers property-based parametrization for eager parameter access
+    5. Registers property-based accessors for eager parameter access
     6. Stores DStorages on the module (accessible via module.dstorages)
 
     Each bucket gets its own byte buffer and DStorage, enabling independent
@@ -223,17 +223,13 @@ def flex_shard(
 
     _attach_flex_shard_module_state(module, storages)
 
-    group_name = inputs.shard_mesh.get_group().group_name
-    world_size = inputs.shard_mesh.size()
-    module_param_map = _create_eager_parametrizations(
+    module_param_map = _create_eager_param_states(
         module,
         storages,
         fqn_to_bucket_spec,
-        group_name,
-        world_size,
         inputs.device,
     )
-    _register_module_parametrizations(module_param_map)
+    _register_module_param_accessors(module_param_map)
 
     # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
     # a selective policy that recomputes only collective ops (all-gather,

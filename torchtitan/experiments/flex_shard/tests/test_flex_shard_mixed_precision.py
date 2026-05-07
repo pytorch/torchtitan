@@ -78,7 +78,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_forward_casts_to_param_dtype(self):
         """Forward casts fp32 -> bf16 when param_dtype=bf16."""
-        from torchtitan.experiments.flex_shard.placements import (
+        from torchtitan.experiments.flex_shard.mixed_precision import (
             _MixedPrecisionCast,
         )
 
@@ -88,7 +88,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_forward_noop_when_none(self):
         """Forward is identity when param_dtype=None."""
-        from torchtitan.experiments.flex_shard.placements import (
+        from torchtitan.experiments.flex_shard.mixed_precision import (
             _MixedPrecisionCast,
         )
 
@@ -99,7 +99,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_forward_noop_when_same_dtype(self):
         """Forward is identity when param_dtype matches input dtype."""
-        from torchtitan.experiments.flex_shard.placements import (
+        from torchtitan.experiments.flex_shard.mixed_precision import (
             _MixedPrecisionCast,
         )
 
@@ -110,7 +110,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_backward_casts_to_reduce_dtype(self):
         """Backward casts grad to reduce_dtype."""
-        from torchtitan.experiments.flex_shard.placements import (
+        from torchtitan.experiments.flex_shard.mixed_precision import (
             _MixedPrecisionCast,
         )
 
@@ -125,7 +125,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_backward_noop_when_reduce_none(self):
         """Backward is identity when reduce_dtype=None."""
-        from torchtitan.experiments.flex_shard.placements import (
+        from torchtitan.experiments.flex_shard.mixed_precision import (
             _MixedPrecisionCast,
         )
 
@@ -143,7 +143,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_decoupled_forward_backward(self):
         """Forward=bf16, backward=fp32 work independently."""
-        from torchtitan.experiments.flex_shard.placements import (
+        from torchtitan.experiments.flex_shard.mixed_precision import (
             _MixedPrecisionCast,
         )
 
@@ -162,7 +162,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
 
 class TestBucketSpecMpPolicy(unittest.TestCase):
-    """Test mp_policy wiring from BucketSpec to parametrization."""
+    """Test mp_policy wiring from BucketSpec to eager parameter access state."""
 
     def test_mp_policy_type(self):
         """BucketSpec.mp_policy accepts MixedPrecisionPolicy."""
@@ -172,35 +172,28 @@ class TestBucketSpecMpPolicy(unittest.TestCase):
         spec = BucketSpec(patterns=["*"], mp_policy=mp)
         self.assertEqual(spec.mp_policy.param_dtype, torch.bfloat16)
 
-    def test_parametrization_receives_dtypes(self):
-        """Parametrization created with correct param_dtype/reduce_dtype."""
-        from torchtitan.experiments.flex_shard.placements import (
-            ShardParametrization,
+    def test_param_state_receives_dtypes(self):
+        """Eager param access state carries param_dtype/reduce_dtype."""
+        from torchtitan.experiments.flex_shard.module_wrapping import (
+            EagerParamAccessState,
         )
 
-        p = ShardParametrization(
-            shard_dim=0,
-            group_name="fake",
-            world_size=2,
+        state = EagerParamAccessState(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
         )
-        self.assertEqual(p.param_dtype, torch.bfloat16)
-        self.assertEqual(p.reduce_dtype, torch.float32)
+        self.assertEqual(state.param_dtype, torch.bfloat16)
+        self.assertEqual(state.reduce_dtype, torch.float32)
 
-    def test_parametrization_default_no_mp(self):
-        """Parametrization without mp has None dtypes."""
-        from torchtitan.experiments.flex_shard.placements import (
-            ShardParametrization,
+    def test_param_state_default_no_mp(self):
+        """Eager param access state without mp has None dtypes."""
+        from torchtitan.experiments.flex_shard.module_wrapping import (
+            EagerParamAccessState,
         )
 
-        p = ShardParametrization(
-            shard_dim=0,
-            group_name="fake",
-            world_size=2,
-        )
-        self.assertIsNone(p.param_dtype)
-        self.assertIsNone(p.reduce_dtype)
+        state = EagerParamAccessState()
+        self.assertIsNone(state.param_dtype)
+        self.assertIsNone(state.reduce_dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +246,8 @@ class TestDistributedMixedPrecision(unittest.TestCase):
             **kwargs,
         )
 
-    def test_param_access_returns_param_dtype(self):
-        """Accessing module.weight returns tensor in param_dtype."""
+    def test_param_access_without_pregather_raises(self):
+        """Parameter access outside hooked forward raises in eager-only mode."""
         from torchtitan.experiments.flex_shard import BucketSpec, MixedPrecisionPolicy
 
         mesh = self._init_mesh()
@@ -269,9 +262,8 @@ class TestDistributedMixedPrecision(unittest.TestCase):
             buckets=[BucketSpec(patterns=["*"], mp_policy=mp)],
         )
 
-        # Accessing weight triggers parametrization with mp cast
-        result = model.weight
-        self.assertEqual(result.dtype, torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+            _ = model.weight
 
     def test_state_dict_returns_storage_dtype(self):
         """state_dict returns raw sharded params in original (storage) dtype."""
@@ -341,9 +333,8 @@ class TestDistributedMixedPrecision(unittest.TestCase):
         loss = output.sum()
         loss.backward()
 
-        # The reduce-scatter produces gradients in reduce_dtype
-        # Since parametrization backward casts to fp32 before reduce-scatter,
-        # the local grad shard is fp32
+        # The reduce-scatter produces gradients in reduce_dtype, so the local
+        # grad shard is fp32.
         grad = model._parameters["weight"].grad
         self.assertIsNotNone(grad)
         self.assertEqual(grad.dtype, torch.float32)
@@ -397,10 +388,10 @@ class TestDistributedMixedPrecision(unittest.TestCase):
             ],
         )
 
-        # linear1 weight should be bf16 via parametrization
-        self.assertEqual(model.linear1.weight.dtype, torch.bfloat16)
-        # linear2 weight should stay fp32 (no mp)
-        self.assertEqual(model.linear2.weight.dtype, torch.float32)
+        with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+            _ = model.linear1.weight
+        with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+            _ = model.linear2.weight
 
 
 # ---------------------------------------------------------------------------

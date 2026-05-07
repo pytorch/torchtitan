@@ -14,13 +14,13 @@ import torch
 import torch.nn as nn
 
 from .comm_buffer_lifetime import AsyncAllGatherResult, AsyncReduceScatterResult
+from .module_wrapping import EagerParamAccessState
 from .state import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
-    _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
 )
 from .placements import Shard
 from .reshard import _reshard_checkpoint_recompute
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ParamEntry = tuple[nn.Module, str, nn.Module, ParamInfo]
+ParamEntry = tuple[nn.Module, str, EagerParamAccessState, ParamInfo]
 
 
 @dataclass
@@ -237,11 +237,8 @@ def _get_or_create_comm_context(
 
 
 def _storage_requires_batched_unshard(storage: DStorage) -> bool:
-    """Return whether execution must use pre-gathered bucket tensors."""
-    infos = list(storage._param_infos.values())
-    if not infos:
-        return False
-    return storage.byte_storage.device.type != "cpu"
+    """Return whether parameter access must use hook-provided tensors."""
+    return bool(storage._param_infos)
 
 
 def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
@@ -346,9 +343,9 @@ def _get_param_leaf_module(
 
 def _get_bucket_param_entries(
     storage: DStorage,
-    module_param_map: dict[nn.Module, dict[str, nn.Module]],
+    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
 ) -> list[ParamEntry]:
-    """Return params in a bucket with their owning module and parametrization."""
+    """Return params in a bucket with their owning module and access state."""
     param_entries: list[ParamEntry] = []
     for info in storage._param_infos.values():
         parts = info.fqn.split(".")
@@ -367,25 +364,22 @@ def _get_bucket_param_entries(
         if hasattr(leaf_module, "_checkpoint_wrapped_module"):
             leaf_module = leaf_module._checkpoint_wrapped_module
         if leaf_module in module_param_map:
-            parametrization = module_param_map[leaf_module].get(local_name)
-            if parametrization is not None:
-                param_entries.append((leaf_module, local_name, parametrization, info))
+            param_state = module_param_map[leaf_module].get(local_name)
+            if param_state is not None:
+                param_entries.append((leaf_module, local_name, param_state, info))
     return param_entries
 
 
-def _create_eager_parametrizations(
+def _create_eager_param_states(
     module: nn.Module,
     storages: list[DStorage],
     fqn_to_bucket_spec: dict[str, BucketSpec],
-    group_name: str,
-    world_size: int,
     device: torch.device,
-) -> dict[nn.Module, dict[str, nn.Module]]:
-    """Create eager parametrizations grouped by owning leaf module."""
-    module_param_map: dict[nn.Module, dict[str, nn.Module]] = {}
+) -> dict[nn.Module, dict[str, EagerParamAccessState]]:
+    """Create eager parameter access state grouped by owning leaf module."""
+    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]] = {}
 
     for storage in storages:
-        requires_batched_unshard = _storage_requires_batched_unshard(storage)
         uses_bucket_autograd_unshard = _storage_uses_bucket_autograd_unshard(storage)
         bucket_fqn = _get_storage_debug_fqn(storage)
         for fqn, info in storage._param_infos.items():
@@ -396,45 +390,37 @@ def _create_eager_parametrizations(
             compute_device = (
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
-            parametrization = info.placements[0].create_parametrization(
-                info,
-                group_name,
-                world_size,
+            param_state = EagerParamAccessState(
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
             )
 
             setattr(
-                parametrization,
-                _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
-                requires_batched_unshard,
-            )
-            setattr(
-                parametrization,
+                param_state,
                 _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
                 uses_bucket_autograd_unshard,
             )
-            setattr(parametrization, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
-            setattr(parametrization, _PARAM_FQN_ATTR, fqn)
-            setattr(parametrization, _BUCKET_FQN_ATTR, bucket_fqn)
+            setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
+            setattr(param_state, _PARAM_FQN_ATTR, fqn)
+            setattr(param_state, _BUCKET_FQN_ATTR, bucket_fqn)
 
             leaf_module, local_name = _get_param_leaf_module(module, fqn)
-            module_param_map.setdefault(leaf_module, {})[local_name] = parametrization
+            module_param_map.setdefault(leaf_module, {})[local_name] = param_state
 
     return module_param_map
 
 
 def _install_batched_allgather_hooks(
     storages: list,
-    module_param_map: dict[nn.Module, dict[str, nn.Module]],
+    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
 ) -> None:
     """Install pre/post forward hooks for batched per-bucket all-gather.
 
     In eager mode, each DStorage's pre-forward hook runs a single batched
     Placement.unshard() call (one NCCL collective per bucket), then sets
-    _pre_gathered on each parametrization module so the property getter
-    skips the per-param all-gather.
+    _pre_gathered on each parameter access state so the property getter can
+    return the hook-provided tensor.
 
     Skipped under graph capture. FlexShard currently supports eager execution
     only, so parameter access will raise before collectives are emitted.
@@ -445,8 +431,6 @@ def _install_batched_allgather_hooks(
             continue
 
         ptype = type(infos[0].placements[0])
-        # Skip batching when the placement/storage does not support the
-        # batched path. Parametrization remains the source of truth.
         if not _storage_requires_batched_unshard(storage):
             continue
         if storage._reshard_after_forward and not _storage_uses_bucket_autograd_unshard(
@@ -539,12 +523,12 @@ def _install_batched_allgather_hooks(
             def _reduce_fn():
                 """Batched reduce-scatter using collected grads."""
                 grads, valid = [], []
-                for idx, (leaf, name, param_p, info) in enumerate(entries):
+                for idx, (leaf, name, param_state, info) in enumerate(entries):
                     g = collected_grads.pop(idx, None)
                     if g is not None:
                         grads.append(g)
                         valid.append((leaf, name, info))
-                    param_p._unsharded_for_reduce = None
+                    param_state._unsharded_for_reduce = None
                 if not grads:
                     return
                 valid_infos = [i for _, _, i in valid]
@@ -589,14 +573,22 @@ def _install_batched_allgather_hooks(
                 if torch.compiler.is_compiling():
                     return
                 # Batched all-gather
-                local_shards = [
-                    (
+                local_shards = []
+                for leaf, name, param_state, _ in entries:
+                    local_shard = (
                         leaf._parameters[name]
                         if use_autograd_bucket
                         else leaf._parameters[name].data
                     )
-                    for leaf, name, _, _ in entries
-                ]
+                    if (
+                        param_state.compute_device is not None
+                        and local_shard.device != param_state.compute_device
+                    ):
+                        local_shard = local_shard.to(
+                            param_state.compute_device,
+                            non_blocking=True,
+                        )
+                    local_shards.append(local_shard)
                 entry_infos = [info for _, _, _, info in entries]
                 if (
                     all_gather_context is not None
@@ -633,16 +625,16 @@ def _install_batched_allgather_hooks(
                 else:
                     with torch.no_grad():
                         full_params = pt.unshard(local_shards, entry_infos, s._mesh)
-                for (_, _, param_p, _), full_param in zip(
+                for (_, _, param_state, _), full_param in zip(
                     entries, full_params, strict=True
                 ):
-                    param_p._pre_gathered = full_param
+                    param_state._pre_gathered = full_param
 
             def post_forward_hook(mod, args, output):
                 if torch.compiler.is_compiling():
                     return
-                for _, _, param_p, _ in entries:
-                    param_p._pre_gathered = None
+                for _, _, param_state, _ in entries:
+                    param_state._pre_gathered = None
                 if use_autograd_bucket:
                     return
 
@@ -653,8 +645,8 @@ def _install_batched_allgather_hooks(
                 if torch.is_grad_enabled():
                     collected_grads.clear()
                     leaf_indices = []
-                    for idx, (_, _, param_p, _) in enumerate(entries):
-                        u = getattr(param_p, "_unsharded_for_reduce", None)
+                    for idx, (_, _, param_state, _) in enumerate(entries):
+                        u = param_state._unsharded_for_reduce
                         if u is not None and u.requires_grad:
                             leaf_indices.append((idx, u))
 
@@ -693,5 +685,5 @@ def _install_batched_allgather_hooks(
         target.register_forward_hook(post_hook)
         if ag_context is not None and ag_bucket is not None:
             ag_context.buckets.append(ag_bucket)
-        for _, _, param_p, _ in param_entries:
-            setattr(param_p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
+        for _, _, param_state, _ in param_entries:
+            setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)

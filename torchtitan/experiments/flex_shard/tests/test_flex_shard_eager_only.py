@@ -71,6 +71,13 @@ class TestFlexShardEagerOnly(unittest.TestCase):
                 self.assertTrue(is_flex_shard_param(param))
                 self.assertIsNotNone(param.grad)
 
+    def test_param_access_outside_forward_raises(self):
+        with _single_rank_cpu_mesh() as mesh:
+            model = _flex_shard_tiny_model(mesh)
+
+            with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+                _ = model[0].weight
+
     def test_graph_capture_raises(self):
         with _single_rank_cpu_mesh() as mesh:
             model = _flex_shard_tiny_model(mesh)

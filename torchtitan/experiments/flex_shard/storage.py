@@ -44,7 +44,7 @@ class OffloadPolicy:
     """CPU offload policy for FlexShard buckets.
 
     When set on a BucketSpec, the bucket's byte storage is allocated on
-    CPU (optionally pinned). The parametrization handles H2D transfer
+    CPU (optionally pinned). The eager all-gather hook handles H2D transfer
     before all-gather; backward autograd handles D2H automatically.
 
     Args:
@@ -157,7 +157,7 @@ class DStorage:
     placement. Each parameter's local shard is a typed view into this buffer at
     its sequential byte offset.
 
-    Communication is delegated to eager hooks and parametrization modules; this
+    Communication is delegated to eager hooks and parameter accessors; this
     storage object owns buffer layout and metadata.
     """
 

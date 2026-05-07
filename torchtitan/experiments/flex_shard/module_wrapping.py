@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,11 +17,9 @@ from .state import (
     _DSTORAGE_ATTR,
     _DSTORAGES_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-    _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
-    _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
 )
-from .placements import _MixedPrecisionCast
+from .mixed_precision import _MixedPrecisionCast
 from .utils import (
     _is_graph_capture_active,
     _raise_graph_capture_unsupported,
@@ -29,6 +28,17 @@ from .utils import (
 
 if TYPE_CHECKING:
     from .storage import DStorage
+
+
+@dataclass
+class EagerParamAccessState:
+    """Mutable state for eager-only FlexShard parameter access."""
+
+    param_dtype: torch.dtype | None = None
+    reduce_dtype: torch.dtype | None = None
+    compute_device: torch.device | None = None
+    _pre_gathered: torch.Tensor | None = None
+    _unsharded_for_reduce: torch.Tensor | None = None
 
 
 class FlexShardModule:
@@ -71,11 +81,11 @@ def _attach_flex_shard_module_state(
 _parametrized_module_class_counter = 0
 
 
-def _register_parametrization(
+def _register_param_accessors(
     module: nn.Module,
-    param_parametrizations: dict[str, nn.Module],
+    param_states: dict[str, EagerParamAccessState],
 ) -> None:
-    """Register per-parameter property getters that call parametrization forward.
+    """Register per-parameter property getters that read eager access state.
 
     Uses dynamic subclass creation (not nn.utils.parametrize) to avoid
     state_dict key mangling. state_dict reads self._parameters directly,
@@ -83,21 +93,27 @@ def _register_parametrization(
 
     Args:
         module: The leaf module owning the parameters.
-        param_parametrizations: Maps parameter name to its parametrization module.
+        param_states: Maps parameter name to its eager access state.
     """
     global _parametrized_module_class_counter
     _parametrized_module_class_counter += 1
 
-    def _make_flex_shard_param_getter(param_name, parametrization):
+    def _make_flex_shard_param_getter(
+        param_name: str,
+        param_state: EagerParamAccessState,
+    ):
         def get_flex_shard_param(self):
-            # In eager batched mode, _pre_gathered is set on the
-            # parametrization by the batched all-gather pre_forward hook.
-            pre = getattr(parametrization, "_pre_gathered", None)
+            # In eager mode, _pre_gathered is set by the batched all-gather
+            # pre-forward hook. This PR intentionally has no per-parameter
+            # all-gather fallback. TODO: later compile support should add a
+            # separate graph-safe parametrization or graph path, with tests
+            # proving graph capture behavior.
+            pre = param_state._pre_gathered
             if pre is not None:
-                parametrization._pre_gathered = None
-                param_dtype = getattr(parametrization, "param_dtype", None)
-                reduce_dtype = getattr(parametrization, "reduce_dtype", None)
-                if getattr(parametrization, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
+                param_state._pre_gathered = None
+                param_dtype = param_state.param_dtype
+                reduce_dtype = param_state.reduce_dtype
+                if getattr(param_state, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
                     if param_dtype is not None or reduce_dtype is not None:
                         pre = _MixedPrecisionCast.apply(pre, param_dtype, reduce_dtype)
                     return pre
@@ -107,25 +123,19 @@ def _register_parametrization(
                 unsharded = pre.detach().requires_grad_(True)
                 if (
                     torch.is_grad_enabled()
-                    and getattr(parametrization, "_unsharded_for_reduce", None) is None
+                    and param_state._unsharded_for_reduce is None
                 ):
-                    parametrization._unsharded_for_reduce = unsharded
+                    param_state._unsharded_for_reduce = unsharded
                 return unsharded
             if _is_graph_capture_active():
                 _raise_graph_capture_unsupported()
-            if getattr(
-                parametrization, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False
-            ) and not getattr(
-                parametrization, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False
-            ):
-                _raise_missing_eager_batched_unshard(parametrization)
-            return parametrization(self._parameters[param_name])
+            _raise_missing_eager_batched_unshard(param_state)
 
         return get_flex_shard_param
 
     param_name_to_property = {
-        param_name: property(_make_flex_shard_param_getter(param_name, param))
-        for param_name, param in param_parametrizations.items()
+        param_name: property(_make_flex_shard_param_getter(param_name, state))
+        for param_name, state in param_states.items()
     }
     module_cls = type(
         f"FlexShard{module.__class__.__name__}_{_parametrized_module_class_counter}",
@@ -136,9 +146,9 @@ def _register_parametrization(
     sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
 
 
-def _register_module_parametrizations(
-    module_param_map: dict[nn.Module, dict[str, nn.Module]],
+def _register_module_param_accessors(
+    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
 ) -> None:
-    """Register property-based parametrizations grouped by owning module."""
+    """Register property-based parameter accessors grouped by owning module."""
     for module, param_map in module_param_map.items():
-        _register_parametrization(module, param_map)
+        _register_param_accessors(module, param_map)
