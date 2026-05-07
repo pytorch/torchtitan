@@ -168,6 +168,25 @@ class Float8LinearConverter(QuantizationConverter):
         logger.info("Swapped to Float8Linear layers")
 
 
+class Float8GroupedExperts(GroupedExperts):
+    """GroupedExperts with Float8 quantization applied in __init__."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(GroupedExperts.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        from torchao.prototype.moe_training.config import Float8TrainingOpConfig
+        from torchao.quantization.quant_api import quantize_
+
+        quantize_(
+            self,
+            config=Float8TrainingOpConfig(),
+            filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+        )
+
+
 _float8_experts_cache: dict[type, type] = {}
 
 
@@ -177,31 +196,22 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
     Works for any ``GroupedExperts`` subclass (e.g. gpt-oss variants).
     The returned class has a proper ``_owner`` set by ``__init_subclass__``.
     """
+    if parent_cls is GroupedExperts:
+        return Float8GroupedExperts
     if parent_cls in _float8_experts_cache:
         return _float8_experts_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
+    parent_config_cls = parent_cls.Config
 
-    class Float8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+    class _Float8GroupedExperts(parent_cls, Float8GroupedExperts):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
-        class Config(parent_config_cls):  # type: ignore[misc]
+        class Config(parent_config_cls, Float8GroupedExperts.Config):  # type: ignore[misc]
             pass
 
-        def __init__(self, config: Config):
-            super().__init__(config)
-            from torchao.prototype.moe_training.config import Float8TrainingOpConfig
-            from torchao.quantization.quant_api import quantize_
-
-            quantize_(
-                self,
-                config=Float8TrainingOpConfig(),
-                filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
-            )
-
-    Float8GroupedExperts.__name__ = f"Float8{parent_cls.__name__}"
-    Float8GroupedExperts.__qualname__ = f"Float8{parent_cls.__name__}"
-    _float8_experts_cache[parent_cls] = Float8GroupedExperts
-    return Float8GroupedExperts
+    _Float8GroupedExperts.__name__ = f"Float8{parent_cls.__name__}"
+    _Float8GroupedExperts.__qualname__ = f"Float8{parent_cls.__name__}"
+    _float8_experts_cache[parent_cls] = _Float8GroupedExperts
+    return _Float8GroupedExperts
 
 
 class Float8GroupedExpertsConverter(QuantizationConverter):
@@ -236,7 +246,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
             quantized_cls = _get_float8_grouped_experts_cls(base_module_cls)
-            new_config = quantized_cls.Config(  # pyrefly: ignore [missing-attribute]
+            new_config = quantized_cls.Config(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
             )
             if isinstance(parent, list):

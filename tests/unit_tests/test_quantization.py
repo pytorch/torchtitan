@@ -6,8 +6,14 @@
 import pytest
 
 from torchtitan.components.quantization import Float8Linear
-from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
-from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
+from torchtitan.components.quantization.float8 import (
+    _get_float8_grouped_experts_cls,
+    Float8GroupedExperts,
+)
+from torchtitan.components.quantization.mx import (
+    _get_mxfp8_grouped_experts_cls,
+    MXFP8GroupedExperts,
+)
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.linear import Linear
@@ -52,5 +58,5 @@ def test_quantized_grouped_experts_owner():
     assert float8_cls.Config._owner is float8_cls
     assert issubclass(mxfp8_cls, GroupedExperts)
     assert issubclass(float8_cls, GroupedExperts)
-    assert issubclass(mxfp8_cls.Config, GroupedExperts.Config)
-    assert issubclass(float8_cls.Config, GroupedExperts.Config)
+    assert issubclass(mxfp8_cls.Config, MXFP8GroupedExperts.Config)
+    assert issubclass(float8_cls.Config, Float8GroupedExperts.Config)
