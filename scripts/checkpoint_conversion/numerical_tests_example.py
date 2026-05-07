@@ -8,7 +8,7 @@ import torch
 
 import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
-from torchtitan.components.checkpoint import ModelWrapper
+from torch.distributed.checkpoint.state_dict import get_model_state_dict
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import logger
 
@@ -77,8 +77,7 @@ def forward_tt(model_name, config_name, checkpoint_path, test_set):
     model.init_weights(buffer_device=device)
     model.eval()
 
-    modelWrapper = ModelWrapper(model)
-    state_dict = modelWrapper._get_state_dict()
+    state_dict = get_model_state_dict(model)
 
     # Checkpoint Loading
     logger.info(f"Loading checkpoint at: {checkpoint_path}")

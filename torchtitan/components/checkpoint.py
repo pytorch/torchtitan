@@ -66,7 +66,7 @@ class ModelWrapper(Stateful):
     def state_dict(self) -> dict[str, Any]:
         sd: dict[str, Any] = {}
         for part in self.model_parts:
-            sd.update(part.get_sd(self.mode))  # pyrefly: ignore [missing-attribute]
+            sd.update(part.get_sd(self.mode))  # pyrefly: ignore [not-callable]
         return sd
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:

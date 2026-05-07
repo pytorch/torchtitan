@@ -592,9 +592,7 @@ class TestCheckpointManager(unittest.TestCase):
                 return None
 
             def get_sd(self, mode=None):
-                from torch.distributed.checkpoint.state_dict import (
-                    get_model_state_dict,
-                )
+                from torch.distributed.checkpoint.state_dict import get_model_state_dict
 
                 return get_model_state_dict(self)
 

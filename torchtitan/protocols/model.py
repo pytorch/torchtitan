@@ -111,9 +111,7 @@ class BaseModel(Module):
                 sd = fn(sd)
         return sd
 
-    def get_sd(
-        self, mode: StateDictMode = StateDictMode.FULL
-    ) -> dict[str, Any]:
+    def get_sd(self, mode: StateDictMode = StateDictMode.FULL) -> dict[str, Any]:
         """Return this model's state dict filtered by mode."""
         if mode == StateDictMode.TRAINABLE:
             return get_model_state_dict(
