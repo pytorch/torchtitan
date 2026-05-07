@@ -135,10 +135,11 @@ def build_trainer_model(
     # Load HF checkpoint
     if model_spec.state_dict_adapter is not None:
         sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
-        storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
-        hf_state_dict = sd_adapter.to_hf(model.state_dict())
+        model.set_sd_adapter(sd_adapter)
+        storage_reader = model.sd_adapter.get_hf_storage_reader(hf_assets_path)
+        hf_state_dict = model.to_hf(model.state_dict())
         dcp.load(hf_state_dict, storage_reader=storage_reader)
-        tt_state_dict = sd_adapter.from_hf(hf_state_dict)
+        tt_state_dict = model.from_hf(hf_state_dict)
         set_model_state_dict(
             model=model,
             model_state_dict=tt_state_dict,
