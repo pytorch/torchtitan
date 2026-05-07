@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 import torch
-import torch.distributed.spmd_types as spmd
+import spmd_types as spmd
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.tools.logging import logger
@@ -382,6 +382,7 @@ class ChunkedCELoss(BaseLoss):
             total_loss = total_loss + chunk_loss.detach()
 
             if requires_grad:
+                with spmd.no_typecheck():
                 chunk_loss.backward()
                 assert h_chunk.grad is not None
                 grad_accumulator.add(h_chunk.grad)
@@ -460,5 +461,4 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
 
 
 
-if spmd.is_available():
-    spmd.register_autograd_function(_DecoderOutputGradientBackProp)
+spmd.register_autograd_function(_DecoderOutputGradientBackProp)

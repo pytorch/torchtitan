@@ -37,7 +37,7 @@ from torchtitan.models.common.rope import (
 )
 from torchtitan.protocols.module import Module
 
-import torch.distributed.spmd_types as spmd
+import spmd_types as spmd
 
 
 def _spmd_spec_leaf(tensor: torch.Tensor):

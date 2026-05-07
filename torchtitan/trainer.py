@@ -4,16 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import dataclasses
 import json
 import os
 import time
 from collections.abc import Iterable, Iterator
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
@@ -24,6 +25,7 @@ from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhausted
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
+from torchtitan.protocols.module import preserve_buffer_spmd
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -50,7 +52,6 @@ from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-import torch.distributed.spmd_types as spmd
 from torchtitan.tools.profiler import Profiler
 
 
@@ -385,14 +386,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                if config.parallelism.full_spmd_types:
-                    from torchtitan.protocols.module import preserve_buffer_spmd
-
-                    buffer_ctx = preserve_buffer_spmd(model)
-                else:
-                    buffer_ctx = contextlib.nullcontext()
-
-                with buffer_ctx:
+                preserve_buffer_types = (
+                    preserve_buffer_spmd(model) if config.parallelism.full_spmd_types else nullcontext()
+                )
+                with preserve_buffer_types:
                     model.to_empty(device=init_device)
                     with torch.no_grad():
                         # TODO: Change this back to init_weights once
@@ -428,12 +425,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
-            tp_axis = parallel_dims.get_spmd_axis("tp")
-            self.loss_fn.enable_spmd_types(
-                parallel_dims.spmd_dp_axes(),
-                tp_axis=tp_axis if tp_axis.size() > 1 else None,
-                tp_pg=parallel_dims.get_spmd_pg("tp"),
-            )
+            self.loss_fn.enable_spmd_types(parallel_dims.spmd_dp_axes())
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor

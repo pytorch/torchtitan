@@ -210,7 +210,7 @@ class ParallelDims:
         # Eagerly populate spmd_axes from the dense mesh so all code
         # (parallelize, FSDP, trainer) uses the same PG objects.
         if self.full_spmd_types:
-            from torch.distributed.spmd_types import MeshAxis
+            from spmd_types import MeshAxis
 
             for name in dense_mesh.mesh_dim_names:
                 if name == "pp":
@@ -362,7 +362,7 @@ class ParallelDims:
     def get_spmd_axis(self, name: str) -> Any:
         """Return the MeshAxis for a named axis, or a trivial axis if disabled."""
         if name not in self._spmd_axes:
-            from torch.distributed.spmd_types import MeshAxis
+            from spmd_types import MeshAxis
 
             mesh = self.get_optional_mesh(name)
             if mesh is not None and mesh.size() > 1:
