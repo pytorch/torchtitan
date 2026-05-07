@@ -9,6 +9,7 @@ from torchtitan.components.quantization import (
     _QuantizedGroupedExpertsConfig,
     Float8Linear,
 )
+from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
@@ -46,9 +47,13 @@ def test_float8_applied_by_model_registry():
     assert len(converted) > 0
 
 
-def test_mxfp8_grouped_experts_owner():
-    """Dynamic MXFP8 quantized class gets correct _owner, not GroupedExperts."""
+def test_quantized_grouped_experts_owner():
+    """Dynamic quantized classes get correct _owner, not GroupedExperts."""
     mxfp8_cls = _get_mxfp8_grouped_experts_cls(GroupedExperts)
+    float8_cls = _get_float8_grouped_experts_cls(GroupedExperts)
     assert mxfp8_cls.Config._owner is mxfp8_cls
+    assert float8_cls.Config._owner is float8_cls
     assert issubclass(mxfp8_cls, GroupedExperts)
+    assert issubclass(float8_cls, GroupedExperts)
     assert issubclass(mxfp8_cls.Config, _QuantizedGroupedExpertsConfig)
+    assert issubclass(float8_cls.Config, _QuantizedGroupedExpertsConfig)

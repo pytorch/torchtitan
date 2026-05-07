@@ -121,7 +121,7 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
     class MXFP8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls, _QuantizedGroupedExpertsConfig):  # type: ignore[misc]
-            _recipe_name: str = "mxfp8_rceil"
+            recipe_name: str = "mxfp8_rceil"
 
         def __init__(self, config: Config):
             super().__init__(config)
@@ -131,7 +131,7 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
             )
             from torchao.quantization.quant_api import quantize_
 
-            recipe = MXFP8TrainingRecipe(config._recipe_name)
+            recipe = MXFP8TrainingRecipe(config.recipe_name)
             mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
             quantize_(
                 self,
@@ -185,7 +185,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
             new_config = quantized_cls.Config(  # pyrefly: ignore [missing-attribute]
                 **{f.name: getattr(config, f.name) for f in fields(config)},
-                _recipe_name=self.config.recipe_name,
+                recipe_name=self.config.recipe_name,
             )
             if isinstance(parent, list):
                 parent[attr] = new_config
