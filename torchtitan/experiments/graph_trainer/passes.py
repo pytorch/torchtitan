@@ -61,6 +61,9 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
+from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+    remat_using_tags_for_fwd_loss_bwd_graph,
+)
 from torchtitan.tools.logging import logger
 
 aten = torch.ops.aten
@@ -165,7 +168,7 @@ def compile_time_passes(
             prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
             defer_n_layers=config.compile.cpu_offload_defer_n_layers,
         ),
-        selective_activation_remat_pass,
+        remat_using_tags_for_fwd_loss_bwd_graph,
         overlap_fsdp_ag_rs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
@@ -815,22 +818,6 @@ def tag_with_memory_policy_pass(
 
     log_activation_memory_policy(gm)
     return gm
-
-
-def selective_activation_remat_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-) -> torch.fx.GraphModule:
-    """Duplicate recompute nodes for backward use, then DCE unused forward versions.
-
-    Wraps ``remat_using_tags_for_fwd_loss_bwd_graph`` with the graph pass
-    signature ``(gm, example_inputs)``.
-    """
-    from torchtitan.experiments.graph_trainer.selective_activation_remat import (
-        remat_using_tags_for_fwd_loss_bwd_graph,
-    )
-
-    return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
 def full_inductor_compilation_pass(

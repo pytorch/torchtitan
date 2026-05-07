@@ -4,11 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""AC rematerialize pass: Duplicates recompute nodes for backward, then DCE removes unused forward versions."""
+"""AC rematerialize pass: in-place duplicate recompute nodes for backward."""
 
-import itertools
 import logging
-from typing import Any, overload
+from typing import Any
 
 import torch
 import torch.fx as fx
@@ -18,28 +17,12 @@ from torch._functorch.partitioners import (
     force_save_bw_mutation_src,
     has_recomputable_ops,
     has_recomputable_rng_ops,
-    is_not_collective,
     must_recompute,
 )
 
 
 log = logging.getLogger(__name__)
 _EMPTY_CUSTOM_META: dict[str, object] = {}
-
-
-def is_impure_node_for_dce(node: fx.Node) -> bool:
-    # Check for special collectives that should be treated as pure
-    if not is_not_collective(node):
-        # It's a collective (wait_tensor, all_gather_into_tensor, etc.)
-        # Treat as pure - can be eliminated if unused
-        return False
-
-    # For everything else, fall back to the DEFAULT logic
-    # This is what eliminate_dead_code() calls when is_impure_node=None
-    impure_random = True
-    if torch._guards.TracingContext.try_get():
-        impure_random = torch._inductor.config.fallback_random
-    return node.is_impure(impure_random)
 
 
 def _is_backward_node(node: fx.Node, use_phase: bool = False) -> bool:
@@ -94,20 +77,34 @@ def _collect_backward_regions(
     return regions
 
 
-def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModule:
-    """
-    Duplicate recompute nodes for backward use. DCE removes unused forward versions.
+def remat_using_tags_for_fwd_loss_bwd_graph(
+    gm: fx.GraphModule,
+    example_inputs: Any = None,
+) -> fx.GraphModule:
+    """In-place remat: insert recompute duplicates before backward consumers.
 
-    Backward regions are identified by custom["phase"] == "backward" (user
-    annotation) or node.meta["autograd_backward"] == True (set automatically when
-    Dynamo traces torch.autograd.grad). When the user provides phase
-    annotations, only those annotated regions are used.
+    For each ``must_recompute`` forward node consumed by a backward node, a
+    duplicate is inserted just before the backward consumer and that
+    consumer's args are redirected to the duplicate. Original forward nodes
+    whose consumers were all backward become dead and are erased; originals
+    with remaining forward consumers stay.
+
+    The graph is mutated in place: original node identities and names are
+    preserved, only the duplicates carry a ``_recomputed`` suffix. No
+    whole-graph DCE or topological reorder is performed.
+
+    Backward regions are identified by ``custom["phase"] == "backward"``
+    (user annotation) or ``node.meta["autograd_backward"] == True`` (set by
+    Dynamo when tracing ``torch.autograd.grad``). When the user provides
+    phase annotations, only those annotated regions are used.
 
     The graph may contain multiple disjoint backward regions (e.g. chunked
     loss). Regions that do not depend on recomputable forward nodes are
     skipped. Only one region may require remat; if multiple do, we error
     and ask the user to annotate which region to rematerialize.
     """
+    del example_inputs  # unused; accepted for graph pass signature compatibility
+
     if not has_recomputable_ops(gm):
         return gm
 
@@ -151,79 +148,128 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
 
     bwd_start, bwd_end = remat_regions[0]
 
-    order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
-    new_graph = fx.Graph()
-    env: dict[fx.Node, fx.Node] = {}
-    recomputed_nodes: dict[fx.Node, fx.Node] = {}
+    all_nodes = list(gm.graph.nodes)
+    bwd_nodes = all_nodes[bwd_start:bwd_end]
+    order = {n: i for i, n in enumerate(all_nodes)}
 
-    # Insert forward nodes
-    for node in itertools.islice(gm.graph.nodes, 0, bwd_start):
-        env[node] = new_graph.node_copy(node, lambda x: env[x])
+    # Map each must_recompute fwd node to the bwd node its dup will be
+    # inserted in front of. The earliest bwd consumer (in graph order)
+    # wins via ``setdefault`` below.
+    remat_targets: dict[fx.Node, fx.Node] = {}
 
-    @overload
-    def remat_input(x: fx.Node) -> fx.Node:
-        ...
-
-    @overload
-    def remat_input(x: Any) -> Any:
-        ...
-
-    def remat_input(x: object) -> object:
-        # fx.Node can have args that are primitive types (e.g. int, float, bool)
-        if not isinstance(x, fx.Node):
-            return x
-        return recomputed_nodes.get(x, env[x])
-
-    def gather_recompute_deps(node: fx.Node) -> set[fx.Node]:
-        deps: set[fx.Node] = set()
+    def claim_for(bwd_node: fx.Node) -> None:
+        seen: set[fx.Node] = set()
 
         def _gather(n: fx.Node) -> None:
-            if n in deps or n in recomputed_nodes or not must_recompute(n):
+            if n in seen or not must_recompute(n):
                 return
-            deps.add(n)
+            seen.add(n)
+            remat_targets.setdefault(n, bwd_node)
             for inp in n.all_input_nodes:
                 _gather(inp)
 
-        # Can't call _gather(node) directly: node itself may not be must_recompute
-        # (e.g. backward nodes), so _gather would return early without visiting inputs.
-        for inp in node.all_input_nodes:
+        # bwd_node itself may not be must_recompute; start from its inputs.
+        for inp in bwd_node.all_input_nodes:
             _gather(inp)
-        return deps
 
-    # Insert backward nodes
-    for node in itertools.islice(gm.graph.nodes, bwd_start, bwd_end):
-        # Gather all deps that need to be recomputed for this node
-        deps = gather_recompute_deps(node)
+    for bwd_node in bwd_nodes:
+        claim_for(bwd_node)
 
-        # Insert deps in forward order (guaranteed disjoint from already-inserted)
-        # This is not as inefficient as it looks, because we only add fresh dependencies
-        # when they are not yet processed as recomputed nodes.
-        new_deps = sorted(deps, key=lambda n: order[n])
-        if new_deps:
-            log.debug(
-                "To compute backward node %s, recomputing [%s]",
-                node.name,
-                ", ".join(dep.name for dep in new_deps),
-            )
-        for dep in new_deps:
-            dup = new_graph.node_copy(dep, remat_input)
-            dup.name = dep.name + "_recomputed"
-            recomputed_nodes[dep] = dup
+    # Map original forward must_recompute node -> its recomputed duplicate.
+    recomputed_nodes: dict[fx.Node, fx.Node] = {}
+    # CPU offload: track which bwd target each reload-chain node was last
+    # hoisted before, so we can re-hoist if an earlier dup needs it later.
+    moved_offload: dict[fx.Node, fx.Node] = {}
 
-        env[node] = new_graph.node_copy(node, remat_input)
+    def ensure_offload_chain_before(reload_node: fx.Node, target: fx.Node) -> None:
+        """Move ``reload_node`` and its bwd-region deps in front of ``target``.
 
-    for node in itertools.islice(gm.graph.nodes, bwd_end, None):
-        env[node] = new_graph.node_copy(node, lambda x: env[x])
+        Mirrors upstream's ``_ensure_in_env``: a recompute dup consuming an
+        offloaded forward node must read from the reload chain on GPU, not
+        from F's freed storage. ``moved_offload`` keeps moves idempotent
+        and ensures the chain ends up before the earliest target across
+        repeated calls.
+        """
+        # ``bwd_reload_chain`` is the set of backward-region nodes that
+        # need to relocate together: ``reload_node`` (typically the
+        # ``ao.wait_tensor`` whose value the dup will read) plus every
+        # backward-region node it transitively depends on (typically the
+        # ``ao.reload`` op feeding it). Forward-region deps stop the walk —
+        # they're already before any backward target.
+        bwd_reload_chain: set[fx.Node] = set()
+        stack = [reload_node]
+        while stack:
+            n = stack.pop()
+            if n in bwd_reload_chain or not _is_backward_node(n):
+                continue
+            prev = moved_offload.get(n)
+            if prev is not None and order[prev] <= order[target]:
+                continue
+            bwd_reload_chain.add(n)
+            stack.extend(n.all_input_nodes)
 
-    new_gm = torch.fx.GraphModule(gm, new_graph)
+        for n in all_nodes:
+            if n in bwd_reload_chain:
+                target.prepend(n)
+                moved_offload[n] = target
 
-    # DCE with custom is_impure_node (like default_partition)
-    # Treats certain collectives as pure while delegating to default impurity logic
-    new_gm.graph.eliminate_dead_code(is_impure_node=is_impure_node_for_dce)
+    def remat_input(x: object) -> object:
+        """Arg-transform: redirect must_recompute originals to their dups, and
+        offloaded forward nodes to their CPU-reload chain. Hoisting of the
+        reload chain happens separately in the dup-creation loop."""
+        if not isinstance(x, fx.Node):
+            return x
+        if x in recomputed_nodes:
+            return recomputed_nodes[x]
+        reload_node = x.meta.get("cpu_offload_reload_node")
+        if reload_node is not None:
+            return reload_node
+        return x
+
+    # Walk the existing graph in forward order. Each claimed must_recompute
+    # node is duplicated immediately before its target backward node; topology
+    # is satisfied by the graph's own order — upstream deps appear earlier in
+    # the walk, so their duplicates are inserted (and visible via
+    # ``recomputed_nodes``) before any downstream duplicate references them.
+    for fwd_node in all_nodes[:bwd_start]:
+        bwd_target = remat_targets.get(fwd_node)
+        if bwd_target is None:
+            continue
+        # Pre-hoist offload reload chains for any args referencing offloaded
+        # forward nodes, so the chain executes before the dup we're about to
+        # create. Mirrors upstream's eager-copy-into-new-graph trick.
+        for arg in fwd_node.all_input_nodes:
+            reload_node = arg.meta.get("cpu_offload_reload_node")
+            if reload_node is not None:
+                ensure_offload_chain_before(reload_node, bwd_target)
+        with gm.graph.inserting_before(bwd_target):
+            dup = gm.graph.node_copy(fwd_node, remat_input)
+        dup.name = fwd_node.name + "_recomputed"
+        dup.meta["autograd_backward"] = True
+        recomputed_nodes[fwd_node] = dup
+        log.debug(
+            "Recomputing %s before backward node %s", fwd_node.name, bwd_target.name
+        )
+
+    # Redirect each backward node's inputs to the recomputed duplicates.
+    # Backward consumers of offloaded forward nodes were already redirected
+    # to their reload chain by the CPU offload pass, so the offload branch
+    # of remat_input is a no-op here.
+    for bwd_node in bwd_nodes:
+        bwd_node.args = torch.fx.map_arg(bwd_node.args, remat_input)
+        bwd_node.kwargs = torch.fx.map_arg(bwd_node.kwargs, remat_input)
+
+    # Targeted erase: original forward must_recompute nodes whose consumers
+    # were all backward now have no users and can be removed. Originals with
+    # remaining forward consumers stay in place. Iterate in reverse graph
+    # order so downstream originals are erased first, freeing their upstream
+    # originals' user lists for erase in the same pass.
+    for orig in reversed(list(recomputed_nodes)):
+        if not orig.users:
+            gm.graph.erase_node(orig)
 
     # raise_getitems pass for better memory (like default_partition)
-    new_gm = raise_getitems(new_gm)
+    gm = raise_getitems(gm)
 
-    new_gm.recompile()
-
-    return new_gm
+    gm.graph.lint()
+    return gm
