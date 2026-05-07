@@ -263,7 +263,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 compile=SimpleNamespace(
                     precompile_artifact_dir="precompiled",
                     inductor_compilation="regional",
-                    enable_cudagraph=True,
                 ),
             )
             passes = construct_default_graph_passes(loaded_result, load_config)
