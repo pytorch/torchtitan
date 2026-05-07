@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
@@ -34,6 +35,9 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     permuted_indices: torch.Tensor  # for _unpermute
     input_splits: list[int]
     output_splits: list[int]
+    # Pre-pad token count. dispatch() rounds bs*slen up to a multiple of
+    # sp_size when sp_size > 1; combine() slices pad rows off using this.
+    original_num_tokens: int
 
 
 class LocalTokenDispatcher(Configurable):
@@ -253,10 +257,22 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             return super().dispatch(x, top_scores, selected_experts_indices)
 
         ep_size = self.ep_mesh.size()
+        original_num_tokens = x.shape[0]
 
         if self.sp_size > 1:
-            # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
-            # shape (batch_size * seq_len // ep_size, top_k)
+            assert self.sp_rank >= 0, (
+                "sp_rank must be set before use. "
+                "wire_meshes() should set it from tp_mesh._sym_get_coordinate()."
+            )
+            # Round bs*slen up to a multiple of sp_size. Pad rows route to
+            # expert 0 with zero scores -> zero contribution to scatter_add.
+            pad = (-original_num_tokens) % self.sp_size
+            if pad > 0:
+                x = F.pad(x, (0, 0, 0, pad))
+                top_scores = F.pad(top_scores, (0, 0, 0, pad))
+                selected_experts_indices = F.pad(
+                    selected_experts_indices, (0, 0, 0, pad)
+                )
             x, top_scores, selected_experts_indices = self._split_along_sp(
                 x, top_scores, selected_experts_indices
             )
@@ -356,6 +372,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
             output_splits=output_splits_list,
+            original_num_tokens=original_num_tokens,
         )
         return routed_input, num_tokens_per_expert_group, metadata
 
@@ -464,15 +481,25 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # When sequence_parallel is active, dispatch splits tokens to a local
         # shard, so token_indices_experts_sorted are 0-based local indices.
         # Offset them to global positions so scatter_add into full x is correct.
+        original_num_tokens = metadata.original_num_tokens
         if self.sp_size > 1:
-            local_num_tokens = x.shape[0] // self.sp_size
+            padded_num_tokens = original_num_tokens + (
+                (-original_num_tokens) % self.sp_size
+            )
+            local_num_tokens = padded_num_tokens // self.sp_size
             token_indices_experts_sorted = (
                 metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
             )
+            assert isinstance(token_indices_experts_sorted, torch.Tensor)
+            # Drop pad-row entries: their global indices fall in
+            # [original_num_tokens, padded_num_tokens), out of `out`'s range.
+            # scatter_add itself is not padded; `out` matches x's shape.
+            if padded_num_tokens != original_num_tokens:
+                mask = token_indices_experts_sorted < original_num_tokens
+                token_indices_experts_sorted = token_indices_experts_sorted[mask]
+                routed_output = routed_output[mask]
         else:
             token_indices_experts_sorted = metadata.token_indices_experts_sorted
-
-        assert isinstance(token_indices_experts_sorted, torch.Tensor)
         out = deterministic_scatter_add(
             out,
             token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
