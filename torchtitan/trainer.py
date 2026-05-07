@@ -428,7 +428,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
-            self.loss_fn.enable_spmd_types(parallel_dims.spmd_dp_axes())
+            tp_axis = parallel_dims.get_spmd_axis("tp")
+            self.loss_fn.enable_spmd_types(
+                parallel_dims.spmd_dp_axes(),
+                tp_axis=tp_axis if tp_axis.size() > 1 else None,
+                tp_pg=parallel_dims.get_spmd_pg("tp"),
+            )
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -481,6 +486,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
         self.full_spmd_types: bool = config.parallelism.full_spmd_types
+
         # Build validator if validation is configured
         if config.validator.enable:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
@@ -661,18 +667,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         labels: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Annotate inputs, labels, and positions with spmd_types {dp: S(0)}."""
+        """Annotate inputs, labels, and positions with spmd_types.
 
+        DP axes get S(0) (batch-sharded). TP axis gets I (invariant —
+        each TP rank sees the same tokens).
+        """
         dp_axes = self.parallel_dims.spmd_dp_axes()
-        if not dp_axes:
-            return inputs, labels
+        tp_axis = self.parallel_dims.get_spmd_axis("tp")
 
-        if len(dp_axes) == 1:
-            spmd_type = {dp_axes[0]: spmd.S(0)}
-            for t in (inputs, labels, positions):
-                spmd.assert_type(t, spmd_type)
+        spmd_type: dict = {}
+        if tp_axis.size() > 1:
+            spmd_type[tp_axis] = spmd.R
+
+        if len(dp_axes) <= 1:
+            for axis in dp_axes:
+                spmd_type[axis] = spmd.S(0)
+            if spmd_type:
+                for t in (inputs, labels, positions):
+                    spmd.assert_type(t, spmd_type)
         else:
-            spmd_type = {axis: spmd.V for axis in dp_axes}
+            for axis in dp_axes:
+                spmd_type[axis] = spmd.V
             for t in (inputs, labels, positions):
                 spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
                 spmd.assert_type(t, spmd_type, spec)

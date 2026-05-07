@@ -242,6 +242,13 @@ def set_decoder_sharding_config(
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
         out_dst_shardings=dense_activation_placement(tp=activation_tp),
     )
+    if full_spmd_types:
+        from spmd_types import P as spmd_P, R as spmd_R, S as spmd_S
+
+        config.tok_embeddings.spmd_config = LocalSpmdConfig(
+            inputs=(SpmdAnnotation(types={DP_SHARD: spmd_S(0), TP: spmd_R}),),
+            out=SpmdAnnotation(types={DP_SHARD: spmd_S(0), TP: spmd_P}),
+        )
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
