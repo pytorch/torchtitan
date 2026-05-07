@@ -59,6 +59,10 @@ from .mx import (  # noqa: F401, E402
     MXFP8Linear,
     MXFP8LinearConverter,
 )
+from .te_nvfp4 import (  # noqa: F401, E402
+    TENVFP4Linear,
+    TENVFP4LinearConverter,
+)
 
 __all__ = [
     "Float8GroupedExpertsConverter",
@@ -67,6 +71,8 @@ __all__ = [
     "MXFP8GroupedExpertsConverter",
     "MXFP8Linear",
     "MXFP8LinearConverter",
+    "TENVFP4Linear",
+    "TENVFP4LinearConverter",
     "QuantizationConverter",
     "QuantizedLinearConfig",
     "_QuantizedGroupedExpertsConfig",
