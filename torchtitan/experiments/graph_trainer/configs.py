@@ -66,7 +66,9 @@ def register_memory_policy_config(name: str):
         _MEMORY_POLICY_TYPES.append(Annotated[cls, tyro.conf.subcommand(name)])
         # Patch the annotation on GraphTrainerCompileConfig so tyro sees the
         # updated Union when it parses CLI args.
-        GraphTrainerCompileConfig.__annotations__["memory_policy"] = Union[
+        GraphTrainerCompileConfig.__annotations__[
+            "memory_policy"
+        ] = Union[  # noqa: NU001
             tuple(_MEMORY_POLICY_TYPES)
         ]
         return cls
@@ -103,7 +105,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Union[tuple(_MEMORY_POLICY_TYPES)] = field(
+    memory_policy: Union[tuple(_MEMORY_POLICY_TYPES)] = field(  # noqa: NU001
         default_factory=DefaultMemoryPolicy
     )
     """
