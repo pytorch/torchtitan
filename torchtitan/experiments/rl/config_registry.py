@@ -262,10 +262,13 @@ def rl_grpo_qwen3_moe_debug_ep_batch_invariant() -> RLTrainer.Config:
 
     Uses the bundled bootstrap directory ``tests/assets/qwen3_moe_debug``
     (config.json + Qwen3 tokenizer files, no weights) together with
-    ``debug.random_init=True`` so no checkpoint is needed.
+    ``debug.skip_rl_trainer_initial_hf_weight_load=True`` so no checkpoint
+    is needed.
     """
     debug_config = DebugConfig(
-        batch_invariant=True, deterministic=True, random_init=True
+        batch_invariant=True,
+        deterministic=True,
+        skip_rl_trainer_initial_hf_weight_load=True,
     )
     return RLTrainer.Config(
         model_spec=model_registry(
