@@ -11,7 +11,9 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_fsdp import FSDPTest
 
-from torchtitan.components.loss import ChunkedCELossWithParamGrads
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedCELossWithParamGrads,
+)
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
