@@ -442,6 +442,7 @@ class TestBitwiseParity(unittest.TestCase):
 
         registry_to_vllm(
             config.model_spec,
+            parallelism=config.generator.parallelism,
             compile_config=config.compile,
         )
 
