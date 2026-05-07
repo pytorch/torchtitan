@@ -27,7 +27,7 @@ class QuantizedLinearConfig(Linear.Config):
 
 
 class _QuantizedGroupedExpertsConfig:
-    """Marker mixin for quantized GroupedExperts configs."""
+    """Marker base for dynamically created quantized GroupedExperts configs."""
 
     pass
 
