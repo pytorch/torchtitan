@@ -31,7 +31,10 @@ def llama4_debugmodel() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=OptimizersContainer.Config(
+            lr=4e-3,
+            optimizer_kwargs={"betas": (0.9, 0.95), "eps": 1e-15, "weight_decay": 0.1},
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -81,7 +84,10 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=OptimizersContainer.Config(
+            lr=4e-3,
+            optimizer_kwargs={"betas": (0.9, 0.95), "eps": 1e-15, "weight_decay": 0.1},
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -115,7 +121,10 @@ def llama4_17bx128e() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=OptimizersContainer.Config(
+            lr=4e-3,
+            optimizer_kwargs={"betas": (0.9, 0.95), "eps": 1e-15, "weight_decay": 0.1},
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=600,
             min_lr_factor=0.1,
@@ -143,7 +152,10 @@ def llama4_17bx16e() -> Trainer.Config:
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
-        optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+        optimizer=OptimizersContainer.Config(
+            lr=4e-3,
+            optimizer_kwargs={"betas": (0.9, 0.95), "eps": 1e-15, "weight_decay": 0.1},
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=600,
             min_lr_factor=0.1,
