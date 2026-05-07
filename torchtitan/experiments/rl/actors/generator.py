@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import logging
 import math
 import os
@@ -13,11 +12,17 @@ from dataclasses import dataclass, field
 import torch
 import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torchtitan.config import Configurable
-from torchtitan.config.configs import CompileConfig, DebugConfig, ParallelismConfig
+from torchtitan.config import (
+    CompileConfig,
+    Configurable,
+    DebugConfig,
+    ParallelismConfig,
+)
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.models.vllm_config_parser import TORCHTITAN_CONFIG_FORMAT
-from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+from torchtitan.experiments.rl.models.vllm_registry import (
+    registry_to_vllm,
+    TORCHTITAN_CONFIG_FORMAT,
+)
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
@@ -136,7 +141,7 @@ class VLLMGenerator(Actor, Configurable):
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            # Generator only supports TP. vLLM handles its own parallelism
+            # Generator only supports TP now. vLLM handles its own parallelism
             # and we only apply TP via the core parallelize function.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
@@ -159,6 +164,16 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support expert parallelism, "
                     f"got ep={p.expert_parallel_degree}"
                 )
+            if p.enable_sequence_parallel:
+                logger.warning(
+                    "Generator enable_sequence_parallel=True hurts inference "
+                    "throughput; prefer SP=False."
+                )
+            if not p.disable_loss_parallel:
+                raise ValueError(
+                    "Generator requires disable_loss_parallel=True, "
+                    f"got disable_loss_parallel={p.disable_loss_parallel}"
+                )
 
     def __init__(
         self,
@@ -179,8 +194,12 @@ class VLLMGenerator(Actor, Configurable):
         # (RLTrainer) as num_prompts_per_step * sampling.n.
         self._max_num_seqs = max_num_seqs
 
-        # Register TorchTitan model with vLLM before any engine creation
-        registry_to_vllm(model_spec)
+        # Register TorchTitan model + parser with vLLM
+        registry_to_vllm(
+            model_spec,
+            parallelism=config.parallelism,
+            compile_config=compile_config,
+        )
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
@@ -197,8 +216,7 @@ class VLLMGenerator(Actor, Configurable):
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
             # registry_to_vllm above). It builds PretrainedConfig from
-            # ModelSpec instead of reading config.json from disk, and
-            # stamps fields like ``compile_config`` for the wrapper.
+            # ModelSpec instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
@@ -207,14 +225,6 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            # Per-engine torchtitan config sections forwarded to the wrapper
-            # via the custom ConfigParser. Keys are validated against
-            # ``_ALLOWED_TORCHTITAN_CONFIG_OVERRIDES`` at engine init: every
-            # value here must originate from a torchtitan config dataclass
-            hf_overrides={
-                "compile_config": dataclasses.asdict(compile_config),
-                "debug_config": dataclasses.asdict(config.debug),
-            },
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.CUSTOM,
             ),

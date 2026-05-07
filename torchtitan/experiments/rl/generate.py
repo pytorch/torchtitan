@@ -44,6 +44,7 @@ def generate():
 
     registry_to_vllm(
         config.model_spec,
+        parallelism=gen_config.parallelism,
         compile_config=config.compile,
     )
     logger.info("Registered TorchTitan model with vLLM")
