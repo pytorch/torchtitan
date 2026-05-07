@@ -5,9 +5,68 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import dataclasses
 import os
 
 from tests.integration_tests import OverrideDefinitions
+
+
+def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
+    """True when the variant has PP > 1 and no other SPMD parallelism > 1.
+
+    full_dtensor requires at least one SPMD axis > 1; PP-only runs collapse
+    every dense SPMD axis to size 1 and trip DTensor's reshape / flatten
+    rejection of Shard-on-degenerate-axis. Detected by parsing the explicit
+    ``--parallelism.*_degree`` flags and back-computing ``dp_shard`` (default
+    -1, "fill remaining").
+    """
+    degrees = {
+        "pipeline_parallel_degree": 1,
+        "data_parallel_replicate_degree": 1,
+        "data_parallel_shard_degree": -1,
+        "tensor_parallel_degree": 1,
+        "context_parallel_degree": 1,
+        "expert_parallel_degree": 1,
+    }
+    for arg in variant:
+        for key in degrees:
+            if key in arg:
+                try:
+                    degrees[key] = int(arg.split()[-1])
+                except ValueError:
+                    pass
+                break
+    if degrees["data_parallel_shard_degree"] == -1:
+        denom = (
+            degrees["pipeline_parallel_degree"]
+            * degrees["data_parallel_replicate_degree"]
+            * degrees["context_parallel_degree"]
+            * degrees["tensor_parallel_degree"]
+        )
+        degrees["data_parallel_shard_degree"] = max(1, ngpu // denom)
+    return degrees["pipeline_parallel_degree"] > 1 and all(
+        v <= 1 for k, v in degrees.items() if k != "pipeline_parallel_degree"
+    )
+
+
+def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
+    """Inject ``--parallelism.full_dtensor`` into every variant.
+
+    All features.py tests run under full_dtensor except PP-only variants
+    (see ``_is_pp_only``); legacy non-full_dtensor coverage lives in
+    models.py. CP variants also switch to FlexAttention config because
+    full_dtensor + CP is not supported with SDPA / Varlen.
+    """
+    new_args = []
+    for variant in t.override_args:
+        prefix: list[str] = []
+        if not _is_pp_only(variant, t.ngpu):
+            prefix.append("--parallelism.full_dtensor")
+        if any("context_parallel_degree" in arg for arg in variant):
+            prefix.append("--module llama3 --config llama3_debugmodel_flex_attn")
+        new_args.append(tuple(prefix) + tuple(variant))
+    return dataclasses.replace(t, override_args=tuple(new_args))
+
 
 # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
 runner_temp = os.getenv("RUNNER_TEMP")
@@ -636,4 +695,4 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
     ]
 
-    return integration_tests_flavors
+    return [_enable_full_dtensor(t) for t in integration_tests_flavors]

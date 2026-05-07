@@ -10,7 +10,12 @@
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -27,6 +32,7 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
@@ -56,22 +62,21 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-    # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
-
-    # TODO: We pass tp_mesh here because TP is the only parallelism
-    # using DTensor currently. Once we move to full DTensor (e.g.,
-    # FSDP via DTensor, CP via DTensor), pass the full SPMD mesh instead.
-    if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+    if parallelism.full_dtensor:
+        validate_config(parallel_dims, model)
+        model.parallelize(parallel_dims)
+    else:
+        if parallel_dims.cp_enabled:
+            apply_cp_to_forward(
+                # pyrefly: ignore [missing-attribute, not-callable]
+                [block.attention.inner_attention for block in model.layers.values()],
+                parallel_dims.get_mesh("cp"),
+            )
+        if parallel_dims.tp_enabled:
+            model.parallelize(parallel_dims)
+            maybe_enable_async_tp(
+                parallelism, compile_config, parallel_dims.get_mesh("tp")
+            )
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -89,8 +94,19 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
+    # all-gather but still installs the MixedPrecisionPolicy.
+    if parallelism.full_dtensor:
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
+            model, parallel_dims, parallelism.full_dtensor
+        )
+    else:
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
+        dp_mesh_dims = None
+
     apply_fsdp(
         model,
         dp_mesh,
@@ -99,6 +115,7 @@ def parallelize_llama(
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     if parallel_dims.dp_replicate_enabled:
@@ -120,6 +137,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    dp_mesh_dims: "DataParallelMeshDims | None" = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -136,7 +154,14 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
-
+        dp_mesh_dims: Under full_dtensor, ``fully_shard`` must flatten
+            ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
+            needs to know which axes of the multi-D SPMD mesh are
+            data-parallel. We pass this explicitly via ``dp_mesh_dims``
+            rather than letting FSDP infer it from mesh axis names: the
+            naming contract between ``fully_shard`` and torchtitan is not
+            strong enough to infer safely, and an explicit declaration
+            avoids silent miscategorization when new mesh axes appear.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -144,6 +169,9 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        # pyrefly: ignore[bad-typed-dict-key]
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()

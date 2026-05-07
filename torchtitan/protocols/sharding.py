@@ -12,11 +12,17 @@ and read by ``Module.parallelize(mesh)``.  All placements use
 self-documenting and support multi-dimensional meshes.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.protocols.types import MeshAxisName
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 # Placement per mesh axis, keyed by MeshAxisName.
@@ -110,25 +116,96 @@ class ShardingConfig:
         return {"repr": repr(self)}
 
 
+def resolve_mesh(
+    axes: Iterable[MeshAxisName | str],
+    parallel_dims: "ParallelDims",
+) -> DeviceMesh | None:
+    """Resolve the device mesh for a set of mesh axis names.
+
+    Given the axes, query ``parallel_dims`` for the corresponding SPMD
+    mesh (dense or sparse).
+
+    Under non-``full_dtensor``, we trim the axes since not all enabled
+    axes participate in the computation.
+
+    Returns ``None`` when no axis is enabled under non-``full_dtensor``.
+    Raises ``ValueError`` under ``full_dtensor`` if the resolved mesh is
+    not one of ``parallel_dims.spmd_meshes()``.
+    """
+    axes_list = list(axes)
+    if not parallel_dims.full_dtensor:
+        in_band = ("tp", "ep")
+        axes_list = [axis for axis in axes_list if axis in in_band]
+    mesh = parallel_dims.get_enabled_mesh(axes_list)
+    if mesh is None:
+        return None
+    assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+    if parallel_dims.full_dtensor and mesh not in parallel_dims.spmd_meshes():
+        raise ValueError(
+            f"Resolved mesh {list(mesh.mesh_dim_names)} does not match any "
+            f"SPMD mesh. Valid meshes: "
+            f"{[list(m.mesh_dim_names or ()) for m in parallel_dims.spmd_meshes()]}."
+        )
+    return mesh
+
+
+def resolve_shared_mesh(
+    placements: Iterable["NamedPlacement | None"],
+    parallel_dims: "ParallelDims",
+) -> DeviceMesh | None:
+    """Resolve the mesh shared by a list of NamedPlacements.
+
+    All non-``None`` entries must reference the same axis keys (placement
+    values may differ -- "redistribute on the same mesh" is exactly the case
+    of same axes, different placements). ``None`` entries are skipped (e.g.
+    LocalMapConfig non-tensor args, optional in/dst/grad placements).
+
+    Returns ``None`` when every entry is ``None`` or when ``resolve_mesh``
+    filters every axis out (legacy non-``full_dtensor`` path); callers
+    should treat this as a no-op for the corresponding boundary.
+    """
+    non_none = [p for p in placements if p is not None]
+    if not non_none:
+        return None
+    axes = non_none[0].keys()
+    for p in non_none[1:]:
+        assert p.keys() == axes, (
+            f"Inconsistent mesh axes within a boundary: "
+            f"{sorted(k.value for k in axes)} vs "
+            f"{sorted(k.value for k in p.keys())}"
+        )
+    return resolve_mesh(axes, parallel_dims)
+
+
 def resolve_placements(
     named: NamedPlacement,
-    mesh_axis_names: tuple[str, ...],
+    mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
     """Resolve NamedPlacement against a mesh in axis order.
 
     Every sharding_config must explicitly declare a placement for every mesh axis
     it will be applied against. Missing declarations raise ``ValueError``;
     extra declarations (axes not in the mesh) are ignored.
+
+    ``Shard(d)`` on a size-1 mesh axis is normalized to ``Replicate()`` --
+    the two are operationally identical on a 1-rank axis, but DTensor's op
+    rules (placement-equality, view/reshape strict mode, ...) treat them
+    as distinct and reject ``Shard`` in places where ``Replicate`` would
+    work.
     """
+    assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
-    for axis_name in mesh_axis_names:
+    for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
         if key not in named:
             raise ValueError(
                 f"Sharding sharding_config does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
                 f"{sorted(k.value for k in named)}; "
-                f"required: {list(mesh_axis_names)}."
+                f"required: {list(mesh.mesh_dim_names)}."
             )
-        result.append(named[key])
+        p = named[key]
+        if isinstance(p, Shard) and mesh.size(i) == 1:
+            p = Replicate()
+        result.append(p)
     return tuple(result)

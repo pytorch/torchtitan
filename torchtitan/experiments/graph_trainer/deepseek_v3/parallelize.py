@@ -13,6 +13,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     apply_simple_fsdp,
@@ -80,10 +81,10 @@ def parallelize_deepseekv3(
     annotate_deepseekv3(model)
 
     if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
         # Config-based sharding: ShardingConfig is populated on the model
         # config in Trainer.Config.__post_init__; Module.parallelize applies it.
-        model.parallelize(tp_mesh)
+        model.parallelize(parallel_dims)
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Read comm_backend from the model's token dispatcher config
     # (set by moe_comm_backend in model_registry / config factories).

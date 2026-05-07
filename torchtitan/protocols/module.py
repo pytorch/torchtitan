@@ -11,11 +11,17 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
+from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import Configurable
-from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.protocols.sharding import (
+    resolve_mesh,
+    resolve_placements,
+    resolve_shared_mesh,
+    ShardingConfig,
+)
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -38,6 +44,7 @@ class Module(nn.Module, Configurable):
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
+    _parallelized: bool = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -169,58 +176,95 @@ class Module(nn.Module, Configurable):
         ]
         return self._pos_arg_list
 
-    def parallelize(self, mesh: DeviceMesh) -> None:
+    def parallelize(self, parallel_dims: ParallelDims) -> None:
         """Parallelize this module and all Module children recursively.
 
         For each module with a ``sharding_config``:
 
-        1. ``distribute_tensor`` on params and buffers per ``state_shardings``.
-        2. Wrap ``self.forward`` with redistribution (+ ``local_map`` if needed).
+        1. Shard states (parameters and buffers).
+        2. Wrap the forward with:
+            ``reshard inputs -> [optional local_map] forward -> reshard outputs``.
 
-        The wrapping order is:
-            ``reshard inputs -> [optional local_map] fn -> reshard outputs``.
+        ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
 
-        fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
-
-        CP (applied before ``parallelize``) is captured inside ``local_map``.
+        Each ``ShardingConfig`` field resolves its mesh independently via
+        ``resolve_mesh()`` and resolves its placements independently via
+        ``resolve_placements()``.
         """
-        # Recurse children first
+        if self._parallelized:
+            raise ValueError(
+                f"{type(self).__name__} has already been parallelized. "
+                "Module.parallelize() must be called at most once per instance."
+            )
+        self._parallelized = True
+
         queue = list(self.children())
         while queue:
             child = queue.pop()
             if isinstance(child, Module):
-                child.parallelize(mesh)
+                child.parallelize(parallel_dims)
             else:
-                # Look through non-Module wrappers, e.g., CheckpointWrapper
+                # Look through non-Module wrappers, e.g., CheckpointWrapper.
                 queue.extend(child.children())
 
-        sharding_config = self._sharding_config
-        if sharding_config is None:
+        if self._sharding_config is None:
             return
 
-        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-        mesh_axis_names = mesh.mesh_dim_names
+        self._shard_states(parallel_dims)
+        self._cache_pos_arg_names()
+        fn = self._maybe_wrap_with_local_map(self.forward, parallel_dims)
 
-        # Distribute parameters and buffers per state_shardings. Every sharding_config
-        # must declare a placement for every mesh axis; ``resolve_placements``
-        # raises otherwise.
+        def with_redistribution(*args, **kwargs):
+            args, kwargs = self._shard_inputs(parallel_dims, args, kwargs)
+            outputs = fn(*args, **kwargs)
+            return self._shard_outputs(parallel_dims, outputs)
+
+        self.forward = with_redistribution
+
+    def _shard_states(self, parallel_dims: ParallelDims) -> None:
+        """Distribute params and buffers per ``state_shardings``.
+
+        Each entry resolves its own mesh via ``resolve_mesh``, so different
+        params on the same Module may live on different meshes. An
+        already-DTensor param/buffer indicates it was distributed by a
+        sibling (e.g. weight tying); skip but verify placements agree.
+        """
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+
         for name, param in self.named_parameters(recurse=False):
-            if name not in sharding_config.state_shardings:
+            named_placements = sharding_config.state_shardings.get(name)
+            if named_placements is None:
                 continue
-            placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_axis_names
-            )
+            axes = named_placements.keys()
+            mesh = resolve_mesh(axes, parallel_dims)
+            if mesh is None:
+                continue
+            placements = resolve_placements(named_placements, mesh)
+            if isinstance(param, DTensor):
+                if tuple(param.placements) != tuple(placements):
+                    raise ValueError(
+                        f"{type(self).__name__}.{name} is already a DTensor with "
+                        f"placements {param.placements}, but its sharding_config "
+                        f"expects {placements}. This usually means a tied parameter "
+                        "is referenced by two modules with conflicting sharding "
+                        "configs."
+                    )
+                continue
             self.register_parameter(
                 name,
                 nn.Parameter(distribute_tensor(param, mesh, list(placements))),
             )
 
         for name, buffer in self.named_buffers(recurse=False):
-            if name not in sharding_config.state_shardings or buffer is None:
+            named_placements = sharding_config.state_shardings.get(name)
+            if named_placements is None or buffer is None:
                 continue
-            placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_axis_names
-            )
+            axes = named_placements.keys()
+            mesh = resolve_mesh(axes, parallel_dims)
+            if mesh is None:
+                continue
+            placements = resolve_placements(named_placements, mesh)
             persistent = name not in self._non_persistent_buffers_set
             self.register_buffer(
                 name,
@@ -228,51 +272,63 @@ class Module(nn.Module, Configurable):
                 persistent=persistent,
             )
 
-        # Cache positional arg names of the original forward so _shard_inputs
-        # can read them from the cache instead of calling inspect every forward.
-        self._cache_pos_arg_names()
+    def _maybe_wrap_with_local_map(
+        self,
+        fn: Callable,
+        parallel_dims: ParallelDims,
+    ) -> Callable:
+        """Wrap ``fn`` with ``local_map`` if ``sharding_config.local_map`` is set.
 
-        fn = self.forward
-        if sharding_config.local_map is not None:
-            # Resolve each NamedPlacement to a positional tuple for the
-            # current mesh.
-            lm = sharding_config.local_map
-            in_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.in_placements
-            )
-            out_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.out_placements
-            )
-            in_grad_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.in_grad_placements
-            )
-            fn = local_map(
-                fn,
-                in_placements=in_placements,
-                out_placements=out_placements,
-                in_grad_placements=in_grad_placements,
-                device_mesh=mesh,
-            )
+        ``local_map`` takes a single ``device_mesh``, so all NamedPlacements within
+        one LocalMapConfig must resolve to the same mesh.
+        """
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        if sharding_config.local_map is None:
+            return fn
 
-        def with_redistribution(*args, **kwargs):
-            args, kwargs = self._shard_inputs(mesh, args, kwargs)
-            outputs = fn(*args, **kwargs)
-            return self._shard_outputs(mesh, outputs)
+        lm = sharding_config.local_map
+        resolved_mesh = resolve_shared_mesh(
+            lm.in_placements + lm.out_placements + lm.in_grad_placements,
+            parallel_dims,
+        )
+        if resolved_mesh is None:
+            return fn
 
-        self.forward = with_redistribution
+        def _resolve(p):
+            if p is None:
+                return None
+            return resolve_placements(p, resolved_mesh)
+
+        in_placements = tuple(_resolve(p) for p in lm.in_placements)
+        out_placements = tuple(_resolve(p) for p in lm.out_placements)
+        in_grad_placements = tuple(_resolve(p) for p in lm.in_grad_placements)
+        return local_map(
+            fn,
+            in_placements=in_placements,
+            out_placements=out_placements,
+            in_grad_placements=in_grad_placements,
+            device_mesh=resolved_mesh,
+            # Under full_dtensor, callers feed DTensors sharded on the full
+            # SPMD mesh; local_map redistributes to the per-arg placements
+            # declared above. Legacy path keeps the strict default so
+            # placement mismatches surface as errors.
+            redistribute_inputs=parallel_dims.full_dtensor,
+        )
 
     def _shard_inputs(
         self,
-        mesh: DeviceMesh,
+        parallel_dims: ParallelDims,
         args: tuple,
         kwargs: dict,
     ) -> tuple[tuple, dict]:
         """Redistribute inputs to desired placements.
 
-        Two-step process per input:
-        1. If plain tensor, wrap as DTensor using ``in_src_shardings``
-           (declares the source placement of the incoming tensor).
-        2. If DTensor placements != ``in_dst_shardings``, redistribute.
+        Per input present in ``in_src_shardings`` / ``in_dst_shardings``:
+        resolve a mesh from that input's NamedPlacements, then:
+        1. If plain tensor and ``in_src_shardings`` declared, wrap as
+           DTensor via ``DTensor.from_local`` on that mesh.
+        2. If ``in_dst_shardings`` declared, redistribute on the same mesh.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
@@ -283,31 +339,38 @@ class Module(nn.Module, Configurable):
         ):
             return args, kwargs
 
-        # Use pre-cached positional arg names (populated in parallelize()) to
-        # merge positional args into a unified kwargs dict.
         pos_arg_names = [
             name for name in self._cache_pos_arg_names() if name not in kwargs
         ]
         new_kwargs = dict(zip(pos_arg_names, args))
         new_kwargs.update(kwargs)
 
-        assert mesh.mesh_dim_names is not None
-        mesh_axis_names = mesh.mesh_dim_names
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
+            src_named_placements = in_src_shardings.get(name)
+            dst_named_placements = in_dst_shardings.get(name)
+            mesh = resolve_shared_mesh(
+                [src_named_placements, dst_named_placements],
+                parallel_dims,
+            )
+            if mesh is None:
+                continue
 
-            # Step 1: Annotate plain tensor as DTensor using in_src_shardings.
-            if not isinstance(value, DTensor) and name in in_src_shardings:
-                layout = resolve_placements(in_src_shardings[name], mesh_axis_names)
-                value = DTensor.from_local(value, mesh, layout, run_check=False)
+            if not isinstance(value, DTensor) and src_named_placements is not None:
+                layout = resolve_placements(src_named_placements, mesh)
+                value = DTensor.from_local(
+                    value,
+                    mesh,
+                    layout,
+                    run_check=False,
+                )
 
-            # Step 2: Redistribute to desired placement if needed.
-            if name in in_dst_shardings and isinstance(value, DTensor):
-                desired = resolve_placements(in_dst_shardings[name], mesh_axis_names)
+            if dst_named_placements is not None and isinstance(value, DTensor):
+                desired = resolve_placements(dst_named_placements, mesh)
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 
@@ -316,30 +379,28 @@ class Module(nn.Module, Configurable):
         new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
         return new_args, new_kwargs
 
-    def _shard_outputs(
-        self,
-        mesh: DeviceMesh,
-        outputs: Any,
-    ) -> Any:
+    def _shard_outputs(self, parallel_dims: ParallelDims, outputs: Any) -> Any:
         """Redistribute output to desired placement.
 
         TODO: Currently only handles a single DTensor output. Extend to
         support nested outputs (tuples, dicts) when models with
-        multi-tensor forward returns (e.g., Flux, MoE) adopt
-        config-based sharding. out_dst_shardings would also need to become
-        a nested structure.
+        multi-tensor forward returns (e.g., Flux, MoE) adopt config-based
+        sharding. ``out_dst_shardings`` would also need to become a nested
+        structure.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
-        if sharding_config.out_dst_shardings is None:
+        out_named_placements = sharding_config.out_dst_shardings
+        mesh = resolve_shared_mesh([out_named_placements], parallel_dims)
+        if mesh is None:
             return outputs
-        assert mesh.mesh_dim_names is not None
-        desired = resolve_placements(
-            sharding_config.out_dst_shardings, mesh.mesh_dim_names
-        )
-        if isinstance(outputs, DTensor) and outputs.placements != desired:
-            outputs = outputs.redistribute(placements=desired, async_op=True)
+
+        if out_named_placements is not None:
+            desired = resolve_placements(out_named_placements, mesh)
+            if isinstance(outputs, DTensor) and outputs.placements != desired:
+                outputs = outputs.redistribute(placements=desired, async_op=True)
+
         return outputs
 
     @classmethod

@@ -11,6 +11,9 @@ from typing import TypeAlias
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.experimental import local_map
+
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.tools.logging import logger
 
@@ -21,13 +24,45 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy loss with sum reduction for token-based normalization."""
+    """Cross-entropy loss with sum reduction for token-based normalization.
+
+    Two paths:
+
+    - 3D-DTensor branch (FSDP + CP under full_dtensor): pred has
+      ``Shard(0)@dp_shard`` and ``Shard(1)@cp``. ``flatten(0, 1)`` would
+      merge them and produce ``_StridedShard``, which the ``nll_loss``
+      sharding handlers reject before kernel selection. ``permute(0, 2, 1)``
+      keeps each tensor dim distinct so placements stay plain ``Shard(d)``.
+      ``F.cross_entropy`` then dispatches to ``aten.nll_loss2d_forward``,
+      which lacks a deterministic CUDA kernel -- enable ``loss_parallel``
+      to route through its Python handler if determinism is required.
+
+    - Flatten branch: every other config (plain pred, 1D-DTensor pred,
+      full_dtensor without CP). Routes to ``aten.nll_loss_forward`` (1D),
+      which has a deterministic CUDA kernel.
+    """
+    if isinstance(pred, DTensor) and _flatten_would_strided_shard(pred):
+        return torch.nn.functional.cross_entropy(
+            pred.permute(0, 2, 1).float(),
+            labels,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
         labels.flatten(0, 1),
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
+
+
+def _flatten_would_strided_shard(pred: DTensor) -> bool:
+    """``pred.flatten(0, 1)`` produces ``_StridedShard`` iff the batch and
+    seq tensor dims are both sharded (on different mesh axes). In practice
+    this is the FSDP + CP under full_dtensor combination.
+    """
+    sharded_dims = {p.dim for p in pred.placements if isinstance(p, Shard)}
+    return 0 in sharded_dims and 1 in sharded_dims
 
 
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -264,7 +299,6 @@ class ChunkedCELoss(BaseLoss):
         through the decoder via a custom autograd Function.
         """
         from torch.distributed._composable.fsdp import FSDPModule
-        from torch.distributed.tensor import DTensor, Replicate
 
         hidden_states = pred
         num_chunks = self.num_chunks
@@ -287,19 +321,38 @@ class ChunkedCELoss(BaseLoss):
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
 
-        # Split hidden states and labels into chunks along seq dim.
-        # Use .contiguous() to break shared storage from torch.chunk().
-        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
-        # directly with Shard(1) on CP. Need local_map to operate on local tensors
-        h_detached = hidden_states.detach().requires_grad_(requires_grad)
+        # Chunking always operates on the *local* view: when ``t`` is a
+        # Shard(1) DTensor, chunking the global view would distribute whole
+        # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
+        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
+        # local seq=0 and breaking GradAccumulator's slice writes.
+        # ``local_map`` runs the chunking body on plain tensors; under the
+        # non-DTensor (eager) path we call ``_chunk_local`` directly.
+        # ``.contiguous()`` breaks shared storage from ``torch.chunk``.
+        def _chunk_local(t):
+            return tuple(c.contiguous() for c in torch.chunk(t, num_chunks, dim=1))
+
+        def _chunk(t):
+            if not isinstance(t, DTensor):
+                return _chunk_local(t)
+            p = t.placements
+            wrapped = local_map(
+                _chunk_local,
+                out_placements=(p,) * num_chunks,
+                in_placements=(p,),
+                device_mesh=t.device_mesh,
+            )
+            return wrapped(t)
+
+        # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+        # accumulates ``.grad`` for ``GradAccumulator``.
         h_chunks = [
-            c.contiguous().detach().requires_grad_(requires_grad)
-            for c in torch.chunk(h_detached, num_chunks, dim=1)
+            c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
         ]
-        label_chunks = torch.chunk(labels, num_chunks, dim=1)
+        label_chunks = list(_chunk(labels))
 
         grad_accumulator = GradAccumulator(
-            h_detached,
+            hidden_states,
             num_chunks=num_chunks,
             dtype=torch.float32,
         )
