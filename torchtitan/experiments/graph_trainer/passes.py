@@ -153,6 +153,10 @@ def compile_time_passes(
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
+
+    from torchtitan.experiments.graph_trainer.preserve_ops_order import (
+        preserve_ops_order,
+    )
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
@@ -170,9 +174,20 @@ def compile_time_passes(
         apply_cpu_offload_pass,
         selective_activation_remat_pass,
         overlap_fsdp_ag_rs_pass,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+        # The bucketing pass topologically reorders ops to overlap collectives
+        # with compute, but doesn't track tensor aliasing/mutation deps.
+        # ChunkedCELoss's per-chunk in-place writes into a grad accumulator
+        # buffer (and the downstream readers of that buffer) live under
+        # ``module_fqn`` ``loss``/``lm_head``; without pinning their order,
+        # the bucketing pass moves the readers past the writes and decoder
+        # grads come out all-zero. ``preserve_ops_order`` chains the loss
+        # region through ``control_deps`` HOPs so the bucketing pass cannot
+        # break the read-after-write ordering.
+        preserve_ops_order(["loss", "lm_head"])(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            )
         ),
     ]
     if config.parallelism.enable_async_tensor_parallel:
@@ -760,6 +775,16 @@ def apply_sac_pass(
             continue
 
         layer_id = _get_layer_id(node)
+
+        # AC only applies inside transformer layers, matching eager apply_ac
+        # which wraps TransformerBlock only. In particular with ChunkedCELoss
+        # the chunked region (lm_head + per-chunk ce_loss) must not be tagged
+        # for recompute: per-chunk autograd backward dispatches create N
+        # disjoint backward regions, and the upstream remat pass errors with
+        # "Detected N disjoint backward regions that require recomputation,
+        # but remat only supports one such region."
+        if layer_id == _NOT_IN_LAYERS:
+            continue
 
         # NOTE: The eager SAC policy (activation_checkpoint.py) alternates
         # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
