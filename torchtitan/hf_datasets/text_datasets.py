@@ -356,14 +356,9 @@ class ChatDataset(IterableDataset, Stateful):
         Allows an optional leading 'system' message, then requires
         alternating user/assistant turns ending with 'assistant'.
         """
-        if len(messages) < 2:
-            raise ValueError(
-                f"Expected at least 2 messages (user + assistant), got {len(messages)}"
-            )
-
         # Determine where the user/assistant alternation starts
         start = 0
-        if messages[0]["role"] == "system":
+        if messages and messages[0]["role"] == "system":
             start = 1
 
         turns = messages[start:]
@@ -497,7 +492,7 @@ class ChatDataset(IterableDataset, Stateful):
             # and last supervised position is end - 2
             # (predicting full_tokens[end-1] from position end-2).
             label_start = max(start - 1, 0)
-            label_end = min(end - 1, len(label_ids))
+            label_end = end - 1
             if label_start >= label_end:
                 logger.warning(
                     f"Sample {self._sample_idx}: assistant span has zero "
