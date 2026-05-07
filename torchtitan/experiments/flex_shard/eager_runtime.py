@@ -581,9 +581,15 @@ def _install_batched_allgather_hooks(
                         )
                         _queue_reduce_scatter_wait(all_gather_context)
                     else:
-                        reduced = bucket_placement.reduce_grad(
-                            grads, valid_infos, s._mesh
+                        device_handle = _get_device_handle(grads[0].device.type)
+                        result = bucket_placement.begin_reduce_grad(
+                            grads,
+                            valid_infos,
+                            s._mesh,
+                            device_handle.current_stream(grads[0].device),
+                            debug_fqn=None,
                         )
+                        reduced = result.finish()
                         _accumulate_sharded_grads(
                             [(leaf, name) for leaf, name, _ in valid],
                             reduced,
@@ -641,9 +647,15 @@ def _install_batched_allgather_hooks(
                             _prefetch_next_bucket()
                 else:
                     with torch.no_grad():
-                        full_params = bucket_placement.unshard(
-                            local_shards, entry_infos, s._mesh
+                        device_handle = _get_device_handle(local_shards[0].device.type)
+                        result = bucket_placement.begin_unshard(
+                            local_shards,
+                            entry_infos,
+                            s._mesh,
+                            device_handle.current_stream(local_shards[0].device),
+                            debug_fqn=None,
                         )
+                        full_params = result.finish()
                 for (_, _, param_state, _), full_param in zip(
                     entries, full_params, strict=True
                 ):

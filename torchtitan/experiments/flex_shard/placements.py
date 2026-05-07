@@ -69,7 +69,8 @@ class Placement:
     """Base class for FlexShard placement strategies.
 
     Each subclass implements per-param sharding (extract_local_shard,
-    assemble_from_shards) and batched communication (unshard, reduce_grad).
+    assemble_from_shards) and batched communication (begin_unshard,
+    begin_reduce_grad).
     """
 
     def validate_param(self, fqn: str, param: nn.Parameter) -> None:
@@ -189,40 +190,6 @@ class Placement:
         nbytes = info.local_numel * info.dtype.itemsize
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
-
-    def unshard(
-        self,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        """Convenience wrapper for a same-stream unshard."""
-        device_handle = _get_device_handle(tensors[0].device.type)
-        result = self.begin_unshard(
-            tensors,
-            infos,
-            mesh,
-            device_handle.current_stream(tensors[0].device),
-            debug_fqn=None,
-        )
-        return result.finish()
-
-    def reduce_grad(
-        self,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        mesh: DeviceMesh,
-    ) -> list[torch.Tensor]:
-        """Convenience wrapper for a same-stream gradient reduction."""
-        device_handle = _get_device_handle(tensors[0].device.type)
-        result = self.begin_reduce_grad(
-            tensors,
-            infos,
-            mesh,
-            device_handle.current_stream(tensors[0].device),
-            debug_fqn=None,
-        )
-        return result.finish()
 
     def begin_unshard(
         self,
