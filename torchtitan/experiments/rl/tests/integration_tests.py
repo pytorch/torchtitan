@@ -64,9 +64,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
         ),
         # End-to-end MoE debug model with TP=4, EP=4 (4 trainer + 4
-        # generator = 8 GPUs). Uses random_init + the bundled
-        # tests/assets/qwen3_moe_debug bootstrap dir so no real HF
-        # checkpoint is needed.
+        # generator = 8 GPUs). Uses skip_rl_trainer_initial_hf_weight_load
+        # + the bundled tests/assets/qwen3_moe_debug bootstrap dir so no
+        # real HF checkpoint is needed.
         OverrideDefinitions(
             [
                 [
@@ -77,8 +77,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.parallelism.expert_parallel_degree 4",
                     "--generator.parallelism.tensor_parallel_degree 4",
                     "--generator.parallelism.expert_parallel_degree 4",
-                    "--trainer.debug.random_init",
-                    "--generator.debug.random_init",
+                    "--trainer.debug.skip_rl_trainer_initial_hf_weight_load",
+                    "--generator.debug.skip_rl_trainer_initial_hf_weight_load",
                     "--trainer.compile.no-enable",
                     "--generator.compile.backend none",
                     "--generator.compile.cudagraph_mode none",
@@ -105,9 +105,10 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
         ),
         # Bitwise-identity check for the MoE debug model with TP=4, EP=4
-        # (4 trainer + 4 generator = 8 GPUs). Uses random_init + the bundled
-        # bootstrap dir so no checkpoint is needed. Trainer/generator logprob
-        # diff must be exactly zero under batch_invariant + deterministic mode.
+        # (4 trainer + 4 generator = 8 GPUs). Uses
+        # skip_rl_trainer_initial_hf_weight_load + the bundled bootstrap dir
+        # so no checkpoint is needed. Trainer/generator logprob diff must be
+        # exactly zero under batch_invariant + deterministic mode.
         OverrideDefinitions(
             [
                 [

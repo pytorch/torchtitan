@@ -111,6 +111,30 @@ def create_torchtitan_config_from_vllm_config(
     world_size = dist.get_world_size()
     parallel_config = vllm_config.parallel_config
 
+    # CP and PP are not supported on the vLLM inference path:
+    #   - PP: vLLM's scheduler and KV-cache manager assume a single-stage
+    #     model; multi-stage execution would require a separate pipeline
+    #     runner that this wrapper does not implement.
+    #   - CP: there is no inference-time benefit to sharding the sequence
+    #     dimension (no activation memory pressure from backward), and the
+    #     wrapper's attention / RoPE paths assume full sequences per rank.
+    # Assert here so misconfigurations fail fast at engine init rather than
+    # producing wrong numerics or shape mismatches deep in the wrapper.
+    if parallel_config.pipeline_parallel_size != 1:
+        raise ValueError(
+            "vLLM pipeline_parallel_size must be 1 for the torchtitan wrapper, "
+            f"got {parallel_config.pipeline_parallel_size}"
+        )
+    if (
+        parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+    ):
+        raise ValueError(
+            "vLLM context-parallel sizes must be 1 for the torchtitan wrapper, "
+            f"got prefill={parallel_config.prefill_context_parallel_size}, "
+            f"decode={parallel_config.decode_context_parallel_size}"
+        )
+
     # When EP is enabled, all TP ranks are repurposed for expert parallelism
     # (each rank holds a shard of experts): ep_size = tp_size.
     tp_size = parallel_config.tensor_parallel_size
@@ -121,7 +145,7 @@ def create_torchtitan_config_from_vllm_config(
         dp_shard=1,
         cp=1,
         tp=tp_size,
-        pp=parallel_config.pipeline_parallel_size,
+        pp=1,
         ep=ep_size,
         world_size=world_size,
     )
@@ -131,15 +155,11 @@ def create_torchtitan_config_from_vllm_config(
         data_parallel_shard_degree=1,
         context_parallel_degree=1,
         tensor_parallel_degree=tp_size,
-        pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
+        pipeline_parallel_degree=1,
         expert_parallel_degree=ep_size,
         disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
         enable_sequence_parallel=False,
     )
-
-    # Build the full device mesh so all dimensions (tp, ep, efsdp, etc.)
-    # are available to the core parallelize function.
-    parallel_dims.build_mesh()
 
     logger.info(
         f"Created TorchTitan config from vLLM: "

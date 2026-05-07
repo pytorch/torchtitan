@@ -363,13 +363,17 @@ class DebugConfig:
     """Enable batch-invariant mode to use batch-invariant ops in model
     forward and deterministic NCCL collective reduction order"""
 
-    random_init: bool = False
-    """If True, skip loading weights from ``hf_assets_path`` and rely on the
-    model's own ``init_weights()``. The trainer pushes its random-init state
-    to TorchStore at startup so the generator picks up the same weights.
-    ``hf_assets_path`` must still point to a directory with ``config.json``
-    and tokenizer files (vLLM needs those to bootstrap), but ``model.safetensors``
-    is not required. Useful for end-to-end debug runs without a real checkpoint."""
+    skip_rl_trainer_initial_hf_weight_load: bool = False
+    """RL-only: if True, the RL trainer skips loading weights from
+    ``hf_assets_path`` and instead relies on the model's own
+    ``init_weights()``. The trainer pushes its random-init state to TorchStore
+    at startup so the generator picks up the same weights. ``hf_assets_path``
+    must still point to a directory with ``config.json`` and tokenizer files
+    (vLLM needs those to bootstrap), but ``model.safetensors`` is not required.
+    Useful for end-to-end RL debug runs without a real checkpoint.
+    TODO: move this to ``WeightSyncConfig`` in the policy trainer once that
+    config exists; ``DebugConfig`` is shared with pre-training and shouldn't
+    carry RL-specific knobs."""
 
     print_config: bool = False
     """Print the job configs to terminal"""
