@@ -67,6 +67,35 @@ aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
 
 
+# ---------------------------------------------------------------------------
+# Registries — keyed by string name
+# ---------------------------------------------------------------------------
+
+MEMORY_POLICY_REGISTRY: dict[str, Callable] = {}
+PASS_PIPELINE_REGISTRY: dict[str, Callable] = {}
+POST_INIT_HOOKS: dict[str, Callable] = {}
+PRE_TRAIN_STEP_HOOKS: dict[str, Callable] = {}
+
+
+def _make_registry_decorator(registry: dict):
+    """Create a decorator that registers a function into the given registry."""
+
+    def register(key: str):
+        def decorator(fn: Callable) -> Callable:
+            registry[key] = fn
+            return fn
+
+        return decorator
+
+    return register
+
+
+register_memory_policy = _make_registry_decorator(MEMORY_POLICY_REGISTRY)
+register_pass_pipeline = _make_registry_decorator(PASS_PIPELINE_REGISTRY)
+register_post_init_hook = _make_registry_decorator(POST_INIT_HOOKS)
+register_pre_train_step_hook = _make_registry_decorator(PRE_TRAIN_STEP_HOOKS)
+
+
 def normalize_view_ops_as_reshape(
     gm: torch.fx.GraphModule,
     example_inputs=None,
@@ -778,6 +807,49 @@ def apply_sac_pass(
     return gm
 
 
+@register_memory_policy("default")
+def _default_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that saves all compute-intensive ops and FSDP all_gathers."""
+    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        config.parallelism.fsdp_reshard_after_forward,
+        pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    )
+    policy_fn = _make_default_memory_policy(
+        fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+    )
+    apply_sac_pass(gm, policy_fn=policy_fn)
+    return gm
+
+
+@register_memory_policy("eager")
+def _eager_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that alternates mm ops between save/recompute."""
+    apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
+    return gm
+
+
+@register_memory_policy("budget_limited_offload")
+def _budget_limited_offload_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC + CPU offload: apply default SAC, then offload within budget."""
+    _default_memory_policy_pass(gm, config=config)
+    tag_all_offloadable_activations(
+        gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
+    )
+    return gm
+
+
 def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -791,28 +863,16 @@ def tag_with_memory_policy_pass(
         eager: SAC alternating mm ops between save/recompute.
         budget_limited_offload: SAC + CPU offload within budget.
 
-    Other memory policies combining SAC and CPU offload can be added here.
+    Other memory policies combining SAC and CPU offload can be added
+    via ``register_memory_policy`` without modifying this function.
     """
     memory_policy = config.compile.memory_policy
-    if memory_policy in ("default", "budget_limited_offload"):
-        fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-            config.parallelism.fsdp_reshard_after_forward,
-            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    if memory_policy not in MEMORY_POLICY_REGISTRY:
+        raise ValueError(
+            f"Unknown memory_policy: {memory_policy!r}. "
+            f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
-        default_policy_fn = functools.partial(
-            _make_default_memory_policy,
-            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-        )
-        apply_sac_pass(gm, policy_fn=default_policy_fn())
-        if memory_policy == "budget_limited_offload":
-            tag_all_offloadable_activations(
-                gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
-            )
-    elif memory_policy == "eager":
-        apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
-    else:
-        raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
-
+    gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
     log_activation_memory_policy(gm)
     return gm
 
