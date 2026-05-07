@@ -63,7 +63,13 @@ class BucketSpec:
     Args:
         patterns: fnmatch glob patterns matched against parameter FQNs.
             A parameter matches this bucket if its FQN matches any pattern.
-        mp_policy: Mixed precision policy for this bucket.
+        mp_policy: Mixed precision policy for this bucket. This currently
+            covers parameter and gradient-reduction dtypes only.
+            TODO: add module-boundary input/output casting separately from
+            BucketSpec. FSDP2 exposes cast_forward_inputs and output_dtype, but
+            those apply to a module's forward args/outputs, not to an individual
+            parameter bucket. Keeping them out of BucketSpec avoids ambiguous
+            behavior when multiple buckets share the same hooked module.
         offload_policy: CPU offload policy for this bucket.
         reshard_after_forward: Whether to free this bucket's unsharded
             parameters after forward and recompute them in backward.
