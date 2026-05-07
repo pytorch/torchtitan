@@ -52,6 +52,12 @@ DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
 
 
+class AsyncMode(str, enum.Enum):
+    DISABLED = "disabled"
+    ASYNC = "async"
+    ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
+
+
 class ModelWrapper(Stateful):
     """Thin wrapper that merges state dicts across PP stages.
 
@@ -76,12 +82,6 @@ class ModelWrapper(Stateful):
                 model_state_dict=state_dict,
                 options=StateDictOptions(strict=False),
             )
-
-
-class AsyncMode(str, enum.Enum):
-    DISABLED = "disabled"
-    ASYNC = "async"
-    ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
 class Terminate:
@@ -368,8 +368,6 @@ class CheckpointManager(Configurable):
         self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
         self.last_save_model_only = config.last_save_model_only
         self.last_save_in_hf = config.last_save_in_hf
-        self.create_seed_checkpoint = config.create_seed_checkpoint
-
         if self.last_save_in_hf:
             assert (
                 self.model.sd_adapter is not None
@@ -464,7 +462,7 @@ class CheckpointManager(Configurable):
         checkpoint_id: str,
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
-        hf_storage: bool = False,
+        to_hf: bool = False,
     ) -> Future | AsyncSaveResponse | None:
         """Save the checkpoint with dcp.
         Args:
@@ -472,7 +470,7 @@ class CheckpointManager(Configurable):
             checkpoint_id (str): The checkpoint id to save.
             async_mode (AsyncMode): Whether the checkpoint is async.
             enable_garbage_collection (bool): Whether to enable garbage collection after save.
-            hf_storage (bool): Whether to use HF safetensors storage writer.
+            to_hf (bool): Whether to use HF safetensors storage writer.
                 Key transforms must be applied by the caller via
                 model.to_hf() or model.adapter_to_hf() before calling this method.
 
@@ -486,7 +484,7 @@ class CheckpointManager(Configurable):
         checkpoint_save_id: str | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
         keys_match_mapping = False
-        if hf_storage:
+        if to_hf:
             assert (
                 self.model.sd_adapter is not None
             ), "trying to save in HF safetensors format, but model has no sd_adapter."
@@ -541,7 +539,7 @@ class CheckpointManager(Configurable):
                 checkpoint_id=checkpoint_save_id,
             )
 
-        if hf_storage and keys_match_mapping:
+        if to_hf and keys_match_mapping:
             assert fqn_to_index_mapping is not None
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
@@ -901,7 +899,7 @@ class CheckpointManager(Configurable):
             checkpoint_id=checkpoint_id,
             async_mode=AsyncMode.DISABLED,
             enable_garbage_collection=True,
-            hf_storage=self.last_save_in_hf,
+            to_hf=self.last_save_in_hf,
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
