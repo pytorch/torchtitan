@@ -25,7 +25,8 @@ from torchtitan.models.common.config_utils import (
     make_gqa_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
-from torchtitan.protocols.model_spec import ModelSpec, validate_converter_order
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
 from .parallelize import parallelize_llama
@@ -380,13 +381,10 @@ def model_registry(
     converters: list[Configurable.Config] | None = None,
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
-    built_converters: list = []
     if converters is not None:
+        validate_converter_order(converters)
         for c in converters:
-            built_converters.append(c.build())
-        validate_converter_order(built_converters)
-        for converter in built_converters:
-            converter.convert(config)
+            c.build().convert(config)
     return ModelSpec(
         name="llama3",
         flavor=flavor,
@@ -395,5 +393,4 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
-        converters=built_converters,
     )

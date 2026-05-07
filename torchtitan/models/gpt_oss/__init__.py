@@ -16,7 +16,8 @@ from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.protocols.model_spec import ModelSpec, validate_converter_order
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
@@ -352,13 +353,10 @@ def model_registry(
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,
     )
-    built_converters: list = []
     if converters is not None:
+        validate_converter_order(converters)
         for c in converters:
-            built_converters.append(c.build())
-        validate_converter_order(built_converters)
-        for converter in built_converters:
-            converter.convert(config)
+            c.build().convert(config)
     return ModelSpec(
         name="gpt_oss",
         flavor=flavor,
@@ -367,5 +365,4 @@ def model_registry(
         pipelining_fn=None,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
-        converters=built_converters,
     )

@@ -12,7 +12,8 @@ import torch.nn as nn
 from torchtitan.config import Configurable
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.protocols.model_spec import ModelSpec, validate_converter_order
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
 from .model.autoencoder import AutoEncoderParams
@@ -548,13 +549,10 @@ def model_registry(
     converters: list[Configurable.Config] | None = None,
 ) -> ModelSpec:
     config = flux_configs[flavor]()
-    built_converters: list = []
     if converters is not None:
+        validate_converter_order(converters)
         for c in converters:
-            built_converters.append(c.build())
-        validate_converter_order(built_converters)
-        for converter in built_converters:
-            converter.convert(config)
+            c.build().convert(config)
     return ModelSpec(
         name="flux",
         flavor=flavor,
@@ -563,5 +561,4 @@ def model_registry(
         pipelining_fn=None,
         post_optimizer_build_fn=None,
         state_dict_adapter=FluxStateDictAdapter,
-        converters=built_converters,
     )

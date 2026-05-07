@@ -24,7 +24,8 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.protocols.model_spec import ModelSpec, validate_converter_order
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Qwen3Model, Qwen3TransformerBlock
 from .parallelize import parallelize_qwen3
@@ -625,13 +626,10 @@ def model_registry(
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
-    built_converters: list = []
     if converters is not None:
+        validate_converter_order(converters)
         for c in converters:
-            built_converters.append(c.build())
-        validate_converter_order(built_converters)
-        for converter in built_converters:
-            converter.convert(config)
+            c.build().convert(config)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,
@@ -640,5 +638,4 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
-        converters=built_converters,
     )

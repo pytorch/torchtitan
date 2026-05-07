@@ -11,7 +11,7 @@ from torchtitan.components.lora import _get_lora_cls, LoRAConverter
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
-from torchtitan.protocols.model_spec import validate_converter_order
+from torchtitan.models.utils import validate_converter_order
 
 
 def test_lora_model_builds():
@@ -65,19 +65,18 @@ def test_lora_forward():
 
 def test_validate_converter_order():
     """Quantization before LoRA is valid; LoRA before quantization is not."""
-    lora = LoRAConverter(LoRAConverter.Config(rank=8, alpha=16.0))
+    lora_cfg = LoRAConverter.Config(rank=8, alpha=16.0)
 
     # Valid order: no error
-    validate_converter_order([lora])
+    validate_converter_order([lora_cfg])
 
     # Invalid order: quantization after LoRA
-    pytest.importorskip("torchao")
-    float8 = Float8LinearConverter(Float8LinearConverter.Config(emulate=True))
+    float8_cfg = Float8LinearConverter.Config(emulate=True)
     with pytest.raises(ValueError, match="must be applied before"):
-        validate_converter_order([lora, float8])
+        validate_converter_order([lora_cfg, float8_cfg])
 
     # Valid order: quantization before LoRA
-    validate_converter_order([float8, lora])
+    validate_converter_order([float8_cfg, lora_cfg])
 
 
 def test_lora_cls_cache():

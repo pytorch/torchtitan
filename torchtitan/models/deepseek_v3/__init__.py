@@ -22,7 +22,8 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.protocols.model_spec import ModelSpec, validate_converter_order
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .parallelize import parallelize_deepseekv3
@@ -541,13 +542,10 @@ def model_registry(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
-    built_converters: list = []
     if converters is not None:
+        validate_converter_order(converters)
         for c in converters:
-            built_converters.append(c.build())
-        validate_converter_order(built_converters)
-        for converter in built_converters:
-            converter.convert(config)
+            c.build().convert(config)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,
@@ -556,5 +554,4 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
-        converters=built_converters,
     )
