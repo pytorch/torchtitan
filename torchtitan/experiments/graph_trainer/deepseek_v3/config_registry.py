@@ -9,9 +9,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
-from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
-    PagedStashMemoryPolicy,
-)
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
@@ -42,7 +39,8 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel_ep(), model_registry)
     config.compile = GraphTrainerCompileConfig(
         enable=True,
-        memory_policy=PagedStashMemoryPolicy(),
+        memory_policy="paged_stash",
+        pass_pipeline="paged_stash",
     )
     config.model_spec = model_registry(
         "debugmodel",

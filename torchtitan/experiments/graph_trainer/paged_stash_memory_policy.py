@@ -8,14 +8,15 @@
 
 import functools
 import operator
+from dataclasses import dataclass
 
 import torch
-import triton
-import triton.language as tl
 
 # Side-effect import: registers ao::wait_tensor custom op
 import torch._functorch._activation_offloading.offload_ops as offload_ops  # noqa: F401
 import torch.fx as fx
+import triton
+import triton.language as tl
 from torch import Tensor
 from torch._functorch._activation_offloading.offload_ops import (
     _get_or_create_transfer_stream,
@@ -24,14 +25,11 @@ from torch._functorch._activation_offloading.offload_ops import (
 from torch.fx.experimental.proxy_tensor import is_sym_node
 from torch.utils.checkpoint import CheckpointPolicy
 
+from torchtitan.config import Configurable
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.experiments.graph_trainer.cpu_offload import _classify_forward_backward
 from torchtitan.tools.logging import logger
 
-from dataclasses import dataclass
-from .configs import (
-    register_memory_policy_config,
-)
 from .passes import (
     apply_sac_pass,
     construct_default_graph_passes,
@@ -44,27 +42,79 @@ from .passes import (
 
 
 # ---------------------------------------------------------------------------
-# Paged stash memory policy configs
+# PagedStash Configurable class
 # ---------------------------------------------------------------------------
 
 
-@register_memory_policy_config("paged_stash")
-@dataclass(kw_only=True, slots=True)
-class PagedStashMemoryPolicy:
-    """Paged stash: store MoE activations in a shared paged buffer.
+class PagedStash(Configurable):
+    """Paged activation stashing for CUDA-graphable MoE training.
 
-    Replaces per-layer worst-case buffers with a single shared paged buffer,
+    Manages pre-allocated paged buffers that store MoE expert activations,
     reducing memory from O(layers x worst_case) to O(worst_case + actual_usage).
     """
 
-    buffer_size_factor: float = 1.1
-    """Factor to scale estimated_tokens for CUDA buffer over-provisioning."""
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        """Configuration for paged stash memory policy buffers."""
 
-    host_buffer_size_factor: float = 0.0
-    """Factor for host (pinned CPU) spillover buffer. 0 = no host buffer."""
+        buffer_size_factor: float = 1.1
+        """Factor to scale estimated_tokens for CUDA buffer over-provisioning."""
 
-    page_size: int = 64
-    """Number of tokens per page in the paged stash buffer."""
+        host_buffer_size_factor: float = 0.0
+        """Factor for host (pinned CPU) spillover buffer. 0 = no host buffer."""
+
+        page_size: int = 64
+        """Number of tokens per page in the paged stash buffer."""
+
+    def __init__(
+        self,
+        config: "PagedStash.Config",
+        *,
+        model: torch.nn.Module,
+        max_tokens: int,
+        capacity_factor: float | None,
+        device: str | torch.device = "cuda",
+    ):
+        self.buffers, self.overflow, self.host_spill = create_paged_buffers(
+            model,
+            max_tokens=max_tokens,
+            capacity_factor=capacity_factor,
+            page_size=config.page_size,
+            buffer_size_factor=config.buffer_size_factor,
+            host_buffer_size_factor=config.host_buffer_size_factor,
+            buffer_device=device,
+        )
+
+    def reset(self):
+        """Reset all buffers and flags for the next step. CUDA graph safe."""
+        if self.buffers:
+            for buf in self.buffers.values():
+                buf.reset()
+        if self.overflow is not None:
+            self.overflow.zero_()
+        if self.host_spill is not None:
+            self.host_spill.zero_()
+
+    def check_overflow(self):
+        """Raise RuntimeError if the previous step overflowed."""
+        if self.overflow is not None and self.overflow.item() != 0:
+            raise RuntimeError(
+                "Paged stash buffer overflow detected. "
+                "The CUDA paged stash buffer is too small for the current "
+                "routing pattern.\n\n"
+                "To fix, try one of:\n"
+                "  1. Enable host spillover: "
+                "--compile.paged_stash.host_buffer_size_factor 1.0\n"
+                "  2. Increase buffer size: "
+                "--compile.paged_stash.buffer_size_factor 2.0\n"
+                "  3. Disable paged stash: "
+                "--compile.memory_policy default"
+            )
+
+    @property
+    def buffers_dict(self) -> dict | None:
+        """Return the buffers dict for use in the graph pass."""
+        return self.buffers
 
 
 # ---------------------------------------------------------------------------
@@ -1261,7 +1311,7 @@ def _make_paged_stash_policy(
     return policy_fn
 
 
-@register_memory_policy(PagedStashMemoryPolicy)
+@register_memory_policy("paged_stash")
 def paged_stash_tag_policy(
     gm: torch.fx.GraphModule,
     *,
@@ -1285,7 +1335,7 @@ def paged_stash_tag_policy(
 # ---------------------------------------------------------------------------
 
 
-@register_pass_pipeline(PagedStashMemoryPolicy)
+@register_pass_pipeline("paged_stash")
 def paged_stash_pass_pipeline(traced_result, config):
     """Default passes with paged_stash_pass inserted between tagging and remat."""
     passes = construct_default_graph_passes(traced_result, config)
@@ -1303,12 +1353,10 @@ def paged_stash_pass_pipeline(traced_result, config):
     return passes
 
 
-@register_post_init_hook(PagedStashMemoryPolicy)
+@register_post_init_hook("paged_stash")
 def setup_paged_stash_buffers(trainer):
-    """Create paged stash buffers and attach them to the model."""
+    """Create paged stash buffers via PagedStash.Config.build()."""
     global _PAGED_STASH_BUFFERS_DICT
-
-    ps_config = trainer.config.compile.memory_policy
 
     model = trainer.model_parts[0]
     training = trainer.config.training
@@ -1331,53 +1379,24 @@ def setup_paged_stash_buffers(trainer):
         cf = None
         max_tokens = base_tokens * top_k
 
-    buffers, overflow, host_spill = create_paged_buffers(
-        model,
+    paged_stash = trainer.config.compile.paged_stash.build(
+        model=model,
         max_tokens=max_tokens,
         capacity_factor=cf,
-        page_size=ps_config.page_size,
-        buffer_size_factor=ps_config.buffer_size_factor,
-        host_buffer_size_factor=ps_config.host_buffer_size_factor,
-        buffer_device="cuda",
+        device="cuda",
     )
 
-    if buffers is not None:
-        model._paged_stash_buffers = list(buffers.values())
-        model._paged_stash_overflow = overflow
-        model._paged_stash_host_spill = host_spill
-        model._paged_stash_paged_buffers_dict = buffers
-        _PAGED_STASH_BUFFERS_DICT = buffers
+    if paged_stash.buffers is not None:
+        trainer._paged_stash = paged_stash
+        _PAGED_STASH_BUFFERS_DICT = paged_stash.buffers_dict
         logger.info("Graph-based paged SAC enabled")
-        logger.info(
-            "aot_fx_trace mode: paged stash pass will be applied at trace time"
-        )
+        logger.info("aot_fx_trace mode: paged stash pass will be applied at trace time")
 
 
-@register_pre_train_step_hook(PagedStashMemoryPolicy)
+@register_pre_train_step_hook("paged_stash")
 def reset_paged_stash_buffers(trainer):
     """Check previous step's overflow flag, then reset buffers for this step."""
-    for model_part in trainer.model_parts:
-        overflow = getattr(model_part, "_paged_stash_overflow", None)
-        if overflow is not None and overflow.item() != 0:
-            raise RuntimeError(
-                "Paged stash buffer overflow detected. "
-                "The CUDA paged stash buffer is too small for the current "
-                "routing pattern.\n\n"
-                "To fix, try one of:\n"
-                "  1. Enable host spillover: "
-                "compile.memory_policy:paged_stash "
-                "--compile.memory_policy.host_buffer_size_factor 1.0\n"
-                "  2. Increase buffer size: "
-                "--compile.memory_policy.buffer_size_factor 2.0\n"
-                "  3. Disable paged stash: "
-                "compile.memory_policy:default"
-            )
-        buffers = getattr(model_part, "_paged_stash_buffers", None)
-        if buffers:
-            for buf in buffers:
-                buf.reset()
-        if overflow is not None:
-            overflow.zero_()
-        host_spill = getattr(model_part, "_paged_stash_host_spill", None)
-        if host_spill is not None:
-            host_spill.zero_()
+    paged_stash = getattr(trainer, "_paged_stash", None)
+    if paged_stash is not None:
+        paged_stash.check_overflow()
+        paged_stash.reset()
