@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from .placements import Placement
-    from .storage import DStorage
+    from .bucket_storage import DStorage
 
 
 def _with_fqn(label: str, fqn: str | None) -> str:

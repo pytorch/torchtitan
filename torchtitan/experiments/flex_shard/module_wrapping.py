@@ -26,7 +26,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from .storage import DStorage
+    from .bucket_storage import DStorage
 
 
 class _MixedPrecisionCast(torch.autograd.Function):

@@ -125,7 +125,7 @@ class TestBucketAssignment(unittest.TestCase):
 
     def test_assigns_params_to_correct_bucket(self):
         """Params match the right bucket by fnmatch."""
-        from torchtitan.experiments.flex_shard.storage import (
+        from torchtitan.experiments.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -138,7 +138,7 @@ class TestBucketAssignment(unittest.TestCase):
 
     def test_rejects_orphan_params(self):
         """Params matching zero buckets raise ValueError."""
-        from torchtitan.experiments.flex_shard.storage import (
+        from torchtitan.experiments.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -149,7 +149,7 @@ class TestBucketAssignment(unittest.TestCase):
 
     def test_rejects_overlapping_params(self):
         """Params matching multiple buckets raise ValueError."""
-        from torchtitan.experiments.flex_shard.storage import (
+        from torchtitan.experiments.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -161,7 +161,7 @@ class TestBucketAssignment(unittest.TestCase):
     def test_bucket_spec_patterns(self):
         """BucketSpec.patterns are used for matching."""
         from torchtitan.experiments.flex_shard import BucketSpec
-        from torchtitan.experiments.flex_shard.storage import (
+        from torchtitan.experiments.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -174,7 +174,7 @@ class TestBucketAssignment(unittest.TestCase):
 
     def test_wildcard_bucket(self):
         """Single ['*'] bucket catches all params."""
-        from torchtitan.experiments.flex_shard.storage import (
+        from torchtitan.experiments.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -186,7 +186,7 @@ class TestBucketAssignment(unittest.TestCase):
 
     def test_multi_pattern_bucket(self):
         """Bucket with multiple patterns matches any of them."""
-        from torchtitan.experiments.flex_shard.storage import (
+        from torchtitan.experiments.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 

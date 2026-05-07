@@ -14,7 +14,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from .storage import DStorage
+from .bucket_storage import DStorage
 from .utils import (
     _module_path_common_prefix,
     _strip_checkpoint_wrapped_module_path,

@@ -33,7 +33,7 @@ from .module_wrapping import (
 from .reshard_after_forward import (
     _apply_reshard_after_forward,
 )
-from .storage import (
+from .bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
     BucketSpec,

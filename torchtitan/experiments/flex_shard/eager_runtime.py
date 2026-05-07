@@ -24,7 +24,7 @@ from .sharding_metadata import (
 )
 from .placements import Shard
 from .reshard_after_forward import _reshard_after_forward_recompute
-from .storage import BucketSpec, DStorage, ParamInfo
+from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .utils import _get_storage_debug_fqn, _with_fqn
 
 if TYPE_CHECKING:

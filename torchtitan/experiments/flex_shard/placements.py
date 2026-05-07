@@ -23,7 +23,7 @@ from .utils import _with_fqn
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .storage import ParamInfo
+    from .bucket_storage import ParamInfo
 
 
 class Placement:
