@@ -15,7 +15,7 @@ import torch.nn as nn
 
 from .comm_buffer_lifetime import AsyncAllGatherResult, AsyncReduceScatterResult
 from .module_wrapping import EagerParamAccessState
-from .state import (
+from .sharding_metadata import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,

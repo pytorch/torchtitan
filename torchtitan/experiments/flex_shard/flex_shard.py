@@ -18,7 +18,7 @@ from .eager_runtime import (
     _create_eager_param_states,
     _install_batched_allgather_hooks,
 )
-from .state import (
+from .sharding_metadata import (
     get_global_shape,
     get_placements,
     is_flex_shard_param,
@@ -32,7 +32,6 @@ from .module_wrapping import (
 )
 from .reshard_after_forward import (
     _apply_reshard_after_forward,
-    _reshard_after_forward_enabled,
 )
 from .storage import (
     _assign_params_to_buckets,
@@ -235,7 +234,7 @@ def flex_shard(
     # a selective policy that recomputes only collective ops (all-gather,
     # broadcast), saving compute ops to avoid redundant work.
     reshard_storages = [s for s in storages if s._reshard_after_forward]
-    if _reshard_after_forward_enabled.get() and reshard_storages:
+    if reshard_storages:
         _apply_reshard_after_forward(module, reshard_storages)
 
     # Install batched all-gather hooks for eager mode when the storage layout

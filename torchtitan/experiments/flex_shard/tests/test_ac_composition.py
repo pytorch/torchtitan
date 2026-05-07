@@ -42,7 +42,9 @@ from torchtitan.experiments.flex_shard import (
     flex_shard,
     per_param_placements,
 )
-from torchtitan.experiments.flex_shard.state import _EAGER_COMM_CONTEXTS_ATTR
+from torchtitan.experiments.flex_shard.sharding_metadata import (
+    _EAGER_COMM_CONTEXTS_ATTR,
+)
 
 
 class SimpleMLP(nn.Module):

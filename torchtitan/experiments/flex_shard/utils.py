@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from .state import (
+from .sharding_metadata import (
     _BUCKET_FQN_ATTR,
     _DSTORAGE_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,

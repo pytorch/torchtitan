@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .state import (
+from .sharding_metadata import (
     _DSTORAGE_ATTR,
     _DSTORAGES_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,

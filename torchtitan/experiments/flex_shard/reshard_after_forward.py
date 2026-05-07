@@ -22,10 +22,6 @@ from .utils import (
 )
 
 
-_reshard_after_forward_enabled: ContextVar[bool] = ContextVar(
-    "_reshard_after_forward_enabled",
-    default=True,
-)
 _reshard_after_forward_recompute: ContextVar[bool] = ContextVar(
     "_reshard_after_forward_recompute",
     default=False,
@@ -33,7 +29,7 @@ _reshard_after_forward_recompute: ContextVar[bool] = ContextVar(
 
 
 @contextmanager
-def _mark_reshard_after_forward_recompute(ctx: Any) -> Generator[None, None, None]:
+def _mark_recompute(ctx: Any) -> Generator[None, None, None]:
     """Mark execution as FlexShard reshard-after-forward recomputation."""
     token = _reshard_after_forward_recompute.set(True)
     try:
@@ -47,7 +43,6 @@ def _mark_reshard_after_forward_recompute(ctx: Any) -> Generator[None, None, Non
 _FLEX_SHARD_COLLECTIVE_OPS = {
     torch.ops._c10d_functional.all_gather_into_tensor.default,
     torch.ops._c10d_functional.wait_tensor.default,
-    torch.ops._c10d_functional.broadcast.default,
 }
 
 
@@ -68,7 +63,7 @@ def _reshard_after_forward_policy(ctx, func, *args, **kwargs):
     return CheckpointPolicy.PREFER_RECOMPUTE
 
 
-def _compose_reshard_after_forward_with_ac_policy(ac_context_fn):
+def _compose_with_ac_policy(ac_context_fn):
     """Compose FlexShard reshard policy with an existing AC context_fn.
 
     Returns a new context_fn that wraps the AC policy: FlexShard collective
@@ -92,12 +87,21 @@ def _compose_reshard_after_forward_with_ac_policy(ac_context_fn):
 
             ctx.policy_fn = merged_policy
         forward_ctx, recompute_ctx = contexts
-        return forward_ctx, _mark_reshard_after_forward_recompute(recompute_ctx)
+        return forward_ctx, _mark_recompute(recompute_ctx)
 
     return merged_context_fn
 
 
-def _wrap_with_reshard_after_forward(child: nn.Module) -> nn.Module:
+def _reshard_only_context_fn():
+    from torch.utils.checkpoint import create_selective_checkpoint_contexts
+
+    forward_ctx, recompute_ctx = create_selective_checkpoint_contexts(
+        _reshard_after_forward_policy
+    )
+    return forward_ctx, _mark_recompute(recompute_ctx)
+
+
+def _wrap_module(child: nn.Module) -> nn.Module:
     """Wrap a module to implement reshard-after-forward via activation recompute.
 
     If the child is already wrapped by AC's CheckpointWrapper, unwraps it,
@@ -108,13 +112,6 @@ def _wrap_with_reshard_after_forward(child: nn.Module) -> nn.Module:
         checkpoint_wrapper,
         CheckpointWrapper,
     )
-    from torch.utils.checkpoint import create_selective_checkpoint_contexts
-
-    def _reshard_only_context_fn():
-        forward_ctx, recompute_ctx = create_selective_checkpoint_contexts(
-            _reshard_after_forward_policy
-        )
-        return forward_ctx, _mark_reshard_after_forward_recompute(recompute_ctx)
 
     if isinstance(child, CheckpointWrapper):
         # AC already applied — unwrap, merge policies, re-wrap
@@ -124,7 +121,7 @@ def _wrap_with_reshard_after_forward(child: nn.Module) -> nn.Module:
         ac_context_fn = ac_kwargs.pop("context_fn", None)
         if ac_context_fn is not None:
             # Selective AC — merge with reshard policy
-            merged_fn = _compose_reshard_after_forward_with_ac_policy(ac_context_fn)
+            merged_fn = _compose_with_ac_policy(ac_context_fn)
         else:
             # Full AC — add reshard policy via selective context
             merged_fn = _reshard_only_context_fn
@@ -158,7 +155,7 @@ def _set_module_by_path(module: nn.Module, path: str, child: nn.Module) -> None:
         setattr(parent, name, child)
 
 
-def _get_storage_reshard_after_forward_module_paths(storage: DStorage) -> list[str]:
+def _get_module_paths_to_wrap(storage: DStorage) -> list[str]:
     """Return module paths to wrap for one reshard-after-forward bucket."""
     owner_paths = sorted(
         {
@@ -207,7 +204,7 @@ def _apply_reshard_after_forward(
     """
     paths: set[str] = set()
     for storage in reshard_storages:
-        storage_paths = _get_storage_reshard_after_forward_module_paths(storage)
+        storage_paths = _get_module_paths_to_wrap(storage)
         if storage_paths:
             paths.update(storage_paths)
         else:
@@ -215,4 +212,4 @@ def _apply_reshard_after_forward(
 
     for path in sorted(paths, key=lambda p: (p.count("."), p)):
         child = _get_module_by_path(module, path)
-        _set_module_by_path(module, path, _wrap_with_reshard_after_forward(child))
+        _set_module_by_path(module, path, _wrap_module(child))
