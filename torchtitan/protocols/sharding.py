@@ -15,7 +15,7 @@ self-documenting and support multi-dimensional meshes.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
