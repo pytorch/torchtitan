@@ -116,6 +116,25 @@ class BitwiseDeterministicBase(unittest.TestCase):
         FlexAttention.inductor_configs = self._orig_inductor_configs
         FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
+    def _get_extra_kwargs(self, model: nn.Module) -> dict[str, object]:
+        """Build extra_kwargs matching what post_dataloading_process produces.
+
+        For FlexAttention models, this generates the BlockMask attention
+        masks. For SDPA models, returns an empty dict.
+        """
+        from torchtitan.models.common.attention import FlexAttention as FlexAttnModule
+        from torchtitan.models.common.decoder import Decoder
+
+        if not isinstance(self.model_config, Decoder.Config):
+            return {}
+        layer = self.model_config.layers[0]
+        inner_attention = getattr(layer.attention, "inner_attention", None)
+        if not isinstance(inner_attention, FlexAttnModule.Config):
+            return {}
+        attention_masks = model.get_attention_masks(positions=self.positions)
+        return {"attention_masks": attention_masks}
+
+
     def _run_steps(
         self,
         model: nn.Module,
