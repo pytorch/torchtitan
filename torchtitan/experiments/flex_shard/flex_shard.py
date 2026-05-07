@@ -37,7 +37,6 @@ from .reshard import (
 from .storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
-    auto_buckets,
     BucketSpec,
     MixedPrecisionPolicy,
 )
@@ -57,7 +56,6 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "auto_buckets",
     "BucketSpec",
     "flex_shard",
     "get_global_shape",
@@ -173,8 +171,7 @@ def flex_shard(
             The minimal eager path currently supports ``Shard(0)`` placements,
             for example via ``per_param_placements``.
         buckets: Required list of bucket specifications. Use
-            ``[BucketSpec(["*"])]`` for a single whole-module bucket or
-            ``auto_buckets()`` to generate one bucket per direct child module.
+            ``[BucketSpec(["*"])]`` for a single whole-module bucket.
 
     Returns:
         The module (mutated in-place). Use module.dstorages to access internals.
@@ -200,15 +197,6 @@ def flex_shard(
         ...     shard_placement_fn=per_param_placements,
         ...     buckets=[BucketSpec(["attn.*"]), BucketSpec(["ffn.*"])],
         ... )
-        >>> # Auto buckets (one per child):
-        >>> flex_shard(
-        ...     model,
-        ...     mesh,
-        ...     DataParallelMeshDims(shard="fsdp"),
-        ...     shard_placement_fn=per_param_placements,
-        ...     buckets=auto_buckets(model),
-        ... )
-
     Note:
         - Each bucket must contain only ``Shard(0)`` placements.
         - Each bucket must contain one original parameter dtype. Split mixed

@@ -133,30 +133,6 @@ def _assign_params_to_buckets(
     return assignments
 
 
-def auto_buckets(module: nn.Module) -> list[BucketSpec]:
-    """Generate one bucket per direct child module.
-
-    Returns a list of ``BucketSpec`` objects suitable for the ``buckets``
-    parameter of :func:`flex_shard`. Each bucket contains a single
-    ``"child_name.*"`` pattern matching all parameters under that child.
-
-    Example::
-
-        >>> buckets = auto_buckets(model)
-        >>> flex_shard(
-        ...     model,
-        ...     mesh,
-        ...     dp_mesh_dims,
-        ...     shard_placement_fn=per_param_placements,
-        ...     buckets=buckets,
-        ... )
-    """
-    children = list(module.named_children())
-    if not children:
-        return [BucketSpec(["*"])]
-    return [BucketSpec([f"{name}.*"]) for name, _ in children]
-
-
 @dataclass
 class ParamInfo:
     """Metadata for a parameter in chunked storage."""
@@ -311,22 +287,6 @@ def _create_param_infos(
     return param_infos, current_byte_offset
 
 
-def _create_sharded_view(
-    local_view: torch.Tensor,
-    info: ParamInfo,
-    mesh: DeviceMesh,
-) -> torch.Tensor:
-    """Annotate a local tensor view with placement metadata."""
-    set_sharding_info(
-        local_view,
-        placements=info.placements,
-        global_shape=info.global_shape,
-        global_stride=info.global_stride,
-        mesh=mesh,
-    )
-    return local_view
-
-
 def _write_params_to_dstorage(
     byte_storage: torch.Tensor,
     named_params: list[tuple[str, nn.Parameter]],
@@ -408,7 +368,13 @@ def _materialize_bucket_storages(
                     f"Expected sharded parameter {fqn!r} on "
                     f"{expected_param_device}, but got {new_param.device}"
                 )
-            _create_sharded_view(new_param, info, mesh)
+            set_sharding_info(
+                new_param,
+                placements=info.placements,
+                global_shape=info.global_shape,
+                global_stride=info.global_stride,
+                mesh=mesh,
+            )
             _set_param_on_module(module, fqn, new_param)
 
         storages.append(

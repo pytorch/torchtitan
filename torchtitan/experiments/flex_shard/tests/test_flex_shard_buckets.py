@@ -368,50 +368,6 @@ class TestBucketPlacementValidation(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Auto-bucket tests (single-process, no NCCL)
-# ---------------------------------------------------------------------------
-
-
-class TestAutoBuckets(unittest.TestCase):
-    """Test auto_buckets helper."""
-
-    def test_generates_per_child_buckets(self):
-        """One bucket per direct child module."""
-        from torchtitan.experiments.flex_shard import auto_buckets
-
-        model = nn.Sequential(nn.Linear(8, 4), nn.Linear(4, 2))
-        result = auto_buckets(model)
-        self.assertEqual([bucket.patterns for bucket in result], [["0.*"], ["1.*"]])
-
-    def test_named_children_buckets(self):
-        """Named children produce named patterns."""
-        from torchtitan.experiments.flex_shard import auto_buckets
-
-        class Model(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.attn = nn.Linear(8, 4)
-                self.ffn = nn.Linear(4, 2)
-
-            def forward(self, x):
-                return self.ffn(self.attn(x))
-
-        result = auto_buckets(Model())
-        self.assertEqual(
-            [bucket.patterns for bucket in result],
-            [["attn.*"], ["ffn.*"]],
-        )
-
-    def test_flat_module_returns_catchall(self):
-        """Module with no children returns [['*']]."""
-        from torchtitan.experiments.flex_shard import auto_buckets
-
-        module = nn.Linear(8, 4)
-        result = auto_buckets(module)
-        self.assertEqual([bucket.patterns for bucket in result], [["*"]])
-
-
-# ---------------------------------------------------------------------------
 # BucketSpec tests (single-process, no NCCL)
 # ---------------------------------------------------------------------------
 

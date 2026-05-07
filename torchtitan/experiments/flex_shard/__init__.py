@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from .storage import (
-    auto_buckets,
     BucketSpec,
     MixedPrecisionPolicy,
 )
@@ -24,7 +23,6 @@ from .placements import (
 
 
 __all__ = [
-    "auto_buckets",
     "BucketSpec",
     "flex_shard",
     "get_global_shape",
