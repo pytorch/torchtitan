@@ -203,7 +203,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
 class TestApplySACPass(TestCase):
     """Unit tests for the apply_sac_pass joint graph pass."""
 
-    def _build_gm(self, op_targets):
+    def _build_gm(self, op_targets, *, annotate_layers: bool = True):
         """Build a GraphModule with a chain of call_function nodes.
 
         Each op in op_targets becomes a call_function node. The graph
@@ -227,7 +227,12 @@ class TestApplySACPass(TestCase):
 
                     last = graph.call_function(_make_tuple, args=(last,))
         graph.output(last)
-        return torch.fx.GraphModule(torch.nn.Module(), graph)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        if annotate_layers:
+            for node in gm.graph.nodes:
+                if node.op == "call_function":
+                    node.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        return gm
 
     def _get_call_function_nodes(self, gm):
         """Return all call_function nodes from the graph."""
@@ -244,6 +249,19 @@ class TestApplySACPass(TestCase):
         apply_sac_pass(gm)
         for node in self._get_call_function_nodes(gm):
             self.assertEqual(node.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
+
+    def test_non_layer_ops_are_not_tagged(self):
+        """Ops outside transformer layers should not be tagged for recompute."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ],
+            annotate_layers=False,
+        )
+        apply_sac_pass(gm)
+        for node in self._get_call_function_nodes(gm):
+            self.assertNotIn("recompute", node.meta)
 
     def test_save_ops_marked_must_save(self):
         """Non-mm ops in the save list should be marked MUST_SAVE."""
