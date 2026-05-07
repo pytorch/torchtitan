@@ -229,16 +229,6 @@ class ChunkedCELoss(BaseLoss):
     class Config(BaseLoss.Config):
         num_chunks: int = 8
         """Number of chunks to split the sequence into."""
-        support_autograd_grad: bool = False
-        """If True, plumb the sharded lm_head param grads (already produced
-        by the chunk loop's reduce-scatter) out as explicit autograd outputs
-        so outer ``torch.autograd.grad(loss, [hidden_states,
-        *lm_head.parameters()])`` returns them directly — no reliance on
-        ``param.grad`` side effects. Required for FX tracing / replay where
-        side-effecting ``.grad`` writes don't survive. Compatible with both
-        outer ``loss.backward()`` and ``torch.autograd.grad`` consumers.
-        TODO: we should use it as default then delete the config.
-        """
 
     def __init__(
         self,
@@ -249,7 +239,6 @@ class ChunkedCELoss(BaseLoss):
         self.fn: LossFunction = cross_entropy_loss
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
-        self.support_autograd_grad = config.support_autograd_grad
         self.lm_head: nn.Module | None = None
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
@@ -356,22 +345,61 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        if self.support_autograd_grad:
-            return _ChunkedLossWithParamGrads.apply(
-                hidden_states,
-                accumulated_grad,
-                total_loss,
-                lm_head,
-                fsdp_enabled,
-                *lm_head.parameters(),
-            )
+        return self._gradient_backprop(
+            hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
+        )
 
-        # Return a differentiable loss via _DecoderOutputGradientBackProp. When
-        # .backward() is called (by the trainer or PP schedule), autograd
-        # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
-        # as the gradient for hidden_states, propagating through the decoder.
+    @staticmethod
+    def _gradient_backprop(
+        hidden_states: torch.Tensor,
+        accumulated_grad: torch.Tensor,
+        total_loss: torch.Tensor,
+        lm_head: nn.Module,
+        fsdp_enabled: bool,
+    ) -> torch.Tensor:
+        """Return a differentiable loss via _DecoderOutputGradientBackProp.
+        When ``.backward()`` is called (by the trainer or PP schedule),
+        autograd calls ``_DecoderOutputGradientBackProp.backward`` which
+        returns ``accumulated_grad`` as the gradient for ``hidden_states``,
+        propagating through the decoder. Subclasses override to swap in a
+        different autograd Function.
+        """
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
+        )
+
+
+class ChunkedCELossWithParamGrads(ChunkedCELoss):
+    """ChunkedCELoss variant that exposes sharded lm_head param grads as
+    explicit autograd outputs of the returned loss tensor, so outer
+    ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
+    returns real grads instead of relying on ``param.grad`` side effects.
+
+    Designed for graph_trainer, where the chunk loop's per-chunk
+    ``param.grad`` side-effect writes don't survive the captured graph and
+    replay therefore produces all-zero param grads. Compatible with both
+    outer ``loss.backward()`` and ``torch.autograd.grad`` consumers.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ChunkedCELoss.Config):
+        pass
+
+    @staticmethod
+    def _gradient_backprop(
+        hidden_states: torch.Tensor,
+        accumulated_grad: torch.Tensor,
+        total_loss: torch.Tensor,
+        lm_head: nn.Module,
+        fsdp_enabled: bool,
+    ) -> torch.Tensor:
+        return _ChunkedLossWithParamGrads.apply(
+            hidden_states,
+            accumulated_grad,
+            total_loss,
+            lm_head,
+            fsdp_enabled,
+            *lm_head.parameters(),
         )
 
 
