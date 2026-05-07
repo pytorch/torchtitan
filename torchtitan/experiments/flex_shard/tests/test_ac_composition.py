@@ -264,7 +264,9 @@ def _run_transformer_checkpoint_raf_recompute_prefetch(apply_ac_fn, label):
     """Transformer AC + RAF uses phase-correct pending AG during recompute."""
     import importlib
 
-    reshard_mod = importlib.import_module("torchtitan.experiments.flex_shard.reshard")
+    reshard_mod = importlib.import_module(
+        "torchtitan.experiments.flex_shard.reshard_after_forward"
+    )
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     mesh = _init_flex_mesh(world_size)
@@ -325,7 +327,7 @@ def _run_transformer_checkpoint_raf_recompute_prefetch(apply_ac_fn, label):
                 {
                     "phase": (
                         "recompute"
-                        if reshard_mod._reshard_checkpoint_recompute.get()
+                        if reshard_mod._reshard_after_forward_recompute.get()
                         else "forward"
                     ),
                     "bucket": name,

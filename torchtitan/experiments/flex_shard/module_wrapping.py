@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -19,7 +19,6 @@ from .state import (
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
 )
-from .mixed_precision import _MixedPrecisionCast
 from .utils import (
     _is_graph_capture_active,
     _raise_graph_capture_unsupported,
@@ -28,6 +27,28 @@ from .utils import (
 
 if TYPE_CHECKING:
     from .storage import DStorage
+
+
+class _MixedPrecisionCast(torch.autograd.Function):
+    """Cast with decoupled forward/backward dtype control."""
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        x: torch.Tensor,
+        param_dtype: torch.dtype | None,
+        reduce_dtype: torch.dtype | None,
+    ) -> torch.Tensor:
+        ctx.reduce_dtype = reduce_dtype
+        if param_dtype is not None and x.dtype != param_dtype:
+            return x.to(param_dtype)
+        return x
+
+    @staticmethod
+    def backward(ctx: Any, grad: torch.Tensor) -> tuple[torch.Tensor, None, None]:
+        if ctx.reduce_dtype is not None and grad.dtype != ctx.reduce_dtype:
+            return grad.to(ctx.reduce_dtype), None, None
+        return grad, None, None
 
 
 @dataclass

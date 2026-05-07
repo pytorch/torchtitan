@@ -78,7 +78,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_forward_casts_to_param_dtype(self):
         """Forward casts fp32 -> bf16 when param_dtype=bf16."""
-        from torchtitan.experiments.flex_shard.mixed_precision import (
+        from torchtitan.experiments.flex_shard.module_wrapping import (
             _MixedPrecisionCast,
         )
 
@@ -88,7 +88,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_forward_noop_when_none(self):
         """Forward is identity when param_dtype=None."""
-        from torchtitan.experiments.flex_shard.mixed_precision import (
+        from torchtitan.experiments.flex_shard.module_wrapping import (
             _MixedPrecisionCast,
         )
 
@@ -99,7 +99,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_forward_noop_when_same_dtype(self):
         """Forward is identity when param_dtype matches input dtype."""
-        from torchtitan.experiments.flex_shard.mixed_precision import (
+        from torchtitan.experiments.flex_shard.module_wrapping import (
             _MixedPrecisionCast,
         )
 
@@ -110,7 +110,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_backward_casts_to_reduce_dtype(self):
         """Backward casts grad to reduce_dtype."""
-        from torchtitan.experiments.flex_shard.mixed_precision import (
+        from torchtitan.experiments.flex_shard.module_wrapping import (
             _MixedPrecisionCast,
         )
 
@@ -125,7 +125,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_backward_noop_when_reduce_none(self):
         """Backward is identity when reduce_dtype=None."""
-        from torchtitan.experiments.flex_shard.mixed_precision import (
+        from torchtitan.experiments.flex_shard.module_wrapping import (
             _MixedPrecisionCast,
         )
 
@@ -143,7 +143,7 @@ class TestMixedPrecisionCast(unittest.TestCase):
 
     def test_decoupled_forward_backward(self):
         """Forward=bf16, backward=fp32 work independently."""
-        from torchtitan.experiments.flex_shard.mixed_precision import (
+        from torchtitan.experiments.flex_shard.module_wrapping import (
             _MixedPrecisionCast,
         )
 

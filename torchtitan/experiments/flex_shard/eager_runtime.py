@@ -23,7 +23,7 @@ from .state import (
     _PARAM_FQN_ATTR,
 )
 from .placements import Shard
-from .reshard import _reshard_checkpoint_recompute
+from .reshard_after_forward import _reshard_after_forward_recompute
 from .storage import BucketSpec, DStorage, ParamInfo
 from .utils import _get_storage_debug_fqn, _with_fqn
 
@@ -489,7 +489,7 @@ def _install_batched_allgather_hooks(
                 if all_gather_context.pending is not None:
                     return
                 prefetch_order = all_gather_context.buckets
-                if _reshard_checkpoint_recompute.get():
+                if _reshard_after_forward_recompute.get():
                     prefetch_order = prefetch_order[::-1]
                 for idx, bucket in enumerate(prefetch_order):
                     if bucket is all_gather_bucket:
@@ -503,7 +503,7 @@ def _install_batched_allgather_hooks(
                 all_gather_context.pending = PendingAllGather(
                     bucket=next_bucket,
                     result=_begin_bucket_unshard(next_bucket),
-                    recompute=_reshard_checkpoint_recompute.get(),
+                    recompute=_reshard_after_forward_recompute.get(),
                 )
 
             def _take_pending_for_current_bucket():
@@ -512,7 +512,7 @@ def _install_batched_allgather_hooks(
                     return None
                 if (
                     pending.bucket is all_gather_bucket
-                    and pending.recompute == _reshard_checkpoint_recompute.get()
+                    and pending.recompute == _reshard_after_forward_recompute.get()
                 ):
                     all_gather_context.pending = None
                     return pending.result

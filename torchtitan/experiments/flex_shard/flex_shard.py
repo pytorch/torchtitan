@@ -30,9 +30,9 @@ from .module_wrapping import (
     _register_module_param_accessors,
     FlexShardModule,
 )
-from .reshard import (
-    _apply_reshard_checkpoint,
-    _reshard_checkpoint_enabled,
+from .reshard_after_forward import (
+    _apply_reshard_after_forward,
+    _reshard_after_forward_enabled,
 )
 from .storage import (
     _assign_params_to_buckets,
@@ -235,8 +235,8 @@ def flex_shard(
     # a selective policy that recomputes only collective ops (all-gather,
     # broadcast), saving compute ops to avoid redundant work.
     reshard_storages = [s for s in storages if s._reshard_after_forward]
-    if _reshard_checkpoint_enabled.get() and reshard_storages:
-        _apply_reshard_checkpoint(module, reshard_storages)
+    if _reshard_after_forward_enabled.get() and reshard_storages:
+        _apply_reshard_after_forward(module, reshard_storages)
 
     # Install batched all-gather hooks for eager mode when the storage layout
     # supports the batched Placement.unshard() path.
