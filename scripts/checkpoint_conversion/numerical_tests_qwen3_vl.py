@@ -33,7 +33,7 @@ import torch.nn.functional as F
 
 torch._dynamo.config.disable = True
 
-from torch.distributed.checkpoint.state_dict import get_model_state_dict
+from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.models.qwen3_vl import model_registry
 from transformers import AutoProcessor
 
@@ -251,7 +251,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
     model.init_weights(buffer_device=torch.device("cpu"))
     model.half()
 
-    state_dict = get_model_state_dict(model)
+    state_dict = ModelWrapper([model]).state_dict()
     print(f"  Loading checkpoint: {checkpoint_path}")
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     model.to(device)
