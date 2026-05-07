@@ -13,7 +13,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config.configs import (
+from torchtitan.config import (
     CompileConfig,
     DebugConfig,
     ParallelismConfig,
@@ -63,6 +63,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -108,6 +110,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=4,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -152,6 +156,8 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=8,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -194,6 +200,8 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
@@ -404,6 +412,8 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
             ),
             sampling=SamplingConfig(
                 n=group_size,
