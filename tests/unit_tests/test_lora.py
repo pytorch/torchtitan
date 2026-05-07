@@ -8,10 +8,8 @@ import pytest
 import torch
 
 from torchtitan.components.lora import (
-    FrozenConfig,
-    LoRAConfig,
-    LoRAConverter,
     _get_lora_cls,
+    LoRAConverter,
 )
 from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.models.common.linear import Linear
@@ -38,13 +36,13 @@ def test_lora_model_builds():
     assert len(trainable) > 0, "No trainable parameters found"
     assert len(frozen) > 0, "No frozen parameters found"
     for name in trainable:
-        assert "lora_a" in name or "lora_b" in name, (
-            f"Trainable param '{name}' is not a LoRA adapter"
-        )
+        assert (
+            "lora_a" in name or "lora_b" in name
+        ), f"Trainable param '{name}' is not a LoRA adapter"
     for name in frozen:
-        assert "lora_a" not in name and "lora_b" not in name, (
-            f"Frozen param '{name}' looks like a LoRA adapter"
-        )
+        assert (
+            "lora_a" not in name and "lora_b" not in name
+        ), f"Frozen param '{name}' looks like a LoRA adapter"
 
 
 def test_lora_forward():
@@ -77,9 +75,7 @@ def test_validate_converter_order():
 
     # Invalid order: quantization after LoRA
     pytest.importorskip("torchao")
-    float8 = Float8LinearConverter(
-        Float8LinearConverter.Config(emulate=True)
-    )
+    float8 = Float8LinearConverter(Float8LinearConverter.Config(emulate=True))
     with pytest.raises(ValueError, match="must be applied before"):
         validate_converter_order([lora, float8])
 
