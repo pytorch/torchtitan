@@ -153,9 +153,7 @@ def _apply_aot_compile(
     joint_custom_passes = joint_passes + joint_custom_passes
 
     # Get compiler passes from config
-    compiler_passes = get_compiler_passes_from_config(
-        model, compile_config, parallel_dims
-    )
+    compiler_passes = get_compiler_passes_from_config(model, compile_config)
 
     # Create compilers with specified passes
     fw_compiler, bw_compiler = make_compiler_with_passes(

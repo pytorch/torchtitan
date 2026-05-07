@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - docker-image-name: torchtitan-ubuntu-20.04-clang12
+          - docker-image-name: torchtitan-ubuntu-22.04-clang12
             runner: [self-hosted, linux.2xlarge]
           - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
             runner: [linux.2xlarge]

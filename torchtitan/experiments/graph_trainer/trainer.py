@@ -9,8 +9,10 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.fx.traceback import annotate_fn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _MODULE_FQN,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
@@ -33,11 +35,19 @@ def make_fwd_bwd_step(loss_fn):
     ``loss_fn`` is captured in the closure so it is not a graph input.
     """
 
+    # The loss function is not a submodule of the model, so
+    # annotate_module_fqns won't tag it. Annotate it here so that
+    # downstream passes (bucketing, SAC, kernel annotations) can
+    # attribute loss nodes in the traced graph.
+    @annotate_fn({_MODULE_FQN: "loss"})
+    def compute_loss(pred, labels, global_valid_tokens):
+        return loss_fn(pred, labels) / global_valid_tokens
+
     def fwd_bwd_step(
         model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
     ):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
-        loss = loss_fn(pred, labels) / global_valid_tokens
+        loss = compute_loss(pred, labels, global_valid_tokens)
         params = [
             p
             for _, p in model.named_parameters(remove_duplicate=False)
@@ -142,12 +152,12 @@ class GraphTrainer(Trainer):
         extra_inputs: dict[str, torch.Tensor],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
+        maybe_register_blockmask_pytree_node()
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-                maybe_register_blockmask_pytree_node()
                 with self.train_context():
                     self._traced_step = trace_train_step(fwd_bwd_fn)(
                         model,
