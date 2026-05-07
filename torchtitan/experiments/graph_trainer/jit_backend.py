@@ -12,7 +12,7 @@ import torch._functorch.config as functorch_config
 from torchtitan.tools.logging import logger
 
 from .configs import GraphTrainerCompileConfig as CompileConfig
-from .passes import (
+from .fsdp_passes import (
     autobucketing_reordering_pass,
     fsdp_reshard_after_fwd_pass,
     transformer_block_bucketing_reordering_pass,

@@ -44,14 +44,15 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "cpu_offload_all"] = "default"
+    memory_policy: Literal["default", "eager", "budget_limited_offload"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
-        default: save all compute-intensive ops and FSDP all_gathers.
-        eager: alternate mm ops between save/recompute, matching the eager
-            AC policy in torchtitan.distributed.activation_checkpoint.
-        cpu_offload_all: offload all eligible activations to CPU.
-            Work in progress — for development and testing only.
+        default: SAC — save all compute-intensive ops and FSDP all_gathers.
+        eager: SAC alternating mm ops between save/recompute, matching the
+            eager AC policy in torchtitan.distributed.activation_checkpoint.
+        budget_limited_offload: SAC + CPU offload — apply default SAC first,
+            then offload surviving MUST_SAVE activations to CPU within
+            the cpu_offload_budget_gb budget.
     """
 
     inductor_compilation: Literal["regional", "full"] = "regional"
@@ -70,6 +71,18 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     enable_cudagraph: bool = True
     """When False, skip the cudagraph pass even if the graph is compatible."""
+
+    cpu_offload_prefetch_n_layers: int = 1
+    """Prefetch reloads this many layers ahead in the backward graph
+    to overlap H2D transfers with compute."""
+
+    cpu_offload_defer_n_layers: int = 1
+    """Defer forward wait_tensor ops this many layers past the last consumer
+    to overlap D2H transfers with compute."""
+
+    cpu_offload_budget_gb: float = 100.0
+    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
+    Tensors are selected largest-first until the budget is exhausted."""
 
     precompile_artifact_dir: str = ""
     """
