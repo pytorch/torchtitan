@@ -15,6 +15,7 @@ from torch.testing._internal.common_utils import (
 )
 from torchtitan.components.loss import (
     ChunkedCELoss,
+    ChunkedCELossWithParamGrads,
     cross_entropy_loss,
     GradAccumulator,
     IGNORE_INDEX,
@@ -216,16 +217,12 @@ class _FakeDecoder(nn.Module):
 
 class TestChunkedCELoss(TestCase):
     def _make_model_and_loss(
-        self, dim=32, vocab_size=64, num_chunks=4, support_autograd_grad=False
+        self, dim=32, vocab_size=64, num_chunks=4, with_param_grads=False
     ):
         """Create a fake Decoder and ChunkedCELoss for testing."""
         model = _FakeDecoder(dim, vocab_size)
-        chunked_loss = ChunkedCELoss(
-            ChunkedCELoss.Config(
-                num_chunks=num_chunks,
-                support_autograd_grad=support_autograd_grad,
-            )
-        )
+        loss_cls = ChunkedCELossWithParamGrads if with_param_grads else ChunkedCELoss
+        chunked_loss = loss_cls(loss_cls.Config(num_chunks=num_chunks))
         # Bypass isinstance(model, Decoder) check for unit testing
         chunked_loss.lm_head = model.output
         return model, chunked_loss
@@ -236,18 +233,16 @@ class TestChunkedCELoss(TestCase):
     ):
         h = hidden_states.detach().requires_grad_(True)
         loss = chunked_loss(h, labels, global_valid_tokens)
-        if chunked_loss.support_autograd_grad:
-            h_grad, w_grad = torch.autograd.grad(
-                loss, [h, model.output.weight]
-            )
+        if isinstance(chunked_loss, ChunkedCELossWithParamGrads):
+            h_grad, w_grad = torch.autograd.grad(loss, [h, model.output.weight])
         else:
             loss.backward()
             h_grad = h.grad
             w_grad = model.output.weight.grad
         return loss, h_grad.clone(), w_grad.clone()
 
-    @parametrize("support_autograd_grad", [False, True])
-    def test_numerical_equivalence(self, support_autograd_grad):
+    @parametrize("with_param_grads", [False, True])
+    def test_numerical_equivalence(self, with_param_grads):
         """ChunkedCELoss must produce the same loss and gradients as the standard path."""
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
@@ -255,7 +250,7 @@ class TestChunkedCELoss(TestCase):
 
         model_std, _ = self._make_model_and_loss(D, V, num_chunks)
         model_chunked, chunked_loss = self._make_model_and_loss(
-            D, V, num_chunks, support_autograd_grad=support_autograd_grad
+            D, V, num_chunks, with_param_grads=with_param_grads
         )
 
         # Share the same lm_head weights
@@ -277,14 +272,12 @@ class TestChunkedCELoss(TestCase):
         lm_head_grad_std = model_std.output.weight.grad.clone()
 
         # Chunked path
-        loss_chunked, grad_chunked, lm_head_grad_chunked = (
-            self._chunked_loss_and_grads(
-                model_chunked,
-                chunked_loss,
-                hidden_states,
-                labels,
-                global_valid_tokens,
-            )
+        loss_chunked, grad_chunked, lm_head_grad_chunked = self._chunked_loss_and_grads(
+            model_chunked,
+            chunked_loss,
+            hidden_states,
+            labels,
+            global_valid_tokens,
         )
 
         # Verify loss values match
@@ -345,7 +338,7 @@ class TestChunkedCELoss(TestCase):
                 msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
             )
 
-    def test_support_autograd_grad_bitwise_equal(self):
+    def test_with_param_grads_bitwise_equal(self):
         torch.manual_seed(42)
         B, L, D, V = 2, 8, 32, 64
         labels = torch.randint(0, V, (B, L))
@@ -353,9 +346,7 @@ class TestChunkedCELoss(TestCase):
         hidden_states = torch.randn(B, L, D)
 
         model_a, loss_a_fn = self._make_model_and_loss(D, V)
-        model_b, loss_b_fn = self._make_model_and_loss(
-            D, V, support_autograd_grad=True
-        )
+        model_b, loss_b_fn = self._make_model_and_loss(D, V, with_param_grads=True)
         model_b.output.load_state_dict(model_a.output.state_dict())
 
         loss_a, h_grad_a, w_grad_a = self._chunked_loss_and_grads(
@@ -369,12 +360,10 @@ class TestChunkedCELoss(TestCase):
         self.assertEqual(h_grad_b, h_grad_a)
         self.assertEqual(w_grad_b, w_grad_a)
 
-    def test_support_autograd_grad_does_not_touch_dot_grad(self):
+    def test_with_param_grads_does_not_touch_dot_grad(self):
         torch.manual_seed(0)
         B, L, D, V = 2, 8, 32, 64
-        model, chunked_loss = self._make_model_and_loss(
-            D, V, support_autograd_grad=True
-        )
+        model, chunked_loss = self._make_model_and_loss(D, V, with_param_grads=True)
         h = torch.randn(B, L, D, requires_grad=True)
         labels = torch.randint(0, V, (B, L))
         loss = chunked_loss(h, labels)
