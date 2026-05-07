@@ -12,7 +12,7 @@ from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import logger
 
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM  # pyrefly: ignore
 
 device_type = "cuda" if torch.cuda.is_available() else "cpu"
 

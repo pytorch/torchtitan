@@ -9,7 +9,7 @@ import os
 from torch import Tensor
 
 from torchtitan.protocols.module import Module
-from transformers import CLIPTextModel, T5EncoderModel
+from transformers import CLIPTextModel, T5EncoderModel  # pyrefly: ignore
 
 
 class FluxEmbedder(Module):

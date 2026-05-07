@@ -35,7 +35,7 @@ torch._dynamo.config.disable = True
 
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.models.qwen3_vl import model_registry
-from transformers import AutoProcessor
+from transformers import AutoProcessor  # pyrefly: ignore
 
 
 # ============================================================
@@ -207,7 +207,7 @@ def print_pixel_comparisons(comparisons):
 @torch.no_grad()
 def run_hf(model_path, hf_inputs, device):
     """Run HF model, return last-token logits per sample."""
-    from transformers import AutoModelForImageTextToText
+    from transformers import AutoModelForImageTextToText  # pyrefly: ignore
 
     print(f"Loading HuggingFace model on {device} ...")
     model = AutoModelForImageTextToText.from_pretrained(
