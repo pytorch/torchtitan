@@ -7,17 +7,25 @@
 import copy
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import DataParallelMeshDims
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
 from torch.testing._internal.common_utils import run_tests
 
-from torchtitan.experiments.flex_shard import flex_shard, per_param_placements
+from torchtitan.experiments.flex_shard import (
+    BucketSpec,
+    flex_shard,
+    MixedPrecisionPolicy,
+    per_param_placements,
+)
 from torchtitan.experiments.flex_shard.tests.common import (
+    check_flex_shard_parity,
     expected_shard,
     make_transformer_model,
     transformer_bucket_specs,
+    transformer_inputs,
 )
 
 
@@ -35,9 +43,10 @@ def _init_params_deterministically(model: torch.nn.Module) -> None:
             param.copy_(values.div(max(param.numel(), 1)).add_(idx))
 
 
-def _deterministic_inputs(args, batch_size: int, device: torch.device) -> torch.Tensor:
-    values = torch.arange(batch_size * args.max_seq_len, device=device)
-    return values.view(batch_size, args.max_seq_len).remainder(args.vocab_size)
+def _average_reference_grads(model: torch.nn.Module) -> None:
+    for param in model.parameters():
+        if param.grad is not None:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
 
 
 class TestFlexShardTraining(FSDPTest):
@@ -67,9 +76,10 @@ class TestFlexShardTraining(FSDPTest):
             ),
         )
 
+        torch.manual_seed(42 + self.rank + 1)
         inputs = [
-            _deterministic_inputs(args, batch_size=3, device=device_type),
-            _deterministic_inputs(args, batch_size=2, device=device_type),
+            transformer_inputs(args, batch_size=3, device=device_type),
+            transformer_inputs(args, batch_size=2, device=device_type),
         ]
         optim = torch.optim.SGD(model.parameters(), lr=0.1)
         ref_optim = torch.optim.SGD(reference.parameters(), lr=0.1)
@@ -83,32 +93,68 @@ class TestFlexShardTraining(FSDPTest):
             loss.backward()
             ref_loss.backward()
 
-        for (name, param), (ref_name, ref_param) in zip(
-            model.named_parameters(),
-            reference.named_parameters(),
-            strict=True,
-        ):
-            self.assertEqual(name, ref_name)
-            self.assertIsNotNone(param.grad)
-            self.assertIsNotNone(ref_param.grad)
-            expected_grad = expected_shard(
-                ref_param.grad,
-                rank=self.rank,
-                world_size=self.world_size,
-            )
-            self.assertEqual(param.grad, expected_grad)
+        _average_reference_grads(reference)
+        check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
 
         optim.step()
         ref_optim.step()
 
-        ref_state_dict = reference.state_dict()
-        for key, value in model.state_dict().items():
-            expected = expected_shard(
-                ref_state_dict[key],
-                rank=self.rank,
-                world_size=self.world_size,
-            )
-            self.assertEqual(value, expected)
+        check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
+
+    @skip_if_lt_x_gpu(2)
+    def test_mixed_precision_policy(self):
+        mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+
+        args, model = make_transformer_model(device=device_type.type)
+        _init_params_deterministically(model)
+        reference = copy.deepcopy(model).to(torch.bfloat16)
+
+        flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[
+                BucketSpec(
+                    ["tok_embeddings.*"],
+                    mp_policy=MixedPrecisionPolicy(
+                        param_dtype=torch.bfloat16,
+                        reduce_dtype=torch.float32,
+                    ),
+                    reshard_after_forward=False,
+                ),
+                *transformer_bucket_specs(args.n_layers, reshard_after_forward=False)[
+                    1:
+                ],
+            ],
+        )
+
+        torch.manual_seed(42 + self.rank + 1)
+        x = transformer_inputs(args, batch_size=2, device=device_type)
+        output = model.tok_embeddings(x)
+        ref_output = reference.tok_embeddings(x)
+        self.assertEqual(output.dtype, torch.bfloat16)
+        self.assertEqual(output, ref_output)
+
+        output.float().sum().backward()
+        ref_output.float().sum().backward()
+
+        grad = model.tok_embeddings._parameters["weight"].grad
+        self.assertIsNotNone(grad)
+        self.assertEqual(grad.dtype, torch.float32)
+
+        ref_grad = reference.tok_embeddings.weight.grad.to(torch.float32)
+        dist.all_reduce(ref_grad, op=dist.ReduceOp.AVG)
+        expected_grad = expected_shard(
+            ref_grad,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        self.assertEqual(grad, expected_grad)
 
 
 if __name__ == "__main__":

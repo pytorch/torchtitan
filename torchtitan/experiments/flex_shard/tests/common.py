@@ -135,6 +135,43 @@ def expected_shard(
     return chunks[rank].contiguous()
 
 
+def check_flex_shard_parity(
+    cls,
+    reference_module: nn.Module,
+    flex_sharded_module: nn.Module,
+    rank: int,
+    world_size: int,
+) -> None:
+    """Check FlexShard local params/state_dict/grads against a reference module."""
+    for (ref_name, ref_param), (name, param) in zip(
+        reference_module.named_parameters(),
+        flex_sharded_module.named_parameters(),
+        strict=True,
+    ):
+        cls.assertEqual(ref_name, name)
+        cls.assertEqual(
+            param.detach(),
+            expected_shard(ref_param.detach(), rank=rank, world_size=world_size),
+        )
+        if ref_param.grad is None:
+            cls.assertIsNone(param.grad)
+            continue
+        cls.assertIsNotNone(param.grad)
+        cls.assertEqual(
+            param.grad.detach(),
+            expected_shard(ref_param.grad.detach(), rank=rank, world_size=world_size),
+        )
+
+    ref_state_dict = reference_module.state_dict()
+    state_dict = flex_sharded_module.state_dict()
+    cls.assertEqual(list(ref_state_dict), list(state_dict))
+    for key, value in state_dict.items():
+        cls.assertEqual(
+            value,
+            expected_shard(ref_state_dict[key], rank=rank, world_size=world_size),
+        )
+
+
 def transformer_bucket_specs(
     num_layers: int,
     *,
