@@ -6,7 +6,7 @@
 
 import copy
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +19,13 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
+
+from torchtitan.experiments.graph_trainer.dynamic_shapes import (
+    _fakeify_input,
+    _insert_runtime_asserts as _insert_runtime_asserts_pass,
+    _tensor_has_mark_unbacked,
+    _wrapper_subclass_has_mark_unbacked,
+)
 
 # Tensors and make_fx-safe primitives are allowed as pytree leaves in args.
 # Everything else (callables, custom objects) should be registered as pytree
@@ -82,7 +89,8 @@ def _unwrap_subclass(t: torch.Tensor) -> tuple[list[torch.Tensor], SubclassMeta 
 
 
 def _wrap_to_subclass(
-    plain_tensors: list[torch.Tensor], meta: SubclassMeta
+    plain_tensors: list[torch.Tensor],
+    meta: SubclassMeta,
 ) -> torch.Tensor:
     inner_dict = {}
     idx = 0
@@ -94,8 +102,12 @@ def _wrap_to_subclass(
             inner_dict[attr] = inner_tensors[0]
         else:
             inner_dict[attr] = _wrap_to_subclass(list(inner_tensors), inner_meta)
+
     return meta.cls.__tensor_unflatten__(
-        inner_dict, meta.ctx, meta.outer_size, meta.outer_stride
+        inner_dict,
+        meta.ctx,
+        meta.outer_size,
+        meta.outer_stride,
     )
 
 
@@ -302,7 +314,11 @@ class TracedResult:
         )
 
 
-def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
+def minimal_fx_tracer(
+    fn: Callable,
+    *,
+    _insert_runtime_asserts: bool = False,
+) -> Callable[..., TracedResult]:
     """Return a tracer for a stateless ``fn`` with explicit ``state`` input.
 
     ``fn`` must be a plain callable (not an ``nn.Module``). The returned
@@ -321,6 +337,12 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
     Tensor subclasses (for example ``DTensor``) are recursively unwrapped into
     plain tensors for tracing, and the layouts needed to rewrap them are stored
     in the returned :class:`TracedResult`.
+
+    ``_insert_runtime_asserts`` opts into materializing the ShapeEnv's deferred
+    runtime asserts (from ``mark_unbacked()`` bounds and ``torch._check()``
+    calls) into the graph as ``_assert_scalar`` nodes. Off by default because
+    cudagraph capture does not evaluate these nodes, and downstream graph
+    passes generally don't need them.
     """
 
     def _trace_with_args(state: Any, *args: Any) -> TracedResult:
@@ -349,20 +371,43 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
         # Combined flat input: [*state, *user_args] with subclasses unwrapped.
         full_args = list(state_flat) + list(user_args_flat)
         num_full_args = len(full_args)
+        for arg in full_args:
+            if not isinstance(arg, torch.Tensor):
+                continue
+            if getattr(arg, "_dynamo_dynamic_indices", None) or getattr(
+                arg, "_dynamo_dynamic_range", None
+            ):
+                raise ValueError("minimal_fx_tracer only supports mark_unbacked()")
+            if _wrapper_subclass_has_mark_unbacked(arg):
+                raise ValueError(
+                    "minimal_fx_tracer only supports mark_unbacked() on plain tensor "
+                    "inputs; wrapper subclasses such as DTensor are not supported"
+                )
         unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
+        has_mark_unbacked = any(
+            isinstance(a, torch.Tensor) and _tensor_has_mark_unbacked(a)
+            for a in unwrapped_args
+        )
 
         fake_mode = FakeTensorMode(
             allow_non_fake_inputs=True,
             shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
         )
-        fake_args = tuple(
-            (
-                fake_mode.from_tensor(a, static_shapes=True)
+        # Fresh unbacked symbols allocated when fakeifying mark_unbacked() inputs
+        # are wired to placeholders via the symbolic context, so they must not
+        # land in the ShapeEnv's pending_fresh_unbacked_symbols list.
+        ignore_ctx = (
+            fake_mode.shape_env.ignore_fresh_unbacked_symbols()
+            if has_mark_unbacked
+            else nullcontext()
+        )
+        with ignore_ctx:
+            fake_args = tuple(
+                _fakeify_input(fake_mode, a, input_name=f"input_{i}")
                 if isinstance(a, torch.Tensor)
                 else a
+                for i, a in enumerate(unwrapped_args)
             )
-            for a in unwrapped_args
-        )
 
         output_layouts: dict[int, SubclassLayout] = {}
         num_flat_outputs: int = 0
@@ -421,6 +466,8 @@ def minimal_fx_tracer(fn: Callable) -> Callable[..., TracedResult]:
         _copy_fwd_metadata_to_bw_nodes(traced)
 
         _remove_cpu_shadow_chains(traced)
+        if _insert_runtime_asserts:
+            _insert_runtime_asserts_pass(traced, fake_mode)
 
         assert output_spec is not None
         return TracedResult(
