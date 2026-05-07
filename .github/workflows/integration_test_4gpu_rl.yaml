@@ -7,10 +7,8 @@ on:
       - 'torchtitan/experiments/rl/**'
       - '.github/workflows/integration_test_4gpu_rl.yaml'
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl.yaml'
+    types: [labeled, synchronize]
+    branches: [ main ]
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -37,6 +35,7 @@ jobs:
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
@@ -66,7 +65,7 @@ jobs:
         pip install uv
 
         # 1. Install Monarch and TorchStore
-        uv pip install torchmonarch==0.3.0
+        uv pip install torchmonarch==0.4.1
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
 
@@ -90,6 +89,11 @@ jobs:
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Install nvcc so FlashInfer can JIT compile its CUDA kernels.
+        # vLLM uses FlashInfer sampler by default (vllm-project/vllm#40376)
+        # but the CI docker image only has CUDA runtime, not the toolkit.
+        uv pip install nvidia-cuda-nvcc
 
         # Run E2E RL integration tests (TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \

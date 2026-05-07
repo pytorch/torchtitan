@@ -81,9 +81,8 @@ class GraphTrainer(Trainer):
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
 
-        # Run post-init hook for the active memory policy
-        policy_type = type(self.config.compile.memory_policy)
-        POST_INIT_HOOKS.get(policy_type, lambda _: None)(self)
+        # Run post-init hook for the active pass pipeline
+        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
     def forward_backward_step(
         self,
@@ -160,12 +159,12 @@ class GraphTrainer(Trainer):
         extra_inputs: dict[str, torch.Tensor],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
+        maybe_register_blockmask_pytree_node()
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-                maybe_register_blockmask_pytree_node()
                 with self.train_context():
                     self._traced_step = trace_train_step(fwd_bwd_fn)(
                         model,
@@ -177,9 +176,9 @@ class GraphTrainer(Trainer):
                     )
 
             if self.config.compile.enable_passes:
-                policy_type = type(self.config.compile.memory_policy)
                 pipeline_fn = PASS_PIPELINE_REGISTRY.get(
-                    policy_type, construct_default_graph_passes
+                    self.config.compile.pass_pipeline,
+                    construct_default_graph_passes,
                 )
                 passes = pipeline_fn(self._traced_step, self.config)
 
@@ -213,8 +212,9 @@ class GraphTrainer(Trainer):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        policy_type = type(self.config.compile.memory_policy)
-        PRE_TRAIN_STEP_HOOKS.get(policy_type, lambda _: None)(self)
+        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
+            self
+        )
         super().train_step(data_iterator)
 
     def close(self) -> None:
