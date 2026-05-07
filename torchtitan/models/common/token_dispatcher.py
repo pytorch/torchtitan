@@ -295,6 +295,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             )
             input_splits_list = input_splits.tolist()
             output_splits_list = output_splits.tolist()
+            # Exact receive-buffer length used by all_to_all_single_autograd.
+            # Passing it to repeat_interleave avoids inferring it from a CUDA sum.
+            num_routed_tokens = sum(output_splits_list)
 
         # All-to-all dispatch tokens to EP ranks
         routed_input = all_to_all_single_autograd(
@@ -321,6 +324,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_tokens_per_expert_group,
             ep_size,
             num_local_experts,
+            num_routed_tokens,
         )
 
         metadata = AllToAllDispatchMetadata(
@@ -334,7 +338,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         return routed_input, num_tokens_per_expert_group, metadata
 
     def _permute(
-        self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
+        self,
+        routed_input,
+        num_tokens_per_expert_group,
+        ep_size,
+        num_local_experts,
+        num_routed_tokens,
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
@@ -342,7 +351,6 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
         """
         device = num_tokens_per_expert_group.device
-        total = num_tokens_per_expert_group.sum()
 
         # [R, E] matrix of token counts per (rank, expert)
         t_mat = num_tokens_per_expert_group.view(ep_size, num_local_experts)
@@ -359,12 +367,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # For each output position, find its input position:
         #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
         seg_ids = torch.arange(segment_lens.shape[0], device=device).repeat_interleave(
-            segment_lens
+            segment_lens, output_size=num_routed_tokens
         )
         output_starts = segment_lens.cumsum(0) - segment_lens
         permuted_indices = (
             input_starts[seg_ids]
-            + torch.arange(total, device=device)
+            + torch.arange(num_routed_tokens, device=device)
             - output_starts[seg_ids]
         )
 
@@ -485,7 +493,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         return super().dispatch(x, top_scores, selected_experts_indices)
 
     def _permute(
-        self, routed_input, num_tokens_per_expert_group, ep_size, num_local_experts
+        self,
+        routed_input,
+        num_tokens_per_expert_group,
+        ep_size,
+        num_local_experts,
+        num_routed_tokens,
     ):
         # FP8/MXFP8 require groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
