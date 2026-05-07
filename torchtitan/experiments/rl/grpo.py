@@ -29,6 +29,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+# must run before torch import
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torchstore as ts
 from monarch.actor import this_host
@@ -124,6 +127,8 @@ class Provisioner:
 
         def _bootstrap():
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+            # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
+            import torch  # noqa: F401
 
         return _bootstrap
 
