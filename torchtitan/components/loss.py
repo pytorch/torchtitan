@@ -375,6 +375,31 @@ class ChunkedCELoss(BaseLoss):
         )
 
 
+def _maybe_redistribute_multiply(g: torch.Tensor, grad_output: torch.Tensor) -> torch.Tensor:
+    """Multiply ``g`` by ``grad_output`` for the autograd chain rule.
+
+    Forward returns the scalar loss, so ``grad_output`` here is always a
+    ``Replicate()`` scalar DTensor (or a plain scalar tensor) — a 0-dim
+    tensor cannot be sharded, and ``torch.autograd.grad`` seeds the
+    backward with ``ones_like(loss)``. We extract the local scalar via
+    ``to_local`` rather than ``redistribute``: DTensor's redistribute
+    does not implement cross-mesh comm (raises
+    ``NotImplementedError("Cross device mesh comm not supported yet!")``),
+    so a naive ``g * grad_output`` crashes whenever ``g`` (saved param
+    grad on, e.g., ``(fsdp, tp)``) and ``grad_output`` (loss on, e.g.,
+    ``(tp,)``) live on different meshes. ``to_local`` on a Replicate
+    scalar is local-only — no collective fires — and ``g * scalar`` then
+    broadcasts cleanly regardless of ``g``'s mesh.
+    """
+    from torch.distributed.tensor import DTensor
+
+    if isinstance(grad_output, DTensor):
+        grad_output = grad_output.to_local(
+            grad_placements=grad_output.placements
+        )
+    return g * grad_output
+
+
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
@@ -405,16 +430,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         ctx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None]:
         (accumulated_grad,) = ctx.saved_tensors
-        # Return accumulated_grad as the gradient for hidden_states.
-        # Autograd then propagates this through hidden_states' existing
-        # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
-        # but expressed as a return value so autograd handles the traversal
-        # in a single pass (no "backward through graph twice" error).
-        # Note: this is not safe if downstream accidentally runs tensor ops after
-        # the loss returns, which would produce a non-trivial grad_output that we need
-        # to properly handle. The complicated part is that grad_output might not be
-        # on the same device mesh as accumlated_grad.
-        return accumulated_grad, None, None
+        return _maybe_redistribute_multiply(accumulated_grad, grad_output), None, None
 
 
 class _ChunkedLossWithParamGrads(torch.autograd.Function):
@@ -486,10 +502,10 @@ class _ChunkedLossWithParamGrads(torch.autograd.Function):
                 lambda: lm_head.set_requires_gradient_sync(True, recurse=False)
             )
         return (
-            accumulated_h_grad,
+            _maybe_redistribute_multiply(accumulated_h_grad, grad_output),
             None,
             None,
             None,
             None,
-            *param_grads,
+            *(_maybe_redistribute_multiply(g, grad_output) for g in param_grads),
         )
