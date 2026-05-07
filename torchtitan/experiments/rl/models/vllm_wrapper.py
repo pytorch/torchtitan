@@ -111,6 +111,24 @@ def create_torchtitan_config_from_vllm_config(
     world_size = dist.get_world_size()
     parallel_config = vllm_config.parallel_config
 
+    # CP and PP are not supported on the vLLM inference path yet
+    if parallel_config.pipeline_parallel_size != 1:
+        raise ValueError(
+            "vLLM pipeline_parallel_size must be 1 for the torchtitan wrapper, "
+            f"got {parallel_config.pipeline_parallel_size}"
+        )
+    if (
+        parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+    ):
+        raise ValueError(
+            "vLLM context-parallel sizes must be 1 for the torchtitan wrapper, "
+            f"got prefill={parallel_config.prefill_context_parallel_size}, "
+            f"decode={parallel_config.decode_context_parallel_size}"
+        )
+
+    # When EP is enabled, all TP ranks are repurposed for expert parallelism
+    # (each rank holds a shard of experts): ep_size = tp_size.
     tp_size = parallel_config.tensor_parallel_size
     dp_size = parallel_config.data_parallel_size
 
@@ -127,7 +145,7 @@ def create_torchtitan_config_from_vllm_config(
         dp_shard=dp_size,
         cp=1,
         tp=tp_size,
-        pp=parallel_config.pipeline_parallel_size,
+        pp=1,
         ep=ep_size,
         world_size=world_size,
     )
@@ -137,13 +155,11 @@ def create_torchtitan_config_from_vllm_config(
         data_parallel_shard_degree=dp_size,
         context_parallel_degree=1,
         tensor_parallel_degree=tp_size,
-        pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
+        pipeline_parallel_degree=1,
         expert_parallel_degree=ep_size,
         disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
         enable_sequence_parallel=False,
     )
-
-    parallel_dims.build_mesh()
 
     logger.info(
         f"Created TorchTitan config from vLLM: "
