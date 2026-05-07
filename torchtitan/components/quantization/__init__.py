@@ -27,7 +27,7 @@ class QuantizedLinearConfig(Linear.Config):
 
 
 class _QuantizedGroupedExpertsConfig:
-    """Marker base for dynamically created quantized GroupedExperts configs."""
+    """Marker mixin for quantized GroupedExperts configs."""
 
     pass
 
@@ -47,24 +47,20 @@ class QuantizationConverter(ModelConfigConverter):
 
 # Re-export all public symbols so callers can import from the package directly.
 from .float8 import (  # noqa: F401, E402
-    Float8GroupedExperts,
     Float8GroupedExpertsConverter,
     Float8Linear,
     Float8LinearConverter,
 )
 from .mx import (  # noqa: F401, E402
-    MXFP8GroupedExperts,
     MXFP8GroupedExpertsConverter,
     MXFP8Linear,
     MXFP8LinearConverter,
 )
 
 __all__ = [
-    "Float8GroupedExperts",
     "Float8GroupedExpertsConverter",
     "Float8Linear",
     "Float8LinearConverter",
-    "MXFP8GroupedExperts",
     "MXFP8GroupedExpertsConverter",
     "MXFP8Linear",
     "MXFP8LinearConverter",
