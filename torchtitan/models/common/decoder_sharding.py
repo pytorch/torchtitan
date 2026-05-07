@@ -77,8 +77,6 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     ``output_sp=True``  -> output ``Shard(1)`` (reduce-scatter into SP region).
     ``output_sp=False`` -> output ``Replicate()`` (all-reduce).
     """
-    from torch.distributed.tensor import Partial
-
     out_tp: Placement = Shard(1) if output_sp else Replicate()
     return ShardingConfig(
         state_shardings={
@@ -102,12 +100,11 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     state = {"weight": dense_param_placement(tp=Replicate())}
     if not enable_sp:
         return ShardingConfig(state_shardings=state)
-    sp_activation = dense_activation_placement(tp=Shard(1))
     return ShardingConfig(
         state_shardings=state,
-        in_src_shardings={"input": sp_activation},
-        in_dst_shardings={"input": sp_activation},
-        out_dst_shardings=sp_activation,
+        in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
+        in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
+        out_dst_shardings=dense_activation_placement(tp=Shard(1)),
     )
 
 
@@ -239,8 +236,6 @@ def set_decoder_sharding_config(
     config.sharding_config = ShardingConfig(
         state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
     )
-    from torch.distributed.tensor import Partial
-
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=Replicate())},

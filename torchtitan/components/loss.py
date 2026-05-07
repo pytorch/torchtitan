@@ -382,11 +382,10 @@ class ChunkedCELoss(BaseLoss):
             total_loss = total_loss + chunk_loss.detach()
 
             if requires_grad:
-                with spmd.no_typecheck():
-                    chunk_loss.backward()
-                    assert h_chunk.grad is not None
-                    grad_accumulator.add(h_chunk.grad)
-                    h_chunk.grad = None
+                chunk_loss.backward()
+                assert h_chunk.grad is not None
+                grad_accumulator.add(h_chunk.grad)
+                h_chunk.grad = None
 
         if fsdp_enabled:
             lm_head.set_reshard_after_forward(True)

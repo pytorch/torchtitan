@@ -385,15 +385,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-                model.train()
-
                 if config.parallelism.full_spmd_types:
-                    self._reannotate_buffers_spmd_types(model)
+                    from torchtitan.protocols.module import preserve_buffer_spmd
+
+                    buffer_ctx = preserve_buffer_spmd(model)
+                else:
+                    buffer_ctx = contextlib.nullcontext()
+
+                with buffer_ctx:
+                    model.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                model.train()
 
                 self.model_parts = [model]
 
@@ -481,21 +486,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
         self.full_spmd_types: bool = config.parallelism.full_spmd_types
-        if self.full_spmd_types:
-            from torch.distributed.fsdp._fully_shard._fsdp_param_group import (
-                RegisterPostBackwardFunction,
-            )
-
-            spmd.register_local_autograd_function(RegisterPostBackwardFunction)
-
-            # Register real meshes in the shard propagator so type
-            # propagation works for ops like rms_norm, embedding, etc.
-            # Must use PGs from the dense mesh (same as FSDP's mesh).
-            from spmd_types._checker import _shard_propagator
-
-            # Don't register real dense submeshes — they carry parent context
-            # with trivial dims that pollute DTensor dispatch. The shard
-            # propagator auto-creates standalone fake meshes by size.
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -671,26 +661,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # spmd_types helpers
     # ------------------------------------------------------------------
 
-    def _reannotate_buffers_spmd_types(self, model: torch.nn.Module) -> None:
-        """Re-annotate buffers after to_empty + init_weights.
-
-        Params are handled by FSDP's _restore_spmd_types. Buffers are not
-        FSDP-managed, so their annotations are lost by to_empty.
-        DP axes get R (different data per rank), TP gets I (identical).
-        """
-        from torch.distributed.tensor import DTensor
-
-        dp_axes = self.parallel_dims.spmd_dp_axes()
-        spmd_type = {axis: spmd.R for axis in dp_axes}
-        tp_axis = self.parallel_dims.get_spmd_axis("tp")
-        if tp_axis.size() > 1:
-            spmd_type[tp_axis] = spmd.R
-        if not spmd_type:
-            return
-        for buf in model.buffers():
-            if not isinstance(buf, DTensor):
-                spmd.assert_type(buf, spmd_type)
-
     def _annotate_inputs_spmd_types(
         self,
         inputs: torch.Tensor,
@@ -776,11 +746,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            current_mesh = spmd.set_current_mesh(self.parallel_dims.spmd_all_axes()) if self.full_spmd_types else contextlib.nullcontext()
-            typechecker = spmd.typecheck(local=False) if self.full_spmd_types else contextlib.nullcontext()
-            with self.train_context(), current_mesh, typechecker:
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
+            current_mesh = (
+                spmd.set_current_mesh(self.parallel_dims.spmd_all_axes())
+                if self.full_spmd_types
+                else contextlib.nullcontext()
+            )
+            typechecker = (
+                spmd.typecheck(local=False)
+                if self.full_spmd_types
+                else contextlib.nullcontext()
+            )
+            with self.train_context(), current_mesh:
+                with typechecker:
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 loss.backward()
 
