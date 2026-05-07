@@ -79,17 +79,10 @@ def parallelize_llama(
             parallel_dims.get_mesh("cp"),
         )
 
-    if parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=True,
-        )
+        model.parallelize(parallel_dims)
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -438,15 +431,8 @@ def apply_moe_ep_tp(
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
             dispatcher = transformer_block.moe.experts.token_dispatcher
-            if tp_mesh is not None:
-                if isinstance(dispatcher, AllToAllTokenDispatcher):
-                    # sp_size and sp_rank are set for sequence-parallel token splitting
-                    # when EP borrows from TP.
-                    dispatcher.sp_size = tp_mesh.size()
-                    # Use _sym_get_coordinate so the rank is a SymInt
-                    # under CooR precompile instead of a concrete int
-                    # that gets baked into the FX graph.
-                    dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
+            if tp_mesh is not None and isinstance(dispatcher, AllToAllTokenDispatcher):
+                dispatcher.wire_meshes(ep_mesh=ep_mesh, tp_mesh=tp_mesh)
 
         parallelize_module(
             # pyrefly: ignore [missing-attribute]

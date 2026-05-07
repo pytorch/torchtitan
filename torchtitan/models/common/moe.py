@@ -10,7 +10,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -138,6 +138,20 @@ class GroupedExperts(Module):
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
         return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+
+    def parallelize(self, parallel_dims) -> None:
+        """Parallelize experts and wire dispatcher meshes.
+
+        After the base ``Module.parallelize`` distributes ``w1``/``w2``/
+        ``w3`` per ``state_shardings``, install the EP / TP meshes on the
+        non-Module ``token_dispatcher`` child via ``wire_meshes`` so its
+        ``dispatch`` / ``combine`` see the right meshes at run time.
+        """
+        super().parallelize(parallel_dims)
+        self.token_dispatcher.wire_meshes(
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
 
 
 class TokenChoiceTopKRouter(Module):
@@ -364,30 +378,17 @@ class MoE(Module):
 
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
+
+        Under TP, the MoE wrapper's ``sharding_config`` (set by
+        ``set_moe_sharding_config``) handles the dense<->local transition
+        declaratively: ``LocalMapConfig`` converts the (already-Replicate)
+        input to a local tensor for the body and wraps the local output as
+        a ``Partial`` DTensor on exit; ``out_dst_shardings`` then redistri-
+        butes ``Partial -> sp_layout`` once at the boundary. The body
+        operates on plain tensors throughout; children (router, experts,
+        shared_experts) re-wrap inputs to DTensors via their own
+        ``sharding_config`` wrappers as needed.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
-        # in backward, so gradient reduction (reduce-scatter from Partial to
-        # Shard(1)) happens once at the MoE boundary rather than being
-        # duplicated inside the MoE.
-        #
-        # Why grad(x) is Partial on the tp_mesh across all parallelism:
-        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
-        #   w1/w3, Rowwise on w2) produce Partial output gradients.
-        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via sequence-parallel token splitting in AllToAllTokenDispatcher),
-        #   so grad(x) is non-zero only at each rank's token positions (Partial).
-        #
-        # This holds for all MoE components (router.gate, routed experts, shared
-        # experts) and regardless of score_before_experts.
-        if isinstance(x, DTensor):
-            assert (
-                x.device_mesh.ndim == 1
-            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            assert x.device_mesh.mesh_dim_names == (
-                "tp",
-            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
