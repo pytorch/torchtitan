@@ -42,7 +42,6 @@ import functools
 from collections.abc import Callable, Iterable
 from typing import Any
 
-import torch
 import torch.fx as fx
 from torch._inductor.fx_passes.control_dependencies import (
     control_deps,
