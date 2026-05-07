@@ -12,6 +12,7 @@ from typing import Any, cast, TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
+
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
@@ -20,7 +21,7 @@ from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -183,15 +184,12 @@ class Validator(BaseValidator):
         # sequential positions when CP needs them for shard indexing,
         # or None (model uses sequential RoPE slice by default).
         model_config = getattr(model_parts[0], "config", None)
-        if isinstance(model_config, Decoder.Config):
-            layer = model_config.layers[0]
-            attn_config = layer.attention
-        else:
-            attn_config = None
-        mask_type = getattr(attn_config, "mask_type", "causal")
+        layer = getattr(model_config, "layer", None)
+        attn_config = getattr(layer, "attention", None) if layer else None
+        attn_mask_type = getattr(attn_config, "mask_type", "causal")
 
         positions = extra_inputs.pop("positions", None)
-        if mask_type == "block_causal":
+        if attn_mask_type == "block_causal":
             # Per-document positions from the dataloader
             extra_kwargs["positions"] = positions
         elif self.parallel_dims.cp_enabled:
@@ -200,19 +198,12 @@ class Validator(BaseValidator):
                 0, inputs.shape[1], dtype=torch.int32, device=inputs.device
             ).expand(inputs.shape)
 
-        mask_inputs = (
-            {**extra_inputs, "positions": positions}
-            if positions is not None
-            else extra_inputs
-        )
-
         try:
             # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = cast(
                 BaseModel, model_parts[0]
             ).get_attention_masks(
-                input_batch=inputs,
-                extra_inputs=mask_inputs,
+                positions=extra_kwargs.get("positions"),
             )
         except TypeError:
             pass
@@ -229,12 +220,14 @@ class Validator(BaseValidator):
 
         return inputs, labels, extra_inputs, extra_kwargs
 
+    @sl.log_trace_span("eval")
     @torch.no_grad()
     def validate(
         self,
         model_parts: list[nn.Module],
         step: int,
     ) -> None:
+        sl.add_step_tag("eval")
         # Set model to eval mode
         for model in model_parts:
             model.eval()

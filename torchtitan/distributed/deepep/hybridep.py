@@ -163,9 +163,7 @@ def _dispatch_impl(
         )
 
     num_local_experts = num_experts // _buffer.group_size
-    from deep_ep.hybrid_ep_buffer import (  # pyrefly: ignore [missing-import]
-        indices_to_map,
-    )
+    from deep_ep.hybrid_ep_buffer import indices_to_map
 
     routing_map, probs = indices_to_map(
         topk_idx, topk_weights.float(), x.shape[0], num_experts
@@ -382,7 +380,6 @@ def get_buffer(
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
     try:
-        # pyrefly: ignore [missing-import]
         from deep_ep import HybridEPBuffer
     except ImportError as e:
         raise ImportError(

@@ -10,6 +10,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar
 
+from torchtitan.observability import structured_logger as sl
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,17 +116,18 @@ class Configurable:
                     f"{type(self).__name__} has no owner class. "
                     "Define Config inside a Configurable subclass."
                 )
-            if not kwargs:
-                return self._owner(config=replace(self))
+            with sl.log_trace_span(f"{type(self).__qualname__}.build"):
+                if not kwargs:
+                    return self._owner(config=replace(self))
 
-            config_fields = {f.name for f in fields(self)}
-            overlap = config_fields & kwargs.keys()
-            if overlap:
-                raise ValueError(
-                    f"build() kwargs {overlap} overlap with config fields. "
-                    "Put these values in the Config, not in build() kwargs."
-                )
-            return self._owner(config=replace(self), **kwargs)
+                config_fields = {f.name for f in fields(self)}
+                overlap = config_fields & kwargs.keys()
+                if overlap:
+                    raise ValueError(
+                        f"build() kwargs {overlap} overlap with config fields. "
+                        "Put these values in the Config, not in build() kwargs."
+                    )
+                return self._owner(config=replace(self), **kwargs)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

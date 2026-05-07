@@ -28,6 +28,7 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
@@ -35,6 +36,7 @@ from torchtitan.models.common.rope import (
     apply_rotary_emb_cos_sin,
 )
 from torchtitan.protocols.module import Module
+
 
 __all__ = [
     "FlexAttention",
@@ -130,12 +132,15 @@ class VarlenAttention(Module):
 
         varlen_kwargs = dict()
 
-        if is_in_batch_invariant_mode():
-            if current_flash_attention_impl() == "FA3":
-                # Fix split count to 1 to prevent non-deterministic split-k
-                # reductions that vary with batch composition.
-                # Only needed for FA3; FA2 is automatically batch-invariant.
-                varlen_kwargs["num_splits"] = 1
+        # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
+        # produces NaN intermittently with paged KV (block_table). Force
+        # num_splits=1 as a workaround. current_flash_attention_impl()
+        # returns None when FA2 is the implicit default (SM < 9.0).
+        # For FA3, only force num_splits=1 in batch-invariant mode
+        # to prevent non-deterministic split-k reductions.
+        fa_impl = current_flash_attention_impl()
+        if fa_impl in (None, "FA2") or is_in_batch_invariant_mode():
+            varlen_kwargs["num_splits"] = 1
 
         # Forward enable_gqa from GQAttention when Q and KV head counts differ
         if kwargs.get("enable_gqa", False):
@@ -310,24 +315,25 @@ def get_causal_mask_mod() -> _mask_mod_signature:
     return _causal_mask
 
 
-def get_document_mask_mod(*, positions: torch.Tensor) -> _mask_mod_signature:
-    """Creates a document mask from position resets.
+def get_document_mask_mod(positions: torch.Tensor) -> _mask_mod_signature:
+    """Creates a document mask that prevents attention across document boundaries.
+
+    Document boundaries are detected where ``positions`` resets to 0, which
+    marks the start of a new packed document.
 
     Args:
-        positions: Position tensor with shape [b, s]. A new document/chunk
-            begins wherever positions reset, i.e. `positions[i] <= positions[i-1]`.
+        positions: Per-token position tensor with shape ``[b, s]``. Positions
+            reset to 0 at each document start.
 
     Returns:
         A mask modifier function that implements document-level masking.
     """
-    boundaries = torch.zeros_like(positions, dtype=torch.bool)
-    boundaries[:, 1:] = positions[:, 1:] <= positions[:, :-1]
-    document_ids = torch.cumsum(boundaries.int(), dim=1)
+    doc_ids = torch.cumsum((positions == 0).int(), dim=1) - 1
 
     def document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        return document_ids[b, q_idx] == document_ids[b, kv_idx]
+        return doc_ids[b, q_idx] == doc_ids[b, kv_idx]
 
     return document_mask
 
@@ -397,13 +403,17 @@ def create_attention_mask(*args, **kwargs):
     return _compiled_create_block_mask(*args, **kwargs)
 
 
-def create_varlen_metadata_for_document(*, positions: torch.Tensor) -> VarlenMetadata:
-    """
-    Creates cumulative sequence length indices needed for variable length attention
+def create_varlen_metadata_for_document(
+    positions: torch.Tensor,
+) -> VarlenMetadata:
+    """Creates cumulative sequence length indices needed for variable length attention.
+
+    Document boundaries are detected where ``positions`` resets to 0 (same
+    convention as :func:`get_document_mask_mod`).
 
     Args:
-        positions: Position tensor with shape [b, s]. Position resets define
-            document/chunk boundaries.
+        positions: Per-token position tensor with shape ``[b, s]``. Positions
+            reset to 0 at each document start.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
@@ -412,22 +422,12 @@ def create_varlen_metadata_for_document(*, positions: torch.Tensor) -> VarlenMet
     device = positions.device
     cu_seqlens_list, all_seq_lengths = [], []
     offset = 0
-    max_seqlen = 0
 
     for b in range(batch_size):
-        sample_positions = positions[b]
-        boundaries = (sample_positions[1:] <= sample_positions[:-1]).nonzero(
-            as_tuple=True
-        )[0].to(torch.int32) + 1
-
+        doc_starts = (positions[b] == 0).nonzero(as_tuple=True)[0].to(torch.int32)
         sample_cu_seqlens = torch.cat(
-            [
-                torch.tensor([0], dtype=torch.int32, device=device),
-                boundaries,
-                torch.tensor([seq_len], dtype=torch.int32, device=device),
-            ]
+            [doc_starts, torch.tensor([seq_len], dtype=torch.int32, device=device)]
         )
-        sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
 
         seq_lengths = torch.diff(sample_cu_seqlens)
         all_seq_lengths.append(seq_lengths)

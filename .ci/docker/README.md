@@ -18,5 +18,5 @@ It also uses the same directory structure as PyTorch.
 ./build.sh "${IMAGE_NAME}" "${DOCKER_BUILD_PARAMETERS}"
 
 # Build a specific image
-./build.sh torchtitan-ubuntu-20.04-clang12 -t myimage:latest
+./build.sh torchtitan-ubuntu-22.04-clang12 -t myimage:latest
 ```

@@ -24,6 +24,7 @@ from torchtitan.distributed.context_parallel import prepare_context_parallel_inp
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer as TitanTrainer
+
 from .engine import ForgeEngine
 
 
@@ -173,11 +174,12 @@ class Trainer(ForgeEngine):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
+        positions = extra_inputs.pop("positions", None)
+
         try:
             # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
-                input_batch=inputs,
-                extra_inputs=extra_inputs,
+                positions=positions,
             )
         except TypeError:
             pass

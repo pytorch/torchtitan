@@ -12,6 +12,9 @@ Usage:
     register_model_to_vllm_model_registry(model_spec)
 """
 
+from __future__ import annotations
+
+from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
 
 # Model-agnostic name used for vLLM model registration.
@@ -21,6 +24,7 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 
 def register_model_to_vllm_model_registry(
     model_spec: ModelSpec,
+    compile_config: CompileConfig,
 ) -> None:
     """
     Register a TorchTitan model with vLLM's ModelRegistry.
@@ -29,6 +33,9 @@ def register_model_to_vllm_model_registry(
 
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components
+        compile_config: Per-layer torch.compile config. When enabled, each
+            TransformerBlock is compiled individually via ``apply_compile``
+            during model construction.
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
     from vllm.logger import init_logger
@@ -43,6 +50,7 @@ def register_model_to_vllm_model_registry(
                 model_spec=model_spec,
                 vllm_config=vllm_config,
                 prefix=prefix,
+                compile_config=compile_config,
             )
 
     # Set the class name so vLLM can identify it

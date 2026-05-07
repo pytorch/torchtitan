@@ -70,6 +70,7 @@ logger = logging.getLogger(__name__)
 # Model and Engine setup
 # ---------------------------------------------------------------------------
 
+
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
     config: RLTrainer.Config,
@@ -181,7 +182,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.compile.is_eager,
+        enforce_eager=not gen_config.cudagraph.enable,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(
             backend=AttentionBackendEnum.CUSTOM,
@@ -194,7 +195,11 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+    max_num_seqs = config.num_prompts_per_step * gen_config.sampling.n
+    engine_kwargs["max_num_seqs"] = max_num_seqs
+    vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
+        max_num_seqs=max_num_seqs,
+    )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.debug.seed is not None:
@@ -435,7 +440,10 @@ class TestBitwiseParity(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
-        register_model_to_vllm_model_registry(config.model_spec)
+        register_model_to_vllm_model_registry(
+            config.model_spec,
+            compile_config=config.compile,
+        )
 
         # Test runs trainer and generator in the same process, so limit
         # GPU memory for vLLM to leave room for the trainer model.

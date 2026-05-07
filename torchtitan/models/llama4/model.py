@@ -203,22 +203,16 @@ class Llama4Model(Decoder):
 
     def get_attention_masks(
         self,
-        input_batch: torch.Tensor,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
+        positions: torch.Tensor,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
-        positions = extra_inputs.get("positions") if extra_inputs else None
         attn_config = self.config.layers[0].attention
         match attn_config.mask_type:
             case "causal":
                 B = 1
             case "block_causal":
-                B = input_batch.shape[0]
-                if positions is None:
-                    raise ValueError(
-                        "block_causal attention requires positions in extra_inputs"
-                    )
-                mask_mods.append(get_document_mask_mod(positions=positions))
+                mask_mods.append(get_document_mask_mod(positions))
+                B = positions.shape[0]
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"
@@ -232,7 +226,7 @@ class Llama4Model(Decoder):
         )
         nope_mask_mod = and_masks(*mask_mods)
 
-        seqlen = input_batch.shape[1]
+        seqlen = positions.shape[1]
         return {
             "rope": create_attention_mask(rope_mask_mod, B, None, seqlen, seqlen),
             "nope": create_attention_mask(nope_mask_mod, B, None, seqlen, seqlen),
