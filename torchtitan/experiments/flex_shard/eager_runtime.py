@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .collectives import AsyncAllGatherResult, AsyncReduceScatterResult
+from .comm_buffer_lifetime import AsyncAllGatherResult, AsyncReduceScatterResult
 from .state import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
@@ -33,13 +33,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+ParamEntry = tuple[nn.Module, str, nn.Module, ParamInfo]
+
 
 @dataclass
 class AllGatherBucket:
     """Runtime metadata for one batched all-gather bucket."""
 
     storage: DStorage
-    entries: list[tuple[nn.Module, str, nn.Module, ParamInfo]]
+    entries: list[ParamEntry]
     infos: list[ParamInfo]
     debug_fqn: str | None
     use_autograd_unshard: bool
@@ -118,6 +120,24 @@ def _wait_and_clear_reduce_scatter_states(
         context.reduce_scatter_states.clear()
 
 
+def _accumulate_sharded_grads(
+    param_refs: list[tuple[nn.Module, str]],
+    sharded_grads: list[torch.Tensor],
+) -> list[torch.Tensor]:
+    """Cast sharded grads to local param dtype and accumulate into .grad."""
+    stored_grads: list[torch.Tensor] = []
+    for (leaf, name), grad in zip(param_refs, sharded_grads, strict=True):
+        param = leaf._parameters[name]
+        if grad.dtype != param.dtype:
+            grad = grad.to(param.dtype)
+        stored_grads.append(grad)
+        if param.grad is None:
+            param.grad = grad
+        else:
+            param.grad += grad
+    return stored_grads
+
+
 class _BucketAllGather(torch.autograd.Function):
     """Autograd boundary for RAF bucket all-gather.
 
@@ -182,22 +202,11 @@ class _BucketAllGather(torch.autograd.Function):
                     runtime.context.reduce_scatter_stream,
                     debug_fqn=runtime.debug_fqn,
                 )
-                stored_grads: list[torch.Tensor] = []
                 with torch.cuda.stream(runtime.context.reduce_scatter_stream):
-                    for (leaf, name), grad in zip(
+                    result.sharded_grads = _accumulate_sharded_grads(
                         valid_param_refs,
                         result.sharded_grads,
-                        strict=True,
-                    ):
-                        param = leaf._parameters[name]
-                        if grad.dtype != param.dtype:
-                            grad = grad.to(param.dtype)
-                        stored_grads.append(grad)
-                        if param.grad is None:
-                            param.grad = grad
-                        else:
-                            param.grad += grad
-                    result.sharded_grads = stored_grads
+                    )
                     result.event = torch.cuda.Event()
                     result.event.record(runtime.context.reduce_scatter_stream)
                 runtime.context.reduce_scatter_states.append(result)
@@ -303,6 +312,26 @@ def _get_bucket_module(storage: DStorage) -> nn.Module:
     return mod
 
 
+def _get_hook_target_module(storage: DStorage) -> nn.Module | None:
+    """Return the module whose forward should trigger a bucket all-gather."""
+    target = _get_bucket_module(storage)
+    if (
+        storage._reshard_after_forward
+        and target is storage._module
+        and any(
+            hasattr(child, "_checkpoint_wrapped_module")
+            for child in storage._module.modules()
+            if child is not storage._module
+        )
+    ):
+        logger.debug(
+            "Skipping root-level batched all-gather hook because child "
+            "checkpoint recomputation would not replay the root hook.",
+        )
+        return None
+    return getattr(target, "_checkpoint_wrapped_module", target)
+
+
 def _get_param_leaf_module(
     module: nn.Module,
     fqn: str,
@@ -313,6 +342,35 @@ def _get_param_leaf_module(
     for part in parts[:-1]:
         leaf_module = getattr(leaf_module, part)
     return leaf_module, parts[-1]
+
+
+def _get_bucket_param_entries(
+    storage: DStorage,
+    module_param_map: dict[nn.Module, dict[str, nn.Module]],
+) -> list[ParamEntry]:
+    """Return params in a bucket with their owning module and parametrization."""
+    param_entries: list[ParamEntry] = []
+    for info in storage._param_infos.values():
+        parts = info.fqn.split(".")
+        leaf_module = storage._module
+        for part in parts[:-1]:
+            child = getattr(leaf_module, part, None)
+            if child is None:
+                wrapped = getattr(leaf_module, "_checkpoint_wrapped_module", None)
+                if wrapped is not None:
+                    leaf_module = getattr(wrapped, part)
+                else:
+                    leaf_module = getattr(leaf_module, part)
+            else:
+                leaf_module = child
+        local_name = parts[-1]
+        if hasattr(leaf_module, "_checkpoint_wrapped_module"):
+            leaf_module = leaf_module._checkpoint_wrapped_module
+        if leaf_module in module_param_map:
+            parametrization = module_param_map[leaf_module].get(local_name)
+            if parametrization is not None:
+                param_entries.append((leaf_module, local_name, parametrization, info))
+    return param_entries
 
 
 def _create_eager_parametrizations(
@@ -396,33 +454,7 @@ def _install_batched_allgather_hooks(
         ):
             _raise_unsupported_bucket_autograd_unshard(storage)
 
-        # Pre-compute (leaf_module, param_name, parametrization, info) for
-        # each param in this bucket. Captured at flex_shard() time (before
-        # checkpoint wrapping changes the module tree).
-        param_entries: list[tuple[nn.Module, str, nn.Module, ParamInfo]] = []
-        for info in infos:
-            parts = info.fqn.split(".")
-            leaf_mod = storage._module
-            for part in parts[:-1]:
-                child = getattr(leaf_mod, part, None)
-                if child is None:
-                    wrapped = getattr(leaf_mod, "_checkpoint_wrapped_module", None)
-                    if wrapped is not None:
-                        leaf_mod = getattr(wrapped, part)
-                    else:
-                        leaf_mod = getattr(leaf_mod, part)
-                else:
-                    leaf_mod = child
-            local_name = parts[-1]
-            # Unwrap CheckpointWrapper to find the original module
-            # that's in module_param_map
-            if hasattr(leaf_mod, "_checkpoint_wrapped_module"):
-                leaf_mod = leaf_mod._checkpoint_wrapped_module
-            if leaf_mod in module_param_map:
-                param_p = module_param_map[leaf_mod].get(local_name)
-                if param_p is not None:
-                    param_entries.append((leaf_mod, local_name, param_p, info))
-
+        param_entries = _get_bucket_param_entries(storage, module_param_map)
         logger.debug(f"Batched hooks: {len(param_entries)}/{len(infos)} params matched")
         if not param_entries:
             continue
@@ -533,22 +565,13 @@ def _install_batched_allgather_hooks(
                             all_gather_context.reduce_scatter_stream,
                             debug_fqn=all_gather_bucket.debug_fqn,
                         )
-                        stored_grads: list[torch.Tensor] = []
                         with torch.cuda.stream(
                             all_gather_context.reduce_scatter_stream
                         ):
-                            for (leaf, name, _), rg in zip(
-                                valid, result.sharded_grads, strict=True
-                            ):
-                                param = leaf._parameters[name]
-                                if rg.dtype != param.dtype:
-                                    rg = rg.to(param.dtype)
-                                stored_grads.append(rg)
-                                if param.grad is None:
-                                    param.grad = rg
-                                else:
-                                    param.grad += rg
-                            result.sharded_grads = stored_grads
+                            result.sharded_grads = _accumulate_sharded_grads(
+                                [(leaf, name) for leaf, name, _ in valid],
+                                result.sharded_grads,
+                            )
                             result.event = torch.cuda.Event()
                             result.event.record(
                                 all_gather_context.reduce_scatter_stream
@@ -557,14 +580,10 @@ def _install_batched_allgather_hooks(
                         _queue_reduce_scatter_wait(all_gather_context)
                     else:
                         reduced = pt.reduce_grad(grads, valid_infos, s._mesh)
-                        for (leaf, name, _), rg in zip(valid, reduced, strict=True):
-                            param = leaf._parameters[name]
-                            if rg.dtype != param.dtype:
-                                rg = rg.to(param.dtype)
-                            if param.grad is None:
-                                param.grad = rg
-                            else:
-                                param.grad += rg
+                        _accumulate_sharded_grads(
+                            [(leaf, name) for leaf, name, _ in valid],
+                            reduced,
+                        )
 
             def pre_forward_hook(mod, args):
                 if torch.compiler.is_compiling():
@@ -667,27 +686,11 @@ def _install_batched_allgather_hooks(
             use_autograd_unshard,
         )
 
-        # Register hooks on the bucket's child module (not root) so they
-        # fire during checkpoint recomputation in backward too.
-        # Navigate through CheckpointWrapper to the inner module.
-        target = _get_bucket_module(storage)
-        if (
-            storage._reshard_after_forward
-            and target is storage._module
-            and any(
-                hasattr(child, "_checkpoint_wrapped_module")
-                for child in storage._module.modules()
-                if child is not storage._module
-            )
-        ):
-            logger.debug(
-                "Skipping root-level batched all-gather hook because child "
-                "checkpoint recomputation would not replay the root hook.",
-            )
+        target = _get_hook_target_module(storage)
+        if target is None:
             continue
-        inner = getattr(target, "_checkpoint_wrapped_module", target)
-        inner.register_forward_pre_hook(pre_hook)
-        inner.register_forward_hook(post_hook)
+        target.register_forward_pre_hook(pre_hook)
+        target.register_forward_hook(post_hook)
         if ag_context is not None and ag_bucket is not None:
             ag_context.buckets.append(ag_bucket)
         for _, _, param_p, _ in param_entries:

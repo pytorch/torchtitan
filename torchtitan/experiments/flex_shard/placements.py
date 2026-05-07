@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 
-from .collectives import (
+from .comm_buffer_lifetime import (
     AsyncAllGatherResult,
     AsyncReduceScatterResult,
     StreamHandoff,
