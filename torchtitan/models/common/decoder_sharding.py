@@ -11,8 +11,8 @@ from torchtitan.protocols.sharding import (
     LocalMapConfig,
     LocalSpmdConfig,
     NamedPlacement,
-    NamedSpmdType,
     ShardingConfig,
+    SpmdAnnotation,
 )
 from torchtitan.protocols.types import MeshAxisName
 
@@ -77,6 +77,8 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     ``output_sp=True``  -> output ``Shard(1)`` (reduce-scatter into SP region).
     ``output_sp=False`` -> output ``Replicate()`` (all-reduce).
     """
+    from torch.distributed.tensor import Partial
+
     out_tp: Placement = Shard(1) if output_sp else Replicate()
     return ShardingConfig(
         state_shardings={
@@ -100,11 +102,12 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     state = {"weight": dense_param_placement(tp=Replicate())}
     if not enable_sp:
         return ShardingConfig(state_shardings=state)
+    sp_activation = dense_activation_placement(tp=Shard(1))
     return ShardingConfig(
         state_shardings=state,
-        in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
-        in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
-        out_dst_shardings=dense_activation_placement(tp=Shard(1)),
+        in_src_shardings={"input": sp_activation},
+        in_dst_shardings={"input": sp_activation},
+        out_dst_shardings=sp_activation,
     )
 
 
@@ -181,22 +184,16 @@ def set_gqa_inner_attention_local_map(
 
 def set_gqa_inner_attention_local_spmd(
     inner_attention_cfg,
-    in_types: tuple[NamedSpmdType, ...],
-    out_types: tuple[NamedSpmdType, ...],
-    in_partition_specs: tuple | None = None,
-    out_partition_specs: tuple | None = None,
+    inputs: tuple[SpmdAnnotation, ...],
+    out: SpmdAnnotation,
 ) -> None:
     """Install a ``LocalSpmdConfig`` on an inner-attention config.
 
     spmd_types counterpart to ``set_gqa_inner_attention_local_map``.
     """
-    inner_attention_cfg.sharding_config = ShardingConfig(
-        local_spmd=LocalSpmdConfig(
-            in_types=in_types,
-            out_types=out_types,
-            in_partition_specs=in_partition_specs,
-            out_partition_specs=out_partition_specs,
-        ),
+    inner_attention_cfg.spmd_config = LocalSpmdConfig(
+        inputs=inputs,
+        out=out,
     )
 
 
@@ -222,7 +219,7 @@ def set_dense_ffn_sharding(
 
 
 def set_decoder_sharding_config(
-    config, *, loss_parallel: bool, enable_sp: bool
+    config, *, loss_parallel: bool, enable_sp: bool, full_spmd_types: bool = False,
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     ``output``, and the root ``freqs_cis`` buffer.
@@ -242,12 +239,21 @@ def set_decoder_sharding_config(
     config.sharding_config = ShardingConfig(
         state_shardings={"freqs_cis": dense_param_placement(tp=Replicate())},
     )
+    from torch.distributed.tensor import Partial
+
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=Shard(0))},
         in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
         out_dst_shardings=dense_activation_placement(tp=activation_tp),
     )
+    if full_spmd_types:
+        from spmd_types import P as spmd_P, R as spmd_R, S as spmd_S
+
+        config.tok_embeddings.spmd_config = LocalSpmdConfig(
+            inputs=(SpmdAnnotation(types={DP_SHARD: spmd_S(0), TP: spmd_R}),),
+            out=SpmdAnnotation(types={DP_SHARD: spmd_S(0), TP: spmd_P}),
+        )
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
