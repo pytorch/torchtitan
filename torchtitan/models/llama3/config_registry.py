@@ -97,8 +97,23 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     )
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=[
+        converters=[
             Float8LinearConverter.Config(model_compile_enabled=model_compile_enabled),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_lora() -> Trainer.Config:
+    from torchtitan.components.lora import LoRAConverter
+
+    config = llama3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            LoRAConverter.Config(
+                rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
+            ),
         ],
     )
     return config
@@ -117,7 +132,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry(
         "debugmodel",
-        quantization=[
+        converters=[
             Float8LinearConverter.Config(
                 emulate=True,
                 model_compile_enabled=(
@@ -208,7 +223,7 @@ def llama3_405b() -> Trainer.Config:
         ),
         model_spec=model_registry(
             "405B",
-            quantization=[
+            converters=[
                 Float8LinearConverter.Config(
                     filter_fqns=["output"],
                     model_compile_enabled=(

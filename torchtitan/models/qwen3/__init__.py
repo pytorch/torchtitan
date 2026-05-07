@@ -10,7 +10,7 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.quantization import QuantizationConverter
+from torchtitan.config import Configurable
 
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
@@ -24,7 +24,7 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.model_spec import ModelSpec, validate_converter_order
 
 from .model import Qwen3Model, Qwen3TransformerBlock
 from .parallelize import parallelize_qwen3
@@ -619,15 +619,19 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: list[QuantizationConverter.Config] | None = None,
+    converters: list[Configurable.Config] | None = None,
 ) -> ModelSpec:
     kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    built_converters: list = []
+    if converters is not None:
+        for c in converters:
+            built_converters.append(c.build())
+        validate_converter_order(built_converters)
+        for converter in built_converters:
+            converter.convert(config)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,
@@ -636,4 +640,5 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
+        converters=built_converters,
     )
