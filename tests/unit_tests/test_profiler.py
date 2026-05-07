@@ -14,7 +14,7 @@ class TestProfilerConfig(unittest.TestCase):
     def test_default_field_values(self):
         cfg = Profiler.Config()
         self.assertFalse(cfg.enable_profiling)
-        self.assertEqual(cfg.save_traces_folder, "profile_traces")
+        self.assertEqual(cfg.save_traces_folder, "profiling/traces")
         self.assertEqual(cfg.profile_freq, 10)
         self.assertEqual(cfg.profiler_active, 1)
         self.assertEqual(cfg.profiler_warmup, 3)
@@ -22,7 +22,7 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertIsNone(cfg.profiler_skip_first)
         self.assertIsNone(cfg.profiler_skip_first_wait)
         self.assertFalse(cfg.enable_memory_snapshot)
-        self.assertEqual(cfg.save_memory_snapshot_folder, "memory_snapshot")
+        self.assertEqual(cfg.save_memory_snapshot_folder, "profiling/memory_snapshot")
 
     def test_custom_field_values(self):
         cfg = Profiler.Config(
