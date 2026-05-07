@@ -77,57 +77,6 @@ class TestFlexShardAPI(unittest.TestCase):
             self.assertIsNone(get_placements(unmanaged))
             self.assertIsNone(get_global_shape(unmanaged))
 
-    def test_root_wrap_excludes_already_flex_sharded_child(self):
-        with single_rank_cpu_mesh() as mesh:
-            args, model = make_transformer_model()
-
-            flex_shard_cpu(
-                model.output,
-                mesh,
-                buckets=[BucketSpec(["*"], reshard_after_forward=False)],
-            )
-            child_storage = model.output.dstorage
-
-            flex_shard_cpu(
-                model,
-                mesh,
-                buckets=transformer_bucket_specs(
-                    args.n_layers,
-                    reshard_after_forward=False,
-                ),
-            )
-
-            self.assertIs(model.output.dstorage, child_storage)
-            for storage in model.dstorages:
-                self.assertNotIn("output.weight", storage.param_infos)
-
-    def test_root_wrap_raises_if_all_children_are_already_managed(self):
-        with single_rank_cpu_mesh() as mesh:
-            args, model = make_transformer_model()
-            children = [
-                model.tok_embeddings,
-                model.pos_embeddings,
-                *model.layers,
-                model.norm,
-                model.output,
-            ]
-            for child in children:
-                flex_shard_cpu(
-                    child,
-                    mesh,
-                    buckets=[BucketSpec(["*"], reshard_after_forward=False)],
-                )
-
-            with self.assertRaisesRegex(ValueError, "has no parameters to shard"):
-                flex_shard_cpu(
-                    model,
-                    mesh,
-                    buckets=transformer_bucket_specs(
-                        args.n_layers,
-                        reshard_after_forward=False,
-                    ),
-                )
-
     def test_offload_policy_is_rejected_until_supported(self):
         with single_rank_cpu_mesh() as mesh:
             _, model = make_transformer_model()

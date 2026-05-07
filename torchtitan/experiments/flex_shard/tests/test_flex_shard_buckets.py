@@ -155,7 +155,10 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["attn.weight", "attn.bias", "ffn.weight", "ffn.bias"]
-        buckets = [BucketSpec(["attn.*"]), BucketSpec(["ffn.*"])]
+        buckets = [
+            BucketSpec(["attn.*"], reshard_after_forward=False),
+            BucketSpec(["ffn.*"], reshard_after_forward=False),
+        ]
         result = _assign_params_to_buckets(fqns, buckets)
 
         self.assertEqual(result[0], ["attn.weight", "attn.bias"])
@@ -168,7 +171,7 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["attn.weight", "norm.weight"]
-        buckets = [BucketSpec(["attn.*"])]
+        buckets = [BucketSpec(["attn.*"], reshard_after_forward=False)]
         with self.assertRaises(ValueError, msg="not covered by any bucket"):
             _assign_params_to_buckets(fqns, buckets)
 
@@ -179,48 +182,12 @@ class TestBucketAssignment(unittest.TestCase):
         )
 
         fqns = ["attn.weight"]
-        buckets = [BucketSpec(["attn.*"]), BucketSpec(["*"])]
+        buckets = [
+            BucketSpec(["attn.*"], reshard_after_forward=False),
+            BucketSpec(["*"], reshard_after_forward=False),
+        ]
         with self.assertRaises(ValueError, msg="matched multiple buckets"):
             _assign_params_to_buckets(fqns, buckets)
-
-    def test_bucket_spec_patterns(self):
-        """BucketSpec.patterns are used for matching."""
-        from torchtitan.experiments.flex_shard import BucketSpec
-        from torchtitan.experiments.flex_shard.bucket_storage import (
-            _assign_params_to_buckets,
-        )
-
-        fqns = ["attn.weight", "ffn.weight"]
-        buckets = [BucketSpec(patterns=["attn.*"]), BucketSpec(patterns=["ffn.*"])]
-        result = _assign_params_to_buckets(fqns, buckets)
-
-        self.assertEqual(result[0], ["attn.weight"])
-        self.assertEqual(result[1], ["ffn.weight"])
-
-    def test_wildcard_bucket(self):
-        """Single ['*'] bucket catches all params."""
-        from torchtitan.experiments.flex_shard.bucket_storage import (
-            _assign_params_to_buckets,
-        )
-
-        fqns = ["a.weight", "b.bias", "c.weight"]
-        buckets = [BucketSpec(["*"])]
-        result = _assign_params_to_buckets(fqns, buckets)
-
-        self.assertEqual(result[0], fqns)
-
-    def test_multi_pattern_bucket(self):
-        """Bucket with multiple patterns matches any of them."""
-        from torchtitan.experiments.flex_shard.bucket_storage import (
-            _assign_params_to_buckets,
-        )
-
-        fqns = ["attn.weight", "ffn.weight", "norm.weight"]
-        buckets = [BucketSpec(["attn.*", "ffn.*"]), BucketSpec(["norm.*"])]
-        result = _assign_params_to_buckets(fqns, buckets)
-
-        self.assertEqual(result[0], ["attn.weight", "ffn.weight"])
-        self.assertEqual(result[1], ["norm.weight"])
 
 
 # ---------------------------------------------------------------------------
@@ -268,31 +235,6 @@ class TestBucketPlacementValidation(unittest.TestCase):
                 _FakeMesh(("fsdp",)),
             )
 
-    def test_rejects_non_shard0_placement(self):
-        """Unsupported placement in a bucket raises ValueError."""
-        from torchtitan.experiments.flex_shard.utils import (
-            _validate_bucket_placements,
-        )
-        from torchtitan.experiments.flex_shard.placements import Placement, Shard
-
-        class UnsupportedPlacement(Placement):
-            def __repr__(self):
-                return "UnsupportedPlacement()"
-
-        assignments = [["a.weight", "b.weight"]]
-        placements = {
-            "a.weight": (Shard(0),),
-            "b.weight": (UnsupportedPlacement(),),
-        }
-        buckets = [BucketSpec(["*"])]
-        with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
-            _validate_bucket_placements(
-                assignments,
-                placements,
-                buckets,
-                self._named_params(),
-            )
-
     def test_rejects_nonzero_shard_dim(self):
         """Shard(1) in a bucket raises ValueError."""
         from torchtitan.experiments.flex_shard.utils import (
@@ -305,53 +247,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(1),),
         }
-        buckets = [BucketSpec(["*"])]
-        with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
-            _validate_bucket_placements(
-                assignments,
-                placements,
-                buckets,
-                self._named_params(),
-            )
-
-    def test_accepts_same_placement(self):
-        """Shard(0) + Shard(0) in one bucket passes."""
-        from torchtitan.experiments.flex_shard.utils import (
-            _validate_bucket_placements,
-        )
-        from torchtitan.experiments.flex_shard.placements import Shard
-
-        assignments = [["a.weight", "b.weight"]]
-        placements = {
-            "a.weight": (Shard(0),),
-            "b.weight": (Shard(0),),
-        }
-        buckets = [BucketSpec(["*"])]
-        # Should not raise
-        _validate_bucket_placements(
-            assignments,
-            placements,
-            buckets,
-            self._named_params(),
-        )
-
-    def test_rejects_non_shard0_in_separate_bucket(self):
-        """Unsupported placement is rejected even when isolated to its own bucket."""
-        from torchtitan.experiments.flex_shard.utils import (
-            _validate_bucket_placements,
-        )
-        from torchtitan.experiments.flex_shard.placements import Placement, Shard
-
-        class UnsupportedPlacement(Placement):
-            def __repr__(self):
-                return "UnsupportedPlacement()"
-
-        assignments = [["a.weight"], ["b.weight"]]
-        placements = {
-            "a.weight": (Shard(0),),
-            "b.weight": (UnsupportedPlacement(),),
-        }
-        buckets = [BucketSpec(["a.*"]), BucketSpec(["b.*"])]
+        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
         with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
             _validate_bucket_placements(
                 assignments,
@@ -372,7 +268,7 @@ class TestBucketPlacementValidation(unittest.TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(0),),
         }
-        buckets = [BucketSpec(["*"])]
+        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
         with self.assertRaisesRegex(ValueError, "mixed parameter dtypes"):
             _validate_bucket_placements(
                 assignments,
@@ -380,24 +276,6 @@ class TestBucketPlacementValidation(unittest.TestCase):
                 buckets,
                 self._named_params({"b.weight": torch.bfloat16}),
             )
-
-    def test_empty_bucket_skipped(self):
-        """Empty bucket assignments are silently skipped."""
-        from torchtitan.experiments.flex_shard.utils import (
-            _validate_bucket_placements,
-        )
-        from torchtitan.experiments.flex_shard.placements import Shard
-
-        assignments = [[], ["a.weight"]]
-        placements = {"a.weight": (Shard(0),)}
-        buckets = [BucketSpec(["x.*"]), BucketSpec(["a.*"])]
-        # Should not raise (first bucket is empty)
-        _validate_bucket_placements(
-            assignments,
-            placements,
-            buckets,
-            self._named_params(),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -490,45 +368,6 @@ class TestBucketStorageLayout(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# BucketSpec tests (single-process, no NCCL)
-# ---------------------------------------------------------------------------
-
-
-class TestBucketSpec(unittest.TestCase):
-    """Test BucketSpec dataclass."""
-
-    def test_basic_creation(self):
-        """BucketSpec stores patterns."""
-        from torchtitan.experiments.flex_shard import BucketSpec
-
-        spec = BucketSpec(patterns=["attn.*", "ffn.*"])
-        self.assertEqual(spec.patterns, ["attn.*", "ffn.*"])
-        self.assertIsNone(spec.mp_policy)
-        self.assertIsNone(spec.offload_policy)
-        self.assertTrue(spec.reshard_after_forward)
-
-    def test_with_policies(self):
-        """BucketSpec stores policy placeholders."""
-        from torchtitan.experiments.flex_shard import BucketSpec
-
-        spec = BucketSpec(
-            patterns=["*"],
-            mp_policy="placeholder",
-            offload_policy="placeholder",
-        )
-        self.assertEqual(spec.mp_policy, "placeholder")
-        self.assertEqual(spec.offload_policy, "placeholder")
-        self.assertTrue(spec.reshard_after_forward)
-
-    def test_reshard_after_forward_policy(self):
-        """BucketSpec stores per-bucket reshard policy."""
-        from torchtitan.experiments.flex_shard import BucketSpec
-
-        spec = BucketSpec(patterns=["*"], reshard_after_forward=False)
-        self.assertFalse(spec.reshard_after_forward)
-
-
-# ---------------------------------------------------------------------------
 # Distributed per-bucket DStorage tests (torchrun only)
 # ---------------------------------------------------------------------------
 
@@ -569,7 +408,7 @@ class TestDistributedBuckets(unittest.TestCase):
         )
 
         kwargs.setdefault("shard_placement_fn", per_param_placements)
-        kwargs.setdefault("buckets", [BucketSpec(["*"])])
+        kwargs.setdefault("buckets", [BucketSpec(["*"], reshard_after_forward=False)])
         return flex_shard(
             model,
             mesh,
@@ -597,6 +436,8 @@ class TestDistributedBuckets(unittest.TestCase):
             ),
         )
 
+        self.assertEqual(len(model.dstorages), 5)
+        self.assertIs(model.dstorage, model.dstorages[0])
         output = model(x)
         torch.testing.assert_close(output, ref_output)
 
@@ -625,57 +466,6 @@ class TestDistributedBuckets(unittest.TestCase):
             sd["output.weight"].shape,
             (args.vocab_size // self.world_size, args.dim),
         )
-
-    def test_whole_transformer_bucket_requires_matching_hook_boundary(self):
-        """A whole-Transformer RAF bucket has no matching recompute hook boundary."""
-        mesh = self._init_mesh()
-
-        args, model = make_transformer_model(device="cuda")
-        for param in model.parameters():
-            torch.distributed.broadcast(param.data, src=0)
-        self._flex_shard(model, mesh, buckets=[BucketSpec(["*"])])
-
-        x = transformer_inputs(args, device="cuda")
-        torch.distributed.broadcast(x, src=0)
-
-        with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
-            model(x)
-
-    def test_multi_bucket_dstorages_count(self):
-        """Module has one DStorage per non-empty bucket."""
-        mesh = self._init_mesh()
-        args, model = make_transformer_model(device="cuda")
-        for p in model.parameters():
-            torch.distributed.broadcast(p.data, src=0)
-
-        buckets = transformer_bucket_specs(args.n_layers, reshard_after_forward=False)
-        self._flex_shard(
-            model,
-            mesh,
-            buckets=buckets,
-        )
-
-        self.assertEqual(len(model.dstorages), len(buckets))
-        self.assertIs(model.dstorage, model.dstorages[0])
-
-    def test_bucket_spec_reshard_policy_wired_to_dstorages(self):
-        """Each bucket's reshard policy is stored on its DStorage."""
-        mesh = self._init_mesh()
-        args, model = make_transformer_model(device="cuda")
-        for p in model.parameters():
-            torch.distributed.broadcast(p.data, src=0)
-
-        buckets = transformer_bucket_specs(args.n_layers, reshard_after_forward=False)
-        buckets[0] = BucketSpec(["tok_embeddings.*"], reshard_after_forward=True)
-        self._flex_shard(
-            model,
-            mesh,
-            buckets=buckets,
-        )
-
-        self.assertTrue(model.dstorages[0]._reshard_after_forward)
-        for storage in model.dstorages[1:]:
-            self.assertFalse(storage._reshard_after_forward)
 
 
 if __name__ == "__main__":

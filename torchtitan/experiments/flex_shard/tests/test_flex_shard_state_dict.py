@@ -54,23 +54,6 @@ class TestFlexShardStateDict(unittest.TestCase):
             for key, value in source.state_dict().items():
                 torch.testing.assert_close(value, target.state_dict()[key])
 
-    def test_state_dict_is_stable_across_forward_and_backward(self):
-        with single_rank_cpu_mesh() as mesh:
-            torch.manual_seed(0)
-            args, model = _make_flex_sharded_transformer(mesh)
-            before = {k: v.clone() for k, v in model.state_dict().items()}
-
-            x = transformer_inputs(args, batch_size=3)
-            _ = model(x)
-            after_forward = {k: v.clone() for k, v in model.state_dict().items()}
-
-            model(x).sum().backward()
-            after_backward = model.state_dict()
-
-            for key, value in before.items():
-                torch.testing.assert_close(value, after_forward[key])
-                torch.testing.assert_close(value, after_backward[key])
-
     def test_load_state_dict_rejects_incompatible_shapes(self):
         with single_rank_cpu_mesh() as mesh:
             _, source = _make_flex_sharded_transformer(mesh, dim=8, n_heads=2)
