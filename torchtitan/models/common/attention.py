@@ -37,6 +37,15 @@ from torchtitan.models.common.rope import (
 )
 from torchtitan.protocols.module import Module
 
+import torch.distributed.spmd_types as spmd
+
+
+def _spmd_spec_leaf(tensor: torch.Tensor):
+    """Build a local_map spec leaf from an spmd-typed tensor."""
+    types = dict(spmd.get_local_type(tensor))
+    spec = spmd.get_partition_spec(tensor)
+    return (types, spec) if spec else types
+
 
 __all__ = [
     "FlexAttention",
@@ -649,11 +658,17 @@ class GQAttention(BaseAttention):
         # Apply rotary embeddings
         if self.use_rope:
             if self.rope_backend == "cos_sin":
-                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
+                rope_fn = lambda q, k, c, p: apply_rotary_emb_cos_sin(q, k, c, p)
             else:
-                xq, xk = apply_rotary_emb_complex(
-                    xq, xk, freqs_cis=rope_cache, positions=positions
+                rope_fn = lambda q, k, c, p: apply_rotary_emb_complex(
+                    q, k, freqs_cis=c, positions=p
                 )
+            if spmd.has_local_type(xq) and spmd.is_type_checking():
+                from spmd_types import local_map as spmd_local_map
+
+                leaf = _spmd_spec_leaf(xq)
+                rope_fn = spmd_local_map(out_types=(leaf, leaf))(rope_fn)
+            xq, xk = rope_fn(xq, xk, rope_cache, positions)
 
         # Handle iRoPE dict masks (Llama4)
         if isinstance(attention_masks, dict):

@@ -119,6 +119,8 @@ class Llama3Model(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 full_spmd_types=parallelism.full_spmd_types,
                 dp_replicate_enabled=parallelism.data_parallel_replicate_degree > 1,
+                dp_shard_enabled=parallelism.data_parallel_shard_degree != 1,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(

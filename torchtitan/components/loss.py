@@ -21,6 +21,15 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
+def _spmd_spec_leaf(tensor: torch.Tensor):
+    """Build a local_map spec leaf from an spmd-typed tensor."""
+    if not spmd.has_local_type(tensor):
+        return None
+    types = dict(spmd.get_local_type(tensor))
+    spec = spmd.get_partition_spec(tensor)
+    return (types, spec) if spec else types
+
+
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     return torch.nn.functional.cross_entropy(
@@ -243,9 +252,11 @@ class ChunkedCELoss(BaseLoss):
         self.lm_head: nn.Module | None = None
         self._spmd_dp_axes: list = []
 
-    def enable_spmd_types(self, dp_axes: list) -> None:
-        """Store spmd_types DP axes for type annotation during loss computation."""
+    def enable_spmd_types(self, dp_axes: list, tp_axis=None, tp_pg=None) -> None:
+        """Store spmd_types axes for type annotation during loss computation."""
         self._spmd_dp_axes = dp_axes
+        self._spmd_tp_axis = tp_axis
+        self._spmd_tp_pg = tp_pg
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -295,14 +306,29 @@ class ChunkedCELoss(BaseLoss):
 
         # Split hidden states and labels into chunks along seq dim.
         # Use .contiguous() to break shared storage from torch.chunk().
-        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
-        # directly with Shard(1) on CP. Need local_map to operate on local tensors
         h_detached = hidden_states.detach().requires_grad_(requires_grad)
-        h_chunks = [
-            c.contiguous().detach().requires_grad_(requires_grad)
-            for c in torch.chunk(h_detached, num_chunks, dim=1)
-        ]
-        label_chunks = torch.chunk(labels, num_chunks, dim=1)
+
+        def _chunk_tensors(h, lbls):
+            h_cs = [
+                c.contiguous().detach().requires_grad_(requires_grad)
+                for c in torch.chunk(h, num_chunks, dim=1)
+            ]
+            l_cs = list(torch.chunk(lbls, num_chunks, dim=1))
+            return (*h_cs, *l_cs)
+
+        if spmd.is_type_checking() and spmd.has_local_type(h_detached):
+            from spmd_types import local_map as spmd_local_map
+
+            h_leaf = _spmd_spec_leaf(h_detached)
+            l_leaf = _spmd_spec_leaf(labels)
+            out_types = (h_leaf,) * num_chunks + (l_leaf,) * num_chunks
+            all_chunks = spmd_local_map(out_types=out_types)(
+                _chunk_tensors
+            )(h_detached, labels)
+        else:
+            all_chunks = _chunk_tensors(h_detached, labels)
+        h_chunks = list(all_chunks[:num_chunks])
+        label_chunks = list(all_chunks[num_chunks:])
 
         grad_accumulator = GradAccumulator(
             h_detached,
@@ -319,6 +345,13 @@ class ChunkedCELoss(BaseLoss):
             for axis in self._spmd_dp_axes:
                 total_loss = spmd.reinterpret(
                     total_loss, axis, src=spmd.R, dst=spmd.P, expert_mode=True
+                )
+            # TP: loss is identical across TP ranks (after all-gather)
+            tp_axis = self._spmd_tp_axis if hasattr(self, '_spmd_tp_axis') else None
+            if tp_axis is not None and tp_axis.size() > 1:
+                total_loss = spmd.convert(
+                    total_loss, self._spmd_tp_pg, src=spmd.R, dst=spmd.I,
+                    expert_mode=True,
                 )
 
         # Disable FSDP reshard on lm_head to keep weight unsharded across
@@ -338,8 +371,12 @@ class ChunkedCELoss(BaseLoss):
                 )
 
             logits = lm_head(h_chunk)
-
             chunk_loss = self.fn(logits, label_chunk)
+            if self._spmd_tp_axis is not None and self._spmd_tp_axis.size() > 1:
+                chunk_loss = spmd.convert(
+                    chunk_loss, self._spmd_tp_pg, src=spmd.R, dst=spmd.I,
+                    expert_mode=True,
+                )
             if global_valid_tokens is not None:
                 chunk_loss = chunk_loss / global_valid_tokens
             total_loss = total_loss + chunk_loss.detach()
