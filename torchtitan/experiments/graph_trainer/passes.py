@@ -278,6 +278,15 @@ def apply_graph_passes(
             and before/after graphs to tlparse for each pass.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
+    pass_names = [
+        pass_fn.func.__name__
+        if isinstance(pass_fn, functools.partial)
+        else pass_fn.__name__
+        for pass_fn in passes
+    ]
+    pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
+    logger.info(f"Applying {len(passes)} graph passes:\n  {pass_list}")
+    all_passes_start = time.perf_counter()
     tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
     for pass_fn in passes:
         pass_name = (
@@ -299,6 +308,8 @@ def apply_graph_passes(
             tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
             after_snapshot = snapshot_graph(gm)
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
+    all_passes_elapsed = time.perf_counter() - all_passes_start
+    logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
     return gm
 
 
