@@ -48,6 +48,7 @@ class EagerAllGatherBucket:
     entries: list[tuple[nn.Module, str, nn.Module, ParamInfo]]
     infos: list[ParamInfo]
     debug_fqn: str | None
+    use_functional_unshard: bool
 
 
 @dataclass
@@ -55,7 +56,7 @@ class PendingEagerAllGather:
     """The single one-bucket-ahead eager all-gather in flight."""
 
     bucket: EagerAllGatherBucket
-    result: EagerAllGatherResult
+    result: EagerAllGatherResult | EagerFunctionalAllGatherResult
 
 
 @dataclass
@@ -68,6 +69,20 @@ class EagerAllGatherResult:
     per_rank_param_offsets: list[list[int]]
     event: torch.Event | None
     send_buf: torch.Tensor
+    debug_fqn: str | None
+
+
+@dataclass
+class EagerFunctionalAllGatherResult:
+    """State needed to finish a differentiable bucket all-gather."""
+
+    full_bucket: torch.Tensor
+    infos: list[ParamInfo]
+    mesh: DeviceMesh
+    padded_bucket_numel: int
+    per_rank_param_offsets: list[list[int]]
+    event: torch.Event | None
+    local_bucket: torch.Tensor
     debug_fqn: str | None
 
 
@@ -345,9 +360,8 @@ class Shard(Placement):
 
         if all_gather_stream is None or device.type != "cuda":
             label = _with_fqn("FlexShard::all_gather", debug_fqn)
-            with torch.profiler.record_function(label):
-                with dist.record_comm(label):
-                    dist.all_gather(gathered, send_buf, group=pg)
+            with dist.record_comm(label):
+                dist.all_gather(gathered, send_buf, group=pg)
             event = None
             if device.type == "cuda":
                 event = torch.cuda.Event()
@@ -367,9 +381,8 @@ class Shard(Placement):
         with torch.cuda.stream(all_gather_stream):
             all_gather_stream.wait_event(copy_in_done)
             label = _with_fqn("FlexShard::all_gather", debug_fqn)
-            with torch.profiler.record_function(label):
-                with dist.record_comm(label):
-                    dist.all_gather(gathered, send_buf, group=pg)
+            with dist.record_comm(label):
+                dist.all_gather(gathered, send_buf, group=pg)
             event = torch.cuda.Event()
             event.record(all_gather_stream)
         send_buf.record_stream(all_gather_stream)
@@ -419,8 +432,144 @@ class Shard(Placement):
 
     @classmethod
     def wait_for_unshard(cls, result: EagerAllGatherResult) -> None:
-        mesh = result.mesh
         device = result.gathered[0].device
+        if device.type == "cuda" and result.event is not None:
+            torch.cuda.current_stream(device).wait_event(result.event)
+
+    @classmethod
+    def begin_functional_unshard(
+        cls,
+        tensors: list[torch.Tensor],
+        infos: list[ParamInfo],
+        mesh: DeviceMesh,
+        all_gather_stream: torch.Stream | None,
+        debug_fqn: str | None = None,
+    ) -> EagerFunctionalAllGatherResult:
+        ws = mesh.size()
+        device = tensors[0].device
+
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
+        ):
+            local_bucket = torch.cat([t.reshape(-1) for t in tensors])
+
+            per_rank_sizes: list[int] = []
+            per_rank_param_offsets: list[list[int]] = []
+            for r in range(ws):
+                offset = 0
+                offsets_r: list[int] = []
+                for info in infos:
+                    offsets_r.append(offset)
+                    offset += info.placements[0].compute_local_numel(
+                        info.global_shape, r, ws
+                    )
+                per_rank_sizes.append(offset)
+                per_rank_param_offsets.append(offsets_r)
+
+            padded_bucket_numel = max(per_rank_sizes)
+            pad_size = padded_bucket_numel - local_bucket.numel()
+            if pad_size > 0:
+                local_bucket = torch.cat(
+                    [local_bucket, local_bucket.new_zeros(pad_size)]
+                )
+
+        group_name = mesh.get_group().group_name
+
+        def _run_all_gather() -> torch.Tensor:
+            label = _with_fqn("FlexShard::all_gather", debug_fqn)
+            with dist.record_comm(label):
+                full_bucket = torch.ops._c10d_functional.all_gather_into_tensor(
+                    local_bucket,
+                    ws,
+                    group_name,
+                )
+                full_bucket = torch.ops._c10d_functional.wait_tensor(full_bucket)
+            full_bucket = _set_tensor_reshard_after_forward(full_bucket, True)
+            if full_bucket.requires_grad and torch.is_grad_enabled():
+                full_bucket.register_hook(lambda grad: grad / ws)
+            return full_bucket
+
+        if all_gather_stream is None or device.type != "cuda":
+            full_bucket = _run_all_gather()
+            event = None
+            if device.type == "cuda":
+                event = torch.cuda.Event()
+                event.record(torch.cuda.current_stream(device))
+            return EagerFunctionalAllGatherResult(
+                full_bucket=full_bucket,
+                infos=infos,
+                mesh=mesh,
+                padded_bucket_numel=padded_bucket_numel,
+                per_rank_param_offsets=per_rank_param_offsets,
+                event=event,
+                local_bucket=local_bucket,
+                debug_fqn=debug_fqn,
+            )
+
+        copy_in_done = torch.cuda.Event()
+        copy_in_done.record(torch.cuda.current_stream(device))
+        with torch.cuda.stream(all_gather_stream):
+            all_gather_stream.wait_event(copy_in_done)
+            full_bucket = _run_all_gather()
+            event = torch.cuda.Event()
+            event.record(all_gather_stream)
+        local_bucket.record_stream(all_gather_stream)
+        full_bucket.record_stream(all_gather_stream)
+        return EagerFunctionalAllGatherResult(
+            full_bucket=full_bucket,
+            infos=infos,
+            mesh=mesh,
+            padded_bucket_numel=padded_bucket_numel,
+            per_rank_param_offsets=per_rank_param_offsets,
+            event=event,
+            local_bucket=local_bucket,
+            debug_fqn=debug_fqn,
+        )
+
+    @classmethod
+    def finish_functional_unshard(
+        cls,
+        result: EagerFunctionalAllGatherResult,
+    ) -> list[torch.Tensor]:
+        cls.wait_for_functional_unshard(result)
+        ws = result.mesh.size()
+        device = result.full_bucket.device
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::all_gather_copy_out", result.debug_fqn)
+        ):
+            results: list[torch.Tensor] = []
+            for i, info in enumerate(result.infos):
+                p = info.placements[0]
+                per_rank_shards: list[torch.Tensor] = []
+                for r in range(ws):
+                    numel = p.compute_local_numel(info.global_shape, r, ws)
+                    shape = p.compute_local_shape(info.global_shape, r, ws)
+                    if numel > 0:
+                        off = (
+                            r * result.padded_bucket_numel
+                            + result.per_rank_param_offsets[r][i]
+                        )
+                        per_rank_shards.append(
+                            result.full_bucket[off : off + numel].view(shape)
+                        )
+                    else:
+                        per_rank_shards.append(
+                            torch.empty(shape, dtype=info.dtype, device=device)
+                        )
+                full_param = p.assemble_from_shards(
+                    per_rank_shards,
+                    info.global_shape,
+                    info.dtype,
+                )
+                results.append(_set_tensor_reshard_after_forward(full_param, True))
+            return results
+
+    @classmethod
+    def wait_for_functional_unshard(
+        cls,
+        result: EagerFunctionalAllGatherResult,
+    ) -> None:
+        device = result.full_bucket.device
         if device.type == "cuda" and result.event is not None:
             torch.cuda.current_stream(device).wait_event(result.event)
 
@@ -494,14 +643,13 @@ class Shard(Placement):
         if reduce_scatter_stream is None or device.type != "cuda":
             recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
             label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
-            with torch.profiler.record_function(label):
-                with dist.record_comm(label):
-                    dist.reduce_scatter_tensor(
-                        output=recv_buf,
-                        input=send_buf,
-                        op=dist.ReduceOp.AVG,
-                        group=pg,
-                    )
+            with dist.record_comm(label):
+                dist.reduce_scatter_tensor(
+                    output=recv_buf,
+                    input=send_buf,
+                    op=dist.ReduceOp.AVG,
+                    group=pg,
+                )
             sharded_grads = _copy_out(recv_buf)
             event = None
             if device.type == "cuda":
@@ -522,14 +670,13 @@ class Shard(Placement):
             reduce_scatter_stream.wait_event(copy_in_done)
             recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
             label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
-            with torch.profiler.record_function(label):
-                with dist.record_comm(label):
-                    dist.reduce_scatter_tensor(
-                        output=recv_buf,
-                        input=send_buf,
-                        op=dist.ReduceOp.AVG,
-                        group=pg,
-                    )
+            with dist.record_comm(label):
+                dist.reduce_scatter_tensor(
+                    output=recv_buf,
+                    input=send_buf,
+                    op=dist.ReduceOp.AVG,
+                    group=pg,
+                )
             sharded_grads = _copy_out(recv_buf)
             event = torch.cuda.Event()
             event.record(reduce_scatter_stream)
@@ -791,6 +938,12 @@ _SPMD_MESH_ATTR = "_spmd_mesh"
 _SPMD_PLACEMENTS_ATTR = "_spmd_placements"
 _SPMD_DP_DIM_INDICES_ATTR = "_spmd_dp_dim_indices"
 _RESHARD_AFTER_FORWARD_ATTR = "_flex_shard_reshard_after_forward"
+_REQUIRES_EAGER_BATCHED_UNSHARD_ATTR = "_flex_shard_requires_eager_batched_unshard"
+_EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered"
+_EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
+_PARAM_FQN_ATTR = "_flex_shard_param_fqn"
+_BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
+_EAGER_FUNCTIONAL_BUCKET_UNSHARD_ATTR = "_flex_shard_eager_functional_bucket_unshard"
 
 
 @dataclass(frozen=True)
@@ -1343,6 +1496,50 @@ def _mark_reshard_checkpoint_recompute(ctx: Any) -> Generator[None, None, None]:
         _reshard_checkpoint_recompute.reset(token)
 
 
+def _is_graph_capture_active() -> bool:
+    """Return whether parametrizations should emit traceable collectives."""
+    if torch.compiler.is_compiling():
+        return True
+    try:
+        return torch._guards.TracingContext.try_get() is not None
+    except AttributeError:
+        return False
+
+
+def _raise_missing_eager_batched_unshard(parametrization: nn.Module) -> None:
+    param_fqn = getattr(parametrization, _PARAM_FQN_ATTR, "<unknown>")
+    bucket_fqn = getattr(parametrization, _BUCKET_FQN_ATTR, None)
+    bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
+    raise RuntimeError(
+        "FlexShard eager mode would fall back to per-parameter "
+        f"_c10d_functional collectives for parameter {param_fqn!r}{bucket_msg}, "
+        "but eager Shard/RaggedShard parameters must be served by a batched "
+        "all-gather hook. This usually means the BucketSpec boundary does not "
+        "match the module hook/checkpoint execution unit. Split the bucket to "
+        "match forward module boundaries, or use torch.compile so functional "
+        "collectives are captured by the graph path."
+    )
+
+
+def _get_or_create_eager_comm_context(
+    root_module: nn.Module,
+    device: torch.device,
+) -> EagerAllGatherContext:
+    contexts = getattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, None)
+    if contexts is None:
+        contexts = {}
+        setattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, contexts)
+
+    context = contexts.get(device)
+    if context is None:
+        context = EagerAllGatherContext(
+            all_gather_stream=torch.cuda.Stream(device=device, priority=-1),
+            reduce_scatter_stream=torch.cuda.Stream(device=device, priority=-1),
+        )
+        contexts[device] = context
+    return context
+
+
 _wrap_class_counter = 0
 
 
@@ -1367,21 +1564,31 @@ def _register_parametrization(
         def getter(self):
             # In eager batched mode, _pre_gathered is set on the
             # parametrization by the batched all-gather pre_forward hook.
-            # Return as a detached leaf — reduce-scatter is handled by
-            # _RegisterPostBackward on the layer's forward inputs.
             pre = getattr(p, "_pre_gathered", None)
             if pre is not None:
                 p._pre_gathered = None
                 param_dtype = getattr(p, "param_dtype", None)
+                reduce_dtype = getattr(p, "reduce_dtype", None)
+                if getattr(p, _EAGER_FUNCTIONAL_BUCKET_UNSHARD_ATTR, False):
+                    if param_dtype is not None or reduce_dtype is not None:
+                        pre = _MixedPrecisionCast.apply(pre, param_dtype, reduce_dtype)
+                    return pre
+
                 if param_dtype is not None and pre.dtype != param_dtype:
                     pre = pre.to(param_dtype)
                 unsharded = pre.detach().requires_grad_(True)
-                # Only store on FIRST forward (not during checkpoint
-                # recomputation). The original leaf is what checkpoint
-                # saves and autograd accumulates grad on.
-                if getattr(p, "_unsharded_for_reduce", None) is None:
+                if (
+                    torch.is_grad_enabled()
+                    and getattr(p, "_unsharded_for_reduce", None) is None
+                ):
                     p._unsharded_for_reduce = unsharded
                 return unsharded
+            if (
+                getattr(p, _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR, False)
+                and not getattr(p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
+                and not _is_graph_capture_active()
+            ):
+                _raise_missing_eager_batched_unshard(p)
             return p(self._parameters[pn])
 
         return getter
@@ -1451,6 +1658,11 @@ class FlexShardModule:
     def dstorages(self) -> list:
         """All DStorage instances (one per bucket)."""
         return getattr(self, _DSTORAGES_ATTR)
+
+    @property
+    def eager_comm_contexts(self) -> dict[torch.device, EagerAllGatherContext]:
+        """Root-owned eager communication contexts keyed by CUDA device."""
+        return getattr(self, _EAGER_COMM_CONTEXTS_ATTR)
 
 
 @dataclass(frozen=True)
@@ -2176,6 +2388,7 @@ class DTensorAwareParametrization(nn.Module):
         # the outer parametrization when returning a pre-gathered tensor.
         self.param_dtype = getattr(inner, "param_dtype", None)
         self.reduce_dtype = getattr(inner, "reduce_dtype", None)
+        self.reshard_after_forward = getattr(inner, "reshard_after_forward", True)
 
     def _requires_dtensor_output(self) -> bool:
         if self.placements is None:
@@ -2648,6 +2861,33 @@ class DStorage:
             yield
         finally:
             self.reduce_grad()
+
+
+def _storage_requires_eager_batched_unshard(storage: DStorage) -> bool:
+    """Return whether eager execution must use pre-gathered bucket tensors."""
+    infos = list(storage._param_infos.values())
+    if not infos:
+        return False
+    ptype = type(infos[0].placements[0])
+    return (
+        ptype is not _OwnedFullCopy
+        and ptype is not Owned
+        and ptype is not FlatShard
+        and storage.byte_storage.device.type != "cpu"
+    )
+
+
+def _storage_uses_eager_functional_unshard(storage: DStorage) -> bool:
+    """Return whether eager RAF should use differentiable bucket collectives."""
+    infos = list(storage._param_infos.values())
+    if not infos:
+        return False
+    ptype = type(infos[0].placements[0])
+    return (
+        storage._reshard_after_forward
+        and ptype is Shard
+        and storage.byte_storage.device.type == "cuda"
+    )
 
 
 def _compute_local_info(
@@ -3190,6 +3430,7 @@ def flex_shard(
     # Store DStorages on module
     setattr(module, _DSTORAGES_ATTR, storages)
     setattr(module, _DSTORAGE_ATTR, storages[0] if storages else None)
+    setattr(module, _EAGER_COMM_CONTEXTS_ATTR, {})
 
     # Change module class to include FlexShardModule mixin
     cls = type(module)
@@ -3204,6 +3445,9 @@ def flex_shard(
     module_param_map: dict[nn.Module, dict[str, nn.Module]] = {}
 
     for s in storages:
+        requires_eager_batched_unshard = _storage_requires_eager_batched_unshard(s)
+        uses_eager_functional_unshard = _storage_uses_eager_functional_unshard(s)
+        bucket_fqn = _get_storage_debug_fqn(s)
         for fqn, info in s._param_infos.items():
             mp = fqn_to_mp_policy.get(fqn)
             offload = fqn_to_offload_policy.get(fqn)
@@ -3230,6 +3474,20 @@ def flex_shard(
                     placements=info.spmd_placements,
                     dp_dim_indices=info.spmd_dp_dim_indices,
                 )
+
+            setattr(
+                p,
+                _REQUIRES_EAGER_BATCHED_UNSHARD_ATTR,
+                requires_eager_batched_unshard,
+            )
+            setattr(
+                p,
+                _EAGER_FUNCTIONAL_BUCKET_UNSHARD_ATTR,
+                uses_eager_functional_unshard,
+            )
+            setattr(p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
+            setattr(p, _PARAM_FQN_ATTR, fqn)
+            setattr(p, _BUCKET_FQN_ATTR, bucket_fqn)
 
             # Find the leaf module owning this param
             parts = fqn.split(".")
@@ -3445,8 +3703,6 @@ def _install_batched_allgather_hooks(
     Skipped under torch.compile — compiled modes use per-param
     _c10d_functional ops which the compiler rebatches via graph passes.
     """
-    shared_ag_contexts: dict[torch.device, EagerAllGatherContext] = {}
-
     for storage in storages:
         infos = list(storage._param_infos.values())
         if not infos:
@@ -3455,12 +3711,7 @@ def _install_batched_allgather_hooks(
         ptype = type(infos[0].placements[0])
         # Skip batching when the placement/storage does not support the eager
         # batched path. Parametrization remains the source of truth.
-        if (
-            ptype is _OwnedFullCopy
-            or ptype is Owned
-            or ptype is FlatShard
-            or storage.byte_storage.device.type == "cpu"
-        ):
+        if not _storage_requires_eager_batched_unshard(storage):
             continue
 
         # Pre-compute (leaf_module, param_name, parametrization, info) for
@@ -3497,19 +3748,7 @@ def _install_batched_allgather_hooks(
         ag_context = None
         if ptype is Shard and storage.byte_storage.device.type == "cuda":
             device = storage.byte_storage.device
-            ag_context = shared_ag_contexts.get(device)
-            if ag_context is None:
-                ag_context = EagerAllGatherContext(
-                    all_gather_stream=torch.cuda.Stream(
-                        device=device,
-                        priority=-1,
-                    ),
-                    reduce_scatter_stream=torch.cuda.Stream(
-                        device=device,
-                        priority=-1,
-                    ),
-                )
-                shared_ag_contexts[device] = ag_context
+            ag_context = _get_or_create_eager_comm_context(storage._module, device)
         ag_bucket = None
         if ag_context is not None:
             ag_bucket = EagerAllGatherBucket(
@@ -3517,17 +3756,38 @@ def _install_batched_allgather_hooks(
                 entries=param_entries,
                 infos=infos,
                 debug_fqn=_get_storage_debug_fqn(storage),
+                use_functional_unshard=_storage_uses_eager_functional_unshard(storage),
             )
-            ag_context.buckets.append(ag_bucket)
+        use_functional_unshard = _storage_uses_eager_functional_unshard(storage)
 
-        def make_hooks(s, entries, pt, all_gather_context, all_gather_bucket):
+        def make_hooks(
+            s,
+            entries,
+            pt,
+            all_gather_context,
+            all_gather_bucket,
+            use_functional_bucket,
+        ):
             # Collected grads from AccumulateGrad hooks (indexed by position)
             collected_grads: dict[int, torch.Tensor] = {}
 
             def _begin_bucket_unshard(bucket):
                 local_shards = [
-                    leaf._parameters[name].data for leaf, name, _, _ in bucket.entries
+                    (
+                        leaf._parameters[name]
+                        if bucket.use_functional_unshard
+                        else leaf._parameters[name].data
+                    )
+                    for leaf, name, _, _ in bucket.entries
                 ]
+                if bucket.use_functional_unshard:
+                    return Shard.begin_functional_unshard(
+                        local_shards,
+                        bucket.infos,
+                        bucket.storage._mesh,
+                        all_gather_context.all_gather_stream,
+                        debug_fqn=bucket.debug_fqn,
+                    )
                 return Shard.begin_unshard(
                     local_shards,
                     bucket.infos,
@@ -3536,8 +3796,16 @@ def _install_batched_allgather_hooks(
                     debug_fqn=bucket.debug_fqn,
                 )
 
+            def _wait_bucket_unshard(result):
+                if isinstance(result, EagerFunctionalAllGatherResult):
+                    Shard.wait_for_functional_unshard(result)
+                else:
+                    Shard.wait_for_unshard(result)
+
             def _prefetch_next_bucket():
                 if all_gather_context.pending is not None:
+                    return
+                if use_functional_bucket:
                     return
                 prefetch_order = all_gather_context.buckets
                 if _reshard_checkpoint_recompute.get():
@@ -3551,6 +3819,8 @@ def _install_batched_allgather_hooks(
                 if next_idx >= len(prefetch_order):
                     return
                 next_bucket = prefetch_order[next_idx]
+                if next_bucket.use_functional_unshard:
+                    return
                 all_gather_context.pending = PendingEagerAllGather(
                     bucket=next_bucket,
                     result=_begin_bucket_unshard(next_bucket),
@@ -3623,33 +3893,61 @@ def _install_batched_allgather_hooks(
                     return
                 # Batched all-gather
                 local_shards = [
-                    leaf._parameters[name].data for leaf, name, _, _ in entries
+                    (
+                        leaf._parameters[name]
+                        if use_functional_bucket
+                        else leaf._parameters[name].data
+                    )
+                    for leaf, name, _, _ in entries
                 ]
                 entry_infos = [info for _, _, _, info in entries]
-                with torch.no_grad():
-                    if (
-                        all_gather_context is not None
-                        and all_gather_bucket is not None
-                        and pt is Shard
-                    ):
+                if (
+                    all_gather_context is not None
+                    and all_gather_bucket is not None
+                    and pt is Shard
+                ):
+                    if use_functional_bucket:
                         pending = all_gather_context.pending
                         if pending is not None and pending.bucket is all_gather_bucket:
                             result = pending.result
                             all_gather_context.pending = None
                         else:
                             if pending is not None:
-                                Shard.wait_for_unshard(pending.result)
+                                _wait_bucket_unshard(pending.result)
                                 all_gather_context.pending = None
-                            result = Shard.begin_unshard(
+                            result = Shard.begin_functional_unshard(
                                 local_shards,
                                 entry_infos,
                                 s._mesh,
                                 all_gather_context.all_gather_stream,
                                 debug_fqn=all_gather_bucket.debug_fqn,
                             )
-                        full_params = Shard.finish_unshard(result)
+                        full_params = Shard.finish_functional_unshard(result)
                         _prefetch_next_bucket()
                     else:
+                        with torch.no_grad():
+                            pending = all_gather_context.pending
+                            if (
+                                pending is not None
+                                and pending.bucket is all_gather_bucket
+                            ):
+                                result = pending.result
+                                all_gather_context.pending = None
+                            else:
+                                if pending is not None:
+                                    _wait_bucket_unshard(pending.result)
+                                    all_gather_context.pending = None
+                                result = Shard.begin_unshard(
+                                    local_shards,
+                                    entry_infos,
+                                    s._mesh,
+                                    all_gather_context.all_gather_stream,
+                                    debug_fqn=all_gather_bucket.debug_fqn,
+                                )
+                            full_params = Shard.finish_unshard(result)
+                            _prefetch_next_bucket()
+                else:
+                    with torch.no_grad():
                         full_params = pt.unshard(local_shards, entry_infos, s._mesh)
                 for (_, _, param_p, _), full_param in zip(
                     entries, full_params, strict=True
@@ -3661,6 +3959,8 @@ def _install_batched_allgather_hooks(
                     return
                 for _, _, param_p, _ in entries:
                     param_p._pre_gathered = None
+                if use_functional_bucket:
+                    return
 
                 # Register AccumulateGrad hooks on detached leaf params.
                 # Each hook stores its grad by index. The last hook fires
@@ -3694,7 +3994,12 @@ def _install_batched_allgather_hooks(
             return pre_forward_hook, post_forward_hook
 
         pre_hook, post_hook = make_hooks(
-            storage, param_entries, ptype, ag_context, ag_bucket
+            storage,
+            param_entries,
+            ptype,
+            ag_context,
+            ag_bucket,
+            use_functional_unshard,
         )
 
         # Register hooks on the bucket's child module (not root) so they
@@ -3718,6 +4023,10 @@ def _install_batched_allgather_hooks(
         inner = getattr(target, "_checkpoint_wrapped_module", target)
         inner.register_forward_pre_hook(pre_hook)
         inner.register_forward_hook(post_hook)
+        if ag_context is not None and ag_bucket is not None:
+            ag_context.buckets.append(ag_bucket)
+        for _, _, param_p, _ in param_entries:
+            setattr(param_p, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
 
 
 def _get_bucket_module(storage) -> nn.Module:
