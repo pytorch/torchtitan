@@ -71,26 +71,30 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
     from torchtitan.components.quantization.float8 import (
-        _float8_experts_cache,
+        _get_float8_grouped_experts_cls,
         Float8Linear,
     )
-    from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
-
-    quant_linear_configs: list[type] = [MXFP8Linear.Config]
-    if Float8Linear is not None:
-        quant_linear_configs.append(Float8Linear.Config)
-
-    quant_experts_configs = tuple(
-        cls.Config  # type: ignore[attr-defined]
-        for cls in (*_float8_experts_cache.values(), *_mxfp8_experts_cache.values())
+    from torchtitan.components.quantization.mx import (
+        _get_mxfp8_grouped_experts_cls,
+        MXFP8Linear,
     )
 
-    has_quant_linear = any(
-        isinstance(config, tuple(quant_linear_configs))
-        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
+    Float8GroupedExperts = _get_float8_grouped_experts_cls(GroupedExperts)
+    MXFP8GroupedExperts = _get_mxfp8_grouped_experts_cls(GroupedExperts)
+
+    has_quant_linear = (
+        any(
+            isinstance(config, (Float8Linear.Config, MXFP8Linear.Config))
+            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
+        )
+        if Float8Linear is not None
+        else any(
+            isinstance(config, MXFP8Linear.Config)
+            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
+        )
     )
-    has_quant_moe = bool(quant_experts_configs) and any(
-        isinstance(config, quant_experts_configs)
+    has_quant_moe = any(
+        isinstance(config, (Float8GroupedExperts.Config, MXFP8GroupedExperts.Config))  # type: ignore[attr-defined]
         for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
     )
     return has_quant_linear or has_quant_moe
