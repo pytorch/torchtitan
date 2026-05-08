@@ -222,10 +222,10 @@ class ChunkedCELoss(BaseLoss):
         computes partial CE on its ``V/tp`` slice, with an internal
         all-reduce for the correct log-sum-exp.
 
-    SPMD composability:
-        The chunk loop body runs inside a ``local_map`` boundary that strips
-        all SPMD types — chunking, flatten, and CE operate on plain local
-        tensors. ``local_map`` re-annotates outputs on exit.
+    CP composability:
+        CP shards dim=1 (seq), the same dim this class chunks on. The chunk
+        loop body runs inside a ``local_map`` boundary that strips all SPMD
+        types — chunking, flatten, and CE operate on plain local tensors.
 
     Compile: ce_loss can be compiled independently; lm_head is not compiled.
     """
@@ -323,8 +323,8 @@ class ChunkedCELoss(BaseLoss):
     ) -> tuple:
         """Build local_map out_types for (total_loss, accumulated_grad).
 
-        total_loss: P on all DP axes — each rank has a partial loss sum
-            from its local batch tokens.
+        total_loss: P on all DP axes (including CP), I on TP — each rank
+            has a partial loss sum from its local batch/seq tokens.
         accumulated_grad: same types as h_detached (the input).
         """
 
@@ -332,6 +332,9 @@ class ChunkedCELoss(BaseLoss):
         loss_type: dict = {}
         for axis in state.dp_axes:
             loss_type[axis] = spmd.P
+        if mesh().tp.size() > 1:
+            loss_type[mesh().tp] = spmd.I
+
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
         grad_leaf = (grad_types, grad_spec) if grad_spec else grad_types
@@ -373,6 +376,21 @@ class ChunkedCELoss(BaseLoss):
                 if not isinstance(placements[tp_dim], Replicate):
                     placements[tp_dim] = Replicate()
                     hidden_states = hidden_states.redistribute(dt_mesh, tuple(placements))
+
+        # SPMD path: all-gather S(1)@tp -> R@tp before the local_map boundary.
+        if is_spmd_active():
+
+            state = spmd_state()
+            if mesh().tp.size() > 1:
+                bwd = (
+                    {"op_dtype": torch.float32}
+                    if hidden_states.dtype != torch.float32
+                    else None
+                )
+                hidden_states = spmd.redistribute(
+                    hidden_states, spmd_state().tp_pg,
+                    src=spmd.S(1), dst=spmd.R, backward_options=bwd,
+                )
 
         requires_grad = hidden_states.requires_grad
         h_detached = hidden_states.detach().requires_grad_(requires_grad)

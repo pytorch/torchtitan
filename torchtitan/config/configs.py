@@ -136,6 +136,11 @@ class ParallelismConfig:
     parallelism typechecking. FSDP stores params as DTensors internally;
     spmd_types annotations are restored at compute time."""
 
+    spmd_typecheck: str = "global"
+    """spmd_types typechecking mode during forward+backward.
+    'global': strict global typechecking (default).
+    'local': local-only typechecking."""
+
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.

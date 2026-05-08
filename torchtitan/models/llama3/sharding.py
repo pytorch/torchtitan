@@ -11,10 +11,12 @@ from torch.distributed.tensor import Placement, Replicate, Shard
 from torchtitan.distributed.spmd_state import is_spmd_active
 from torchtitan.models.common.decoder_sharding import (
     EMBED_OUT,
-    QKV_LOCAL_SPMD,
     EMBED_OUT_SP,
     LM_HEAD_OUTPUT_REDIST,
+    QKV_LOCAL_SPMD,
+    SP_INPUT_REDIST,
     norm_config,
+    rowwise_spmd_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
@@ -68,6 +70,11 @@ def _set_llama3_layer_sharding(
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
     if full_spmd_types:
         layer_cfg.attention.inner_attention.local_spmd = QKV_LOCAL_SPMD
+        layer_cfg.attention.wo.global_spmd = rowwise_spmd_config(
+            output_sp=enable_sp,
+        )
+        if enable_sp:
+            layer_cfg.attention.global_spmd = SP_INPUT_REDIST
     else:
         set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
@@ -77,4 +84,9 @@ def _set_llama3_layer_sharding(
         attn_x_placement=attn_x_placement,
         enable_sp=enable_sp,
     )
-
+    if full_spmd_types:
+        layer_cfg.feed_forward.w2.global_spmd = rowwise_spmd_config(
+            output_sp=enable_sp,
+        )
+        if enable_sp:
+            layer_cfg.feed_forward.global_spmd = SP_INPUT_REDIST

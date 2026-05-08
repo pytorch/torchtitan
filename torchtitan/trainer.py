@@ -15,9 +15,8 @@ from datetime import timedelta
 from typing import Annotated, Any, cast
 
 import spmd_types as spmd
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
+from torchtitan.distributed.spmd_state import is_spmd_active, mesh, spmd_state
 import torch
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -28,6 +27,8 @@ from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.protocols.module import preserve_buffer_spmd
+from torchtitan.protocols.sharding import SpmdAnnotation
+from torchtitan.protocols.types import MeshAxisName
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -55,6 +56,42 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
+
+
+def convert_tp_states_for_compute(model: torch.nn.Module, tp_pg) -> None:
+    """Install forward pre-hooks that convert I@tp params/buffers to R@tp.
+
+    TP-replicated states are I at rest. At compute time, ``convert(I, R)``
+    makes them R so the typechecker accepts mixing with TP-sharded
+    activations, and inserts a backward all-reduce for correct gradient
+    reduction when SP is enabled.
+    DP I→R is handled at annotation time in ``_annotate_states_spmd``.
+    """
+    import itertools
+
+    def pre_hook(module, args):
+        for store in (module._parameters, module._buffers):
+            for name, t in store.items():
+                if t is not None and spmd.maybe_get_axis_local_type(t, tp_pg) is spmd.I:
+                    bwd = (
+                        {"op_dtype": torch.float32}
+                        if t.dtype != torch.float32
+                        else None
+                    )
+                    store[name] = spmd.convert(
+                        t, tp_pg, src=spmd.I, dst=spmd.R,
+                        backward_options=bwd,
+                    )
+
+    for module in model.modules():
+        has_states = any(
+            t is not None
+            for t in itertools.chain(
+                module._parameters.values(), module._buffers.values()
+            )
+        )
+        if has_states:
+            module.register_forward_pre_hook(pre_hook)
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -427,6 +464,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
 
+        if is_spmd_active():
+            from torchtitan.distributed.spmd_state import spmd_state
+
+            tp_pg = spmd_state().tp_pg
+            if tp_pg is not None:
+                for model in self.model_parts:
+                    convert_tp_states_for_compute(model, tp_pg)
+
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
@@ -476,7 +521,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             and not is_spmd_active()
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
-
 
 
         # Build validator if validation is configured
@@ -653,30 +697,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # spmd_types helpers
     # ------------------------------------------------------------------
 
+    # Input annotation: (batch, seq) — DP on batch, CP on seq, TP replicated.
+    _INPUT_ANNOTATION = SpmdAnnotation(
+        types={MeshAxisName.TP: spmd.R},
+        partition_spec=((MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD), MeshAxisName.CP),
+    )
+
     def _annotate_inputs_spmd_types(
         self,
         inputs: torch.Tensor,
         labels: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Annotate inputs, labels, and positions with spmd_types.
-
-        DP axes get S(0) (batch-sharded).
-        """
-        from torchtitan.distributed.spmd_state import spmd_state
-
-        dp_axes = spmd_state().dp_axes
-
-        if len(dp_axes) <= 1:
-            spmd_type = {dp_axes[0]: spmd.S(0)} if dp_axes else {}
-            if spmd_type:
+        """Annotate inputs, labels, and positions with spmd_types."""
+        resolved = self._INPUT_ANNOTATION.resolve()
+        if resolved:
+            if isinstance(resolved, tuple):
+                types, spec = resolved
                 for t in (inputs, labels, positions):
-                    spmd.assert_type(t, spmd_type)
-        else:
-            spmd_type = {axis: spmd.V for axis in dp_axes}
-            for t in (inputs, labels, positions):
-                spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
-                spmd.assert_type(t, spmd_type, spec)
+                    spmd.assert_type(t, types, spec)
+            else:
+                for t in (inputs, labels, positions):
+                    spmd.assert_type(t, resolved)
 
         return inputs, labels
 

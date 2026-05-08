@@ -195,6 +195,16 @@ LM_HEAD_OUTPUT_REDIST = GlobalSpmdConfig(
     ),
 )
 
+# SP input redistribute: S(1)@TP -> R@TP
+SP_INPUT_REDIST = GlobalSpmdConfig(
+    inputs=(
+        SpmdRedist(
+            src=SpmdAnnotation(types={TP: spmd.S(1)}),
+            dst=SpmdAnnotation(types={TP: spmd.R}),
+        ),
+    ),
+)
+
 # Embedding output [B, L, D] — SP variant (TP on seq dim)
 EMBED_OUT_SP = LocalSpmdConfig(
     out=SpmdAnnotation(
