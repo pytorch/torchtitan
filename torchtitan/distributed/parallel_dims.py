@@ -32,8 +32,6 @@ class ParallelDims:
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
-    _spmd_axes: dict[str, Any] = field(default_factory=dict, repr=False)
-    _spmd_pgs: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_config(
@@ -206,15 +204,39 @@ class ParallelDims:
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
-        # Initialize global SPMD state for forward-time access.
+        # Populate global SPMD state from the dense mesh PGs.
         if self.full_spmd_types:
+            from spmd_types import MeshAxis
             from torchtitan.distributed.spmd_state import SpmdState, init_spmd_state
 
+            axes: dict[str, Any] = {}
+            pgs: dict[str, Any] = {}
+            for name in dense_mesh.mesh_dim_names:
+                if name == "pp":
+                    continue
+                size = dense_mesh.size(dense_mesh.mesh_dim_names.index(name))
+                if size > 1:
+                    pg = dense_mesh.get_group(name)
+                    pg._set_group_desc(name)
+                    axes[name] = MeshAxis.of(pg)
+                    pgs[name] = pg
+                else:
+                    axes[name] = MeshAxis.of(1, 1)
+
+            dp_names = ("dp_replicate", "dp_shard", "cp")
+            dp_axes = [axes[n] for n in dp_names if axes[n].size() > 1]
+            all_axes = frozenset(
+                a for n in ("dp_replicate", "dp_shard", "cp", "tp")
+                if (a := axes[n]).size() > 1
+            )
+
             init_spmd_state(SpmdState(
-                dp_axes=self.spmd_dp_axes(),
-                tp_axis=self.get_spmd_axis("tp"),
-                cp_axis=self.get_spmd_axis("cp"),
-                pgs=dict(self._spmd_pgs),
+                dp_axes=dp_axes,
+                tp_axis=axes.get("tp"),
+                cp_axis=axes.get("cp"),
+                all_axes=all_axes,
+                _axes=axes,
+                pgs=pgs,
             ))
 
         # Validate mesh sizes
@@ -347,50 +369,6 @@ class ParallelDims:
         if not self._meshes:
             self.build_mesh()
         return {k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1}
-
-    # ------------------------------------------------------------------
-    # spmd_types accessors
-    # ------------------------------------------------------------------
-
-    def get_spmd_axis(self, name: str) -> Any:
-        """Return the MeshAxis for a named axis, or a trivial axis if disabled."""
-        if name not in self._spmd_axes:
-            from spmd_types import MeshAxis
-
-            mesh = self.get_optional_mesh(name)
-            if mesh is not None and mesh.size() > 1:
-                pg = mesh.get_group()
-                pg._set_group_desc(name)
-                self._spmd_axes[name] = MeshAxis.of(pg)
-                self._spmd_pgs[name] = pg
-            else:
-                self._spmd_axes[name] = MeshAxis.of(1, 1)
-        return self._spmd_axes[name]
-
-    def get_spmd_pg_for_axis(self, axis: Any) -> Any | None:
-        """Return the ProcessGroup for a MeshAxis object."""
-        for name, a in self._spmd_axes.items():
-            if a is axis:
-                return self._spmd_pgs.get(name)
-        return None
-
-    def spmd_dp_axes(self) -> list:
-        """Active DP MeshAxis objects."""
-        if self.full_spmd_types:
-            names = ("dp_replicate", "dp_shard", "cp")
-        else:
-            names = ("dp_replicate", "fsdp")
-        return [self.get_spmd_axis(n) for n in names if self.get_spmd_axis(n).size() > 1]
-
-    def spmd_all_axes(self) -> frozenset:
-        """All active axes as a frozenset for set_current_mesh()."""
-        if self.full_spmd_types:
-            names = ("dp_replicate", "dp_shard", "cp", "tp")
-        else:
-            names = ("dp_replicate", "fsdp", "tp", "cp")
-        return frozenset(
-            a for n in names if (a := self.get_spmd_axis(n)).size() > 1
-        )
 
     @property
     def world_mesh(self) -> DeviceMesh:
