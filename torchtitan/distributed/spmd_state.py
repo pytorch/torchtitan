@@ -12,10 +12,12 @@ needs mesh axes or process groups for SPMD collectives.
 
 Usage::
 
-    from torchtitan.distributed.spmd_state import spmd_state
-    state = spmd_state()
-    pg = state.pgs["tp"]
-    dp_axes = state.dp_axes
+    from torchtitan.distributed.spmd_state import spmd_state, is_spmd_active
+
+    if is_spmd_active():
+        state = spmd_state()
+        pg = state.tp_pg
+        dp_axes = state.dp_axes
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ class SpmdState:
     dp_axes: list[Any] = field(default_factory=list)
     tp_axis: Any | None = None
     cp_axis: Any | None = None
+    all_axes: frozenset = field(default_factory=frozenset)
+    _axes: dict[str, Any] = field(default_factory=dict)
     pgs: dict[str, ProcessGroup] = field(default_factory=dict)
 
     @property
@@ -47,6 +51,17 @@ class SpmdState:
     def tp_active(self) -> bool:
         return self.tp_axis is not None and self.tp_axis.size() > 1
 
+    def axis(self, name: str) -> Any:
+        """Return the MeshAxis for a named axis, or a trivial axis if absent."""
+        return self._axes[name]
+
+    def pg_for_axis(self, ax: Any) -> ProcessGroup | None:
+        """Reverse lookup: MeshAxis → ProcessGroup."""
+        for name, a in self._axes.items():
+            if a is ax:
+                return self.pgs.get(name)
+        return None
+
 
 _STATE: SpmdState | None = None
 
@@ -58,6 +73,11 @@ def spmd_state() -> SpmdState:
         "Call init_spmd_state() during build_mesh() with full_spmd_types=True."
     )
     return _STATE
+
+
+def is_spmd_active() -> bool:
+    """Check whether the SPMD path is active (SpmdState has been initialized)."""
+    return _STATE is not None
 
 
 def init_spmd_state(state: SpmdState) -> None:

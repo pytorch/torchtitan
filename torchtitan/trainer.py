@@ -15,6 +15,7 @@ from datetime import timedelta
 from typing import Annotated, Any, cast
 
 import spmd_types as spmd
+from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
@@ -423,7 +424,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     )
 
                 preserve_buffer_types = (
-                    preserve_buffer_spmd(model) if config.parallelism.full_spmd_types else nullcontext()
+                    preserve_buffer_spmd(model) if is_spmd_active() else nullcontext()
                 )
                 with preserve_buffer_types:
                     model.to_empty(device=init_device)
@@ -460,10 +461,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     0
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
-        if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
-            self.loss_fn.enable_spmd_types()
 
-        if config.parallelism.full_spmd_types:
+        if is_spmd_active():
             from torchtitan.distributed.spmd_state import spmd_state
 
             tp_pg = spmd_state().tp_pg
@@ -517,11 +516,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled
             and not config.parallelism.disable_loss_parallel
-            and not config.parallelism.full_spmd_types
+            and not is_spmd_active()
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
-        self.full_spmd_types: bool = config.parallelism.full_spmd_types
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -686,7 +684,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.full_spmd_types:
+        if is_spmd_active():
             inputs, labels = self._annotate_inputs_spmd_types(
                 inputs, labels, extra_kwargs.get("positions"),
             )
@@ -802,13 +800,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Non-PP forward / backward
             assert len(model_parts) == 1
             current_mesh = (
-                spmd.set_current_mesh(self.parallel_dims.spmd_all_axes())
-                if self.full_spmd_types
+                spmd.set_current_mesh(spmd_state().all_axes)
+                if is_spmd_active()
                 else contextlib.nullcontext()
             )
             typechecker = (
                 spmd.typecheck(local=False)
-                if self.full_spmd_types
+                if is_spmd_active()
                 else contextlib.nullcontext()
             )
             with self.train_context(), current_mesh:
@@ -851,9 +849,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             global_valid_tokens = local_valid_tokens.float()
 
-        if self.full_spmd_types and isinstance(global_valid_tokens, torch.Tensor):
+        if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
 
-            all_axes = self.parallel_dims.spmd_all_axes()
+            all_axes = spmd_state().all_axes
             if all_axes:
                 spmd.assert_type(global_valid_tokens, {a: spmd.I for a in all_axes})
 

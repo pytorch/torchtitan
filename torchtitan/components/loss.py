@@ -13,6 +13,7 @@ import torch
 import spmd_types as spmd
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -244,11 +245,7 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self._full_spmd_types: bool = False
 
-    def enable_spmd_types(self) -> None:
-        """Enable SPMD type tracking. Axes/PGs are read from global state."""
-        self._full_spmd_types = True
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -330,7 +327,6 @@ class ChunkedCELoss(BaseLoss):
             has a partial loss sum from its local batch/seq tokens.
         accumulated_grad: same types as h_detached (the input).
         """
-        from torchtitan.distributed.spmd_state import spmd_state
 
         state = spmd_state()
         loss_type: dict = {}
@@ -382,8 +378,7 @@ class ChunkedCELoss(BaseLoss):
                     hidden_states = hidden_states.redistribute(mesh, tuple(placements))
 
         # SPMD path: all-gather S(1)@tp -> R@tp before the local_map boundary.
-        if self._full_spmd_types:
-            from torchtitan.distributed.spmd_state import spmd_state
+        if is_spmd_active():
 
             state = spmd_state()
             if state.tp_active:
@@ -400,7 +395,7 @@ class ChunkedCELoss(BaseLoss):
         requires_grad = hidden_states.requires_grad
         h_detached = hidden_states.detach().requires_grad_(requires_grad)
 
-        if self._full_spmd_types:
+        if is_spmd_active():
             loss_out_type, grad_out_type = self.chunked_loss_spmd_out_types(h_detached)
             total_loss, grad_buffer = spmd.local_map(
                 out_types=(loss_out_type, grad_out_type),
