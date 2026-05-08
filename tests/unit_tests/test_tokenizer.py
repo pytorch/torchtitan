@@ -90,6 +90,30 @@ class TestTokenizerIntegration(unittest.TestCase):
             # No chat template should be set
             self.assertIsNone(tok._chat_template)
 
+    def test_same_bos_eos_token_is_inferred_for_both_ids(self):
+        """Tokenizers like GPT-2 use one token as both BOS and EOS."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shutil.copy2(
+                os.path.join(ASSETS_TOKENIZER, "tokenizer.json"),
+                os.path.join(tmpdir, "tokenizer.json"),
+            )
+            with open(os.path.join(tmpdir, "tokenizer_config.json"), "w") as f:
+                json.dump(
+                    {
+                        "bos_token": "<|end_of_text|>",
+                        "eos_token": "<|end_of_text|>",
+                    },
+                    f,
+                )
+
+            tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
+
+            self.assertIsNotNone(tok.bos_id)
+            self.assertEqual(tok.bos_id, tok.eos_id)
+            encoded = tok.encode("hello", add_bos=True, add_eos=True)
+            self.assertEqual(encoded[0], tok.bos_id)
+            self.assertEqual(encoded[-1], tok.eos_id)
+
     def _compare_tokenizers(self, our_tokenizer, reference_tokenizer, test_repo_id):
         """
         Comprehensive comparison between our tokenizer and a reference tokenizer.

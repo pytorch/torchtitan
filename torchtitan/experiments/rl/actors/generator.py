@@ -24,6 +24,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
+from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -361,3 +362,32 @@ class VLLMGenerator(Actor, Configurable):
         logger.debug(
             f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
+
+    @endpoint
+    async def close(self) -> None:
+        """Release the vLLM engine and distributed state.
+
+        vLLM's sync ``LLMEngine`` (what we use) has no public ``shutdown``
+        method; only the async ``AsyncLLM`` does. We tear it down by
+        plumbing through its components in the same order ``AsyncLLM``
+        uses internally:
+
+        1. ``renderer.shutdown()`` — closes thread pools and the
+           multimodal-processor cache.
+        2. ``engine_core.shutdown()`` — stops the model worker and the
+           scheduler.
+        3. ``cleanup_dist_env_and_memory()`` — destroys NCCL / model-
+           parallel process groups, runs ``gc.collect``, empties the
+           accelerator cache.
+
+        Each step runs in a ``try/finally`` so a failure in one step
+        does not skip the next.
+        """
+        if self._engine is not None:
+            renderer = getattr(self._engine, "renderer", None)
+            try:
+                if renderer is not None:
+                    renderer.shutdown()
+            finally:
+                self._engine.engine_core.shutdown()
+        cleanup_dist_env_and_memory()
