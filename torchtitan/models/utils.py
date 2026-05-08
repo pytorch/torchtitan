@@ -501,9 +501,7 @@ def get_moe_model_nparams_and_flops(
     if getattr(model_config, "enable_weight_tying", False):
         nparams_for_matmul = nparams_dense + nparams_sparse_active
     else:
-        nparams_for_matmul = (
-            nparams_dense - nparams_embedding + nparams_sparse_active
-        )
+        nparams_for_matmul = nparams_dense - nparams_embedding + nparams_sparse_active
     num_flops_per_token = (
         6 * nparams_for_matmul
         + 6 * len(model_config.layers) * n_heads * head_dims * seq_len
