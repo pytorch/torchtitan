@@ -241,11 +241,11 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self._spmd_dp_axes: list = []
+        self._full_spmd_types: bool = False
 
-    def enable_spmd_types(self, dp_axes: list) -> None:
-        """Store spmd_types DP axes for type annotation during loss computation."""
-        self._spmd_dp_axes = dp_axes
+    def enable_spmd_types(self) -> None:
+        """Enable SPMD type tracking. Axes/PGs are read from global state."""
+        self._full_spmd_types = True
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -314,9 +314,10 @@ class ChunkedCELoss(BaseLoss):
 
         # spmd_types: chunk_loss is P on DP axes. Reinterpret total_loss
         # from R to P so P + P = P accumulates without per-chunk all-reduces.
+        if self._full_spmd_types:
+            from torchtitan.distributed.spmd_state import spmd_state
 
-        if spmd.is_type_checking():
-            for axis in self._spmd_dp_axes:
+            for axis in spmd_state().dp_axes:
                 total_loss = spmd.reinterpret(
                     total_loss, axis, src=spmd.R, dst=spmd.P, expert_mode=True
                 )
