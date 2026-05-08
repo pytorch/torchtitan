@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Generator
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -454,6 +455,7 @@ class FlatShard(Placement):
 
 
 __all__ = [
+    "disable_active_parametrization",
     "DStorage",
     "flat_shard_placements",
     "FlatShard",
@@ -538,6 +540,62 @@ def _validate_placements_for_tracing(
                         f"which is not evenly divisible by "
                         f"world_size={world_size}. Pad the parameter."
                     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a: Parametrization guard and property-based registration
+# ---------------------------------------------------------------------------
+
+_active_parametrization = True
+
+
+@contextmanager
+def disable_active_parametrization() -> Generator[None, None, None]:
+    """Disable parametrization forward (returns raw sharded tensor).
+
+    Use during initialization, checkpointing, or any context where
+    parameter access should not trigger collective communication.
+    """
+    global _active_parametrization
+    try:
+        _active_parametrization = False
+        yield
+    finally:
+        _active_parametrization = True
+
+
+_wrap_class_counter = 0
+
+
+def _register_parametrization(
+    module: nn.Module,
+    param_parametrizations: dict[str, nn.Module],
+) -> None:
+    """Register per-parameter property getters that call parametrization forward.
+
+    Uses dynamic subclass creation (not nn.utils.parametrize) to avoid
+    state_dict key mangling. state_dict reads self._parameters directly,
+    bypassing property getters.
+
+    Args:
+        module: The leaf module owning the parameters.
+        param_parametrizations: Maps parameter name to its parametrization module.
+    """
+    global _wrap_class_counter
+    _wrap_class_counter += 1
+    param_name_to_property = {
+        param_name: property(
+            lambda self, pn=param_name, p=param: p(self._parameters[pn])
+        )
+        for param_name, param in param_parametrizations.items()
+    }
+    module_cls = type(
+        f"FlexShard{module.__class__.__name__}_{_wrap_class_counter}",
+        (module.__class__,),
+        param_name_to_property,
+    )
+    module.__class__ = module_cls
+    sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
 
 
 def set_sharding_info(
@@ -864,6 +922,8 @@ class ShardParametrization(nn.Module):
         self.world_size = world_size
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
+        if not _active_parametrization:
+            return local_shard
         full = torch.ops._c10d_functional.all_gather_into_tensor(
             local_shard, self.world_size, self.group_name
         )
@@ -889,6 +949,8 @@ class FlatShardParametrization(nn.Module):
         self.original_shape = original_shape
 
     def forward(self, flat_shard: torch.Tensor) -> torch.Tensor:
+        if not _active_parametrization:
+            return flat_shard
         full_flat = torch.ops._c10d_functional.all_gather_into_tensor(
             flat_shard, self.world_size, self.group_name
         )
@@ -1603,16 +1665,16 @@ PlacementFn = Callable[
 ]
 
 # TODO: flex_shard(buckets=[module1, module2, ...]
-# prefer full fqn to nn.Parmeter(torch.Tensor)
+# prefer full fqn to nn.Parameter(torch.Tensor)
 # ._wrapped_(compile)._wrapped_(ac).xxx
 # FQN : string = nn.Parameter()
 # shard_placement_fn(model):
 
 #    for submodule in model.modules():
 #        if isinstancE(submodule, EPModule):
-#            reutnr {parame: Sahrd(1)}
+#            return {param: Shard(1)}
 #         else:
-#             reutrn {Shard(0)}
+#             return {Shard(0)}
 
 # model: nn.Module, top-level fqn,
 # shard_placement_fn: specify [module/param_fqn] : [placement]
@@ -1625,7 +1687,7 @@ def flex_shard(
     mesh: DeviceMesh,
     shard_placement_fn: PlacementFn | None = None,
     reshard_after_forward: bool = True,
-    register_hooks: bool = True,
+    register_hooks: bool = False,
     module_fqn: str = "",
 ) -> FlexShardModule:
     """
@@ -1756,5 +1818,46 @@ def flex_shard(
     cls = type(module)
     if not issubclass(cls, FlexShardModule):
         module.__class__ = type(cls.__name__, (cls, FlexShardModule), {})
+
+    # Register property-based parametrization (Phase 2a)
+    if not register_hooks:
+        group_name = mesh.get_group().group_name
+        world_size = mesh.size()
+
+        # Group parametrizations by leaf module
+        module_param_map: dict[nn.Module, dict[str, nn.Module]] = {}
+
+        for fqn, info in param_infos.items():
+            placement = info.placements[0]
+            if isinstance(placement, Shard):
+                p = ShardParametrization(
+                    shard_dim=placement.dim,
+                    group_name=group_name,
+                    world_size=world_size,
+                )
+            elif isinstance(placement, FlatShard):
+                p = FlatShardParametrization(
+                    group_name=group_name,
+                    world_size=world_size,
+                    original_shape=info.global_shape,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported placement for parametrization: {placement}"
+                )
+
+            # Find the leaf module owning this param
+            parts = fqn.split(".")
+            leaf_mod = module
+            for part in parts[:-1]:
+                leaf_mod = getattr(leaf_mod, part)
+            local_name = parts[-1]
+
+            if leaf_mod not in module_param_map:
+                module_param_map[leaf_mod] = {}
+            module_param_map[leaf_mod][local_name] = p
+
+        for mod, param_map in module_param_map.items():
+            _register_parametrization(mod, param_map)
 
     return module
