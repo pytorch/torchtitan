@@ -106,6 +106,21 @@ def _queue_reduce_scatter_wait(context: EagerAllGatherContext) -> None:
     torch.autograd.Variable._execution_engine.queue_callback(_wait_for_reduce_scatter)
 
 
+def _wait_and_clear_reduce_scatter_states(
+    context: EagerAllGatherContext,
+    debug_fqn: str | None,
+) -> None:
+    """Wait for prior eager reduce-scatter states and release their buffers."""
+    if not context.reduce_scatter_states:
+        return
+    with torch.profiler.record_function(
+        _with_fqn("FlexShard::post_backward_rs_wait", debug_fqn)
+    ):
+        for result in context.reduce_scatter_states:
+            Shard.wait_for_reduce_grad(result)
+        context.reduce_scatter_states.clear()
+
+
 class Placement:
     """Base class for FlexShard placement strategies.
 
@@ -3559,6 +3574,10 @@ def _install_batched_allgather_hooks(
                         and all_gather_bucket is not None
                         and pt is Shard
                     ):
+                        _wait_and_clear_reduce_scatter_states(
+                            all_gather_context,
+                            all_gather_bucket.debug_fqn,
+                        )
                         result = Shard.begin_reduce_grad(
                             grads,
                             valid_infos,
