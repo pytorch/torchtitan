@@ -25,7 +25,58 @@ from torch.distributed.fsdp import DataParallelMeshDims
 
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from torch.distributed.device_mesh import DeviceMesh
+
+
+class StreamHandoff:
+    """Hold a tensor until it is safe to release on a target stream."""
+
+    __slots__ = (
+        "_tensor",
+        "_event",
+        "_release_stream",
+        "_device_handle",
+        "_released",
+    )
+
+    def __init__(
+        self,
+        tensor: torch.Tensor,
+        ready_event: torch.Event | None,
+        release_stream: torch.Stream,
+        device_handle: ModuleType | None = None,
+    ) -> None:
+        if device_handle is None:
+            device_handle = getattr(torch, tensor.device.type)
+        self._tensor: torch.Tensor | None = tensor
+        self._event = ready_event
+        self._release_stream = release_stream
+        self._device_handle = device_handle
+        self._released = False
+
+    def wait(self, stream: torch.Stream) -> None:
+        if self._released or self._event is None:
+            return
+        stream.wait_event(self._event)
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._tensor is None:
+            return
+        if self._event is not None:
+            self._release_stream.wait_event(self._event)
+        with self._device_handle.stream(self._release_stream):
+            self._tensor = None
+
+    def __del__(self) -> None:
+        try:
+            self.release()
+        except Exception:
+            pass
 
 
 @dataclass
@@ -69,7 +120,7 @@ class EagerAllGatherResult:
     mesh: DeviceMesh
     per_rank_param_offsets: list[list[int]]
     event: torch.Event | None
-    send_buf: torch.Tensor
+    send_buf: torch.Tensor | None
     debug_fqn: str | None
 
 
@@ -91,8 +142,8 @@ class EagerReduceScatterResult:
 
     sharded_grads: list[torch.Tensor]
     event: torch.Event | None
-    send_buf: torch.Tensor
-    recv_buf: torch.Tensor
+    send_buf: torch.Tensor | None
+    recv_buf: torch.Tensor | None
     debug_fqn: str | None
 
 
@@ -113,6 +164,10 @@ def _queue_reduce_scatter_wait(context: EagerAllGatherContext) -> None:
         try:
             for result in context.reduce_scatter_states:
                 Shard.wait_for_reduce_grad(result)
+                Shard.release_reduce_grad_buffers(
+                    result,
+                    release_sharded_grads=True,
+                )
         finally:
             context.reduce_scatter_states.clear()
             context.reduce_scatter_callback_queued = False
@@ -132,6 +187,10 @@ def _wait_and_clear_reduce_scatter_states(
     ):
         for result in context.reduce_scatter_states:
             Shard.wait_for_reduce_grad(result)
+            Shard.release_reduce_grad_buffers(
+                result,
+                release_sharded_grads=True,
+            )
         context.reduce_scatter_states.clear()
 
 
@@ -384,9 +443,6 @@ class Shard(Placement):
                 dist.all_gather(gathered, send_buf, group=pg)
             event = torch.cuda.Event()
             event.record(all_gather_stream)
-        send_buf.record_stream(all_gather_stream)
-        for tensor in gathered:
-            tensor.record_stream(all_gather_stream)
         return EagerAllGatherResult(
             gathered=gathered,
             infos=infos,
@@ -427,6 +483,8 @@ class Shard(Placement):
                         per_rank_shards, info.global_shape, info.dtype
                     )
                 )
+                del per_rank_shards
+            cls.release_unshard_buffers(result)
             return results
 
     @classmethod
@@ -434,6 +492,33 @@ class Shard(Placement):
         device = result.gathered[0].device
         if device.type == "cuda" and result.event is not None:
             torch.cuda.current_stream(device).wait_event(result.event)
+
+    @classmethod
+    def release_unshard_buffers(cls, result: EagerAllGatherResult) -> None:
+        """Release raw all-gather buffers after current-stream work is queued."""
+        if not result.gathered and result.send_buf is None:
+            return
+        device = (
+            result.gathered[0].device
+            if result.gathered
+            else result.send_buf.device  # type: ignore[union-attr]
+        )
+        if device.type != "cuda":
+            result.gathered.clear()
+            result.send_buf = None
+            return
+
+        stream = torch.cuda.current_stream(device)
+        event = torch.cuda.Event()
+        event.record(stream)
+        handoffs: list[StreamHandoff] = []
+        if result.send_buf is not None:
+            handoffs.append(StreamHandoff(result.send_buf, event, stream))
+            result.send_buf = None
+        while result.gathered:
+            handoffs.append(StreamHandoff(result.gathered.pop(), event, stream))
+        for handoff in handoffs:
+            handoff.release()
 
     @classmethod
     def reduce_grad(
@@ -542,10 +627,6 @@ class Shard(Placement):
             sharded_grads = _copy_out(recv_buf)
             event = torch.cuda.Event()
             event.record(reduce_scatter_stream)
-        send_buf.record_stream(reduce_scatter_stream)
-        recv_buf.record_stream(reduce_scatter_stream)
-        for grad in sharded_grads:
-            grad.record_stream(reduce_scatter_stream)
         return EagerReduceScatterResult(
             sharded_grads=sharded_grads,
             event=event,
@@ -561,9 +642,44 @@ class Shard(Placement):
 
     @classmethod
     def wait_for_reduce_grad(cls, result: EagerReduceScatterResult) -> None:
-        device = result.recv_buf.device
+        device = (
+            result.recv_buf.device
+            if result.recv_buf is not None
+            else result.sharded_grads[0].device
+        )
         if device.type == "cuda" and result.event is not None:
             torch.cuda.current_stream(device).wait_event(result.event)
+
+    @classmethod
+    def release_reduce_grad_buffers(
+        cls,
+        result: EagerReduceScatterResult,
+        release_sharded_grads: bool,
+    ) -> None:
+        """Release pending reduce-scatter buffers after its completion wait."""
+        tensors: list[torch.Tensor] = []
+        if result.send_buf is not None:
+            tensors.append(result.send_buf)
+            result.send_buf = None
+        if result.recv_buf is not None:
+            tensors.append(result.recv_buf)
+            result.recv_buf = None
+        if release_sharded_grads:
+            tensors.extend(result.sharded_grads)
+            result.sharded_grads.clear()
+        if not tensors:
+            return
+        device = tensors[0].device
+        if device.type != "cuda":
+            return
+
+        stream = torch.cuda.current_stream(device)
+        event = torch.cuda.Event()
+        event.record(stream)
+        handoffs = [StreamHandoff(tensor, event, stream) for tensor in tensors]
+        tensors.clear()
+        for handoff in handoffs:
+            handoff.release()
 
 
 class _EagerBucketAllGather(torch.autograd.Function):
@@ -584,6 +700,7 @@ class _EagerBucketAllGather(torch.autograd.Function):
         ctx.num_inputs = len(local_shards)
 
         result = runtime.prefetched_result
+        runtime.prefetched_result = None
         if result is None:
             result = Shard.begin_unshard(
                 [shard.detach() for shard in local_shards],
@@ -3739,6 +3856,7 @@ def _install_batched_allgather_hooks(
 
             def _wait_bucket_unshard(result):
                 Shard.wait_for_unshard(result)
+                Shard.release_unshard_buffers(result)
 
             def _prefetch_next_bucket():
                 if all_gather_context.pending is not None:
