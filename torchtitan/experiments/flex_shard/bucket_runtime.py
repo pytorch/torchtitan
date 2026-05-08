@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from types import ModuleType
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -33,9 +33,6 @@ from .reshard_after_forward import _reshard_after_forward_recompute
 from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .utils import _get_storage_debug_fqn, _with_fqn
 
-if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
-
 
 logger = logging.getLogger(__name__)
 
@@ -43,20 +40,10 @@ ParamEntry = tuple[nn.Module, str, EagerParamAccessState, ParamInfo]
 
 
 @dataclass
-class AllGatherBucket:
-    """Runtime metadata for one batched all-gather bucket."""
-
-    storage: DStorage
-    entries: list[ParamEntry]
-    infos: list[ParamInfo]
-    debug_fqn: str | None
-
-
-@dataclass
 class PendingAllGather:
     """The single one-bucket-ahead all-gather in flight."""
 
-    bucket: AllGatherBucket
+    bucket: BucketRuntime
     result: AllGatherUnshardHandle
     recompute: bool
 
@@ -69,66 +56,62 @@ class PendingReduceGrad:
 
 
 @dataclass
-class AllGatherContext:
+class BucketCommContext:
     """Communication streams for batched collectives."""
 
     device_handle: ModuleType
     all_gather_stream: torch.Stream
     reduce_scatter_stream: torch.Stream
-    buckets: list[AllGatherBucket] = field(default_factory=list)
+    buckets: list[BucketRuntime] = field(default_factory=list)
     pending: PendingAllGather | None = None
     reduce_scatter_states: list[PendingReduceGrad] = field(default_factory=list)
     reduce_scatter_callback_queued: bool = False
+
+    def queue_reduce_scatter_wait(self) -> None:
+        """Queue a post-backward wait for reduce-scatter work."""
+        if self.reduce_scatter_callback_queued:
+            return
+        self.reduce_scatter_callback_queued = True
+
+        def _wait_for_reduce_scatter() -> None:
+            try:
+                for pending in self.reduce_scatter_states:
+                    pending.result.wait()
+                    pending.result.release_buffers(
+                        release_sharded_grads=True,
+                    )
+            finally:
+                self.reduce_scatter_states.clear()
+                self.reduce_scatter_callback_queued = False
+
+        torch.autograd.Variable._execution_engine.queue_callback(
+            _wait_for_reduce_scatter
+        )
+
+    def wait_and_clear_reduce_scatter_states(
+        self,
+        debug_fqn: str | None,
+    ) -> None:
+        """Wait for prior reduce-scatter states and release their buffers."""
+        if not self.reduce_scatter_states:
+            return
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::post_backward_rs_wait", debug_fqn)
+        ):
+            for pending in self.reduce_scatter_states:
+                pending.result.wait()
+                pending.result.release_buffers(
+                    release_sharded_grads=True,
+                )
+            self.reduce_scatter_states.clear()
 
 
 @dataclass
 class BucketAllGatherRuntime:
     """Runtime metadata passed to RAF bucket autograd."""
 
+    bucket: BucketRuntime
     prefetched_result: AllGatherUnshardHandle | None
-    infos: list[ParamInfo]
-    param_refs: list[tuple[nn.Module, str]]
-    mesh: DeviceMesh
-    context: AllGatherContext
-    debug_fqn: str | None
-
-
-def _queue_reduce_scatter_wait(context: AllGatherContext) -> None:
-    """Queue a post-backward wait for reduce-scatter work."""
-    if context.reduce_scatter_callback_queued:
-        return
-    context.reduce_scatter_callback_queued = True
-
-    def _wait_for_reduce_scatter() -> None:
-        try:
-            for pending in context.reduce_scatter_states:
-                pending.result.wait()
-                pending.result.release_buffers(
-                    release_sharded_grads=True,
-                )
-        finally:
-            context.reduce_scatter_states.clear()
-            context.reduce_scatter_callback_queued = False
-
-    torch.autograd.Variable._execution_engine.queue_callback(_wait_for_reduce_scatter)
-
-
-def _wait_and_clear_reduce_scatter_states(
-    context: AllGatherContext,
-    debug_fqn: str | None,
-) -> None:
-    """Wait for prior reduce-scatter states and release their buffers."""
-    if not context.reduce_scatter_states:
-        return
-    with torch.profiler.record_function(
-        _with_fqn("FlexShard::post_backward_rs_wait", debug_fqn)
-    ):
-        for pending in context.reduce_scatter_states:
-            pending.result.wait()
-            pending.result.release_buffers(
-                release_sharded_grads=True,
-            )
-        context.reduce_scatter_states.clear()
 
 
 def _accumulate_sharded_grads(
@@ -147,6 +130,200 @@ def _accumulate_sharded_grads(
         else:
             param.grad += grad
     return stored_grads
+
+
+@dataclass
+class BucketRuntime:
+    """Runtime state and hooks for one FlexShard bucket."""
+
+    storage: DStorage
+    entries: list[ParamEntry]
+    context: BucketCommContext
+    debug_fqn: str | None
+    use_autograd_unshard: bool
+    collected_grads: dict[int, torch.Tensor] = field(default_factory=dict)
+
+    @property
+    def infos(self) -> list[ParamInfo]:
+        return [info for _, _, _, info in self.entries]
+
+    @property
+    def param_refs(self) -> list[tuple[nn.Module, str]]:
+        return [(leaf, name) for leaf, name, _, _ in self.entries]
+
+    def _local_shards(self, use_autograd: bool) -> list[torch.Tensor]:
+        local_shards: list[torch.Tensor] = []
+        for leaf, name, param_state, _ in self.entries:
+            local_shard = (
+                leaf._parameters[name] if use_autograd else leaf._parameters[name].data
+            )
+            if (
+                param_state.compute_device is not None
+                and local_shard.device != param_state.compute_device
+            ):
+                local_shard = local_shard.to(
+                    param_state.compute_device,
+                    non_blocking=True,
+                )
+            local_shards.append(local_shard)
+        return local_shards
+
+    def begin_unshard(self) -> AllGatherUnshardHandle:
+        """Begin this bucket's all-gather unshard on the shared stream."""
+        return begin_all_gather_unshard(
+            self._local_shards(use_autograd=False),
+            self.infos,
+            self.storage._mesh,
+            self.context.all_gather_stream,
+            debug_fqn=self.debug_fqn,
+        )
+
+    def wait_pending(self, result: AllGatherUnshardHandle) -> None:
+        """Wait for and release an unused pending unshard result."""
+        result.wait()
+        result.release_buffers()
+
+    def prefetch_next(self) -> None:
+        """Start the next bucket's all-gather if no prefetch is in flight."""
+        if self.context.pending is not None:
+            return
+        prefetch_order = self.context.buckets
+        if _reshard_after_forward_recompute.get():
+            prefetch_order = prefetch_order[::-1]
+        for idx, bucket in enumerate(prefetch_order):
+            if bucket is self:
+                break
+        else:
+            return
+        next_idx = idx + 1
+        if next_idx >= len(prefetch_order):
+            return
+        next_bucket = prefetch_order[next_idx]
+        self.context.pending = PendingAllGather(
+            bucket=next_bucket,
+            result=next_bucket.begin_unshard(),
+            recompute=_reshard_after_forward_recompute.get(),
+        )
+
+    def take_pending(self) -> AllGatherUnshardHandle | None:
+        """Return a matching pending result, releasing stale pending work."""
+        pending = self.context.pending
+        if pending is None:
+            return None
+        if (
+            pending.bucket is self
+            and pending.recompute == _reshard_after_forward_recompute.get()
+        ):
+            self.context.pending = None
+            return pending.result
+        self.wait_pending(pending.result)
+        self.context.pending = None
+        return None
+
+    def reduce_grads(
+        self,
+        grads: list[torch.Tensor],
+        infos: list[ParamInfo],
+        param_refs: list[tuple[nn.Module, str]],
+    ) -> None:
+        """Reduce full-parameter grads and accumulate local sharded grads."""
+        if not grads:
+            return
+        with torch.no_grad():
+            self.context.wait_and_clear_reduce_scatter_states(self.debug_fqn)
+            result = begin_reduce_scatter_grad(
+                grads,
+                infos,
+                self.storage._mesh,
+                self.context.reduce_scatter_stream,
+                debug_fqn=self.debug_fqn,
+            )
+            with self.context.device_handle.stream(self.context.reduce_scatter_stream):
+                sharded_grads = result.finish()
+                result.record_sharded_grads(
+                    _accumulate_sharded_grads(
+                        param_refs,
+                        sharded_grads,
+                    ),
+                    self.context.reduce_scatter_stream,
+                )
+            self.context.reduce_scatter_states.append(PendingReduceGrad(result))
+            self.context.queue_reduce_scatter_wait()
+
+    def _reduce_collected_grads(self) -> None:
+        grads: list[torch.Tensor] = []
+        infos: list[ParamInfo] = []
+        param_refs: list[tuple[nn.Module, str]] = []
+        for idx, (leaf, name, param_state, info) in enumerate(self.entries):
+            grad = self.collected_grads.pop(idx, None)
+            if grad is not None:
+                grads.append(grad)
+                infos.append(info)
+                param_refs.append((leaf, name))
+            param_state._unsharded_for_reduce = None
+        self.reduce_grads(grads, infos, param_refs)
+
+    def pre_forward_hook(self, mod, args) -> None:
+        if torch.compiler.is_compiling():
+            return
+        local_shards = self._local_shards(use_autograd=self.use_autograd_unshard)
+        if self.use_autograd_unshard:
+            prefetched_result = self.take_pending()
+            runtime = BucketAllGatherRuntime(
+                bucket=self,
+                prefetched_result=prefetched_result,
+            )
+            full_params = list(_BucketAllGather.apply(runtime, *local_shards))
+            self.prefetch_next()
+        else:
+            with torch.no_grad():
+                result = self.take_pending()
+                if result is None:
+                    result = begin_all_gather_unshard(
+                        local_shards,
+                        self.infos,
+                        self.storage._mesh,
+                        self.context.all_gather_stream,
+                        debug_fqn=self.debug_fqn,
+                    )
+                full_params = result.finish()
+                self.prefetch_next()
+        for (_, _, param_state, _), full_param in zip(
+            self.entries, full_params, strict=True
+        ):
+            param_state._pre_gathered = full_param
+
+    def post_forward_hook(self, mod, args, output) -> None:
+        if torch.compiler.is_compiling():
+            return
+        for _, _, param_state, _ in self.entries:
+            param_state._pre_gathered = None
+        if self.use_autograd_unshard:
+            return
+
+        if torch.is_grad_enabled():
+            self.collected_grads.clear()
+            leaf_indices = []
+            for idx, (_, _, param_state, _) in enumerate(self.entries):
+                leaf = param_state._unsharded_for_reduce
+                if leaf is not None and leaf.requires_grad:
+                    leaf_indices.append((idx, leaf))
+
+            if leaf_indices:
+                indices = [idx for idx, _ in leaf_indices]
+                leaves = [leaf for _, leaf in leaf_indices]
+
+                def _on_grads(grads):
+                    self.collected_grads.clear()
+                    for idx, grad in zip(indices, grads, strict=True):
+                        if grad is not None:
+                            self.collected_grads[idx] = grad
+                    self._reduce_collected_grads()
+
+                torch.autograd.graph.register_multi_grad_hook(
+                    leaves,
+                    _on_grads,
+                )
 
 
 class _BucketAllGather(torch.autograd.Function):
@@ -171,10 +348,10 @@ class _BucketAllGather(torch.autograd.Function):
         if result is None:
             result = begin_all_gather_unshard(
                 [shard.detach() for shard in local_shards],
-                runtime.infos,
-                runtime.mesh,
-                runtime.context.all_gather_stream,
-                debug_fqn=runtime.debug_fqn,
+                runtime.bucket.infos,
+                runtime.bucket.storage._mesh,
+                runtime.bucket.context.all_gather_stream,
+                debug_fqn=runtime.bucket.debug_fqn,
             )
         full_params = result.finish()
         return tuple(full_params)
@@ -185,13 +362,14 @@ class _BucketAllGather(torch.autograd.Function):
         *full_param_grads: torch.Tensor | None,
     ) -> tuple[Any, ...]:
         runtime: BucketAllGatherRuntime = ctx.runtime
+        bucket = runtime.bucket
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
         valid_param_refs: list[tuple[nn.Module, str]] = []
         for grad, info, param_ref in zip(
             full_param_grads,
-            runtime.infos,
-            runtime.param_refs,
+            bucket.infos,
+            bucket.param_refs,
             strict=True,
         ):
             if grad is None:
@@ -201,31 +379,7 @@ class _BucketAllGather(torch.autograd.Function):
             valid_param_refs.append(param_ref)
 
         if grads:
-            with torch.no_grad():
-                _wait_and_clear_reduce_scatter_states(
-                    runtime.context,
-                    runtime.debug_fqn,
-                )
-                result = begin_reduce_scatter_grad(
-                    grads,
-                    valid_infos,
-                    runtime.mesh,
-                    runtime.context.reduce_scatter_stream,
-                    debug_fqn=runtime.debug_fqn,
-                )
-                with runtime.context.device_handle.stream(
-                    runtime.context.reduce_scatter_stream
-                ):
-                    sharded_grads = result.finish()
-                    result.record_sharded_grads(
-                        _accumulate_sharded_grads(
-                            valid_param_refs,
-                            sharded_grads,
-                        ),
-                        runtime.context.reduce_scatter_stream,
-                    )
-                runtime.context.reduce_scatter_states.append(PendingReduceGrad(result))
-                _queue_reduce_scatter_wait(runtime.context)
+            bucket.reduce_grads(grads, valid_infos, valid_param_refs)
 
         # Gradients are accumulated into the original sharded parameters above
         # so the autograd input grads can stay empty and avoid blocking here.
@@ -235,7 +389,7 @@ class _BucketAllGather(torch.autograd.Function):
 def _get_or_create_comm_context(
     root_module: nn.Module,
     device: torch.device,
-) -> AllGatherContext:
+) -> BucketCommContext:
     contexts = getattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, None)
     if contexts is None:
         contexts = {}
@@ -244,7 +398,7 @@ def _get_or_create_comm_context(
     context = contexts.get(device)
     if context is None:
         device_handle = _get_device_handle(device.type)
-        context = AllGatherContext(
+        context = BucketCommContext(
             device_handle=device_handle,
             all_gather_stream=device_handle.Stream(priority=-1),
             reduce_scatter_stream=device_handle.Stream(priority=-1),
@@ -460,247 +614,19 @@ def _install_batched_allgather_hooks(
                 comm_device = param_state.compute_device
                 break
         ag_context = _get_or_create_comm_context(storage._module, comm_device)
-        ag_bucket = AllGatherBucket(
+        bucket_runtime = BucketRuntime(
             storage=storage,
             entries=param_entries,
-            infos=infos,
+            context=ag_context,
             debug_fqn=_get_storage_debug_fqn(storage),
-        )
-        use_autograd_unshard = _storage_uses_bucket_autograd_unshard(storage)
-
-        def make_hooks(
-            s,
-            entries,
-            all_gather_context,
-            all_gather_bucket,
-            use_autograd_bucket,
-        ):
-            # Collected grads from AccumulateGrad hooks (indexed by position)
-            collected_grads: dict[int, torch.Tensor] = {}
-
-            def _begin_bucket_unshard(bucket):
-                local_shards = [
-                    leaf._parameters[name].data for leaf, name, _, _ in bucket.entries
-                ]
-                return begin_all_gather_unshard(
-                    local_shards,
-                    bucket.infos,
-                    bucket.storage._mesh,
-                    all_gather_context.all_gather_stream,
-                    debug_fqn=bucket.debug_fqn,
-                )
-
-            def _wait_bucket_unshard(result):
-                result.wait()
-                result.release_buffers()
-
-            def _prefetch_next_bucket():
-                if all_gather_context.pending is not None:
-                    return
-                prefetch_order = all_gather_context.buckets
-                if _reshard_after_forward_recompute.get():
-                    prefetch_order = prefetch_order[::-1]
-                for idx, bucket in enumerate(prefetch_order):
-                    if bucket is all_gather_bucket:
-                        break
-                else:
-                    return
-                next_idx = idx + 1
-                if next_idx >= len(prefetch_order):
-                    return
-                next_bucket = prefetch_order[next_idx]
-                all_gather_context.pending = PendingAllGather(
-                    bucket=next_bucket,
-                    result=_begin_bucket_unshard(next_bucket),
-                    recompute=_reshard_after_forward_recompute.get(),
-                )
-
-            def _take_pending_for_current_bucket():
-                pending = all_gather_context.pending
-                if pending is None:
-                    return None
-                if (
-                    pending.bucket is all_gather_bucket
-                    and pending.recompute == _reshard_after_forward_recompute.get()
-                ):
-                    all_gather_context.pending = None
-                    return pending.result
-                _wait_bucket_unshard(pending.result)
-                all_gather_context.pending = None
-                return None
-
-            def _reduce_fn():
-                """Batched reduce-scatter using collected grads."""
-                grads, valid = [], []
-                for idx, (leaf, name, param_state, info) in enumerate(entries):
-                    g = collected_grads.pop(idx, None)
-                    if g is not None:
-                        grads.append(g)
-                        valid.append((leaf, name, info))
-                    param_state._unsharded_for_reduce = None
-                if not grads:
-                    return
-                valid_infos = [i for _, _, i in valid]
-                with torch.no_grad():
-                    if all_gather_context is not None and all_gather_bucket is not None:
-                        _wait_and_clear_reduce_scatter_states(
-                            all_gather_context,
-                            all_gather_bucket.debug_fqn,
-                        )
-                        result = begin_reduce_scatter_grad(
-                            grads,
-                            valid_infos,
-                            s._mesh,
-                            all_gather_context.reduce_scatter_stream,
-                            debug_fqn=all_gather_bucket.debug_fqn,
-                        )
-                        with all_gather_context.device_handle.stream(
-                            all_gather_context.reduce_scatter_stream
-                        ):
-                            sharded_grads = result.finish()
-                            result.record_sharded_grads(
-                                _accumulate_sharded_grads(
-                                    [(leaf, name) for leaf, name, _ in valid],
-                                    sharded_grads,
-                                ),
-                                all_gather_context.reduce_scatter_stream,
-                            )
-                        all_gather_context.reduce_scatter_states.append(
-                            PendingReduceGrad(result)
-                        )
-                        _queue_reduce_scatter_wait(all_gather_context)
-                    else:
-                        device_handle = _get_device_handle(grads[0].device.type)
-                        result = begin_reduce_scatter_grad(
-                            grads,
-                            valid_infos,
-                            s._mesh,
-                            device_handle.current_stream(grads[0].device),
-                            debug_fqn=None,
-                        )
-                        reduced = result.finish()
-                        _accumulate_sharded_grads(
-                            [(leaf, name) for leaf, name, _ in valid],
-                            reduced,
-                        )
-                        result.release_buffers(release_sharded_grads=True)
-
-            def pre_forward_hook(mod, args):
-                if torch.compiler.is_compiling():
-                    return
-                # Batched all-gather
-                local_shards = []
-                for leaf, name, param_state, _ in entries:
-                    local_shard = (
-                        leaf._parameters[name]
-                        if use_autograd_bucket
-                        else leaf._parameters[name].data
-                    )
-                    if (
-                        param_state.compute_device is not None
-                        and local_shard.device != param_state.compute_device
-                    ):
-                        local_shard = local_shard.to(
-                            param_state.compute_device,
-                            non_blocking=True,
-                        )
-                    local_shards.append(local_shard)
-                entry_infos = [info for _, _, _, info in entries]
-                if all_gather_context is not None and all_gather_bucket is not None:
-                    if use_autograd_bucket:
-                        prefetched_result = _take_pending_for_current_bucket()
-                        runtime = BucketAllGatherRuntime(
-                            prefetched_result=prefetched_result,
-                            infos=entry_infos,
-                            param_refs=[(leaf, name) for leaf, name, _, _ in entries],
-                            mesh=s._mesh,
-                            context=all_gather_context,
-                            debug_fqn=all_gather_bucket.debug_fqn,
-                        )
-                        full_params = list(
-                            _BucketAllGather.apply(runtime, *local_shards)
-                        )
-                        _prefetch_next_bucket()
-                    else:
-                        with torch.no_grad():
-                            result = _take_pending_for_current_bucket()
-                            if result is None:
-                                result = begin_all_gather_unshard(
-                                    local_shards,
-                                    entry_infos,
-                                    s._mesh,
-                                    all_gather_context.all_gather_stream,
-                                    debug_fqn=all_gather_bucket.debug_fqn,
-                                )
-                            full_params = result.finish()
-                            _prefetch_next_bucket()
-                else:
-                    with torch.no_grad():
-                        device_handle = _get_device_handle(local_shards[0].device.type)
-                        result = begin_all_gather_unshard(
-                            local_shards,
-                            entry_infos,
-                            s._mesh,
-                            device_handle.current_stream(local_shards[0].device),
-                            debug_fqn=None,
-                        )
-                        full_params = result.finish()
-                for (_, _, param_state, _), full_param in zip(
-                    entries, full_params, strict=True
-                ):
-                    param_state._pre_gathered = full_param
-
-            def post_forward_hook(mod, args, output):
-                if torch.compiler.is_compiling():
-                    return
-                for _, _, param_state, _ in entries:
-                    param_state._pre_gathered = None
-                if use_autograd_bucket:
-                    return
-
-                # Register AccumulateGrad hooks on detached leaf params.
-                # Each hook stores its grad by index. The last hook fires
-                # _reduce_fn with all collected grads (u.grad is None at
-                # hook time — grads must be captured from the hook argument).
-                if torch.is_grad_enabled():
-                    collected_grads.clear()
-                    leaf_indices = []
-                    for idx, (_, _, param_state, _) in enumerate(entries):
-                        u = param_state._unsharded_for_reduce
-                        if u is not None and u.requires_grad:
-                            leaf_indices.append((idx, u))
-
-                    if leaf_indices:
-                        indices = [idx for idx, _ in leaf_indices]
-                        leaves = [leaf for _, leaf in leaf_indices]
-
-                        def _on_grads(grads):
-                            collected_grads.clear()
-                            for idx, grad in zip(indices, grads, strict=True):
-                                if grad is not None:
-                                    collected_grads[idx] = grad
-                            _reduce_fn()
-
-                        torch.autograd.graph.register_multi_grad_hook(
-                            leaves,
-                            _on_grads,
-                        )
-
-            return pre_forward_hook, post_forward_hook
-
-        pre_hook, post_hook = make_hooks(
-            storage,
-            param_entries,
-            ag_context,
-            ag_bucket,
-            use_autograd_unshard,
+            use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
         )
 
         target = _get_hook_target_module(storage)
         if target is None:
             continue
-        target.register_forward_pre_hook(pre_hook)
-        target.register_forward_hook(post_hook)
-        ag_context.buckets.append(ag_bucket)
+        target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
+        target.register_forward_hook(bucket_runtime.post_forward_hook)
+        ag_context.buckets.append(bucket_runtime)
         for _, _, param_state, _ in param_entries:
             setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
