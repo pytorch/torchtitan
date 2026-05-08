@@ -32,6 +32,62 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
+def loss_parallel_cross_entropy(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    tp_pg: "ProcessGroup",
+) -> torch.Tensor:
+    """Distributed cross-entropy on vocab-sharded logits.
+
+    Operates on locally-typed tensors inside ``local_map``. Uses 3
+    all-reduces on ``[B*L]``-sized tensors instead of all-gathering the
+    full ``[B, L, V]`` logits.
+
+    Args:
+        logits: ``[B, L, V/tp]`` with vocab dim sharded across TP ranks.
+        labels: ``[B, L]`` replicated across TP ranks.
+        tp_pg: TP process group for collectives.
+
+    Returns:
+        Scalar sum-reduced loss, identical on all TP ranks.
+    """
+    import torch.distributed as dist
+    import torch.distributed._functional_collectives as funcol
+
+    tp_rank = dist.get_rank(tp_pg)
+    vocab_chunk_size = logits.shape[-1]
+    logits_2d = logits.flatten(0, 1).float()
+    labels_1d = labels.flatten(0, 1)
+
+    # Distributed log-sum-exp: 2 all-reduces for numerical stability
+    # MAX reduce is for numerical stability only — detach from autograd
+    # (it cancels out: shifted = x - max, log_sum_exp = log(sum(exp(shifted))) + max)
+    with torch.no_grad():
+        local_max = logits_2d.max(dim=-1).values
+        global_max = funcol.all_reduce(local_max, "MAX", tp_pg)
+
+    shifted = logits_2d - global_max.unsqueeze(-1)
+    local_exp_sum = shifted.exp().sum(dim=-1)
+    global_exp_sum = funcol.all_reduce(local_exp_sum, "SUM", tp_pg)
+
+    log_sum_exp = global_exp_sum.log() + global_max
+
+    # Distributed target lookup: each rank gathers its local slice
+    vocab_start = tp_rank * vocab_chunk_size
+    in_range = (labels_1d >= vocab_start) & (labels_1d < vocab_start + vocab_chunk_size)
+    local_idx = (labels_1d - vocab_start).clamp(min=0, max=vocab_chunk_size - 1)
+    local_target_logit = logits_2d[
+        torch.arange(labels_1d.shape[0], device=logits.device), local_idx
+    ]
+    local_target_logit = local_target_logit * in_range.to(logits_2d.dtype)
+    target_logit = funcol.all_reduce(local_target_logit, "SUM", tp_pg)
+
+    per_token_loss = -target_logit + log_sum_exp
+    valid = labels_1d != IGNORE_INDEX
+    return (per_token_loss * valid).sum()
+
+
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """MSE loss with sum reduction for Transformer models training."""
     return torch.nn.functional.mse_loss(
@@ -245,6 +301,7 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
+        self._loss_parallel: bool = False
 
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
@@ -299,7 +356,12 @@ class ChunkedCELoss(BaseLoss):
                 )
 
             logits = lm_head(h_chunk)
-            chunk_loss = self.fn(logits, label_chunk)
+            if self._loss_parallel:
+                chunk_loss = loss_parallel_cross_entropy(
+                    logits, label_chunk, tp_pg=spmd_state().tp_pg,
+                )
+            else:
+                chunk_loss = self.fn(logits, label_chunk)
             if global_valid_tokens is not None:
                 chunk_loss = chunk_loss / global_valid_tokens
             total_loss = total_loss + chunk_loss.detach()
@@ -333,7 +395,9 @@ class ChunkedCELoss(BaseLoss):
         for axis in state.dp_axes:
             loss_type[axis] = spmd.P
         if mesh().tp.size() > 1:
-            loss_type[mesh().tp] = spmd.I
+            # R when loss_parallel (all-reduces ensure identical values),
+            # I otherwise (each rank computes on replicated logits)
+            loss_type[mesh().tp] = spmd.R if self._loss_parallel else spmd.I
 
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
