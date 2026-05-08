@@ -57,13 +57,15 @@ def redistribute_per_axis(
     x: torch.Tensor,
     src_types: spmd.PerMeshAxisSpmdTypes,
     dst_types: spmd.PerMeshAxisSpmdTypes,
-    parallel_dims: "ParallelDims",
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
+    from torchtitan.distributed.spmd_state import spmd_state
+
+    state = spmd_state()
     for axis, dst_t in dst_types.items():
         src_t = src_types.get(axis)
         if src_t is not None and src_t != dst_t:
-            pg = parallel_dims.get_spmd_pg_for_axis(axis)
+            pg = state.pg_for_axis(axis)
             bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
             x = spmd.redistribute(x, pg, src=src_t, dst=dst_t, backward_options=bwd)
     return x
@@ -72,12 +74,11 @@ def redistribute_per_axis(
 def lspmd_parallelize(
     fn: Callable,
     config: LocalSpmdConfig,
-    parallel_dims: "ParallelDims",
 ) -> Callable:
     """Wrap forward with ``spmd.local_map`` for local typechecking."""
-    resolved_out = config.out.resolve(parallel_dims)
+    resolved_out = config.out.resolve()
     resolved_in = (
-        tuple(a.resolve(parallel_dims) for a in config.inputs)
+        tuple(a.resolve() for a in config.inputs)
         if config.inputs is not None else spmd.Infer
     )
 
@@ -91,18 +92,17 @@ def lspmd_parallelize(
 def gspmd_parallelize(
     fn: Callable,
     config: GlobalSpmdConfig,
-    parallel_dims: "ParallelDims",
 ) -> Callable:
     """Build a forward wrapper that redistributes inputs and/or outputs."""
     resolved_inputs = None
     if config.inputs is not None:
         resolved_inputs = tuple(
-            r.resolve(parallel_dims) if r is not None else None
+            r.resolve() if r is not None else None
             for r in config.inputs
         )
 
     resolved_output = (
-        config.output.resolve(parallel_dims) if config.output is not None else None
+        config.output.resolve() if config.output is not None else None
     )
 
     def wrapper(*args, **kwargs):
@@ -110,13 +110,13 @@ def gspmd_parallelize(
             args = list(args)
             for i, redist in enumerate(resolved_inputs):
                 if redist is not None and isinstance(args[i], torch.Tensor):
-                    args[i] = redistribute_per_axis(args[i], *redist, parallel_dims)
+                    args[i] = redistribute_per_axis(args[i], *redist)
             args = tuple(args)
 
         outputs = fn(*args, **kwargs)
 
         if resolved_output is not None and isinstance(outputs, torch.Tensor):
-            outputs = redistribute_per_axis(outputs, *resolved_output, parallel_dims)
+            outputs = redistribute_per_axis(outputs, *resolved_output)
 
         return outputs
 
@@ -387,7 +387,9 @@ class Module(nn.Module, Configurable):
 
     def _parallelize_spmd(self, parallel_dims: "ParallelDims") -> None:
         if self._sharding_config is not None:
-            dp_axes_set = set(parallel_dims.spmd_dp_axes())
+            from torchtitan.distributed.spmd_state import spmd_state
+
+            dp_axes_set = set(spmd_state().dp_axes)
             for name, state in itertools.chain(
                 self.named_parameters(recurse=False),
                 self.named_buffers(recurse=False),
@@ -395,7 +397,7 @@ class Module(nn.Module, Configurable):
                 if name not in self._sharding_config.state_shardings:
                     continue
                 resolved = resolve_spmd(
-                    self._sharding_config.state_shardings[name], parallel_dims,
+                    self._sharding_config.state_shardings[name],
                 )
                 # DP-replicated states need R (not I) because each rank
                 # processes different data — gradients need reduction.
@@ -409,13 +411,9 @@ class Module(nn.Module, Configurable):
 
         spmd_config = self._spmd_config
         if isinstance(spmd_config, LocalSpmdConfig):
-            self.forward = lspmd_parallelize(
-                self.forward, spmd_config, parallel_dims,
-            )
+            self.forward = lspmd_parallelize(self.forward, spmd_config)
         elif isinstance(spmd_config, GlobalSpmdConfig):
-            self.forward = gspmd_parallelize(
-                self.forward, spmd_config, parallel_dims,
-            )
+            self.forward = gspmd_parallelize(self.forward, spmd_config)
 
     # ----- DTensor input/output helpers (unchanged from main) -----
 
