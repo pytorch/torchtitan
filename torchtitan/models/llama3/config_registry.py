@@ -104,7 +104,7 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_lora() -> Trainer.Config:
+def llama3_debugmodel_float8_emulate_lora() -> Trainer.Config:
     from torchtitan.components.lora import LoRAConverter
 
     config = llama3_debugmodel()
@@ -132,20 +132,6 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_float8_emulate() -> Trainer.Config:
-    config = llama3_debugmodel()
-    config.model_spec = model_registry(
-        "debugmodel",
-        converters=[
-            Float8LinearConverter.Config(
-                emulate=True,
-                model_compile_enabled=(
-                    config.compile.enable and "model" in config.compile.components
-                ),
-            ),
-        ],
-    )
-    return config
 
 
 def llama3_8b() -> Trainer.Config:
