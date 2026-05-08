@@ -33,6 +33,7 @@ from torch.distributed.fsdp import DataParallelMeshDims
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from torchtitan.experiments.flex_shard import (
+    BucketSpec,
     flat_shard_placements,
     flex_shard,
     FlexShardModule,
@@ -129,12 +130,14 @@ def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
             mesh,
             DataParallelMeshDims(shard="fsdp"),
             shard_placement_fn=shard_placement_fn,
+            buckets=[BucketSpec(["*"])],
         )
     flex_shard(
         model,
         mesh,
         DataParallelMeshDims(shard="fsdp"),
         shard_placement_fn=shard_placement_fn,
+        buckets=[BucketSpec(["embed.*"]), BucketSpec(["output.*"])],
     )
 
     # Root-level reshard checkpointing wraps FlexShard-managed layers in
