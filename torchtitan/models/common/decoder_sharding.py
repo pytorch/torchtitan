@@ -7,7 +7,13 @@
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import LocalMapConfig, NamedPlacement, ShardingConfig
+from torchtitan.protocols.sharding import (
+    LocalMapConfig,
+    LocalSpmdConfig,
+    NamedPlacement,
+    ShardingConfig,
+    SpmdAnnotation,
+)
 from torchtitan.protocols.types import MeshAxisName
 
 DP_REPLICATE = MeshAxisName.DP_REPLICATE
@@ -173,6 +179,21 @@ def set_gqa_inner_attention_local_map(
     )
 
 
+def set_gqa_inner_attention_local_spmd(
+    inner_attention_cfg,
+    inputs: tuple[SpmdAnnotation, ...],
+    out: SpmdAnnotation,
+) -> None:
+    """Install a ``LocalSpmdConfig`` on an inner-attention config.
+
+    spmd_types counterpart to ``set_gqa_inner_attention_local_map``.
+    """
+    inner_attention_cfg.spmd_config = LocalSpmdConfig(
+        inputs=inputs,
+        out=out,
+    )
+
+
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,
@@ -195,7 +216,7 @@ def set_dense_ffn_sharding(
 
 
 def set_decoder_sharding_config(
-    config, *, loss_parallel: bool, enable_sp: bool
+    config, *, loss_parallel: bool, enable_sp: bool, full_spmd_types: bool = False,
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     ``output``, and the root ``freqs_cis`` buffer.
