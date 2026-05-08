@@ -13,7 +13,7 @@ import torch
 import spmd_types as spmd
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
+from torchtitan.distributed.spmd_state import is_spmd_active, mesh, spmd_state
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -222,10 +222,10 @@ class ChunkedCELoss(BaseLoss):
         computes partial CE on its ``V/tp`` slice, with an internal
         all-reduce for the correct log-sum-exp.
 
-    CP composability:
-        CP shards dim=1 (seq), the same dim this class chunks on. The chunk
-        loop body runs inside a ``local_map`` boundary that strips all SPMD
-        types — chunking, flatten, and CE operate on plain local tensors.
+    SPMD composability:
+        The chunk loop body runs inside a ``local_map`` boundary that strips
+        all SPMD types — chunking, flatten, and CE operate on plain local
+        tensors. ``local_map`` re-annotates outputs on exit.
 
     Compile: ce_loss can be compiled independently; lm_head is not compiled.
     """
@@ -332,7 +332,6 @@ class ChunkedCELoss(BaseLoss):
         loss_type: dict = {}
         for axis in state.dp_axes:
             loss_type[axis] = spmd.P
-
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
         grad_leaf = (grad_types, grad_spec) if grad_spec else grad_types
@@ -367,13 +366,13 @@ class ChunkedCELoss(BaseLoss):
         # Redistribute only the TP dim to Replicate before chunking so that
         # the lm_head receives Replicate input on TP.
         if isinstance(hidden_states, DTensor):
-            mesh = hidden_states.device_mesh
-            if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
-                tp_dim = mesh.mesh_dim_names.index("tp")
+            dt_mesh = hidden_states.device_mesh
+            if dt_mesh.mesh_dim_names is not None and "tp" in dt_mesh.mesh_dim_names:
+                tp_dim = dt_mesh.mesh_dim_names.index("tp")
                 placements = list(hidden_states.placements)
                 if not isinstance(placements[tp_dim], Replicate):
                     placements[tp_dim] = Replicate()
-                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
+                    hidden_states = hidden_states.redistribute(dt_mesh, tuple(placements))
 
         requires_grad = hidden_states.requires_grad
         h_detached = hidden_states.detach().requires_grad_(requires_grad)
