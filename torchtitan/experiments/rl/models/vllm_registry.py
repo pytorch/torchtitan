@@ -47,6 +47,16 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     Field names match HF conventions because vLLM's engine reads them by
     hardcoded name (``vocab_size``, ``hidden_size``, ``num_attention_heads``,
     …) before any model class is constructed.
+
+    Fields are grouped into three categories:
+      1. Value used — vLLM reads the actual value and its magnitude
+         affects behavior.
+      2. Presence required — only existence / non-empty / positive
+         matters; the specific value is not consumed.
+      3. Unused — present so ``PretrainedConfig`` has the keys other
+         vLLM helpers may ``getattr`` against, but the values are not
+         consumed in our flow (V1 engine, ``TorchTitanCausalLM`` model
+         class, no KV transfer, no MFU metrics, no multimodal).
     """
     cfg = spec.model
     if not cfg.layers:
@@ -59,38 +69,44 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     head_dim = attn.head_dim if attn.head_dim is not None else cfg.dim // n_heads
 
     hf: dict[str, Any] = {
-        # All torchtitan-backed models register under VLLM_MODEL_NAME.
-        "architectures": [VLLM_MODEL_NAME],
-        "model_type": "torchtitan",
-        "vocab_size": cfg.vocab_size,
-        "hidden_size": cfg.dim,
-        "num_hidden_layers": len(cfg.layers),
-        "num_attention_heads": n_heads,
-        "num_key_value_heads": n_kv_heads,
-        "head_dim": head_dim,
-        "max_position_embeddings": cfg.rope.max_seq_len,
-        "rope_theta": cfg.rope.theta,
-        "rms_norm_eps": cfg.norm.eps,
-        "tie_word_embeddings": getattr(cfg, "enable_weight_tying", False),
-        # Best-effort special tokens: tokenizer_config.json overrides at
-        # request-processing time.
-        "bos_token_id": 0,
-        "eos_token_id": 1,
+        # Value used
+        "architectures": [VLLM_MODEL_NAME],  # ModelRegistry lookup key
+        "vocab_size": cfg.vocab_size,  # V1 logits buffer + out of vocabulary check
+        "hidden_size": cfg.dim,  # vLLM compile-pass thresholds (SP, flashinfer)
+        "num_attention_heads": n_heads,  # TP divisibility + FA3 num_heads_q
+        "num_key_value_heads": n_kv_heads,  # DCP divisibility + FA3 num_heads_kv
+        "head_dim": head_dim,  # FA3 scheduler headdim
+        "max_position_embeddings": cfg.rope.max_seq_len,  # caps max_model_len
+        # Presence required
+        "model_type": "torchtitan",  # any non-empty string
+        "num_hidden_layers": len(
+            cfg.layers
+        ),  # positive int; only PP/KV-transfer read magnitude
+        # Unused
+        "rope_theta": cfg.rope.theta,  # only used for non-default rope_type; wrapper builds RoPE
+        "rms_norm_eps": cfg.norm.eps,  # only minimax-qk-norm fusion reads it; wrapper builds RMSNorm
+        "tie_word_embeddings": getattr(
+            cfg, "enable_weight_tying", False
+        ),  # multimodal/GGUF only; wrapper ties weights
+        "bos_token_id": 0,  # Fuyu-only; engine reads tokenizer/sampling tokens
+        "eos_token_id": 1,  # per-model files only; engine reads tokenizer/sampling tokens
     }
 
     ffn = getattr(layer0, "feed_forward", None)
     if ffn is not None:
-        # FeedForward.Config holds w1/w2/w3 Linear.Config objects; the SwiGLU
-        # hidden dim is w1.out_features (== w3.out_features == w2.in_features).
+        # Unused: only v1/metrics/perf.py reads it (off by default). SwiGLU hidden == w1.out_features.
         hf["intermediate_size"] = ffn.w1.out_features
 
     moe = getattr(layer0, "moe", None)
     if moe is not None:
-        hf["num_experts"] = moe.experts.num_experts
-        # top_k lives on the router config, not the experts config.
-        hf["num_experts_per_tok"] = moe.router.top_k
+        hf[
+            "num_experts"
+        ] = moe.experts.num_experts  # presence required: >0 toggles MoE/EP branches
+        # Unused: only per-model loaders (qwen3_moe, deepseek_v2, ...) and v1/metrics/perf.py (off) read these.
+        hf[
+            "num_experts_per_tok"
+        ] = moe.router.top_k  # top_k is on the router, not experts
         hf["moe_intermediate_size"] = moe.experts.hidden_dim
-        # vLLM's qwen3_moe model loader checks this for sparse layer placement.
         hf["decoder_sparse_step"] = 1
         hf.setdefault("norm_topk_prob", True)
 
