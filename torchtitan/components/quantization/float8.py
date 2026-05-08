@@ -168,25 +168,42 @@ class Float8LinearConverter(QuantizationConverter):
         logger.info("Swapped to Float8Linear layers")
 
 
-class Float8GroupedExperts(GroupedExperts):
-    """GroupedExperts with Float8 quantization applied in __init__."""
+_float8_experts_cache: dict[type, type] = {}
 
-    _is_quantized_experts = True
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(GroupedExperts.Config):
-        pass
+def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
+    """Get or create a Float8-quantized subclass of *parent_cls*.
 
-    def __init__(self, config: Config):
-        super().__init__(config)
-        from torchao.prototype.moe_training.config import Float8TrainingOpConfig
-        from torchao.quantization.quant_api import quantize_
+    Works for any ``GroupedExperts`` subclass (e.g. gpt-oss variants).
+    The returned class has a proper ``_owner`` set by ``__init_subclass__``.
+    """
+    if parent_cls in _float8_experts_cache:
+        return _float8_experts_cache[parent_cls]
 
-        quantize_(
-            self,
-            config=Float8TrainingOpConfig(),
-            filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
-        )
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
+
+    class Float8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+        _is_quantized_experts = True
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            pass
+
+        def __init__(self, config: Config):
+            super().__init__(config)
+            from torchao.prototype.moe_training.config import Float8TrainingOpConfig
+            from torchao.quantization.quant_api import quantize_
+
+            quantize_(
+                self,
+                config=Float8TrainingOpConfig(),
+                filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+            )
+
+    Float8GroupedExperts.__name__ = f"Float8{parent_cls.__name__}"
+    Float8GroupedExperts.__qualname__ = f"Float8{parent_cls.__name__}"
+    _float8_experts_cache[parent_cls] = Float8GroupedExperts
+    return Float8GroupedExperts
 
 
 class Float8GroupedExpertsConverter(QuantizationConverter):
@@ -194,8 +211,6 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
 
     # FP8: 16 byte alignment / 1 byte per elem = 16 elements.
     PAD_MULTIPLE = 16
-
-    _quantized_cls_cache: dict[type, type] = {}
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
@@ -218,46 +233,11 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
                 "enable it with --compile.enable"
             )
 
-    @classmethod
-    def _quantized_cls(cls, parent_cls: type) -> type:
-        """Return a Float8-quantized subclass of *parent_cls*."""
-        if parent_cls is GroupedExperts:
-            return Float8GroupedExperts
-        if parent_cls in cls._quantized_cls_cache:
-            return cls._quantized_cls_cache[parent_cls]
-
-        parent_config_cls = parent_cls.Config
-
-        class _Float8Experts(parent_cls):  # type: ignore[valid-type, misc]
-            _is_quantized_experts = True
-
-            @dataclass(kw_only=True, slots=True)
-            class Config(parent_config_cls):  # type: ignore[misc]
-                pass
-
-            def __init__(self, config: Config):
-                parent_cls.__init__(  # pyrefly: ignore [no-matching-overload]
-                    self, config
-                )
-                from torchao.prototype.moe_training.config import Float8TrainingOpConfig
-                from torchao.quantization.quant_api import quantize_
-
-                quantize_(
-                    self,
-                    config=Float8TrainingOpConfig(),
-                    filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
-                )
-
-        _Float8Experts.__name__ = f"Float8{parent_cls.__name__}"
-        _Float8Experts.__qualname__ = f"Float8{parent_cls.__name__}"
-        cls._quantized_cls_cache[parent_cls] = _Float8Experts
-        return _Float8Experts
-
     def convert(self, model_config) -> None:
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
-            quantized_cls = self._quantized_cls(base_module_cls)
+            quantized_cls = _get_float8_grouped_experts_cls(base_module_cls)
             new_config = quantized_cls.Config(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
             )
