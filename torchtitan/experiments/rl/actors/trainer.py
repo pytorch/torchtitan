@@ -160,6 +160,12 @@ class PolicyTrainer(Actor, Configurable):
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
 
+    @endpoint
+    async def close(self) -> None:
+        """Destroy the worker's torch.distributed process group."""
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+
     def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
         """Load model weights from HF checkpoint using DCP and state_dict_adapter.
 
