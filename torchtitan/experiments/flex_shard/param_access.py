@@ -52,6 +52,33 @@ class _MixedPrecisionCast(torch.autograd.Function):
 
 
 @dataclass
+class ParamModuleInfo:
+    """Owning module and local parameter name for a managed parameter."""
+
+    module: nn.Module
+    param_name: str
+
+    @classmethod
+    def resolve(cls, root_module: nn.Module, fqn: str) -> ParamModuleInfo:
+        """Resolve a parameter FQN from root, unwrapping checkpoint wrappers."""
+        parts = fqn.split(".")
+        leaf_module = root_module
+        for part in parts[:-1]:
+            child = getattr(leaf_module, part, None)
+            if child is None:
+                wrapped = getattr(leaf_module, "_checkpoint_wrapped_module", None)
+                if wrapped is not None:
+                    leaf_module = getattr(wrapped, part)
+                else:
+                    leaf_module = getattr(leaf_module, part)
+            else:
+                leaf_module = child
+        if hasattr(leaf_module, "_checkpoint_wrapped_module"):
+            leaf_module = leaf_module._checkpoint_wrapped_module
+        return cls(leaf_module, parts[-1])
+
+
+@dataclass
 class EagerParamAccessState:
     """Mutable state for eager-only FlexShard parameter access."""
 
@@ -61,6 +88,40 @@ class EagerParamAccessState:
     compute_device: torch.device | None = None
     _pre_gathered: torch.Tensor | None = None
     _unsharded_for_reduce: torch.Tensor | None = None
+
+    def consume_pre_gathered_param(self) -> torch.Tensor:
+        """Return the hook-provided full param or raise for unsupported access."""
+        # In eager mode, _pre_gathered is set by the batched all-gather
+        # pre-forward hook. This PR intentionally has no per-parameter
+        # all-gather fallback. TODO: later compile support should add a
+        # separate graph-safe parametrization or graph path, with tests
+        # proving graph capture behavior.
+        pre = self._pre_gathered
+        if pre is not None:
+            self._pre_gathered = None
+            if getattr(self, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
+                if self.param_dtype is not None or self.reduce_dtype is not None:
+                    pre = _MixedPrecisionCast.apply(
+                        pre,
+                        self.param_dtype,
+                        self.reduce_dtype,
+                    )
+                return pre
+
+            if self.param_dtype is not None and pre.dtype != self.param_dtype:
+                pre = pre.to(self.param_dtype)
+            unsharded = pre.detach().requires_grad_(self.requires_grad)
+            if (
+                torch.is_grad_enabled()
+                and self.requires_grad
+                and self._unsharded_for_reduce is None
+            ):
+                self._unsharded_for_reduce = unsharded
+            return unsharded
+
+        if _is_graph_capture_active():
+            _raise_graph_capture_unsupported()
+        _raise_missing_eager_batched_unshard(self)
 
 
 class FlexShardModule:
@@ -120,44 +181,14 @@ def _register_param_accessors(
     global _parametrized_module_class_counter
     _parametrized_module_class_counter += 1
 
-    def _make_flex_shard_param_getter(
-        param_name: str,
-        param_state: EagerParamAccessState,
-    ):
+    def _make_flex_shard_param_getter(param_state: EagerParamAccessState):
         def get_flex_shard_param(self):
-            # In eager mode, _pre_gathered is set by the batched all-gather
-            # pre-forward hook. This PR intentionally has no per-parameter
-            # all-gather fallback. TODO: later compile support should add a
-            # separate graph-safe parametrization or graph path, with tests
-            # proving graph capture behavior.
-            pre = param_state._pre_gathered
-            if pre is not None:
-                param_state._pre_gathered = None
-                param_dtype = param_state.param_dtype
-                reduce_dtype = param_state.reduce_dtype
-                if getattr(param_state, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
-                    if param_dtype is not None or reduce_dtype is not None:
-                        pre = _MixedPrecisionCast.apply(pre, param_dtype, reduce_dtype)
-                    return pre
-
-                if param_dtype is not None and pre.dtype != param_dtype:
-                    pre = pre.to(param_dtype)
-                unsharded = pre.detach().requires_grad_(param_state.requires_grad)
-                if (
-                    torch.is_grad_enabled()
-                    and param_state.requires_grad
-                    and param_state._unsharded_for_reduce is None
-                ):
-                    param_state._unsharded_for_reduce = unsharded
-                return unsharded
-            if _is_graph_capture_active():
-                _raise_graph_capture_unsupported()
-            _raise_missing_eager_batched_unshard(param_state)
+            return param_state.consume_pre_gathered_param()
 
         return get_flex_shard_param
 
     param_name_to_property = {
-        param_name: property(_make_flex_shard_param_getter(param_name, state))
+        param_name: property(_make_flex_shard_param_getter(state))
         for param_name, state in param_states.items()
     }
     module_cls = type(

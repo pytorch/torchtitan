@@ -21,7 +21,7 @@ from .bucket_collectives import (
     begin_all_gather_unshard,
     begin_reduce_scatter_grad,
 )
-from .param_access import EagerParamAccessState
+from .param_access import EagerParamAccessState, ParamModuleInfo
 from .param_metadata import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
@@ -36,7 +36,7 @@ from .utils import _get_storage_debug_fqn, _with_fqn
 
 logger = logging.getLogger(__name__)
 
-ParamEntry = tuple[nn.Module, str, EagerParamAccessState, ParamInfo]
+ParamEntry = tuple[ParamModuleInfo, EagerParamAccessState, ParamInfo]
 
 
 @dataclass
@@ -137,13 +137,13 @@ class BucketAllGatherRuntime:
 
 
 def _accumulate_sharded_grads(
-    param_refs: list[tuple[nn.Module, str]],
+    param_refs: list[ParamModuleInfo],
     sharded_grads: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Cast sharded grads to local param dtype and accumulate into .grad."""
     stored_grads: list[torch.Tensor] = []
-    for (leaf, name), grad in zip(param_refs, sharded_grads, strict=True):
-        param = leaf._parameters[name]
+    for module_info, grad in zip(param_refs, sharded_grads, strict=True):
+        param = module_info.module._parameters[module_info.param_name]
         if grad.dtype != param.dtype:
             grad = grad.to(param.dtype)
         stored_grads.append(grad)
@@ -200,25 +200,13 @@ class BucketRuntime:
         """Return params in a bucket with their owning module and access state."""
         param_entries: list[ParamEntry] = []
         for info in storage._param_infos.values():
-            parts = info.fqn.split(".")
-            leaf_module = storage._module
-            for part in parts[:-1]:
-                child = getattr(leaf_module, part, None)
-                if child is None:
-                    wrapped = getattr(leaf_module, "_checkpoint_wrapped_module", None)
-                    if wrapped is not None:
-                        leaf_module = getattr(wrapped, part)
-                    else:
-                        leaf_module = getattr(leaf_module, part)
-                else:
-                    leaf_module = child
-            local_name = parts[-1]
-            if hasattr(leaf_module, "_checkpoint_wrapped_module"):
-                leaf_module = leaf_module._checkpoint_wrapped_module
-            if leaf_module in module_param_map:
-                param_state = module_param_map[leaf_module].get(local_name)
+            module_info = ParamModuleInfo.resolve(storage._module, info.fqn)
+            if module_info.module in module_param_map:
+                param_state = module_param_map[module_info.module].get(
+                    module_info.param_name
+                )
                 if param_state is not None:
-                    param_entries.append((leaf_module, local_name, param_state, info))
+                    param_entries.append((module_info, param_state, info))
         return param_entries
 
     @staticmethod
@@ -228,25 +216,24 @@ class BucketRuntime:
     ) -> torch.device:
         """Return the device used for this bucket's collectives."""
         comm_device = storage.byte_storage.device
-        for _, _, param_state, _ in entries:
+        for _, param_state, _ in entries:
             if param_state.compute_device is not None:
                 return param_state.compute_device
         return comm_device
 
     @property
     def infos(self) -> list[ParamInfo]:
-        return [info for _, _, _, info in self.entries]
+        return [info for _, _, info in self.entries]
 
     @property
-    def param_refs(self) -> list[tuple[nn.Module, str]]:
-        return [(leaf, name) for leaf, name, _, _ in self.entries]
+    def param_refs(self) -> list[ParamModuleInfo]:
+        return [module_info for module_info, _, _ in self.entries]
 
     def _local_shards(self, use_autograd: bool) -> list[torch.Tensor]:
         local_shards: list[torch.Tensor] = []
-        for leaf, name, param_state, _ in self.entries:
-            local_shard = (
-                leaf._parameters[name] if use_autograd else leaf._parameters[name].data
-            )
+        for module_info, param_state, _ in self.entries:
+            param = module_info.module._parameters[module_info.param_name]
+            local_shard = param if use_autograd else param.data
             if (
                 param_state.compute_device is not None
                 and local_shard.device != param_state.compute_device
@@ -357,7 +344,7 @@ class BucketRuntime:
         self,
         grads: list[torch.Tensor],
         infos: list[ParamInfo],
-        param_refs: list[tuple[nn.Module, str]],
+        param_refs: list[ParamModuleInfo],
     ) -> None:
         """Reduce full-parameter grads and accumulate local sharded grads."""
         if not grads:
@@ -386,13 +373,13 @@ class BucketRuntime:
     def _reduce_collected_grads(self) -> None:
         grads: list[torch.Tensor] = []
         infos: list[ParamInfo] = []
-        param_refs: list[tuple[nn.Module, str]] = []
-        for idx, (leaf, name, param_state, info) in enumerate(self.entries):
+        param_refs: list[ParamModuleInfo] = []
+        for idx, (module_info, param_state, info) in enumerate(self.entries):
             grad = self.collected_grads.pop(idx, None)
             if grad is not None:
                 grads.append(grad)
                 infos.append(info)
-                param_refs.append((leaf, name))
+                param_refs.append(module_info)
             param_state._unsharded_for_reduce = None
         self.reduce_grads(grads, infos, param_refs)
 
@@ -421,7 +408,7 @@ class BucketRuntime:
                     )
                 full_params = result.finish()
                 self.prefetch_next()
-        for (_, _, param_state, _), full_param in zip(
+        for (_, param_state, _), full_param in zip(
             self.entries, full_params, strict=True
         ):
             param_state._pre_gathered = full_param
@@ -429,7 +416,7 @@ class BucketRuntime:
     def post_forward_hook(self, mod, args, output) -> None:
         if torch.compiler.is_compiling():
             return
-        for _, _, param_state, _ in self.entries:
+        for _, param_state, _ in self.entries:
             param_state._pre_gathered = None
         if self.use_autograd_unshard:
             return
@@ -437,7 +424,7 @@ class BucketRuntime:
         if torch.is_grad_enabled():
             self.collected_grads.clear()
             leaf_indices = []
-            for idx, (_, _, param_state, _) in enumerate(self.entries):
+            for idx, (_, param_state, _) in enumerate(self.entries):
                 leaf = param_state._unsharded_for_reduce
                 if leaf is not None and leaf.requires_grad:
                     leaf_indices.append((idx, leaf))
@@ -498,7 +485,7 @@ class _BucketAllGather(torch.autograd.Function):
         bucket = runtime.bucket
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
-        valid_param_refs: list[tuple[nn.Module, str]] = []
+        valid_param_refs: list[ParamModuleInfo] = []
         for grad, info, param_ref in zip(
             full_param_grads,
             bucket.infos,
@@ -557,18 +544,6 @@ def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
     )
 
 
-def _get_param_leaf_module(
-    module: nn.Module,
-    fqn: str,
-) -> tuple[nn.Module, str]:
-    """Return the leaf module and local parameter name for a parameter FQN."""
-    parts = fqn.split(".")
-    leaf_module = module
-    for part in parts[:-1]:
-        leaf_module = getattr(leaf_module, part)
-    return leaf_module, parts[-1]
-
-
 def _create_eager_param_states(
     module: nn.Module,
     storages: list[DStorage],
@@ -605,8 +580,10 @@ def _create_eager_param_states(
             setattr(param_state, _PARAM_FQN_ATTR, fqn)
             setattr(param_state, _BUCKET_FQN_ATTR, bucket_fqn)
 
-            leaf_module, local_name = _get_param_leaf_module(module, fqn)
-            module_param_map.setdefault(leaf_module, {})[local_name] = param_state
+            module_info = ParamModuleInfo.resolve(module, fqn)
+            module_param_map.setdefault(module_info.module, {})[
+                module_info.param_name
+            ] = param_state
 
     return module_param_map
 
@@ -646,5 +623,5 @@ def _install_batched_allgather_hooks(
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
         target.register_forward_hook(bucket_runtime.post_forward_hook)
         bucket_runtime.context.buckets.append(bucket_runtime)
-        for _, _, param_state, _ in bucket_runtime.entries:
+        for _, param_state, _ in bucket_runtime.entries:
             setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
