@@ -28,7 +28,7 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
-    get_transformer_block_buckets,
+    get_buckets,
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
@@ -67,7 +67,7 @@ def _apply_jit_compile(
     fsdp_reshard_after_forward: bool,
 ) -> nn.Module:
     """Apply JIT compilation (torch.compile with custom backend)."""
-    transformer_block_buckets = get_transformer_block_buckets(model)
+    transformer_block_buckets = get_buckets(model)
     backend = get_compile_backend_with_passes(
         compile_config,
         fsdp_reshard_after_forward,
