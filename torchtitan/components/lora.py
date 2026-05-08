@@ -94,8 +94,7 @@ class FrozenConfig(Configurable.Config):
     """Config wrapper that freezes all parameters at build time.
 
     Works with any ``Module.Config`` — used by ``LoRAConverter`` to freeze
-    non-target modules (linears, norms, embeddings) so that only LoRA
-    adapter parameters remain trainable.
+    non-target Linear modules.
     """
 
     inner: Configurable.Config
@@ -124,7 +123,7 @@ class LoRAConverter(ModelConfigConverter):
 
     Operates on the model config tree: target Linear configs are replaced
     with ``LoRALinear.Config`` (which builds a LoRA subclass with frozen base
-    and trainable adapters). Non-target modules are wrapped with
+    and trainable adapters). Non-target Linear modules are wrapped with
     ``FrozenConfig``.
 
     When ``target_modules`` is None (default), every ``Linear.Config`` is
@@ -191,11 +190,11 @@ class LoRAConverter(ModelConfigConverter):
         )
 
     def convert(self, model_config) -> None:
-        """Walk the model config tree for all leaf modules.
+        """Walk the model config tree for Linear modules.
 
         Target Linear modules get their config replaced with
-        ``LoRALinear.Config``.  Everything else is wrapped with
-        ``FrozenConfig``.
+        ``LoRALinear.Config``.  Non-target Linear modules are wrapped
+        with ``FrozenConfig``.
         """
         matched = set()
 

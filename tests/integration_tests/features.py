@@ -586,6 +586,15 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module llama3 --config llama3_debugmodel_lora",
+                ],
+            ],
+            "LoRA training test",
+            "lora",
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--comm.mode torchcomms",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",

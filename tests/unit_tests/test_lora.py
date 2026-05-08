@@ -58,7 +58,6 @@ def test_lora_forward():
     model.init_states()
 
     vocab_size = model_spec.model.vocab_size
-    dim = model_spec.model.dim
     batch_size, seq_len = 2, 16
     tokens = torch.randint(0, vocab_size, (batch_size, seq_len))
     output = model(tokens)
