@@ -470,6 +470,7 @@ __all__ = [
     "get_placements",
     "is_flex_shard_param",
     "MixedPrecisionPolicy",
+    "OffloadPolicy",
     "Owned",
     "param_boundary_placements",
     "per_param_placements",
@@ -790,6 +791,23 @@ class MixedPrecisionPolicy:
     reduce_dtype: torch.dtype | None = None
 
 
+@dataclass(frozen=True)
+class OffloadPolicy:
+    """CPU offload policy for FlexShard buckets.
+
+    When set on a BucketSpec, the bucket's byte storage is allocated on
+    CPU (optionally pinned). The parametrization handles H2D transfer
+    before all-gather; backward autograd handles D2H automatically.
+
+    Args:
+        pin_memory: Whether to pin CPU memory for faster H2D/D2H
+            transfers via DMA. Set to False if insufficient CPU memory.
+            Default True.
+    """
+
+    pin_memory: bool = True
+
+
 @dataclass
 class BucketSpec:
     """Specification for a parameter communication bucket.
@@ -798,12 +816,12 @@ class BucketSpec:
         patterns: fnmatch glob patterns matched against parameter FQNs.
             A parameter matches this bucket if its FQN matches any pattern.
         mp_policy: Mixed precision policy for this bucket.
-        offload_policy: CPU offload policy for this bucket (not yet implemented).
+        offload_policy: CPU offload policy for this bucket.
     """
 
     patterns: list[str]
     mp_policy: MixedPrecisionPolicy | None = None
-    offload_policy: Any = None
+    offload_policy: OffloadPolicy | None = None
 
 
 def _get_bucket_patterns(bucket: list | BucketSpec) -> list[str]:
@@ -1091,6 +1109,7 @@ class ShardParametrization(nn.Module):
         world_size: int,
         param_dtype: torch.dtype | None = None,
         reduce_dtype: torch.dtype | None = None,
+        compute_device: torch.device | None = None,
     ):
         super().__init__()
         self.shard_dim = shard_dim
@@ -1098,10 +1117,16 @@ class ShardParametrization(nn.Module):
         self.world_size = world_size
         self.param_dtype = param_dtype
         self.reduce_dtype = reduce_dtype
+        self.compute_device = compute_device
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
             return local_shard
+        if (
+            self.compute_device is not None
+            and local_shard.device != self.compute_device
+        ):
+            local_shard = local_shard.to(self.compute_device, non_blocking=True)
         full = torch.ops._c10d_functional.all_gather_into_tensor(
             local_shard, self.world_size, self.group_name
         )
@@ -1129,6 +1154,7 @@ class FlatShardParametrization(nn.Module):
         original_shape: torch.Size,
         param_dtype: torch.dtype | None = None,
         reduce_dtype: torch.dtype | None = None,
+        compute_device: torch.device | None = None,
     ):
         super().__init__()
         self.group_name = group_name
@@ -1136,10 +1162,13 @@ class FlatShardParametrization(nn.Module):
         self.original_shape = original_shape
         self.param_dtype = param_dtype
         self.reduce_dtype = reduce_dtype
+        self.compute_device = compute_device
 
     def forward(self, flat_shard: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
             return flat_shard
+        if self.compute_device is not None and flat_shard.device != self.compute_device:
+            flat_shard = flat_shard.to(self.compute_device, non_blocking=True)
         full_flat = torch.ops._c10d_functional.all_gather_into_tensor(
             flat_shard, self.world_size, self.group_name
         )
@@ -2076,6 +2105,19 @@ def flex_shard(
     bucket_assignments = _assign_params_to_buckets(param_fqns, buckets_resolved)
     _validate_bucket_placements(bucket_assignments, param_placements, buckets_resolved)
 
+    # Validate offload + hooks incompatibility
+    if register_hooks:
+        has_offload = any(
+            isinstance(b, BucketSpec) and b.offload_policy is not None
+            for b in buckets_resolved
+        )
+        if has_offload:
+            raise ValueError(
+                "CPU offloading requires parametrization mode "
+                "(register_hooks=False). Remove register_hooks=True "
+                "or remove offload_policy from BucketSpec."
+            )
+
     # Log bucket coverage
     if logger.isEnabledFor(logging.DEBUG):
         lines = ["flex_shard bucket coverage:"]
@@ -2093,18 +2135,22 @@ def flex_shard(
     named_params_dict = dict(named_params)
     storages: list[DStorage] = []
     fqn_to_mp_policy: dict[str, MixedPrecisionPolicy | None] = {}
+    fqn_to_offload_policy: dict[str, OffloadPolicy | None] = {}
 
     for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
         if not bucket_fqns:
             continue
 
-        # Extract per-bucket mp_policy
+        # Extract per-bucket policies
         bucket_mp_policy = None
+        bucket_offload_policy = None
         bucket_spec = buckets_resolved[bucket_idx]
         if isinstance(bucket_spec, BucketSpec):
             bucket_mp_policy = bucket_spec.mp_policy
+            bucket_offload_policy = bucket_spec.offload_policy
         for fqn in bucket_fqns:
             fqn_to_mp_policy[fqn] = bucket_mp_policy
+            fqn_to_offload_policy[fqn] = bucket_offload_policy
 
         bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
         bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
@@ -2113,7 +2159,15 @@ def flex_shard(
             bucket_named_params, mesh, bucket_placements
         )
 
-        byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
+        if bucket_offload_policy is not None:
+            byte_storage = torch.empty(
+                total_bytes,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=bucket_offload_policy.pin_memory,
+            )
+        else:
+            byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
         _write_params_to_dstorage(byte_storage, bucket_named_params, param_infos, mesh)
 
         for fqn, info in param_infos.items():
@@ -2162,8 +2216,10 @@ def flex_shard(
         for s in storages:
             for fqn, info in s._param_infos.items():
                 mp = fqn_to_mp_policy.get(fqn)
+                offload = fqn_to_offload_policy.get(fqn)
                 param_dtype = mp.param_dtype if mp else None
                 reduce_dtype = mp.reduce_dtype if mp else None
+                compute_device = torch.device(device) if offload is not None else None
                 placement = info.placements[0]
                 if isinstance(placement, Shard):
                     p = ShardParametrization(
@@ -2172,6 +2228,7 @@ def flex_shard(
                         world_size=world_size,
                         param_dtype=param_dtype,
                         reduce_dtype=reduce_dtype,
+                        compute_device=compute_device,
                     )
                 elif isinstance(placement, FlatShard):
                     p = FlatShardParametrization(
@@ -2180,6 +2237,7 @@ def flex_shard(
                         original_shape=info.global_shape,
                         param_dtype=param_dtype,
                         reduce_dtype=reduce_dtype,
+                        compute_device=compute_device,
                     )
                 else:
                     raise ValueError(

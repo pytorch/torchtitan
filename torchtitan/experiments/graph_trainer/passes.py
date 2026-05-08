@@ -36,6 +36,9 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.experiments.flex_shard.reshard_after_forward import (
+    flex_shard_reshard_after_fwd_pass,
+)
 from torchtitan.experiments.graph_trainer.bucketing import (
     joint_transformer_block_bucketing_reordering_pass,
 )
@@ -1015,5 +1018,6 @@ AVAILABLE_COMPILER_PASSES = {
 # Registry for joint custom passes (applied before partitioning, AOT mode only)
 AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
+    "flex_shard_reshard_after_fwd": flex_shard_reshard_after_fwd_pass,
     "apply_sac": apply_sac_pass,
 }
