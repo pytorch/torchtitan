@@ -6,14 +6,8 @@
 import pytest
 
 from torchtitan.components.quantization import Float8Linear
-from torchtitan.components.quantization.float8 import (
-    _get_float8_grouped_experts_cls,
-    Float8GroupedExpertsConverter,
-)
-from torchtitan.components.quantization.mx import (
-    _get_mxfp8_grouped_experts_cls,
-    MXFP8GroupedExpertsConverter,
-)
+from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
+from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.linear import Linear
