@@ -15,15 +15,11 @@ self-documenting and support multi-dimensional meshes.
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 import spmd_types as spmd
 from torchtitan.protocols.types import MeshAxisName
-
-if TYPE_CHECKING:
-    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 NamedPlacement = dict[MeshAxisName, Placement]
@@ -52,20 +48,21 @@ class SpmdAnnotation:
     types: NamedSpmdType
     partition_spec: tuple | None = None
 
-    def resolve(
-        self, parallel_dims: ParallelDims,
-    ) -> spmd.PerMeshAxisSpmdTypes | tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec]:
+    def resolve(self) -> spmd.PerMeshAxisSpmdTypes | tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec]:
+        from torchtitan.distributed.spmd_state import spmd_state
+
+        state = spmd_state()
         resolved = {
-            parallel_dims.get_spmd_axis(name.value): t
+            state.axis(name.value): t
             for name, t in self.types.items()
-            if parallel_dims.get_spmd_axis(name.value).size() > 1
+            if state.axis(name.value).size() > 1
         }
         if self.partition_spec is not None:
             from torch.utils._pytree import tree_map_only
 
             spec = tree_map_only(
                 MeshAxisName,
-                lambda n: parallel_dims.get_spmd_axis(n.value),
+                lambda n: state.axis(n.value),
                 self.partition_spec,
             )
             return (resolved, spmd.PartitionSpec(*spec))
@@ -79,11 +76,9 @@ class SpmdRedist:
     src: SpmdAnnotation
     dst: SpmdAnnotation
 
-    def resolve(
-        self, parallel_dims: ParallelDims,
-    ) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PerMeshAxisSpmdTypes]:
-        src = self.src.resolve(parallel_dims)
-        dst = self.dst.resolve(parallel_dims)
+    def resolve(self) -> tuple[spmd.PerMeshAxisSpmdTypes, spmd.PerMeshAxisSpmdTypes]:
+        src = self.src.resolve()
+        dst = self.dst.resolve()
         if isinstance(src, tuple):
             src = src[0]
         if isinstance(dst, tuple):
@@ -226,16 +221,18 @@ def placement_to_spmd_type(
 
 def resolve_spmd(
     named: NamedPlacement | None,
-    parallel_dims: ParallelDims,
     *,
     is_compute: bool = False,
 ) -> spmd.PerMeshAxisSpmdTypes | None:
     """Resolve NamedPlacement to {MeshAxis: spmd_type}. Skips disabled axes."""
     if named is None:
         return None
+    from torchtitan.distributed.spmd_state import spmd_state
+
+    state = spmd_state()
     result: spmd.PerMeshAxisSpmdTypes = {}
     for axis_name, placement in named.items():
-        axis = parallel_dims.get_spmd_axis(axis_name.value)
+        axis = state.axis(axis_name.value)
         if axis.size() <= 1:
             continue
         result[axis] = placement_to_spmd_type(placement, is_compute=is_compute)
