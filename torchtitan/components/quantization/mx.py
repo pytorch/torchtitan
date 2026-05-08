@@ -115,7 +115,7 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
     if parent_cls in _mxfp8_experts_cache:
         return _mxfp8_experts_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
+    parent_config_cls = parent_cls.Config
 
     class MXFP8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
         _is_quantized_experts = True
@@ -184,7 +184,8 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
             quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
-            new_config = quantized_cls.Config(
+            config_cls = quantized_cls.Config
+            new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
                 recipe_name=self.config.recipe_name,
             )
