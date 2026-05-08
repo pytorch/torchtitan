@@ -231,13 +231,15 @@ def set_embedding_local_spmd(
     *,
     dp_replicate_enabled: bool = False,
     dp_shard_enabled: bool = True,
+    cp_enabled: bool = False,
     enable_tp: bool = False,
     enable_sp: bool = False,
 ) -> None:
     """Install a ``LocalSpmdConfig`` on the tok_embeddings config.
 
-    The embedding output is ``[B, L, D]``: batch-sharded on DP, and
-    ``S(1)`` on TP when SP is enabled (otherwise ``R`` on TP).
+    The embedding output is ``[B, L, D]``: batch-sharded on DP,
+    ``S(1)`` on CP when enabled, and ``S(1)`` on TP when SP is enabled
+    (otherwise ``R`` on TP).
     """
     batch_axes: list = []
     if dp_replicate_enabled:
@@ -246,6 +248,8 @@ def set_embedding_local_spmd(
         batch_axes.append(DP_SHARD)
 
     sharded_axes = batch_axes.copy()
+    if cp_enabled:
+        sharded_axes.append(CP)
     if enable_tp and enable_sp:
         sharded_axes.append(TP)
 
@@ -255,14 +259,28 @@ def set_embedding_local_spmd(
         out_type: dict = {axis: spmd.V for axis in sharded_axes}
         if enable_tp and not enable_sp:
             out_type[TP] = spmd.R
-        batch_entry = tuple(batch_axes) if len(batch_axes) > 1 else batch_axes[0]
+        batch_entry: tuple | MeshAxisName | None = (
+            tuple(batch_axes) if len(batch_axes) > 1
+            else batch_axes[0] if batch_axes
+            else None
+        )
+        cp_entry = CP if cp_enabled else None
         tp_entry = TP if (enable_tp and enable_sp) else None
-        spec = (batch_entry, tp_entry, None)
+        # Build seq dim spec entry: CP and/or SP
+        seq_entry: tuple | MeshAxisName | None = cp_entry
+        if tp_entry is not None:
+            seq_entry = (
+                (cp_entry, tp_entry) if cp_entry is not None
+                else tp_entry
+            )
+        spec = (batch_entry, seq_entry, None)
         out_annotation = SpmdAnnotation(types=out_type, partition_spec=spec)
     else:
         out_type = {}
         if batch_axes:
             out_type[batch_axes[0]] = spmd.S(0)
+        if cp_enabled:
+            out_type[CP] = spmd.S(1)
         if enable_tp:
             out_type[TP] = spmd.S(1) if enable_sp else spmd.R
         out_annotation = SpmdAnnotation(types=out_type)

@@ -25,6 +25,7 @@ from torchtitan.protocols.types import MeshAxisName
 if TYPE_CHECKING:
     from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
 
+CP = MeshAxisName.CP
 DP_REPLICATE = MeshAxisName.DP_REPLICATE
 DP_SHARD = MeshAxisName.DP_SHARD
 FSDP = MeshAxisName.FSDP
@@ -39,6 +40,7 @@ def set_llama3_sharding_config(
     full_spmd_types: bool = False,
     dp_replicate_enabled: bool = False,
     dp_shard_enabled: bool = True,
+    cp_enabled: bool = False,
     enable_tp: bool = False,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
@@ -61,6 +63,7 @@ def set_llama3_sharding_config(
             config.tok_embeddings,
             dp_replicate_enabled=dp_replicate_enabled,
             dp_shard_enabled=dp_shard_enabled,
+            cp_enabled=cp_enabled,
             enable_tp=enable_tp,
             enable_sp=enable_sp,
         )
@@ -71,6 +74,7 @@ def set_llama3_sharding_config(
             full_spmd_types=full_spmd_types,
             dp_replicate_enabled=dp_replicate_enabled,
             dp_shard_enabled=dp_shard_enabled,
+            cp_enabled=cp_enabled,
             enable_tp=enable_tp,
         )
 
@@ -82,6 +86,7 @@ def _set_llama3_layer_sharding(
     full_spmd_types: bool = False,
     dp_replicate_enabled: bool = False,
     dp_shard_enabled: bool = True,
+    cp_enabled: bool = False,
     enable_tp: bool = False,
 ) -> None:
     """Set sharding on one Llama3 transformer layer.
@@ -103,6 +108,7 @@ def _set_llama3_layer_sharding(
             layer_cfg.attention.inner_attention,
             dp_replicate_enabled=dp_replicate_enabled,
             dp_shard_enabled=dp_shard_enabled,
+            cp_enabled=cp_enabled,
             enable_tp=enable_tp,
         )
         if enable_tp:
@@ -135,13 +141,15 @@ def _set_inner_attention_local_spmd(
     *,
     dp_replicate_enabled: bool = False,
     dp_shard_enabled: bool = True,
+    cp_enabled: bool = False,
     enable_tp: bool = False,
 ) -> None:
-    """Install a LocalSpmdConfig for inner attention with DP and/or TP axes."""
+    """Install a LocalSpmdConfig for inner attention with DP, CP, and/or TP axes."""
     from torchtitan.protocols.sharding import SpmdAnnotation
 
     # q/k/v shape: (batch, seq, heads, head_dim)
     batch_axes: list = []
+    seq_axis = None
     heads_axis = None
 
     if dp_replicate_enabled:
@@ -149,24 +157,36 @@ def _set_inner_attention_local_spmd(
     if dp_shard_enabled:
         batch_axes.append(DP_SHARD)
 
+    if cp_enabled:
+        seq_axis = CP
     if enable_tp:
         heads_axis = TP
 
     # When multiple axes shard different tensor dims, we need explicit V types
     # + PartitionSpec template. With a single axis, S(dim) suffices (local_map
     # auto-decays S(dim) to V + PartitionSpec).
-    sharded_axes = batch_axes + ([heads_axis] if heads_axis else [])
+    sharded_axes = (
+        batch_axes
+        + ([seq_axis] if seq_axis else [])
+        + ([heads_axis] if heads_axis else [])
+    )
     needs_spec = len(sharded_axes) > 1
 
     if needs_spec:
         qkv_type: dict = {axis: spmd.V for axis in sharded_axes}
-        batch_entry = tuple(batch_axes) if len(batch_axes) > 1 else batch_axes[0]
-        spec_template = (batch_entry, None, heads_axis, None)
+        batch_entry = (
+            tuple(batch_axes) if len(batch_axes) > 1
+            else batch_axes[0] if batch_axes
+            else None
+        )
+        spec_template = (batch_entry, seq_axis, heads_axis, None)
         annotation = SpmdAnnotation(types=qkv_type, partition_spec=spec_template)
     else:
         qkv_type = {}
         if batch_axes:
             qkv_type[batch_axes[0]] = spmd.S(0)
+        if seq_axis:
+            qkv_type[seq_axis] = spmd.S(1)
         if heads_axis:
             qkv_type[heads_axis] = spmd.S(2)
         annotation = SpmdAnnotation(types=qkv_type)

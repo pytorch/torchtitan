@@ -462,10 +462,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
             tp_axis = parallel_dims.get_spmd_axis("tp")
+            cp_axis = parallel_dims.get_spmd_axis("cp")
             self.loss_fn.enable_spmd_types(
                 parallel_dims.spmd_dp_axes(),
                 tp_axis=tp_axis if tp_axis.size() > 1 else None,
                 tp_pg=parallel_dims.get_spmd_pg("tp"),
+                cp_axis=cp_axis if cp_axis.size() > 1 else None,
             )
 
         if config.parallelism.full_spmd_types:
@@ -708,28 +710,46 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Annotate inputs, labels, and positions with spmd_types.
 
-        DP axes get S(0) (batch-sharded). TP axis gets R (replicated —
-        each TP rank sees the same tokens).
+        Batch-DP axes get S(0) (batch-sharded on dim 0). CP axis gets S(1)
+        (sequence-sharded on dim 1). TP axis gets R (replicated).
         """
         dp_axes = self.parallel_dims.spmd_dp_axes()
+        cp_axis = self.parallel_dims.get_spmd_axis("cp")
+        cp_active = cp_axis.size() > 1
         tp_axis = self.parallel_dims.get_spmd_axis("tp")
+
+        # Separate batch-DP axes (dim 0) from CP axis (dim 1)
+        batch_dp_axes = [a for a in dp_axes if a is not cp_axis]
 
         spmd_type: dict = {}
         if tp_axis.size() > 1:
             spmd_type[tp_axis] = spmd.R
 
-        if len(dp_axes) <= 1:
-            for axis in dp_axes:
-                spmd_type[axis] = spmd.S(0)
+        # Multiple axes on the same dim (e.g. dp_replicate + dp_shard both
+        # on dim 0) require V + PartitionSpec; otherwise S(dim) suffices.
+        needs_spec = len(batch_dp_axes) > 1 or (batch_dp_axes and cp_active)
+        if needs_spec:
+            for a in batch_dp_axes:
+                spmd_type[a] = spmd.V
+            if cp_active:
+                spmd_type[cp_axis] = spmd.V
+            batch_entry = (
+                tuple(batch_dp_axes) if len(batch_dp_axes) > 1
+                else batch_dp_axes[0] if batch_dp_axes else None
+            )
+            cp_entry = cp_axis if cp_active else None
+            for t in (inputs, labels, positions):
+                spmd.assert_type(
+                    t, spmd_type, spmd.PartitionSpec(batch_entry, cp_entry),
+                )
+        else:
+            for a in batch_dp_axes:
+                spmd_type[a] = spmd.S(0)
+            if cp_active:
+                spmd_type[cp_axis] = spmd.S(1)
             if spmd_type:
                 for t in (inputs, labels, positions):
                     spmd.assert_type(t, spmd_type)
-        else:
-            for axis in dp_axes:
-                spmd_type[axis] = spmd.V
-            for t in (inputs, labels, positions):
-                spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
-                spmd.assert_type(t, spmd_type, spec)
 
         return inputs, labels
 

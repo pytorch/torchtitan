@@ -204,6 +204,18 @@ class ParallelDims:
         }
         if self.full_spmd_types:
             self._meshes["dp_shard"] = dense_mesh["dp_shard"]
+            if self.cp > 1:
+                # FSDP needs dp_shard*cp combined for weight sharding
+                # and gradient sync across CP ranks. Create a separate
+                # global mesh so get_mesh(["dp_replicate", "fsdp", "tp"])
+                # works for the FSDP setup in parallelize.py.
+                fsdp_dense_mesh = unflatten_mesh(
+                    self._world_mesh,
+                    ("pp", "dp_replicate", "fsdp", "tp"),
+                    (self.pp, self.dp_replicate, fsdp, self.tp),
+                )
+                self._global_meshes["fsdp_dense"] = fsdp_dense_mesh
+                self._meshes["fsdp"] = fsdp_dense_mesh["fsdp"]
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
@@ -248,6 +260,8 @@ class ParallelDims:
         }
         if self.full_spmd_types:
             expected_sizes["dp_shard"] = self.dp_shard
+            if self.cp > 1:
+                expected_sizes["fsdp"] = self.dp_shard * self.cp
         else:
             expected_sizes["fsdp"] = self.dp_shard * self.cp
 
