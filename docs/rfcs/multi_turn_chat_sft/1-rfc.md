@@ -111,18 +111,39 @@ Branch the conversation so every assistant turn appears as the *terminal* turn o
 
 **Decision: default `AS_RENDERED` + audit. The other two are explicit opt-ins.**
 
-## 5. Axis A — how libraries build the loss mask
 
-Quick map (each detailed below):
+## 5. Next sessions quickmap
 
+### Axis A — how libraries build the loss mask
 - **A1 — Span recovery:** render the full conversation; recover per-message token spans by re-rendering prefixes (with a fallback for templates that rewrite history).
 - **A2 — HF generation-mask:** Jinja's `{% generation %}` tag plus `apply_chat_template(return_assistant_tokens_mask=True)` returns a per-token mask directly.
 - **A3 — Final-only prompt subtraction:** tokenize prompt vs full conversation; supervise only the suffix.
 - **A4 — Renderer-emitted spans:** a Python class returns tokens with per-message attribution as it writes them.
 
+###  Axis B — who owns the chat format?
+- **B1 — User edits the model's stock chat template** (manual Jinja editing).
+- **B2 — Library ships a training template** (one or more Jinja files maintained by the framework).
+- **B3 — Library bypasses Jinja entirely** (Python renderer/tokenizer code IS the format).
+
+###  C - one row or branched rows?
+- **C1 SINGLE:** one conversation → one row.
+- **C2 PER_ASSISTANT:** one conversation → one row per supervised assistant turn.
+
+###  Decision:
+**V1 default path = A1 + B1 + C1 + AS_RENDERED.** Render with the model's stock HF chat template, recover assistant spans and keep one row per conversation.
+
+**Long-term renderer path = A4 + B3 + C1.** A Python renderer emits tokens and token ownership together. It can run as-rendered, preserve reasoning, or branch per assistant turn as an explicit policy choice.
+
+## 5.1 Axis A — how libraries build the loss mask
+
 Output blocks below all run on the simple example with a Qwen3 stock template.
 
 ### A1. Span recovery
+
+- **A1 — Span recovery:** render the full conversation; recover per-message token spans by re-rendering prefixes (with a fallback for templates that rewrite history).
+- **A2 — HF generation-mask:** Jinja's `{% generation %}` tag plus `apply_chat_template(return_assistant_tokens_mask=True)` returns a per-token mask directly.
+- **A3 — Final-only prompt subtraction:** tokenize prompt vs full conversation; supervise only the suffix.
+- **A4 — Renderer-emitted spans:** a Python class returns tokens with per-message attribution as it writes them.
 
 Used by **NeMo-RL, prime-rl, Verl, Open-Instruct, OpenRLHF, Axolotl, Megatron-LM**. Render the full conversation, then walk message-by-message to find which tokens came from which message.
 
@@ -308,7 +329,6 @@ not match stock inference (renderer chose to preserve; stock template strips).
 The same renderer with strip_thinking_from_history=True would match A1's
 inference-shape output above.
 ```
-
 ### Axis A recap
 
 ```text
@@ -325,8 +345,6 @@ v1 uses **A1**. Reason: works with stock HF templates;
 ## 6. Axis B — who owns the chat format?
 
 The four mechanisms differ on *who finds spans*. There's a separate question: *who supplies the chat template (or the Python renderer) that controls the rendering?*
-
-Quick map:
 
 - **B1 — User edits the model's stock chat template** (manual Jinja editing).
 - **B2 — Library ships a training template** (one or more Jinja files maintained by the framework).
