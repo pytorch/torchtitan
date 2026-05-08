@@ -217,10 +217,12 @@ class ParallelDims:
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
-        # Populate global SPMD state from the dense mesh PGs.
+        # Populate global SPMD state: always-valid axes + PGs.
         if self.full_spmd_types:
             from spmd_types import MeshAxis
-            from torchtitan.distributed.spmd_state import SpmdState, init_spmd_state
+            from torchtitan.distributed.spmd_state import (
+                MeshAxes, SpmdState, init_spmd_state,
+            )
 
             axes: dict[str, Any] = {}
             pgs: dict[str, Any] = {}
@@ -238,19 +240,12 @@ class ParallelDims:
 
             dp_names = ("dp_replicate", "dp_shard", "cp")
             dp_axes = [axes[n] for n in dp_names if axes[n].size() > 1]
-            all_axes = frozenset(
-                a for n in ("dp_replicate", "dp_shard", "cp", "tp")
-                if (a := axes[n]).size() > 1
-            )
+            all_axes = frozenset(a for a in axes.values() if a.size() > 1)
 
-            init_spmd_state(SpmdState(
-                dp_axes=dp_axes,
-                tp_axis=axes.get("tp"),
-                cp_axis=axes.get("cp"),
-                all_axes=all_axes,
-                _axes=axes,
-                pgs=pgs,
-            ))
+            init_spmd_state(
+                MeshAxes(**axes),
+                SpmdState(dp_axes=dp_axes, all_axes=all_axes, pgs=pgs),
+            )
 
         # Validate mesh sizes
         self._validate_meshes()

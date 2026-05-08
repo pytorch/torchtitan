@@ -13,7 +13,7 @@ import torch
 import spmd_types as spmd
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
+from torchtitan.distributed.spmd_state import is_spmd_active, mesh, spmd_state
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -332,8 +332,8 @@ class ChunkedCELoss(BaseLoss):
         loss_type: dict = {}
         for axis in state.dp_axes:
             loss_type[axis] = spmd.P
-        if state.tp_active:
-            loss_type[state.tp_axis] = spmd.I
+        if mesh().tp.size() > 1:
+            loss_type[mesh().tp] = spmd.I
 
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
@@ -369,26 +369,26 @@ class ChunkedCELoss(BaseLoss):
         # Redistribute only the TP dim to Replicate before chunking so that
         # the lm_head receives Replicate input on TP.
         if isinstance(hidden_states, DTensor):
-            mesh = hidden_states.device_mesh
-            if mesh.mesh_dim_names is not None and "tp" in mesh.mesh_dim_names:
-                tp_dim = mesh.mesh_dim_names.index("tp")
+            dt_mesh = hidden_states.device_mesh
+            if dt_mesh.mesh_dim_names is not None and "tp" in dt_mesh.mesh_dim_names:
+                tp_dim = dt_mesh.mesh_dim_names.index("tp")
                 placements = list(hidden_states.placements)
                 if not isinstance(placements[tp_dim], Replicate):
                     placements[tp_dim] = Replicate()
-                    hidden_states = hidden_states.redistribute(mesh, tuple(placements))
+                    hidden_states = hidden_states.redistribute(dt_mesh, tuple(placements))
 
         # SPMD path: all-gather S(1)@tp -> R@tp before the local_map boundary.
         if is_spmd_active():
 
             state = spmd_state()
-            if state.tp_active:
+            if mesh().tp.size() > 1:
                 bwd = (
                     {"op_dtype": torch.float32}
                     if hidden_states.dtype != torch.float32
                     else None
                 )
                 hidden_states = spmd.redistribute(
-                    hidden_states, state.tp_pg,
+                    hidden_states, spmd_state().tp_pg,
                     src=spmd.S(1), dst=spmd.R, backward_options=bwd,
                 )
 
