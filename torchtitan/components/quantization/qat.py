@@ -110,8 +110,7 @@ def _patch_module_protocol(mod: nn.Module) -> None:
                 _patched_classes[cls] = patched
             child.__class__ = _patched_classes[cls]
             child._param_init = {  # type: ignore[assignment]
-                name: _noop_init
-                for name, _ in child.named_parameters(recurse=False)
+                name: _noop_init for name, _ in child.named_parameters(recurse=False)
             }
 
 
