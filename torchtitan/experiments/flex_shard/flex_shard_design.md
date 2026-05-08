@@ -549,17 +549,54 @@ stream while still moving the NCCL all-gather itself to a dedicated stream.
    - `finish_unshard()` waits on the all-gather event from the default stream,
      assembles full tensors, and writes `param_p._pre_gathered`.
 
-   This changes stream placement without adding implicit next-bucket prefetch or
-   changing when the current module may start compute.
+   This changes stream placement without changing when the current module may
+   start compute.
 
-5. **Handle cleanup.** On post-forward, reshard, exception cleanup, and repeated
+5. **Prefetch the next eager bucket.** After the current bucket is ready, the
+   eager hook launches the next bucket's all-gather on the shared all-gather
+   stream. Normal forward uses bucket order:
+
+   ```text
+   embed -> layers.0 -> ... -> layers.N -> output
+   ```
+
+   FlexShard checkpoint recompute marks recompute execution with an internal
+   context flag, and eager prefetch uses reverse bucket order there:
+
+   ```text
+   output -> layers.N -> ... -> layers.0 -> embed
+   ```
+
+   The output/lm_head bucket should remain `reshard_after_forward=True` by
+   default. Setting it to `False` avoids the output bucket's backward
+   recompute all-gather, but simply moves the exposed first all-gather to the
+   last transformer layer because there is then no preceding recompute hook to
+   launch that prefetch.
+
+6. **Document the first backward-prefetch gap.** The current eager prefetch
+   mechanism is one-bucket-ahead and is triggered from bucket pre-forward hooks.
+   That means the first bucket in checkpoint recompute order cannot be
+   prefetched by this mechanism:
+
+   ```text
+   output.reshard_after_forward=True:  output AG is exposed first
+   output.reshard_after_forward=False: layers.N AG is exposed first
+   ```
+
+   Hiding that first recompute all-gather requires a separate backward-entry
+   trigger, for example a FlexShard-owned eager scheduler hook at the downstream
+   consumer boundary. A tensor grad hook can provide such a trigger internally,
+   but it should be wrapped as a bucket scheduler primitive instead of exposed
+   as model-specific output-hook logic.
+
+7. **Handle cleanup.** On post-forward, reshard, exception cleanup, and repeated
    forward/backward:
 
    - clear `_pre_gathered`
    - avoid leaving references to gathered buffers after the bucket is consumed
    - make checkpoint recomputation replay hooks safely
 
-6. **Add profiler ranges.** Add `torch.profiler.record_function()` scopes:
+8. **Add profiler ranges.** Add `torch.profiler.record_function()` scopes:
 
    - `FlexShard::all_gather_copy_in`
    - `FlexShard::all_gather`
