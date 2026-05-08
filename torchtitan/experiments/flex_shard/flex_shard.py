@@ -2950,14 +2950,40 @@ def _storage_requires_eager_batched_unshard(storage: DStorage) -> bool:
 
 def _storage_uses_eager_autograd_unshard(storage: DStorage) -> bool:
     """Return whether eager RAF should use the custom bucket autograd path."""
+    if not storage._reshard_after_forward:
+        return False
+    if not storage._param_infos:
+        return False
+    return _get_eager_raf_custom_bucket_unsupported_reason(storage) is None
+
+
+def _get_eager_raf_custom_bucket_unsupported_reason(
+    storage: DStorage,
+) -> str | None:
+    """Return why a RAF eager bucket cannot use the custom autograd path."""
     infos = list(storage._param_infos.values())
     if not infos:
-        return False
+        return None
+    if storage.byte_storage.device.type != "cuda":
+        return f"storage is on {storage.byte_storage.device.type}"
     ptype = type(infos[0].placements[0])
-    return (
-        storage._reshard_after_forward
-        and ptype is Shard
-        and storage.byte_storage.device.type == "cuda"
+    if ptype is not Shard:
+        return f"placement type is {ptype.__name__}"
+    shard_dims = sorted({info.placements[0].dim for info in infos})
+    if shard_dims != [0]:
+        return f"Shard dimension is {shard_dims}"
+    return None
+
+
+def _raise_unsupported_eager_raf_custom_bucket(storage: DStorage) -> None:
+    reason = _get_eager_raf_custom_bucket_unsupported_reason(storage)
+    bucket_fqn = _get_storage_debug_fqn(storage)
+    bucket_msg = f" for bucket {bucket_fqn!r}" if bucket_fqn else ""
+    raise NotImplementedError(
+        "FlexShard eager reshard_after_forward currently supports only CUDA "
+        f"Shard(0) buckets in the custom autograd bucket path{bucket_msg}; "
+        f"{reason}. Use reshard_after_forward=False for this bucket or add "
+        "support for this placement before using eager RAF."
     )
 
 
@@ -3798,6 +3824,10 @@ def _install_batched_allgather_hooks(
         # batched path. Parametrization remains the source of truth.
         if not _storage_requires_eager_batched_unshard(storage):
             continue
+        if storage._reshard_after_forward and not _storage_uses_eager_autograd_unshard(
+            storage
+        ):
+            _raise_unsupported_eager_raf_custom_bucket(storage)
 
         # Pre-compute (leaf_module, param_name, parametrization, info) for
         # each param in this bucket. Captured at flex_shard() time (before
