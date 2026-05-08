@@ -4,15 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import spmd_types as spmd
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.protocols.sharding import (
+    GlobalSpmdConfig,
     LocalMapConfig,
     LocalSpmdConfig,
     NamedPlacement,
     ShardingConfig,
     SpmdAnnotation,
+    SpmdRedist,
 )
 from torchtitan.protocols.types import MeshAxisName
 
@@ -179,6 +182,55 @@ def set_gqa_inner_attention_local_map(
     )
 
 
+# ---------------------------------------------------------------------------
+# Constant SPMD annotations — resolved at parallelize time.
+# Size-1 axes are automatically dropped by spmd_types.
+# ---------------------------------------------------------------------------
+
+# lm_head output: S(2)@TP -> R@TP (all-gather vocab dim)
+LM_HEAD_OUTPUT_REDIST = GlobalSpmdConfig(
+    output=SpmdRedist(
+        src=SpmdAnnotation(types={TP: spmd.S(2)}),
+        dst=SpmdAnnotation(types={TP: spmd.R}),
+    ),
+)
+
+# Embedding output [B, L, D] — SP variant (TP on seq dim)
+EMBED_OUT_SP = LocalSpmdConfig(
+    out=SpmdAnnotation(
+        partition_spec=((DP_REPLICATE, DP_SHARD), (CP, TP), None),
+    ),
+)
+
+# Embedding output [B, L, D] — no SP (TP is R, not sharded)
+EMBED_OUT = LocalSpmdConfig(
+    out=SpmdAnnotation(
+        types={TP: spmd.R},
+        partition_spec=((DP_REPLICATE, DP_SHARD), CP, None),
+    ),
+)
+
+# Inner attention q/k/v: (batch, seq, heads, head_dim)
+QKV_LOCAL_SPMD = LocalSpmdConfig(
+    inputs=(
+        SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+        SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+        SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+    ),
+    out=SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+)
+
+# Rowwise output redistribute: P@TP -> R@TP (or S(1)@TP for SP)
+def rowwise_spmd_config(*, output_sp: bool) -> GlobalSpmdConfig:
+    dst_type = spmd.S(1) if output_sp else spmd.R
+    return GlobalSpmdConfig(
+        output=SpmdRedist(
+            src=SpmdAnnotation(types={TP: spmd.P}),
+            dst=SpmdAnnotation(types={TP: dst_type}),
+        ),
+    )
+
+
 def set_gqa_inner_attention_local_spmd(
     inner_attention_cfg,
     inputs: tuple[SpmdAnnotation, ...],
@@ -188,7 +240,7 @@ def set_gqa_inner_attention_local_spmd(
 
     spmd_types counterpart to ``set_gqa_inner_attention_local_map``.
     """
-    inner_attention_cfg.spmd_config = LocalSpmdConfig(
+    inner_attention_cfg.local_spmd = LocalSpmdConfig(
         inputs=inputs,
         out=out,
     )
@@ -216,7 +268,7 @@ def set_dense_ffn_sharding(
 
 
 def set_decoder_sharding_config(
-    config, *, loss_parallel: bool, enable_sp: bool, full_spmd_types: bool = False,
+    config, *, loss_parallel: bool, enable_sp: bool,
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     ``output``, and the root ``freqs_cis`` buffer.

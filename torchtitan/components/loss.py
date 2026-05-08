@@ -14,6 +14,7 @@ import spmd_types as spmd
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
+from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss

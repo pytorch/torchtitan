@@ -17,14 +17,17 @@ from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 
 import spmd_types as spmd
+from torch.distributed.tensor import Shard as DtShard
 from torchtitan.config import Configurable
 from torchtitan.protocols.sharding import (
     GlobalSpmdConfig,
     LocalSpmdConfig,
+    placement_to_spmd_type,
     resolve_placements,
     resolve_spmd,
     ShardingConfig,
 )
+from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -59,7 +62,7 @@ def redistribute_per_axis(
     dst_types: spmd.PerMeshAxisSpmdTypes,
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
-    from torchtitan.distributed.spmd_state import spmd_state
+    from torchtitan.distributed.spmd_state import mesh, spmd_state
 
     state = spmd_state()
     for axis, dst_t in dst_types.items():
@@ -142,14 +145,16 @@ class Module(nn.Module, Configurable):
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
-    _spmd_config: LocalSpmdConfig | GlobalSpmdConfig | None = None
+    _local_spmd: LocalSpmdConfig | None = None
+    _global_spmd: GlobalSpmdConfig | None = None
     _pos_arg_list: list[str] | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: dict | None = None
         sharding_config: ShardingConfig | None = None
-        spmd_config: LocalSpmdConfig | GlobalSpmdConfig | None = None
+        local_spmd: LocalSpmdConfig | None = None
+        global_spmd: GlobalSpmdConfig | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -160,8 +165,10 @@ class Module(nn.Module, Configurable):
                 instance._param_init = self.param_init
             if self.sharding_config is not None:
                 instance._sharding_config = self.sharding_config
-            if self.spmd_config is not None:
-                instance._spmd_config = self.spmd_config
+            if self.local_spmd is not None:
+                instance._local_spmd = self.local_spmd
+            if self.global_spmd is not None:
+                instance._global_spmd = self.global_spmd
             return instance
 
     def init_states(
@@ -300,7 +307,7 @@ class Module(nn.Module, Configurable):
                 # Look through non-Module wrappers, e.g., CheckpointWrapper
                 queue.extend(child.children())
 
-        if self._sharding_config is None and self._spmd_config is None:
+        if self._sharding_config is None and self._local_spmd is None and self._global_spmd is None:
             return
 
         from torchtitan.distributed.parallel_dims import ParallelDims
@@ -386,34 +393,70 @@ class Module(nn.Module, Configurable):
     # ----- spmd_types path -----
 
     def _parallelize_spmd(self, parallel_dims: "ParallelDims") -> None:
-        if self._sharding_config is not None:
-            from torchtitan.distributed.spmd_state import spmd_state
+        sharding_config = self._sharding_config
+        if sharding_config is not None:
+            self._annotate_states_spmd(sharding_config, parallel_dims)
 
-            dp_axes_set = set(spmd_state().dp_axes)
-            for name, state in itertools.chain(
-                self.named_parameters(recurse=False),
-                self.named_buffers(recurse=False),
-            ):
-                if name not in self._sharding_config.state_shardings:
-                    continue
-                resolved = resolve_spmd(
-                    self._sharding_config.state_shardings[name],
-                )
-                # DP-replicated states need R (not I) because each rank
-                # processes different data — gradients need reduction.
+        self._cache_pos_arg_names()
+
+        if self._local_spmd is not None:
+            self.forward = lspmd_parallelize(self.forward, self._local_spmd)
+        if self._global_spmd is not None:
+            self.forward = gspmd_parallelize(self.forward, self._global_spmd)
+
+    def _annotate_states_spmd(
+        self,
+        sharding_config: ShardingConfig,
+        parallel_dims: "ParallelDims",
+    ) -> None:
+        """Annotate params and buffers with SPMD types, slicing TP-sharded params."""
+        from torchtitan.distributed.spmd_state import mesh, spmd_state
+
+        tp_pg = spmd_state().tp_pg
+        dp_axes_set = set(spmd_state().dp_axes)
+
+        for name, tensor in itertools.chain(
+            self.named_parameters(recurse=False),
+            self.named_buffers(recurse=False),
+        ):
+            if tensor is None or name not in sharding_config.state_shardings:
+                continue
+            named_p = sharding_config.state_shardings[name]
+
+            # Physical TP weight slicing (params only)
+            if tp_pg is not None and isinstance(tensor, nn.Parameter):
+                for axis_name, placement in named_p.items():
+                    if axis_name.value == "tp" and isinstance(placement, DtShard):
+                        tensor = nn.Parameter(
+                            parallel_dims.tp_shard(tensor, placement.dim)
+                        )
+                        self.register_parameter(name, tensor)
+                        break
+
+            resolved = resolve_spmd(named_p)
+            if resolved:
                 resolved = {
                     a: (spmd.R if t is spmd.I and a in dp_axes_set else t)
                     for a, t in resolved.items()
                 }
-                spmd.assert_type(state, resolved)
+                spmd.assert_type(tensor, resolved)
 
-        self._cache_pos_arg_names()
+        # Vocab-parallel embedding
+        from torchtitan.models.common.embedding import Embedding
 
-        spmd_config = self._spmd_config
-        if isinstance(spmd_config, LocalSpmdConfig):
-            self.forward = lspmd_parallelize(self.forward, spmd_config)
-        elif isinstance(spmd_config, GlobalSpmdConfig):
-            self.forward = gspmd_parallelize(self.forward, spmd_config)
+        if tp_pg is not None and isinstance(self, Embedding):
+            tp_placement = sharding_config.state_shardings.get(
+                "weight", {}
+            ).get(MeshAxisName.TP)
+            if isinstance(tp_placement, DtShard):
+                out_dst = sharding_config.out_dst_shardings or {}
+                tp_out_placement = out_dst.get(MeshAxisName.TP)
+                tp_out_type = (
+                    placement_to_spmd_type(tp_out_placement, is_compute=True)
+                    if tp_out_placement is not None
+                    else spmd.R
+                )
+                self._setup_tp(tp_out_type)
 
     # ----- DTensor input/output helpers (unchanged from main) -----
 
