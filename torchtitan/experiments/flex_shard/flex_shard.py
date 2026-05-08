@@ -18,17 +18,15 @@ from .bucket_runtime import (
     _create_eager_param_states,
     _install_batched_allgather_hooks,
 )
-from .param_metadata import (
-    get_global_shape,
-    get_placements,
-    is_flex_shard_param,
-    set_sharding_info,
-)
 from .param_access import (
     _attach_flex_shard_module_state,
     _check_not_already_flex_sharded,
+    get_global_shape,
+    get_placements,
+    is_flex_shard_param,
     _register_module_param_accessors,
     FlexShardModule,
+    set_sharding_info,
 )
 from .reshard_after_forward import (
     _apply_reshard_after_forward,

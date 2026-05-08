@@ -21,13 +21,14 @@ from .bucket_collectives import (
     begin_all_gather_unshard,
     begin_reduce_scatter_grad,
 )
-from .param_access import EagerParamAccessState, ParamModuleInfo
-from .param_metadata import (
+from .param_access import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
+    EagerParamAccessState,
+    ParamModuleInfo,
 )
 from .reshard_after_forward import _reshard_after_forward_recompute
 from .bucket_storage import BucketSpec, DStorage, ParamInfo

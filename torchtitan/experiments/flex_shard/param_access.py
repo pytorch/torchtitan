@@ -13,20 +13,93 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .param_metadata import (
-    _DSTORAGE_ATTR,
-    _DSTORAGES_ATTR,
-    _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-    _EAGER_COMM_CONTEXTS_ATTR,
-)
-from .utils import (
-    _is_graph_capture_active,
-    _raise_graph_capture_unsupported,
-    _raise_missing_eager_batched_unshard,
-)
-
 if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
+
     from .bucket_storage import DStorage
+    from .placements import Placement
+
+
+# Module attribute names for storing DStorage
+_DSTORAGE_ATTR = "_dstorage"
+_DSTORAGES_ATTR = "_dstorages"
+
+# Hidden attribute names for placement metadata on plain tensors
+_PLACEMENTS_ATTR = "_placements"
+_GLOBAL_SHAPE_ATTR = "_global_shape"
+_GLOBAL_STRIDE_ATTR = "_global_stride"
+_MESH_ATTR = "_mesh"
+_EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered"
+_EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
+_PARAM_FQN_ATTR = "_flex_shard_param_fqn"
+_BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
+_EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR = "_flex_shard_eager_autograd_bucket_unshard"
+
+
+def set_sharding_info(
+    tensor: torch.Tensor,
+    placements: tuple[Placement, ...],
+    global_shape: torch.Size,
+    global_stride: tuple[int, ...],
+    mesh: DeviceMesh,
+) -> None:
+    """Annotate a tensor with FlexShard placement metadata."""
+    tensor._placements = placements
+    tensor._global_shape = global_shape
+    tensor._global_stride = global_stride
+    tensor._mesh = mesh
+
+
+def get_placements(tensor: torch.Tensor) -> tuple[Placement, ...] | None:
+    """Get FlexShard placements from a tensor, or None if not annotated."""
+    return getattr(tensor, _PLACEMENTS_ATTR, None)
+
+
+def get_global_shape(tensor: torch.Tensor) -> torch.Size | None:
+    """Get the global (unsharded) shape from a tensor, or None if not annotated."""
+    return getattr(tensor, _GLOBAL_SHAPE_ATTR, None)
+
+
+def is_flex_shard_param(tensor: torch.Tensor) -> bool:
+    """Check if a tensor has FlexShard placement metadata."""
+    return hasattr(tensor, _PLACEMENTS_ATTR)
+
+
+def _is_graph_capture_active() -> bool:
+    """Return whether unsupported graph capture is active."""
+    if torch.compiler.is_compiling():
+        return True
+    try:
+        return torch._guards.TracingContext.try_get() is not None
+    except AttributeError:
+        return False
+
+
+def _raise_graph_capture_unsupported() -> None:
+    raise ValueError(
+        "FlexShard currently supports eager execution only; torch.compile and "
+        "graph capture are not supported yet."
+    )
+
+
+def _raise_missing_eager_batched_unshard(param_state: Any) -> None:
+    param_fqn = getattr(param_state, _PARAM_FQN_ATTR, "<unknown>")
+    bucket_fqn = getattr(param_state, _BUCKET_FQN_ATTR, None)
+    hook_registered = getattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
+    bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
+    hook_msg = (
+        " The bucket hook was registered but did not run before parameter access."
+        if hook_registered
+        else " No bucket hook was registered for this parameter."
+    )
+    raise RuntimeError(
+        "FlexShard eager mode requires pre-gathered parameter data from a "
+        f"batched all-gather hook for parameter {param_fqn!r}{bucket_msg}."
+        f"{hook_msg} This usually means the parameter was accessed outside "
+        "the hooked module forward, or the BucketSpec boundary does not match "
+        "the module hook/checkpoint execution unit. Split the bucket to match "
+        "forward module boundaries."
+    )
 
 
 class _MixedPrecisionCast(torch.autograd.Function):

@@ -13,12 +13,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.fsdp import DataParallelMeshDims
 
-from .param_metadata import (
-    _BUCKET_FQN_ATTR,
-    _DSTORAGE_ATTR,
-    _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
-    _PARAM_FQN_ATTR,
-)
+from .param_access import _DSTORAGE_ATTR
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -95,43 +90,6 @@ def _get_storage_debug_fqn(storage: DStorage) -> str | None:
     if not top_level_paths:
         return None
     return ", ".join(top_level_paths)
-
-
-def _is_graph_capture_active() -> bool:
-    """Return whether unsupported graph capture is active."""
-    if torch.compiler.is_compiling():
-        return True
-    try:
-        return torch._guards.TracingContext.try_get() is not None
-    except AttributeError:
-        return False
-
-
-def _raise_graph_capture_unsupported() -> None:
-    raise ValueError(
-        "FlexShard currently supports eager execution only; torch.compile and "
-        "graph capture are not supported yet."
-    )
-
-
-def _raise_missing_eager_batched_unshard(param_state: Any) -> None:
-    param_fqn = getattr(param_state, _PARAM_FQN_ATTR, "<unknown>")
-    bucket_fqn = getattr(param_state, _BUCKET_FQN_ATTR, None)
-    hook_registered = getattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
-    bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
-    hook_msg = (
-        " The bucket hook was registered but did not run before parameter access."
-        if hook_registered
-        else " No bucket hook was registered for this parameter."
-    )
-    raise RuntimeError(
-        "FlexShard eager mode requires pre-gathered parameter data from a "
-        f"batched all-gather hook for parameter {param_fqn!r}{bucket_msg}."
-        f"{hook_msg} This usually means the parameter was accessed outside "
-        "the hooked module forward, or the BucketSpec boundary does not match "
-        "the module hook/checkpoint execution unit. Split the bucket to match "
-        "forward module boundaries."
-    )
 
 
 def _set_param_on_module(
