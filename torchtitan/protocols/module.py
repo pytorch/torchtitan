@@ -62,7 +62,7 @@ def redistribute_per_axis(
     dst_types: spmd.PerMeshAxisSpmdTypes,
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
-    from torchtitan.distributed.spmd_state import spmd_state
+    from torchtitan.distributed.spmd_state import mesh, spmd_state
 
     state = spmd_state()
     for axis, dst_t in dst_types.items():
@@ -410,7 +410,7 @@ class Module(nn.Module, Configurable):
         parallel_dims: "ParallelDims",
     ) -> None:
         """Annotate params and buffers with SPMD types, slicing TP-sharded params."""
-        from torchtitan.distributed.spmd_state import spmd_state
+        from torchtitan.distributed.spmd_state import mesh, spmd_state
 
         tp_pg = spmd_state().tp_pg
         dp_axes_set = set(spmd_state().dp_axes)
