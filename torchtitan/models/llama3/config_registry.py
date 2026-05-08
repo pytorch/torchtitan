@@ -113,6 +113,30 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_te_nvfp4() -> Trainer.Config:
+    """Debug model with NVFP4 quantized training (TransformerEngine backend).
+
+    Uses CrossEntropyLoss due to ChunkedCELoss compatibility issue.
+    """
+    from torchtitan.components.loss import CrossEntropyLoss
+    from torchtitan.components.quantization import TENVFP4LinearConverter
+
+    config = llama3_debugmodel()
+    config.loss = CrossEntropyLoss.Config()
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        quantization=[
+            TENVFP4LinearConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
 def llama3_debugmodel_float8_emulate() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry(
