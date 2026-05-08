@@ -9,8 +9,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.protocols.model import ModelConfigConverter
-
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -24,6 +22,8 @@ from torchtitan.models.common.param_init import depth_scaled_std, skip_param_ini
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Qwen3VLModel

@@ -9,10 +9,11 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
