@@ -469,6 +469,7 @@ __all__ = [
     "get_global_shape",
     "get_placements",
     "is_flex_shard_param",
+    "MixedPrecisionPolicy",
     "Owned",
     "param_boundary_placements",
     "per_param_placements",
@@ -754,6 +755,40 @@ class FlexShardModule:
         """All DStorage instances (one per bucket)."""
         return getattr(self, _DSTORAGES_ATTR)
 
+    @contextmanager
+    def no_sync(self) -> Generator[None, None, None]:
+        """Skip gradient reduction for all buckets (hooks mode only).
+
+        In parametrization mode, reduce-scatter is autograd-generated
+        and always runs. This context manager only affects the hooks-based
+        flow (register_hooks=True).
+        """
+        storages = getattr(self, _DSTORAGES_ATTR)
+        old_flags = [s._require_gradient_sync for s in storages]
+        try:
+            for s in storages:
+                s._require_gradient_sync = False
+            yield
+        finally:
+            for s, old in zip(storages, old_flags):
+                s._require_gradient_sync = old
+
+
+@dataclass(frozen=True)
+class MixedPrecisionPolicy:
+    """Mixed precision policy for FlexShard buckets.
+
+    Args:
+        param_dtype: Dtype for forward compute. Parameters are all-gathered
+            in storage dtype, then cast to param_dtype. If None, no cast.
+        reduce_dtype: Dtype for gradient reduction. Gradients are cast to
+            this dtype before reduce-scatter. If None, uses param_dtype
+            (or storage dtype if param_dtype is also None).
+    """
+
+    param_dtype: torch.dtype | None = None
+    reduce_dtype: torch.dtype | None = None
+
 
 @dataclass
 class BucketSpec:
@@ -762,12 +797,12 @@ class BucketSpec:
     Args:
         patterns: fnmatch glob patterns matched against parameter FQNs.
             A parameter matches this bucket if its FQN matches any pattern.
-        mp_policy: Mixed precision policy for this bucket (Phase 2c).
-        offload_policy: CPU offload policy for this bucket (Phase 2c).
+        mp_policy: Mixed precision policy for this bucket.
+        offload_policy: CPU offload policy for this bucket (not yet implemented).
     """
 
     patterns: list[str]
-    mp_policy: Any = None
+    mp_policy: MixedPrecisionPolicy | None = None
     offload_policy: Any = None
 
 
@@ -1049,11 +1084,20 @@ class ShardParametrization(nn.Module):
     chunk and re-cat along the correct shard_dim.
     """
 
-    def __init__(self, shard_dim: int, group_name: str, world_size: int):
+    def __init__(
+        self,
+        shard_dim: int,
+        group_name: str,
+        world_size: int,
+        param_dtype: torch.dtype | None = None,
+        reduce_dtype: torch.dtype | None = None,
+    ):
         super().__init__()
         self.shard_dim = shard_dim
         self.group_name = group_name
         self.world_size = world_size
+        self.param_dtype = param_dtype
+        self.reduce_dtype = reduce_dtype
 
     def forward(self, local_shard: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
@@ -1065,6 +1109,8 @@ class ShardParametrization(nn.Module):
         if self.shard_dim != 0:
             chunks = full.chunk(self.world_size, dim=0)
             full = torch.cat(chunks, dim=self.shard_dim)
+        if self.param_dtype is not None or self.reduce_dtype is not None:
+            full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
         return full
 
 
@@ -1076,11 +1122,20 @@ class FlatShardParametrization(nn.Module):
     After all-gather, the result is reshaped to the original parameter shape.
     """
 
-    def __init__(self, group_name: str, world_size: int, original_shape: torch.Size):
+    def __init__(
+        self,
+        group_name: str,
+        world_size: int,
+        original_shape: torch.Size,
+        param_dtype: torch.dtype | None = None,
+        reduce_dtype: torch.dtype | None = None,
+    ):
         super().__init__()
         self.group_name = group_name
         self.world_size = world_size
         self.original_shape = original_shape
+        self.param_dtype = param_dtype
+        self.reduce_dtype = reduce_dtype
 
     def forward(self, flat_shard: torch.Tensor) -> torch.Tensor:
         if not _active_parametrization:
@@ -1089,7 +1144,38 @@ class FlatShardParametrization(nn.Module):
             flat_shard, self.world_size, self.group_name
         )
         full_flat = torch.ops._c10d_functional.wait_tensor(full_flat)
-        return full_flat.view(self.original_shape)
+        full = full_flat.view(self.original_shape)
+        if self.param_dtype is not None or self.reduce_dtype is not None:
+            full = _MixedPrecisionCast.apply(full, self.param_dtype, self.reduce_dtype)
+        return full
+
+
+class _MixedPrecisionCast(torch.autograd.Function):
+    """Cast with decoupled forward/backward dtype control.
+
+    Forward casts to param_dtype (compute dtype).
+    Backward casts to reduce_dtype (gradient reduction dtype).
+    This allows all-gather in storage dtype (e.g., fp32), compute in
+    param_dtype (e.g., bf16), and reduce-scatter in reduce_dtype (e.g., fp32).
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        x: torch.Tensor,
+        param_dtype: torch.dtype | None,
+        reduce_dtype: torch.dtype | None,
+    ) -> torch.Tensor:
+        ctx.reduce_dtype = reduce_dtype
+        if param_dtype is not None and x.dtype != param_dtype:
+            return x.to(param_dtype)
+        return x
+
+    @staticmethod
+    def backward(ctx: Any, grad: torch.Tensor) -> tuple[torch.Tensor, None, None]:
+        if ctx.reduce_dtype is not None and grad.dtype != ctx.reduce_dtype:
+            return grad.to(ctx.reduce_dtype), None, None
+        return grad, None, None
 
 
 class ShardedState(Enum):
@@ -1190,6 +1276,9 @@ class DStorage:
 
         # Track if post_backward has been called this iteration
         self._post_backward_called = False
+
+        # Gradient sync flag for no_sync() (hooks mode only)
+        self._require_gradient_sync = True
 
         # Register forward hooks if requested
         if register_hooks:
@@ -1436,6 +1525,24 @@ class DStorage:
         finally:
             self.reduce_grad()
 
+    @contextmanager
+    def no_sync(self) -> Generator[None, None, None]:
+        """Skip gradient reduction during backward (hooks mode only).
+
+        Use for gradient accumulation: run N micro-batches without
+        reduce-scatter, then run a final step with sync enabled.
+
+        Only affects hooks-based flow (register_hooks=True). In
+        parametrization mode, reduce-scatter is autograd-generated
+        and always runs.
+        """
+        old = self._require_gradient_sync
+        try:
+            self._require_gradient_sync = False
+            yield
+        finally:
+            self._require_gradient_sync = old
+
     # ==================== Hook-based Scheduling ====================
 
     def _register_forward_hooks(self) -> None:
@@ -1519,7 +1626,10 @@ class DStorage:
 
         # Only reduce if currently unsharded
         if self._state == ShardedState.UNSHARDED:
-            self.reduce_grad()
+            if self._require_gradient_sync:
+                self.reduce_grad()
+            else:
+                self._reshard_params_only()
 
     def _reshard_params_only(self) -> None:
         """
@@ -1982,10 +2092,19 @@ def flex_shard(
     # Per-bucket: create param_infos, byte buffer, replace params, create DStorage
     named_params_dict = dict(named_params)
     storages: list[DStorage] = []
+    fqn_to_mp_policy: dict[str, MixedPrecisionPolicy | None] = {}
 
     for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
         if not bucket_fqns:
             continue
+
+        # Extract per-bucket mp_policy
+        bucket_mp_policy = None
+        bucket_spec = buckets_resolved[bucket_idx]
+        if isinstance(bucket_spec, BucketSpec):
+            bucket_mp_policy = bucket_spec.mp_policy
+        for fqn in bucket_fqns:
+            fqn_to_mp_policy[fqn] = bucket_mp_policy
 
         bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
         bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
@@ -2042,18 +2161,25 @@ def flex_shard(
 
         for s in storages:
             for fqn, info in s._param_infos.items():
+                mp = fqn_to_mp_policy.get(fqn)
+                param_dtype = mp.param_dtype if mp else None
+                reduce_dtype = mp.reduce_dtype if mp else None
                 placement = info.placements[0]
                 if isinstance(placement, Shard):
                     p = ShardParametrization(
                         shard_dim=placement.dim,
                         group_name=group_name,
                         world_size=world_size,
+                        param_dtype=param_dtype,
+                        reduce_dtype=reduce_dtype,
                     )
                 elif isinstance(placement, FlatShard):
                     p = FlatShardParametrization(
                         group_name=group_name,
                         world_size=world_size,
                         original_shape=info.global_shape,
+                        param_dtype=param_dtype,
+                        reduce_dtype=reduce_dtype,
                     )
                 else:
                     raise ValueError(
