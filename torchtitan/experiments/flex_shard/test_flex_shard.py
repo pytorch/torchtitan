@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 # Copyright (c) Meta Platforms, Inc. and affiliates
 # Owner(s): ["oncall: distributed"]
 
@@ -14,20 +20,20 @@ ThreadBasedRNGTracker from https://github.com/pytorch/pytorch/pull/174446.
 That codepath is disabled until the PR lands.
 """
 
+from datetime import timedelta
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from datetime import timedelta
 from torch.distributed.device_mesh import init_device_mesh
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 from torchtitan.experiments.flex_shard import (
+    flat_shard_placements,
     flex_shard,
     FlexShardModule,
-    is_flex_shard_param,
-    Owned,
-    RaggedShard,
-    Shard,
+    per_param_placements,
 )
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def setup_distributed():
@@ -55,31 +61,33 @@ def print_rank0(msg):
         print(msg)
 
 
-class SimpleMLP(nn.Module):
-    def __init__(self, in_dim: int = 16, hidden_dim: int = 32, out_dim: int = 64):
+class MultiLayerMLP(nn.Module):
+    """Multi-layer model for testing per-layer wrapping."""
+
+    def __init__(self, dim: int = 16, num_layers: int = 4):
         super().__init__()
-        self.fc1 = nn.Linear(in_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, out_dim)
-        self.fc3 = nn.Linear(out_dim, 8)
+        self.embed = nn.Linear(dim, dim)
+        self.layers = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(dim, dim * 2),
+                    nn.ReLU(),
+                    nn.Linear(dim * 2, dim),
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.output = nn.Linear(dim, 8)
 
     def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
-
-    def reset_parameters(self):
-        self.fc1.reset_parameters()
-        self.fc2.reset_parameters()
-        self.fc3.reset_parameters()
+        x = self.embed(x)
+        for layer in self.layers:
+            x = x + layer(x)
+        return self.output(x)
 
 
-def run_test_placement(name, placement_fn=None):
-    """Test flex_shard with a given placement, verifying DDP parity.
-
-    Args:
-        name: test label for logging
-        placement_fn: optional shard_placement_fn; None means default Shard(0)
-    """
+def run_test_per_layer_wrapping(shard_placement_fn=None, name="per_param"):
+    """Test per-layer wrapping with DDP parity over multiple training steps."""
     rank, world_size = dist.get_rank(), dist.get_world_size()
     device = torch.device("cuda", torch.cuda.current_device())
     mesh = init_device_mesh("cuda", (world_size,))
@@ -91,55 +99,62 @@ def run_test_placement(name, placement_fn=None):
     # Create model
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
-    model = SimpleMLP().to(device)
+    model = MultiLayerMLP().to(device)
 
-    # Create reference model (DDP) with same seed
+    # Create DDP reference
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
-    ref_model = SimpleMLP().to(device)
-    ref_model = DDP(ref_model, device_ids=[rank])
+    ref_model = DDP(MultiLayerMLP().to(device), device_ids=[rank])
 
-    # Apply flex_shard
-    if placement_fn is not None:
-        flex_shard(model, mesh, shard_placement_fn=placement_fn)
-    else:
-        flex_shard(model, mesh)
-    assert isinstance(model, FlexShardModule)
-    storage = model.dstorage
+    # Per-layer wrapping: wrap each layer first, then root
+    for layer in model.layers:
+        flex_shard(layer, mesh, shard_placement_fn=shard_placement_fn)
+    flex_shard(model, mesh, shard_placement_fn=shard_placement_fn)
 
-    # Print placement config
-    for fqn, info in storage.param_infos.items():
-        assert is_flex_shard_param(
-            dict(model.named_parameters())[fqn]
-        ), f"{fqn} missing metadata"
+    # Verify each layer has its own DStorage
+    for i, layer in enumerate(model.layers):
+        assert isinstance(layer, FlexShardModule), f"layers.{i} not wrapped"
+    assert isinstance(model, FlexShardModule), "root not wrapped"
+
+    # Print storage info
+    if rank == 0:
+        root_ds = model.dstorage
+        print(f"  Root DStorage: {len(root_ds.param_infos)} params")
+        for fqn in root_ds.param_infos:
+            print(f"    {fqn}")
+        for i, layer in enumerate(model.layers):
+            layer_ds = layer.dstorage
+            print(f"  Layer {i} DStorage: {len(layer_ds.param_infos)} params")
+
+    # Optimizers
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    ref_optimizer = torch.optim.SGD(ref_model.parameters(), lr=1e-3)
+
+    # Multiple training steps
+    for step in range(3):
+        torch.manual_seed(42 + rank + step)
+        inp = torch.randn(4, 16, device=device)
+
+        optimizer.zero_grad()
+        loss = model(inp).sum()
+        loss.backward()
+        optimizer.step()
+
+        ref_optimizer.zero_grad()
+        ref_loss = ref_model(inp).sum()
+        ref_loss.backward()
+        ref_optimizer.step()
+
+        torch.testing.assert_close(loss, ref_loss, atol=1e-6, rtol=1e-5)
         if rank == 0:
             print(
-                f"  {fqn:<20} | {repr(info.placements[0]):<45} "
-                f"| local_numel={info.local_numel}"
+                f"  step {step}: flex_shard={loss.item():.6f}  ref={ref_loss.item():.6f}"
             )
 
-    # Forward parity
-    batch_size = 4
-    torch.manual_seed(42 + rank)
-    inp = torch.randn(batch_size, 16, device=device)
-
-    with torch.no_grad():
-        ref_loss = ref_model(inp).sum()
-        fsdp_loss = model(inp).sum()
-    torch.testing.assert_close(ref_loss, fsdp_loss)
-    print_rank0(f"  Forward:  ref={ref_loss.item():.6f}  fsdp={fsdp_loss.item():.6f}")
-
-    # Backward — verify all params get gradients
-    torch.manual_seed(42 + rank)
-    inp = torch.randn(batch_size, 16, device=device)
-
-    ref_model(inp).sum().backward()
-    model(inp).sum().backward()
-
+    # Verify all params have gradients
     for fqn, param in model.named_parameters():
         if param.requires_grad and param.numel() > 0:
             assert param.grad is not None, f"{fqn} has no grad"
-    print_rank0("  Backward: all params have gradients")
 
     print_rank0(f"PASSED: {name}")
     torch.cuda.synchronize()
@@ -150,40 +165,14 @@ def main():
     rank, world_size = setup_distributed()
     print_rank0(f"Running tests with world_size={world_size}")
 
-    equal_units = tuple(1 for _ in range(world_size))
-
-    tests = [
-        ("Shard(0)", None),
-        (
-            "RaggedShard (equal units)",
-            lambda fqn, p: (
-                RaggedShard(dims=(0,), local_units=equal_units)
-                if p.dim() >= 2
-                else Shard(0)
-            ),
-        ),
-        (
-            "Mixed Shard + Owned",
-            lambda fqn, p: Owned(0) if "fc1" in fqn else Shard(0),
-        ),
-        (
-            "Mixed Shard + RaggedShard + Owned",
-            lambda fqn, p: (
-                Owned(0)
-                if "fc3" in fqn
-                else (
-                    RaggedShard(dims=(0,), local_units=equal_units)
-                    if p.dim() >= 2
-                    else Shard(0)
-                )
-            ),
-        ),
-    ]
-
     success = True
-    for name, placement_fn in tests:
+    tests = [
+        (per_param_placements, "per_param"),
+        (flat_shard_placements, "flat_shard"),
+    ]
+    for placement_fn, name in tests:
         try:
-            run_test_placement(name, placement_fn)
+            run_test_per_layer_wrapping(shard_placement_fn=placement_fn, name=name)
         except Exception as e:
             print_rank0(f"FAILED: {name}: {e}")
             import traceback
