@@ -392,6 +392,8 @@ def _maybe_redistribute_multiply(
     if isinstance(grad_output, DTensor):
         grad_output = grad_output.to_local(grad_placements=grad_output.placements)
     return g * grad_output
+
+
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 

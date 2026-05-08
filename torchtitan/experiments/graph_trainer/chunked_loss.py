@@ -7,7 +7,7 @@
 import torch
 import torch.nn as nn
 
-from torchtitan.components.loss import ChunkedCELoss, _maybe_redistribute_multiply
+from torchtitan.components.loss import _maybe_redistribute_multiply, ChunkedCELoss
 
 
 class ChunkedCELossWithParamGrads(ChunkedCELoss):
