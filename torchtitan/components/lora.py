@@ -61,7 +61,7 @@ def _get_lora_cls(parent_cls: type) -> type:
     if parent_cls in _lora_class_cache:
         return _lora_class_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
 
     class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
@@ -168,7 +168,7 @@ class LoRAConverter(ModelConfigConverter):
         assert cfg._owner is not None
         lora_cls = _get_lora_cls(cfg._owner)
         lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(cfg.sharding_config)
-        return lora_cls.Config(
+        return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
             **{f.name: getattr(cfg, f.name) for f in fields(cfg)},
             lora_a=Linear.Config(
                 in_features=cfg.in_features,
