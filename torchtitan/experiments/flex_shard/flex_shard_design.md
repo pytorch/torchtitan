@@ -625,6 +625,110 @@ stream while still moving the NCCL all-gather itself to a dedicated stream.
    - NCCL all-gather on the FlexShard all-gather stream
    - default stream waiting before parameter compute consumes `_pre_gathered`
 
+## Eager Reduce-Scatter Stream Plan
+
+PyTorch composable FSDP keeps backward gradient copy-in on the current stream
+and moves reduce-scatter plus post-reduce gradient view-out onto a dedicated
+high-priority `reduce_scatter_stream`. FlexShard should mirror that model for
+eager batched `Shard` buckets.
+
+### Target Behavior
+
+1. **Gradient copy-in stays on the current stream.** The eager `AccumulateGrad`
+   hooks collect full-parameter gradients produced by autograd. Packing those
+   gradients into the reduce-scatter input buffer must remain ordered after the
+   autograd kernels that produced them.
+
+2. **NCCL reduce-scatter launches on a shared FlexShard reduce-scatter stream.**
+   The same eager communication context that owns the all-gather stream also
+   owns one high-priority `reduce_scatter_stream` per CUDA device. The
+   reduce-scatter stream waits for the copy-in event before launching NCCL.
+
+3. **Grad write-out happens on the reduce-scatter stream.** After NCCL
+   completes, FlexShard unpacks/casts/accumulates sharded gradients on the
+   reduce-scatter stream and records a completion event.
+
+4. **Backward returns only after outstanding reduce-scatter work is ordered.**
+   FlexShard queues one autograd final callback per eager communication context.
+   That callback waits the default stream on every outstanding reduce-scatter
+   completion event and clears the retained input/output buffers. This makes
+   `optimizer.step()` safe while still allowing reduce-scatter overlap during
+   backward.
+
+5. **Scope is eager `Shard` buckets first.** `FlatShard`, `RaggedShard`,
+   `Owned`, CPU-offload, and compiled `_c10d_functional` paths remain on their
+   existing synchronous/graph-managed behavior until separately migrated.
+
+### Implementation Steps
+
+1. Extend the eager communication context with:
+
+   ```python
+   reduce_scatter_stream: torch.Stream
+   reduce_scatter_states: list[EagerReduceScatterResult]
+   reduce_scatter_callback_queued: bool
+   ```
+
+2. Split `Shard.reduce_grad()` into:
+
+   ```python
+   result = Shard.begin_reduce_grad(
+       grads,
+       infos,
+       mesh,
+       reduce_scatter_stream,
+   )
+   sharded_grads = Shard.finish_reduce_grad(result)
+   ```
+
+   The synchronous public `reduce_grad()` remains a wrapper for non-eager paths.
+
+3. In `begin_reduce_grad()`:
+
+   - pack full gradients into a flat reduce-scatter input on the current stream
+   - record a copy-in completion event
+   - enter `reduce_scatter_stream`
+   - wait on the copy-in event
+   - launch `dist.reduce_scatter_tensor(..., async_op=False)`
+   - unpack/copy out sharded gradients
+   - record a reduce-scatter completion event
+
+4. In the eager batched `_reduce_fn()`:
+
+   - call `begin_reduce_grad()` for CUDA `Shard` buckets
+   - cast/accumulate `param.grad` on the reduce-scatter stream
+   - record a final event after grad write-out
+   - retain the result state until the final post-backward callback
+
+5. Add profiler and comm labels:
+
+   - `FlexShard::reduce_scatter_copy_in (<bucket fqn>)`
+   - `FlexShard::reduce_scatter (<bucket fqn>)`
+   - `FlexShard::reduce_scatter_copy_out (<bucket fqn>)`
+
+   Wrap the NCCL call with `dist.record_comm(...)` so CUDA comm annotations use
+   the bucket FQN instead of plain `nccl:reduce_scatter`.
+
+### Current Status
+
+The eager CUDA `Shard` bucket path implements the split reduce-scatter flow
+above. Copy-in remains on the current stream, NCCL reduce-scatter and sharded
+gradient write-out run on the shared FlexShard reduce-scatter stream, and a
+queued autograd final callback waits outstanding reduce-scatter events before
+backward returns.
+
+### Open Follow-Ups
+
+1. Add an explicit concurrency throttle if traces show too many reduce-scatter
+   buffers retained until the final callback.
+
+2. Migrate `FlatShard` and `RaggedShard` reduce paths after the `Shard` stream
+   path is stable.
+
+3. Add a profiler smoke test that checks reduce-scatter copy-in on the default
+   stream, NCCL reduce-scatter on the FlexShard reduce-scatter stream, and the
+   final post-backward wait before optimizer execution.
+
 ## Core Insight
 
 FlexShard intercepts parameter access so that `module.weight` triggers an all-gather behind the scenes — the model code just reads `self.weight` as usual, unaware of sharding. This works identically across eager, JIT, and AOT. Under the hood, the interceptor (a `@property` on the module class) has two branches:

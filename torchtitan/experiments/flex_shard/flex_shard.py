@@ -30,11 +30,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class EagerAllGatherContext:
-    """Communication streams for eager batched all-gather."""
+    """Communication streams for eager batched collectives."""
 
     all_gather_stream: torch.Stream
+    reduce_scatter_stream: torch.Stream
     buckets: list[EagerAllGatherBucket] = field(default_factory=list)
     pending: PendingEagerAllGather | None = None
+    reduce_scatter_states: list[EagerReduceScatterResult] = field(default_factory=list)
+    reduce_scatter_callback_queued: bool = False
 
 
 @dataclass
@@ -68,11 +71,39 @@ class EagerAllGatherResult:
     debug_fqn: str | None
 
 
+@dataclass
+class EagerReduceScatterResult:
+    """State needed to finish an eager reduce-scatter launched on a side stream."""
+
+    sharded_grads: list[torch.Tensor]
+    event: torch.Event | None
+    send_buf: torch.Tensor
+    recv_buf: torch.Tensor
+    debug_fqn: str | None
+
+
 def _with_fqn(label: str, fqn: str | None) -> str:
     """Append a module/bucket FQN to profiler labels, matching FSDP style."""
     if fqn:
         return f"{label} ({fqn})"
     return label
+
+
+def _queue_reduce_scatter_wait(context: EagerAllGatherContext) -> None:
+    """Queue a post-backward wait for eager reduce-scatter work."""
+    if context.reduce_scatter_callback_queued:
+        return
+    context.reduce_scatter_callback_queued = True
+
+    def _wait_for_reduce_scatter() -> None:
+        try:
+            for result in context.reduce_scatter_states:
+                Shard.wait_for_reduce_grad(result)
+        finally:
+            context.reduce_scatter_states.clear()
+            context.reduce_scatter_callback_queued = False
+
+    torch.autograd.Variable._execution_engine.queue_callback(_wait_for_reduce_scatter)
 
 
 class Placement:
@@ -385,50 +416,130 @@ class Shard(Placement):
         infos: list[ParamInfo],
         mesh: DeviceMesh,
     ) -> list[torch.Tensor]:
+        result = cls.begin_reduce_grad(
+            tensors,
+            infos,
+            mesh,
+            reduce_scatter_stream=None,
+            debug_fqn=None,
+        )
+        return cls.finish_reduce_grad(result)
+
+    @classmethod
+    def begin_reduce_grad(
+        cls,
+        tensors: list[torch.Tensor],
+        infos: list[ParamInfo],
+        mesh: DeviceMesh,
+        reduce_scatter_stream: torch.Stream | None,
+        debug_fqn: str | None = None,
+    ) -> EagerReduceScatterResult:
         ws = mesh.size()
         rank = mesh.get_local_rank()
         pg = mesh.get_group()
         dtype = tensors[0].dtype
         device = tensors[0].device
 
-        padded_sizes = []
-        for tensor in tensors:
-            padded_dim0 = ((tensor.size(0) + ws - 1) // ws) * ws
-            padded_sizes.append(torch.Size([padded_dim0] + list(tensor.shape[1:])))
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
+        ):
+            padded_sizes = []
+            for tensor in tensors:
+                padded_dim0 = ((tensor.size(0) + ws - 1) // ws) * ws
+                padded_sizes.append(torch.Size([padded_dim0] + list(tensor.shape[1:])))
 
-        input_numel = sum(s.numel() for s in padded_sizes)
-        output_numel = input_numel // ws
+            input_numel = sum(s.numel() for s in padded_sizes)
+            output_numel = input_numel // ws
 
-        send_buf = torch.empty(input_numel, dtype=dtype, device=device)
-        send_buf_2d = send_buf.view(ws, -1)
-        torch._chunk_cat(tensors, dim=0, num_chunks=ws, out=send_buf_2d)
+            send_buf = torch.empty(input_numel, dtype=dtype, device=device)
+            send_buf_2d = send_buf.view(ws, -1)
+            torch._chunk_cat(tensors, dim=0, num_chunks=ws, out=send_buf_2d)
 
-        recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
+        def _copy_out(recv_buf: torch.Tensor) -> list[torch.Tensor]:
+            with torch.profiler.record_function(
+                _with_fqn("FlexShard::reduce_scatter_copy_out", debug_fqn)
+            ):
+                results: list[torch.Tensor] = []
+                flat_offset = 0
+                for info, padded_size in zip(infos, padded_sizes, strict=True):
+                    local_shape = info.placements[0].compute_local_shape(
+                        info.global_shape, rank, ws
+                    )
+                    stride = make_contiguous_strides_for(local_shape)
+                    shard = torch.as_strided(
+                        recv_buf,
+                        size=local_shape,
+                        stride=stride,
+                        storage_offset=flat_offset,
+                    ).contiguous()
+                    results.append(shard)
+                    flat_offset += padded_size.numel() // ws
+                return results
 
-        dist.reduce_scatter_tensor(
-            output=recv_buf,
-            input=send_buf,
-            op=dist.ReduceOp.AVG,
-            group=pg,
+        if reduce_scatter_stream is None or device.type != "cuda":
+            recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
+            label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
+            with torch.profiler.record_function(label):
+                with dist.record_comm(label):
+                    dist.reduce_scatter_tensor(
+                        output=recv_buf,
+                        input=send_buf,
+                        op=dist.ReduceOp.AVG,
+                        group=pg,
+                    )
+            sharded_grads = _copy_out(recv_buf)
+            event = None
+            if device.type == "cuda":
+                event = torch.cuda.Event()
+                event.record(torch.cuda.current_stream(device))
+            return EagerReduceScatterResult(
+                sharded_grads=sharded_grads,
+                event=event,
+                send_buf=send_buf,
+                recv_buf=recv_buf,
+                debug_fqn=debug_fqn,
+            )
+
+        copy_in_done = torch.cuda.Event()
+        copy_in_done.record(torch.cuda.current_stream(device))
+        recv_buf: torch.Tensor
+        with torch.cuda.stream(reduce_scatter_stream):
+            reduce_scatter_stream.wait_event(copy_in_done)
+            recv_buf = torch.empty(output_numel, dtype=dtype, device=device)
+            label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
+            with torch.profiler.record_function(label):
+                with dist.record_comm(label):
+                    dist.reduce_scatter_tensor(
+                        output=recv_buf,
+                        input=send_buf,
+                        op=dist.ReduceOp.AVG,
+                        group=pg,
+                    )
+            sharded_grads = _copy_out(recv_buf)
+            event = torch.cuda.Event()
+            event.record(reduce_scatter_stream)
+        send_buf.record_stream(reduce_scatter_stream)
+        recv_buf.record_stream(reduce_scatter_stream)
+        for grad in sharded_grads:
+            grad.record_stream(reduce_scatter_stream)
+        return EagerReduceScatterResult(
+            sharded_grads=sharded_grads,
+            event=event,
+            send_buf=send_buf,
+            recv_buf=recv_buf,
+            debug_fqn=debug_fqn,
         )
 
-        # Unpack per param from recv_buf
-        results: list[torch.Tensor] = []
-        flat_offset = 0
-        for info, padded_size in zip(infos, padded_sizes, strict=True):
-            local_shape = info.placements[0].compute_local_shape(
-                info.global_shape, rank, ws
-            )
-            stride = make_contiguous_strides_for(local_shape)
-            shard = torch.as_strided(
-                recv_buf,
-                size=local_shape,
-                stride=stride,
-                storage_offset=flat_offset,
-            ).contiguous()
-            results.append(shard)
-            flat_offset += padded_size.numel() // ws
-        return results
+    @classmethod
+    def finish_reduce_grad(cls, result: EagerReduceScatterResult) -> list[torch.Tensor]:
+        cls.wait_for_reduce_grad(result)
+        return result.sharded_grads
+
+    @classmethod
+    def wait_for_reduce_grad(cls, result: EagerReduceScatterResult) -> None:
+        device = result.recv_buf.device
+        if device.type == "cuda" and result.event is not None:
+            torch.cuda.current_stream(device).wait_event(result.event)
 
 
 @dataclass
@@ -3377,7 +3488,11 @@ def _install_batched_allgather_hooks(
                     all_gather_stream=torch.cuda.Stream(
                         device=device,
                         priority=-1,
-                    )
+                    ),
+                    reduce_scatter_stream=torch.cuda.Stream(
+                        device=device,
+                        priority=-1,
+                    ),
                 )
                 shared_ag_contexts[device] = ag_context
         ag_bucket = None
@@ -3439,15 +3554,50 @@ def _install_batched_allgather_hooks(
                     return
                 valid_infos = [i for _, _, i in valid]
                 with torch.no_grad():
-                    reduced = pt.reduce_grad(grads, valid_infos, s._mesh)
-                for (leaf, name, _), rg in zip(valid, reduced, strict=True):
-                    param = leaf._parameters[name]
-                    if rg.dtype != param.dtype:
-                        rg = rg.to(param.dtype)
-                    if param.grad is None:
-                        param.grad = rg
+                    if (
+                        all_gather_context is not None
+                        and all_gather_bucket is not None
+                        and pt is Shard
+                    ):
+                        result = Shard.begin_reduce_grad(
+                            grads,
+                            valid_infos,
+                            s._mesh,
+                            all_gather_context.reduce_scatter_stream,
+                            debug_fqn=all_gather_bucket.debug_fqn,
+                        )
+                        stored_grads: list[torch.Tensor] = []
+                        with torch.cuda.stream(
+                            all_gather_context.reduce_scatter_stream
+                        ):
+                            for (leaf, name, _), rg in zip(
+                                valid, result.sharded_grads, strict=True
+                            ):
+                                param = leaf._parameters[name]
+                                if rg.dtype != param.dtype:
+                                    rg = rg.to(param.dtype)
+                                stored_grads.append(rg)
+                                if param.grad is None:
+                                    param.grad = rg
+                                else:
+                                    param.grad += rg
+                            result.sharded_grads = stored_grads
+                            result.event = torch.cuda.Event()
+                            result.event.record(
+                                all_gather_context.reduce_scatter_stream
+                            )
+                        all_gather_context.reduce_scatter_states.append(result)
+                        _queue_reduce_scatter_wait(all_gather_context)
                     else:
-                        param.grad += rg
+                        reduced = pt.reduce_grad(grads, valid_infos, s._mesh)
+                        for (leaf, name, _), rg in zip(valid, reduced, strict=True):
+                            param = leaf._parameters[name]
+                            if rg.dtype != param.dtype:
+                                rg = rg.to(param.dtype)
+                            if param.grad is None:
+                                param.grad = rg
+                            else:
+                                param.grad += rg
 
             def pre_forward_hook(mod, args):
                 if torch.compiler.is_compiling():
