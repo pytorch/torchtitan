@@ -63,6 +63,17 @@ class TestLlama3WeightTying(unittest.TestCase):
             "tok_embeddings.weight and output.weight must remain tied after init_states",
         )
 
+    def test_tied_parameter_count_matches_unique_parameters(self):
+        """Tied embeddings should be counted once, not subtracted away."""
+        config = _make_config(enable_weight_tying=True)
+        model = Llama3Model(config)
+        unique_param_count = sum(
+            p.numel() for p in {id(p): p for p in model.parameters()}.values()
+        )
+        reported_param_count, _ = config.get_nparams_and_flops(model, seq_len=512)
+
+        self.assertEqual(reported_param_count, unique_param_count)
+
     def test_pp_guard_raises_when_weight_tying_and_pp_enabled(self):
         """update_from_config must raise NotImplementedError when PP > 1 and weight tying is on."""
         from unittest.mock import MagicMock

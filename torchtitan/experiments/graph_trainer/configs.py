@@ -41,6 +41,11 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_passes: bool = True
     """When False, skip all graph passes (both default and user-configured)."""
 
+    disable_passes: list[str] = field(default_factory=list)
+    """Pass names to selectively disable for debugging and ablation
+    studies. A pass is skipped if its name exactly matches any entry.
+    Example: --compile.disable_passes custom_codegen_pass,cudagraph_pass"""
+
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
@@ -72,9 +77,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     numerics_changing_optim: bool = False
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
-
-    enable_cudagraph: bool = True
-    """When False, skip the cudagraph pass even if the graph is compatible."""
 
     cpu_offload_prefetch_n_layers: int = 1
     """Prefetch reloads this many layers ahead in the backward graph
