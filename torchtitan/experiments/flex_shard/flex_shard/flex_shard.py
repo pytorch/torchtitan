@@ -172,7 +172,7 @@ def flex_shard(
             ``(named_params, dp_shard_mesh)`` to per-parameter placements.
             The minimal eager path expects one ``Placement`` per parameter.
             Example ``Shard(0)`` placements are available under
-            ``torchtitan.experiments.flex_shard.example``.
+            ``torchtitan.experiments.flex_shard.example.shard``.
         buckets: Required list of bucket specifications. Use
             ``[BucketSpec(["*"])]`` for a single whole-module bucket.
 

@@ -15,7 +15,7 @@ from torchtitan.experiments.flex_shard import (
     is_flex_shard_param,
     OffloadPolicy,
 )
-from torchtitan.experiments.flex_shard.example import Shard
+from torchtitan.experiments.flex_shard.example.shard import Shard
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
     flex_shard_transformer_model,

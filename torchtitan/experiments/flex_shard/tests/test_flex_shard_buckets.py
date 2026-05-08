@@ -37,7 +37,7 @@ from torchtitan.experiments.flex_shard import (
     LocalStorageLayout,
     Placement,
 )
-from torchtitan.experiments.flex_shard.example import Shard
+from torchtitan.experiments.flex_shard.example.shard import Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
@@ -605,7 +605,7 @@ class TestDistributedBuckets(FSDPTest):
         from torch.distributed.fsdp import DataParallelMeshDims
 
         from torchtitan.experiments.flex_shard import flex_shard
-        from torchtitan.experiments.flex_shard.example import per_param_placements
+        from torchtitan.experiments.flex_shard.example.shard import per_param_placements
 
         kwargs.setdefault("shard_placement_fn", per_param_placements)
         kwargs.setdefault("buckets", [BucketSpec(["*"], reshard_after_forward=False)])

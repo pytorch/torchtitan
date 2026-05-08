@@ -25,7 +25,7 @@ from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
 )
-from torchtitan.experiments.flex_shard.example import per_param_placements
+from torchtitan.experiments.flex_shard.example.shard import per_param_placements
 
 
 @contextmanager
