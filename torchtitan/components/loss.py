@@ -221,7 +221,10 @@ class ChunkedCELoss(BaseLoss):
         computes partial CE on its ``V/tp`` slice, with an internal
         all-reduce for the correct log-sum-exp.
 
-    CP: Further chunks the local sequence dimension. Works out of the box.
+    SPMD composability:
+        The chunk
+        loop body runs inside a ``local_map`` boundary that strips all SPMD
+        types — chunking, flatten, and CE operate on plain local tensors.
 
     Compile: ce_loss can be compiled independently; lm_head is not compiled.
     """
@@ -242,16 +245,10 @@ class ChunkedCELoss(BaseLoss):
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
         self._full_spmd_types: bool = False
-        self._spmd_dp_axes: list = []
-        self._spmd_tp_axis = None
-        self._spmd_tp_pg = None
 
-    def enable_spmd_types(self, dp_axes: list, tp_axis=None, tp_pg=None) -> None:
-        """Store spmd_types axes for type annotation during loss computation."""
+    def enable_spmd_types(self) -> None:
+        """Enable SPMD type tracking. Axes/PGs are read from global state."""
         self._full_spmd_types = True
-        self._spmd_dp_axes = dp_axes
-        self._spmd_tp_axis = tp_axis
-        self._spmd_tp_pg = tp_pg
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -329,16 +326,18 @@ class ChunkedCELoss(BaseLoss):
     ) -> tuple:
         """Build local_map out_types for (total_loss, accumulated_grad).
 
-        total_loss: P on all DP axes (each rank has a partial loss sum
-            from its local batch tokens), I on TP.
+        total_loss: P on all DP axes, I on TP — each rank
+            has a partial loss sum from its local batch tokens.
         accumulated_grad: same types as h_detached (the input).
         """
+        from torchtitan.distributed.spmd_state import spmd_state
+
+        state = spmd_state()
         loss_type: dict = {}
-        for axis in self._spmd_dp_axes:
+        for axis in state.dp_axes:
             loss_type[axis] = spmd.P
-        tp_axis = self._spmd_tp_axis
-        if tp_axis is not None and tp_axis.size() > 1:
-            loss_type[tp_axis] = spmd.I
+        if state.tp_active:
+            loss_type[state.tp_axis] = spmd.I
 
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
@@ -383,17 +382,20 @@ class ChunkedCELoss(BaseLoss):
                     hidden_states = hidden_states.redistribute(mesh, tuple(placements))
 
         # SPMD path: all-gather S(1)@tp -> R@tp before the local_map boundary.
-        tp_axis = self._spmd_tp_axis
-        if tp_axis is not None and tp_axis.size() > 1 and self._full_spmd_types:
-            bwd = (
-                {"op_dtype": torch.float32}
-                if hidden_states.dtype != torch.float32
-                else None
-            )
-            hidden_states = spmd.redistribute(
-                hidden_states, self._spmd_tp_pg,
-                src=spmd.S(1), dst=spmd.R, backward_options=bwd,
-            )
+        if self._full_spmd_types:
+            from torchtitan.distributed.spmd_state import spmd_state
+
+            state = spmd_state()
+            if state.tp_active:
+                bwd = (
+                    {"op_dtype": torch.float32}
+                    if hidden_states.dtype != torch.float32
+                    else None
+                )
+                hidden_states = spmd.redistribute(
+                    hidden_states, state.tp_pg,
+                    src=spmd.S(1), dst=spmd.R, backward_options=bwd,
+                )
 
         requires_grad = hidden_states.requires_grad
         h_detached = hidden_states.detach().requires_grad_(requires_grad)
