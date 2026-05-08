@@ -53,9 +53,7 @@ def _build_mock_graph(pattern: str) -> torch.fx.GraphModule:
     ag = graph.call_function(
         torch.ops._c10d_functional.all_gather_into_tensor.default, (cur, 2, "fake")
     )
-    wait = graph.call_function(
-        torch.ops._c10d_functional.wait_tensor.default, (ag,)
-    )
+    wait = graph.call_function(torch.ops._c10d_functional.wait_tensor.default, (ag,))
 
     # Post-wait_tensor ops depend on pattern
     terminal = wait
@@ -68,14 +66,10 @@ def _build_mock_graph(pattern: str) -> torch.fx.GraphModule:
         cat = graph.call_function(torch.ops.aten.cat.default, ([gi0, gi1], 1))
         terminal = cat
     elif base_pattern == "flat_shard":
-        view = graph.call_function(
-            torch.ops.aten.view.default, (wait, [4, 8])
-        )
+        view = graph.call_function(torch.ops.aten.view.default, (wait, [4, 8]))
         terminal = view
     elif base_pattern == "simple_fsdp":
-        slc = graph.call_function(
-            torch.ops.aten.slice.Tensor, (wait, 0, 0, 4)
-        )
+        slc = graph.call_function(torch.ops.aten.slice.Tensor, (wait, 0, 0, 4))
         terminal = slc
 
     # Optional mixed precision cast after terminal
@@ -116,7 +110,9 @@ class TestShardDim0Pattern(unittest.TestCase):
 
         annotated = _get_annotated_nodes(gm)
         targets = {n.target for n in annotated}
-        self.assertIn(torch.ops._c10d_functional.all_gather_into_tensor.default, targets)
+        self.assertIn(
+            torch.ops._c10d_functional.all_gather_into_tensor.default, targets
+        )
         self.assertIn(torch.ops._c10d_functional.wait_tensor.default, targets)
         self.assertEqual(len(annotated), 2)
 
@@ -132,7 +128,9 @@ class TestShardDim0Pattern(unittest.TestCase):
         annotated = _get_annotated_nodes(gm)
         targets = {n.target for n in annotated}
         self.assertIn(torch.ops.aten._to_copy.default, targets)
-        self.assertIn(torch.ops._c10d_functional.all_gather_into_tensor.default, targets)
+        self.assertIn(
+            torch.ops._c10d_functional.all_gather_into_tensor.default, targets
+        )
         self.assertIn(torch.ops._c10d_functional.wait_tensor.default, targets)
         self.assertEqual(len(annotated), 3)
 
@@ -278,7 +276,9 @@ class TestMetadataTagging(unittest.TestCase):
 
         tagged = _get_tagged_nodes(gm)
         self.assertEqual(len(tagged), 1)
-        self.assertEqual(tagged[0].target, torch.ops._c10d_functional.wait_tensor.default)
+        self.assertEqual(
+            tagged[0].target, torch.ops._c10d_functional.wait_tensor.default
+        )
 
     def test_shard_dim_nonzero_tags_cat(self):
         """Shard(dim!=0): terminal is cat."""
@@ -317,9 +317,62 @@ class TestMetadataTagging(unittest.TestCase):
 
         tagged = _get_tagged_nodes(gm)
         self.assertEqual(len(tagged), 1)
-        self.assertEqual(
-            tagged[0].target, torch.ops.prims.convert_element_type.default
+        self.assertEqual(tagged[0].target, torch.ops.prims.convert_element_type.default)
+
+
+class TestSACComposition(unittest.TestCase):
+    """Test that reshard pass overrides SAC's PREFER_RECOMPUTE annotations."""
+
+    def test_sac_then_reshard_preserves_must_recompute(self):
+        """SAC → reshard: unshard nodes end up MUST_RECOMPUTE, not PREFER_RECOMPUTE."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            flex_shard_reshard_after_fwd_pass,
         )
+        from torchtitan.experiments.graph_trainer.passes import apply_sac_pass
+
+        for pattern in ("shard_dim0", "shard_dim_nonzero", "flat_shard"):
+            with self.subTest(pattern=pattern):
+                gm = _build_mock_graph(pattern)
+
+                # SAC runs first — marks everything PREFER_RECOMPUTE
+                gm = apply_sac_pass(gm)
+                for n in gm.graph.nodes:
+                    if n.op == "call_function" and "recompute" in n.meta:
+                        self.assertIn(
+                            n.meta["recompute"],
+                            (
+                                CheckpointPolicy.PREFER_RECOMPUTE,
+                                CheckpointPolicy.MUST_SAVE,
+                            ),
+                        )
+
+                # Reshard runs last — overwrites unshard nodes to MUST_RECOMPUTE
+                gm = flex_shard_reshard_after_fwd_pass(
+                    gm, example_inputs=None, reshard_after_forward=True
+                )
+                for n in _get_annotated_nodes(gm):
+                    if n.meta.get("ac_graph_id") == 100000:
+                        self.assertEqual(
+                            n.meta["recompute"],
+                            CheckpointPolicy.MUST_RECOMPUTE,
+                            f"Node {n.target} should be MUST_RECOMPUTE after reshard pass",
+                        )
+
+    def test_sac_then_reshard_false_preserves_must_save(self):
+        """SAC → reshard(False): unshard nodes end up MUST_SAVE."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            flex_shard_reshard_after_fwd_pass,
+        )
+        from torchtitan.experiments.graph_trainer.passes import apply_sac_pass
+
+        gm = _build_mock_graph("shard_dim0")
+        gm = apply_sac_pass(gm)
+        gm = flex_shard_reshard_after_fwd_pass(
+            gm, example_inputs=None, reshard_after_forward=False
+        )
+        for n in _get_annotated_nodes(gm):
+            if n.meta.get("ac_graph_id") == 100000:
+                self.assertEqual(n.meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
 
 class TestPassSignature(unittest.TestCase):
