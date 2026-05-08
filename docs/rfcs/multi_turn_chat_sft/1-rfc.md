@@ -5,6 +5,7 @@ This RFC decides how torchtitan should turn a multi-turn `messages` list into `(
 
 - **Data contract:** `messages + optional keep_loss`, where `keep_loss[i]` says whether message `i` should get cross-entropy loss.
 - **V1 algorithm:** render with the model's stock chat template, recover per-message token spans by incremental rendering, and fall back to message-payload diff when the template rewrites history.
+- **Long-term production grade** A Python renderer, per model family. It can run as-rendered, preserve reasoning, or branch per assistant turn as an explicit policy choice.
 - **Thinking policy:** default to `AS_RENDERED` plus a visible audit. If the audit shows stripped intermediate reasoning and you want that reasoning supervised, opt into `PRESERVE_WITH_TEMPLATE` or `PER_ASSISTANT`.
 
 `return_assistant_tokens_mask=True` is a valid opt-in when a verified `{% generation %}` template is available. It should not be the default: 0 of 8 probed stock instruct templates had those markers.
