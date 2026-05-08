@@ -25,7 +25,7 @@ from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
-from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
@@ -200,7 +200,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)
-        loss_fn = cross_entropy_loss
+        loss_fn = CrossEntropyLoss.Config().build()
         fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
 
         global_valid_tokens = torch.tensor(
