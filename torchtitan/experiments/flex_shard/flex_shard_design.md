@@ -1116,6 +1116,9 @@ forward, and preserving stream/prefetch behavior.
   shared RS stream; a checkpointed memory snapshot shows no live AG/full-param
   buffers after forward/recompute boundaries and only sharded `param.grad`
   storage after backward.
+- Done: unsupported CUDA eager RAF buckets that require the batched hook now
+  raise instead of falling back to an unvalidated path. The current custom
+  autograd bucket path is limited to CUDA `Shard(0)`.
 - TODO: extend the custom bucket path beyond CUDA `Shard` buckets to mixed
   precision, CPU offload, `Shard(dim != 0)`, uneven shards, `FlatShard`,
   `RaggedShard`, and `Owned`.

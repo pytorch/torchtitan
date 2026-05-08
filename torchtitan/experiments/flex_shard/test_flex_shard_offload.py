@@ -201,11 +201,15 @@ class TestDistributedOffload(unittest.TestCase):
         from torch.distributed.fsdp import DataParallelMeshDims
 
         from torchtitan.experiments.flex_shard import (
+            BucketSpec,
             flex_shard,
             lift_params_to_global_spmd_mesh,
+            per_param_placements,
         )
 
         lift_params_to_global_spmd_mesh(model, mesh)
+        kwargs.setdefault("shard_placement_fn", per_param_placements)
+        kwargs.setdefault("buckets", [BucketSpec(["*"])])
         return flex_shard(
             model,
             mesh,
@@ -338,7 +342,7 @@ class TestDistributedOffload(unittest.TestCase):
             mesh,
             buckets=[
                 BucketSpec(patterns=["0.*"], offload_policy=OffloadPolicy()),
-                ["1.*"],  # Not offloaded
+                BucketSpec(["1.*"]),  # Not offloaded
             ],
         )
 
@@ -368,7 +372,7 @@ class TestDistributedOffload(unittest.TestCase):
         torch.distributed.broadcast(model_cpu.weight.data, src=0)
 
         # Shard both
-        self._flex_shard(model_gpu, mesh, buckets=[["*"]])
+        self._flex_shard(model_gpu, mesh, buckets=[BucketSpec(["*"])])
         self._flex_shard(
             model_cpu,
             mesh,
