@@ -4,10 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import torch.nn as nn
-from torchtitan.config import Configurable
+
+from torchtitan.components.quantization import (
+    QuantizationConverter,
+    QuantizedLinearConfig,
+)
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
 _SUPPORTED_SCHEMES = (
@@ -82,81 +88,132 @@ def _build_base_config(scheme: str, group_size: int):
         )
 
 
-def apply_qat_prepare(
-    model: nn.Module,
-    scheme: str,
-    group_size: int,
-    *,
-    filter_fn=None,
-) -> None:
-    """Apply QAT PREPARE step: insert fake quantization into Linear modules.
+def _noop_init(param: nn.Parameter) -> None:
+    pass
 
-    After ``quantize_()``, patches ``init_weights`` onto all new module classes
-    so they satisfy the Module protocol.
 
-    Args:
-        model: The model (or subtree) to quantize.
-        scheme: QAT scheme name (must be in ``_SUPPORTED_SCHEMES``).
-        group_size: Group size for per-group schemes.
-        filter_fn: Optional ``(module, fqn) -> bool`` passed to ``quantize_()``.
-            When None, all ``nn.Linear`` modules are quantized.
+def _patch_module_protocol(mod: nn.Module) -> None:
+    """Make torchao-created modules satisfy torchtitan's Module protocol.
+
+    ``torchao.quantize_()`` replaces ``nn.Linear`` with classes like
+    ``FakeQuantizedLinear`` that don't inherit from torchtitan's ``Module``.
+    This patches the class hierarchy so ``verify_module_protocol()`` passes,
+    and sets ``_param_init`` to skip re-initialization (params are already
+    initialized by the original Linear).
     """
-    from torchao.quantization import quantize_
-    from torchao.quantization.qat import QATConfig
-    from torchao.quantization.qat.api import QATStep
+    for child in mod.modules():
+        if not isinstance(child, Module):
+            cls = type(child)
+            if cls not in _patched_classes:
+                patched = type(cls.__name__, (cls, Module), {})
+                _patched_classes[cls] = patched
+            child.__class__ = _patched_classes[cls]
+            child._param_init = {  # pyrefly: ignore [bad-argument-type]
+                name: _noop_init for name, _ in child.named_parameters(recurse=False)
+            }
 
-    init_params_cache: dict[str, tuple[float, float]] = {}
+
+_patched_classes: dict[type, type] = {}
+
+
+@dataclass(kw_only=True, slots=True)
+class QATLinearConfig(QuantizedLinearConfig):
+    """Config that builds a Linear then applies QAT fake quantization.
+
+    ``torchao.quantize_()`` replaces ``nn.Linear`` children of a parent
+    module, so ``build()`` wraps the freshly built Linear in a temporary
+    parent, runs ``quantize_()``, and returns the swapped child.
+    """
+
+    _scheme: str = "int4_weight_only"
+    _group_size: int = 128
+
+    def build(self, **kwargs):
+        from torchao.quantization import quantize_
+        from torchao.quantization.qat import QATConfig
+        from torchao.quantization.qat.api import QATStep
+
+        base_config_obj = Linear.Config(
+            in_features=self.in_features,
+            out_features=self.out_features,
+            bias=self.bias,
+            param_init=self.param_init,
+            sharding_config=self.sharding_config,
+        )
+        instance = base_config_obj.build(**kwargs)
+        wrapper = nn.Sequential(instance)
+        base_config = _build_base_config(self._scheme, self._group_size)
+        quantize_(wrapper, QATConfig(base_config, step=QATStep.PREPARE))
+        result = wrapper[0]
+        _patch_module_protocol(result)
+        return result
+
+
+def convert_qat_to_linear(model: nn.Module) -> None:
+    """Strip FakeQuantizedLinear back to plain nn.Linear.
+
+    Walks the module tree and replaces any FakeQuantizedLinear with
+    a plain nn.Linear carrying the same weight and bias. Called at
+    end of training so saved checkpoints have clean weights.
+    """
+    replacements: list[tuple[nn.Module, str, nn.Module]] = []
     for name, mod in model.named_modules():
-        if isinstance(mod, nn.Linear) and hasattr(mod, "_init_mean"):
-            init_params_cache[name] = (
-                getattr(mod, "_init_mean", 0.0),
-                getattr(mod, "_init_std", 0.02),
+        if type(mod).__name__ in (
+            "FakeQuantizedLinear",
+            "NVFP4FakeQuantizedLinear",
+            "MXFakeQuantizedLinear",
+        ):
+            new_linear = nn.Linear(
+                mod.in_features,  # pyrefly: ignore [bad-argument-type]
+                mod.out_features,  # pyrefly: ignore [bad-argument-type]
+                bias=mod.bias is not None,
+                device=mod.weight.device,
+                dtype=mod.weight.dtype,
             )
+            new_linear.weight = mod.weight  # pyrefly: ignore [bad-assignment]
+            if mod.bias is not None:
+                new_linear.bias = mod.bias  # pyrefly: ignore [bad-assignment]
+            replacements.append((name, mod, new_linear))
 
-    base_config = _build_base_config(scheme, group_size)
+    for name, _old, new_linear in replacements:
+        parts = name.rsplit(".", 1)
+        if len(parts) == 1:
+            setattr(model, parts[0], new_linear)
+        else:
+            parent = model.get_submodule(parts[0])
+            setattr(parent, parts[1], new_linear)
 
-    kwargs = {}
-    if filter_fn is not None:
-        kwargs["filter_fn"] = filter_fn
-    quantize_(model, QATConfig(base_config, step=QATStep.PREPARE), **kwargs)
-
-    # Restore init params on replaced modules
-    for name, mod in model.named_modules():
-        if isinstance(mod, nn.Linear) and name in init_params_cache:
-            init_mean, init_std = init_params_cache[name]
-            object.__setattr__(mod, "_init_mean", init_mean)
-            object.__setattr__(mod, "_init_std", init_std)
+    if replacements:
+        logger.info(
+            f"Converted {len(replacements)} FakeQuantizedLinear modules back to nn.Linear"
+        )
 
 
-class QATConverter(Configurable):
-    """Apply quantization-aware training via torchao's QATConfig.
+class QATConverter(QuantizationConverter):
+    """Apply quantization-aware training to Linear layers in a model.
 
-    Uses ``torchao.quantize_(model, QATConfig(base_config, step="prepare"))``
-    to insert fake quantization into ``nn.Linear`` modules. The ``scheme``
-    config field selects a torchao PTQ base config, which QATConfig uses to
-    infer the appropriate fake quantization for both weights and activations.
+    Operates on the model config tree: Linear configs are replaced with
+    ``QATLinear.Config`` which builds a QATLinear that applies fake
+    quantization via ``torchao.quantize_()`` in its constructor.
 
     Supported schemes:
-      - ``"int4_weight_only"`` — int4 weight-only fake quantization
-      - ``"intx_weight_only"`` — intx weight-only fake quantization
-      - ``"int8_dynamic_act_intx_weight"`` — int8 activation + int4 weight
-      - ``"float8_dynamic_act_float8_weight"`` — float8 activation + float8 weight
-      - ``"float8_dynamic_act_int4_weight"`` — float8 activation + int4 weight
-      - ``"nvfp4"`` — NVFP4 dynamic activation + NVFP4 weight
-      - ``"mx"`` — MX dynamic activation + MX weight
+      - ``"int4_weight_only"`` -- int4 weight-only fake quantization
+      - ``"intx_weight_only"`` -- intx weight-only fake quantization
+      - ``"int8_dynamic_act_intx_weight"`` -- int8 activation + int4 weight
+      - ``"float8_dynamic_act_float8_weight"`` -- float8 activation + float8 weight
+      - ``"float8_dynamic_act_int4_weight"`` -- float8 activation + int4 weight
+      - ``"nvfp4"`` -- NVFP4 dynamic activation + NVFP4 weight
+      - ``"mx"`` -- MX dynamic activation + MX weight
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         scheme: str = "int4_weight_only"
         """QAT scheme name. Maps to a torchao PTQ base config."""
 
         group_size: int = 128
         """Group size for per-group weight quantization.
         Used by schemes that support per-group granularity."""
-
-        convert_at_end: bool = False
-        """When True, finalize() applies QAT CONVERT step at end of training."""
 
     def __init__(self, config: Config, **kwargs):
         if config.scheme not in _SUPPORTED_SCHEMES:
@@ -166,41 +223,29 @@ class QATConverter(Configurable):
             )
         self.scheme = config.scheme
         self.group_size = config.group_size
-        self.convert_at_end = config.convert_at_end
         if config.scheme not in _SCHEMES_WITH_GROUP_SIZE:
             logger.warning(
                 f"QAT scheme '{config.scheme}' does not use group_size, "
                 f"ignoring group_size={config.group_size}"
             )
         logger.info(
-            f"QAT training active (scheme={self.scheme}, group_size={self.group_size}, "
-            f"convert_at_end={self.convert_at_end})"
+            f"QAT training active (scheme={self.scheme}, group_size={self.group_size})"
         )
 
-    def convert(self, model: nn.Module) -> None:
-        """Apply QAT PREPARE step to the model."""
-        apply_qat_prepare(model, self.scheme, self.group_size)
+    def convert(self, model_config) -> None:
+        """Walk the model config tree, replacing Linear configs with QATLinear configs."""
+        for _fqn, config, parent, attr in model_config.traverse(Linear.Config):
+            new_config = QATLinearConfig(
+                **{f.name: getattr(config, f.name) for f in fields(config)},
+                _scheme=self.scheme,
+                _group_size=self.group_size,
+            )
+            if isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+
         logger.info(
-            f"Applied QAT fake quantization (scheme={self.scheme}, "
+            f"Swapped to QATLinear layers (scheme={self.scheme}, "
             f"group_size={self.group_size})"
-        )
-
-    def finalize(self, model: nn.Module) -> None:
-        """Apply QAT CONVERT step, replacing FakeQuantizedLinear with real quantized modules.
-
-        Skipped when convert_at_end is False.
-        """
-        if not self.convert_at_end:
-            return
-
-        from torchao.quantization import quantize_
-        from torchao.quantization.qat import QATConfig
-        from torchao.quantization.qat.api import QATStep
-
-        base_config = _build_base_config(self.scheme, self.group_size)
-        quantize_(model, QATConfig(base_config, step=QATStep.CONVERT))
-
-        logger.info(
-            f"Applied QAT CONVERT (scheme={self.scheme}, group_size={self.group_size}): "
-            "FakeQuantizedLinear modules replaced with real quantized modules"
         )

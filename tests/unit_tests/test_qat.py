@@ -4,13 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections import OrderedDict
-
 import pytest
 import torch
-import torch.nn as nn
 
-from torchtitan.components.quantization.qat import QATConverter
+from torchtitan.components.quantization.qat import (
+    convert_qat_to_linear,
+    QATConverter,
+    QATLinearConfig,
+)
 
 
 @pytest.mark.parametrize(
@@ -26,37 +27,18 @@ from torchtitan.components.quantization.qat import QATConverter
     ],
 )
 def test_qat_all_schemes(scheme, group_size, expected_linear_cls):
-    """Each QAT scheme should replace nn.Linear with the correct fake-quantized class."""
+    """Each QAT scheme should replace Linear with the correct fake-quantized class."""
     pytest.importorskip("torchao")
 
-    model = nn.Sequential(
-        OrderedDict(
-            [
-                ("fc1", nn.Linear(64, 64)),
-                ("relu", nn.ReLU()),
-                ("fc2", nn.Linear(64, 64)),
-            ]
-        )
-    )
-    original_dtypes = {name: param.dtype for name, param in model.named_parameters()}
-
-    config_kwargs = {"scheme": scheme}
+    config_kwargs = {"_scheme": scheme}
     if group_size is not None:
-        config_kwargs["group_size"] = group_size
-    converter = QATConverter(QATConverter.Config(**config_kwargs))
-    converter.convert(model)
+        config_kwargs["_group_size"] = group_size
+    config = QATLinearConfig(in_features=64, out_features=64, **config_kwargs)
+    mod = config.build()
 
     assert (
-        type(model.fc1).__name__ == expected_linear_cls
-    ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc1).__name__}"
-    assert (
-        type(model.fc2).__name__ == expected_linear_cls
-    ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(model.fc2).__name__}"
-
-    for name, param in model.named_parameters():
-        assert (
-            param.dtype == original_dtypes[name]
-        ), f"'{name}' dtype changed from {original_dtypes[name]} to {param.dtype}"
+        type(mod).__name__ == expected_linear_cls
+    ), f"scheme={scheme}: expected {expected_linear_cls}, got {type(mod).__name__}"
 
 
 def test_qat_unknown_scheme_raises():
@@ -83,20 +65,52 @@ def test_qat_forward():
     """QAT model forward should produce correct output shape."""
     pytest.importorskip("torchao")
 
-    model = nn.Sequential(
-        OrderedDict(
-            [
-                ("fc1", nn.Linear(64, 64)),
-                ("relu", nn.ReLU()),
-                ("fc2", nn.Linear(64, 32)),
-            ]
-        )
+    config = QATLinearConfig(
+        in_features=64, out_features=32, _scheme="intx_weight_only", _group_size=64
     )
-    converter = QATConverter(
-        QATConverter.Config(scheme="intx_weight_only", group_size=64)
-    )
-    converter.convert(model)
+    mod = config.build()
 
     x = torch.randn(4, 64)
-    out = model(x)
+    out = mod(x)
     assert out.shape == (4, 32)
+
+
+def test_qat_converter_config_tree():
+    """QATConverter should swap Linear.Config -> QATLinear.Config in config tree."""
+    pytest.importorskip("torchao")
+    from torchtitan.models.llama3 import model_registry
+
+    spec = model_registry(
+        "debugmodel",
+        quantization=[
+            QATConverter.Config(scheme="int4_weight_only", group_size=64),
+        ],
+    )
+
+    with torch.device("meta"):
+        model = spec.model.build()
+
+    fake_quant_count = 0
+    for name, mod in model.named_modules():
+        if "FakeQuantized" in type(mod).__name__:
+            fake_quant_count += 1
+
+    assert fake_quant_count > 0, "No FakeQuantizedLinear modules found after QAT"
+
+
+def test_convert_qat_to_linear():
+    """convert_qat_to_linear should strip fake quant back to nn.Linear."""
+    pytest.importorskip("torchao")
+    import torch.nn as nn
+
+    config = QATLinearConfig(
+        in_features=64, out_features=64, _scheme="int4_weight_only", _group_size=64
+    )
+    mod = config.build()
+    assert "FakeQuantized" in type(mod).__name__
+
+    parent = nn.Sequential(mod)
+    convert_qat_to_linear(parent)
+
+    assert type(parent[0]) is nn.Linear
+    assert parent[0].weight.shape == (64, 64)
