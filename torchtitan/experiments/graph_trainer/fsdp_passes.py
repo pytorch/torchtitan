@@ -27,12 +27,17 @@ from torch._inductor.fx_passes.bucketing import (
     is_wait_tensor,
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
+    _schedulable_wait_node,
+    get_subgraph_by_path,
+    make_graph_view,
     manual_overlap_bucketing,
-    ManualOverlapScheduler,
+    ManualOverlapPreservingBucketer,
 )
 from torch._inductor.fx_passes.overlap_scheduling import (
+    CollectiveInfo,
     is_compute_node,
     schedule_overlap_bucketing,
+    stable_topological_sort,
 )
 from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import CheckpointPolicy
@@ -235,21 +240,15 @@ def transformer_block_bucketing_reordering_pass(
     return gm
 
 
-class JointManualOverlapScheduler(ManualOverlapScheduler):
+class JointManualOverlapScheduler:
     """Manual overlap scheduler for joint forward+backward graphs.
 
-    For the aot_fx_trace path we trace a joint forward+backward graph and
-    want to bucket + reorder both directions in a single pass over the
-    graph. This subclass of :class:`ManualOverlapScheduler` produces the
-    same bucketing and prefetch pattern as invoking the upstream
-    ``manual_overlap_bucketing`` twice (once per direction).
-
-    Overrides :meth:`_manual_bucket_collectives` to split each module's
-    collectives by direction before handing them to the bucketer.
-
-    Overrides :meth:`_manual_reorder_graph` to track per-direction state
-    so a single reversed walk emits correct AG prefetch edges for both
-    forward and backward regions.
+    Lightweight, standalone scheduler that buckets and reorders FSDP
+    collectives in a joint forward+backward FX graph.  Unlike the upstream
+    ``ManualOverlapScheduler`` (which inherits from ``OverlapScheduler``),
+    this class does **not** run ``gather_node_runtime_estimations`` or any
+    other expensive/fragile estimation in its constructor.  It only needs
+    the graph structure and collective identification — nothing more.
 
     The caller supplies:
 
@@ -271,14 +270,98 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         module_stack_fn: Callable[[fx.Node], list[tuple[str, type[Any]]]],
         bucket_mode: BucketMode | None = None,
     ) -> None:
-        super().__init__(
-            gm,
-            module_bucket_plans,
-            insert_overlap_deps,
-            module_stack_fn=module_stack_fn,
+        self.gm = gm
+        self.graph = gm.graph
+        self.insert_overlap_deps = insert_overlap_deps
+        self.module_bucket_plans = module_bucket_plans
+        self.module_stack_fn = module_stack_fn
+        self._is_backward_fn = is_backward_fn
+
+        bucket_mode = bucket_mode or "custom_ops"
+
+        stable_topological_sort(self.graph)
+        self.nodes: list[fx.Node] = list(self.graph.nodes)
+        self.node_idx: dict[fx.Node, int] = {n: i for i, n in enumerate(self.nodes)}
+        self.node_ancestors: dict[
+            fx.Node, OrderedSet[fx.Node]
+        ] = self._collect_node_ancestors()
+
+        self.collective_info: dict[fx.Node, CollectiveInfo] = {}
+        self.wait_to_start: dict[fx.Node, fx.Node] = {}
+        self.unscheduled_collectives: OrderedSet[fx.Node] = OrderedSet()
+        self._identify_collectives()
+
+        self.in_degree: Counter[fx.Node] = Counter(
+            user for node in self.nodes for user in node.users
+        )
+        self.on_path_ready: list[tuple[int, fx.Node]] = []
+        self.scheduled: OrderedSet[fx.Node] = OrderedSet()
+        self.nodes_in_subgraph: list[list[fx.Node]] = []
+
+        self.bucketer = ManualOverlapPreservingBucketer(
+            graph=self.graph,
+            collective_info=self.collective_info,
+            scheduled=OrderedSet(self.graph.nodes),
             bucket_mode=bucket_mode,
         )
-        self._is_backward_fn = is_backward_fn
+
+    def _collect_node_ancestors(self) -> dict[fx.Node, OrderedSet[fx.Node]]:
+        ancestors: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(OrderedSet)
+        for node in self.nodes:
+            for input_node in node.all_input_nodes:
+                ancestors[node].add(input_node)
+                ancestors[node] |= ancestors[input_node]
+        return ancestors
+
+    def _identify_collectives(self) -> None:
+        for node in self.nodes:
+            if _schedulable_wait_node(node):
+                start = node.args[0]
+                info = CollectiveInfo(
+                    start_node=start,
+                    wait_node=node,
+                    size_bytes=0,
+                    estimated_time_ms=0,
+                    exposed_time_ms=0,
+                )
+                self.collective_info[start] = info
+                self.wait_to_start[node] = start
+                self.unscheduled_collectives.add(start)
+
+    def _obtain_nodes_in_subgraph(self) -> None:
+        graph_view = make_graph_view(self.graph, self.module_stack_fn)
+        if graph_view is None:
+            return
+        for module in self.module_bucket_plans:
+            subgraph_view = get_subgraph_by_path(graph_view, module)
+            self.nodes_in_subgraph.append(subgraph_view)
+        all_subgraph_nodes = [
+            node for sublist in self.nodes_in_subgraph for node in sublist
+        ]
+        unique_subgraph_nodes = list(OrderedSet(all_subgraph_nodes))
+        assert len(all_subgraph_nodes) <= len(unique_subgraph_nodes), (
+            f"Overlapping FX nodes detected across subgraphs in "
+            f"`module_bucket_plans`. Expected disjoint node sets but found "
+            f"{len(all_subgraph_nodes) - len(unique_subgraph_nodes)} "
+            f"duplicated node(s)."
+        )
+
+    def _add_to_ready_queue(self, node: fx.Node) -> None:
+        heapq.heappush(self.on_path_ready, (self.node_idx[node], node))
+
+    def _schedule(self, node: fx.Node) -> None:
+        assert node not in self.scheduled
+        assert all(n in self.scheduled for n in node.all_input_nodes)
+        self.scheduled.add(node)
+        for user in node.users:
+            self.in_degree[user] -= 1
+            if self.in_degree[user] == 0:
+                self._add_to_ready_queue(user)
+
+    def run(self) -> fx.GraphModule:
+        self._manual_bucket_collectives()
+        self._manual_reorder_graph()
+        return self.gm
 
     def _manual_bucket_collectives(self) -> None:
         """Bucket per module, splitting by direction to keep fwd/bwd buckets disjoint."""
@@ -364,7 +447,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
 
         Uses separate fwd/bwd buffers so AG pairing never crosses the
         fwd/bwd boundary. Consumes ``self.scheduled`` produced by
-        :meth:`_emit_rs_prefetch`.
+        :meth:`_schedule_rs_prefetch`.
         """
         self.scheduled = OrderedSet(reversed(list(self.scheduled)))
 
@@ -398,18 +481,11 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
                 picked.clear()
 
             if is_compute_node(node):
-                # Track per-direction last_compute so orphan bwd all-gathers
-                # attach to a bwd-region compute and orphan fwd all-gathers
-                # attach to a fwd-region compute.
                 if is_bwd and node in bwd_scope:
                     bwd_last_compute = node
                 elif not is_bwd and node in fwd_scope:
                     fwd_last_compute = node
 
-        # Trailing block, applied once per direction. Attaches any orphan
-        # AG starts (those whose wait was not matched during the reversed
-        # walk of their direction) to the last compute in that direction,
-        # unless they are already an ancestor of it.
         self._apply_trailing_block(bwd_picked, bwd_last_compute, overlap_deps)
         self._apply_trailing_block(fwd_picked, fwd_last_compute, overlap_deps)
 
