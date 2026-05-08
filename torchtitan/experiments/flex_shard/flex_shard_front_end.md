@@ -559,8 +559,9 @@ How each concern is addressed without a mode split:
   eager communication is needed later, add a transparent prefetch optimization inside
   the parametrization: when the first param in a bucket is accessed, prefetch the
   entire bucket. This is a runtime detail, not a structural mode switch.
-- **Graph compiler bucketing**: `buckets` are passed to `get_buckets()` for the
-  `transformer_block_bucketing` pass, exactly as before.
+- **Graph compiler bucketing**: `buckets` are passed to `get_buckets()` (renamed from
+  `get_transformer_block_buckets()` in Phase 3) for the `transformer_block_bucketing`
+  pass, exactly as before.
 
 ### 10. Annotate FX nodes with placement metadata for bucketing passes
 
@@ -584,13 +585,19 @@ all intermediate ops (chunk, cat, view) are included in the recomputation scope.
 node.meta["flex_shard_placement"] = placement  # e.g., Shard(0), Shard(1), FlatShard()
 ```
 
-`auto_bucketing` reads this metadata and only fuses nodes with matching placement type
-and parameters. Nodes without metadata (SimpleFSDP) behave as before — backward
-compatible.
+**Phase 3 finding**: `auto_bucketing` delegates to PyTorch's
+`schedule_overlap_bucketing`, which does communication **scheduling** (reordering
+collectives for compute/comm overlap on the same CUDA stream), not all-gather
+**fusion**. Each all-gather remains an independent node with its own output. Different
+placement types don't conflict because their post-processing (chunk+cat for
+Shard(dim!=0), view for FlatShard) operates on independent tensors. The placement
+metadata is available for future passes that need to distinguish placement types, but
+the existing bucketing passes work without it.
 
-**Fusion constraint**: two all-gather nodes can be fused only if they have identical
-placement type and shard dimension. `Shard(0)` + `Shard(0)` is safe. `Shard(0)` +
-`Shard(1)` is not. `Shard` + `FlatShard` is not.
+**Potential future fusion constraint**: if a fusion pass is added, two all-gather nodes
+can be fused only if they have identical placement type and shard dimension.
+`Shard(0)` + `Shard(0)` is safe. `Shard(0)` + `Shard(1)` is not. `Shard` +
+`FlatShard` is not.
 
 **Implemented in `flex_shard/reshard_after_forward.py`.** The generalized pass
 `annotate_flex_shard_all_gather` reuses `is_wait_tensor_from_fsdp()` for detection
@@ -799,16 +806,14 @@ another for hierarchical sharding). This pass must run **before** bucketing pass
 because bucketed all-gathers must inherit the reassigned process group.
 
 FlexShard's `_c10d_functional` ops use the same argument format as SimpleFSDP's
-(process group name as a string argument), so `reassign_to_pg_pass` should work
-without modification. However, this needs explicit testing — the pass pattern-matches
-on `all_gather_into_tensor` nodes and rewrites `node.args`, and FlexShard's
-`Shard(dim != 0)` adds `chunk` + `cat` nodes after the all-gather that the pass
-should ignore.
+(process group name as a string argument), so `reassign_to_pg_pass` works
+without modification.
 
-**Verification item (Phase 3)**: run `reassign_to_pg_pass` on a FlexShard-traced graph
-with mixed `Shard(0)` and `Shard(1)` placements and verify that (a) all-gather nodes
-are correctly reassigned, (b) post-gather `chunk`/`cat` nodes are not affected, and
-(c) bucketing after reassignment produces correct results.
+**Verified (Phase 3)**: `test_flex_shard_passes.py::TestReassignToPgComposition`
+confirms (a) all-gather nodes are correctly reassigned across all patterns
+(Shard(0), Shard(dim!=0), FlatShard), (b) post-gather `chunk`/`cat`/`view` nodes
+are not affected, (c) mixed `Shard(0)` + `Shard(dim!=0)` all-gathers both get
+reassigned, and (d) reassign + reshard passes compose correctly.
 
 ## What FlexShard Brings to Graph Trainer
 
@@ -1229,11 +1234,12 @@ both execution contexts without leaking abstractions.
 When the compiler can do strictly better (e.g., non-obvious overlap patterns),
 `auto_bucketing` ignores user buckets entirely — so the user is never constrained.
 
-### `get_buckets()` (renamed from `get_transformer_block_buckets()`)
+### `get_buckets()` (renamed from `get_transformer_block_buckets()` in Phase 3)
 
-The current `get_transformer_block_buckets()` hardcodes transformer-specific model
-structure (`model.tok_embeddings`, `model.layers`, etc.). Rename to `get_buckets()`
-and make it a simple pass-through for user-specified buckets:
+`get_buckets()` (formerly `get_transformer_block_buckets()`, renamed in Phase 3)
+currently hardcodes transformer-specific model structure (`model.tok_embeddings`,
+`model.layers`, etc.). Future work: make it a simple pass-through for user-specified
+buckets:
 
 ```python
 def get_buckets(model, user_buckets=None) -> list[list[str] | str]:
@@ -1251,9 +1257,12 @@ Model-specific bucket logic (e.g., grouping `norm` + `output` together for
 transformers) belongs in the model's `parallelize.py`, not in a general-purpose
 utility. Models that need custom bucket layouts pass them via `flex_shard(buckets=...)`.
 
-**Migration**: existing callers of `get_transformer_block_buckets()` in Graph Trainer
+**Migration**: ~~existing callers of `get_transformer_block_buckets()` in Graph Trainer
 (e.g., `graph_trainer.py`, pass setup code) need to be updated to call `get_buckets()`
-and pass user-specified buckets through from the model's `parallelize.py`.
+and pass user-specified buckets through from the model's `parallelize.py`.~~
+**Done (Phase 3)**: renamed to `get_buckets()` in `common_utils.py`, updated callers
+in `compile.py` and `graph_utils.py`. Future work: add `user_buckets` parameter to
+accept user-specified bucket layouts from `flex_shard(buckets=...)`.
 
 ### Auto-Bucket Generation
 
@@ -1361,20 +1370,22 @@ FlexShard Core (always parametrization-based)
 - [x] Validate offload + hooks incompatibility: `offload_policy` with `register_hooks=True` raises `ValueError`
 - [x] Unit tests in `test_flex_shard_offload.py`: OffloadPolicy (3 tests), BucketSpec offload_policy wiring (6 tests), H2D transfer (2 tests), distributed offloading (6 tests)
 - [x] `reshard_after_forward` graph pass: `flex_shard_reshard_after_fwd_pass` in `reshard_after_forward.py` — generalizes `annotate_fsdp_all_gather` to handle all FlexShard unshard patterns (Shard(0), Shard(dim!=0) chunk+cat, FlatShard view) plus offload `.to()` and mixed precision `convert_element_type`; tags terminal nodes with `node.meta["flex_shard_placement"]`; registered in `graph_trainer/passes.py` as `flex_shard_reshard_after_fwd`
-- [x] Unit tests in `test_flex_shard_reshard.py`: pattern detection (8 tests across Shard(0)/Shard(dim!=0)/FlatShard/SimpleFSDP with offload and mp variants), recompute policy (2 tests), metadata tagging (4 tests), pass signature (2 tests)
+- [x] Unit tests in `test_flex_shard_reshard.py`: pattern detection (8 tests across Shard(0)/Shard(dim!=0)/FlatShard/SimpleFSDP with offload and mp variants), recompute policy (2 tests), metadata tagging (4 tests), SAC composition (2 tests), pass signature (2 tests)
+- [x] Unit tests in `test_flex_shard_passes.py`: reassign_to_pg composition (3 tests), pass ordering (3 tests)
 - [ ] Prefetch optimization (overlap H2D of next bucket with compute of current) — deferred
 
-### Phase 3: Graph pass compatibility
+### Phase 3: Graph pass compatibility ✓
 
 - [x] Attach placement metadata (`node.meta["flex_shard_placement"]`) to final output node of each parametrization's unshard sequence (see Gap #10) — implemented in `flex_shard/reshard_after_forward.py`
 - [x] Generalize `annotate_fsdp_all_gather` for FlexShard — `annotate_flex_shard_all_gather` in `flex_shard/reshard_after_forward.py` handles all patterns; registered as `flex_shard_reshard_after_fwd` in `graph_trainer/passes.py`
-- [ ] Update `auto_bucketing` to respect placement metadata: only fuse nodes with matching placement type and shard dimension
-- [ ] Ensure bucketing passes (`auto_bucketing`, `transformer_block_bucketing`) recognize FlexShard comm patterns
-- [ ] Verify `apply_sac_pass` works with FlexShard's node patterns (hardcoded `wait_tensor` logic must handle `chunk`/`cat` nodes for `Shard(dim != 0)`)
-- [ ] Verify `reassign_to_pg_pass` works with FlexShard's all-gather nodes and does not affect post-gather `chunk`/`cat` nodes (see Gap #14)
-- [ ] Rename `get_transformer_block_buckets()` to `get_buckets()` and update all callers in Graph Trainer
-- [ ] Test with `cudagraph` and `full_inductor_compilation` passes
-- [ ] Test mixed-placement model (e.g., `Shard(0)` + `Shard(1)`) with `auto_bucketing` to verify no incorrect fusion
+- [x] Wire `flex_shard_reshard_after_fwd_pass` into pipeline — `get_joint_custom_passes_from_config()` in `graph_utils.py` skips hardcoded `fsdp_reshard_after_fwd_pass` when `flex_shard_reshard_after_fwd` is in `joint_pass_names`
+- [x] Rename `get_transformer_block_buckets()` → `get_buckets()` — updated in `common_utils.py`, `compile.py`, `graph_utils.py`
+- [x] Verify `apply_sac_pass` works with FlexShard — SAC's `PREFER_RECOMPUTE` on unshard nodes is correctly overridden by reshard pass's `MUST_RECOMPUTE` (reshard pass always runs last). Tested in `test_flex_shard_reshard.py::TestSACComposition`
+- [x] Verify `reassign_to_pg_pass` works with FlexShard — only modifies `all_gather_into_tensor` node PG args; post-gather nodes (chunk, cat, view) are untouched. Tested in `test_flex_shard_passes.py::TestReassignToPgComposition`
+- [x] `auto_bucketing` works without changes — delegates to PyTorch's `schedule_overlap_bucketing` which does communication scheduling (reordering for compute/comm overlap), not all-gather fusion. Each all-gather remains independent; different placement types don't conflict.
+- [x] `transformer_block_bucketing` works without changes — uses `manual_overlap_bucketing` with module FQNs. FlexShard's parametrization fires during each module's forward, so nodes inherit correct module context. FQN-based bucketing is placement-agnostic.
+- [x] `cudagraph` and `full_inductor_compilation` work without changes — no FSDP-specific logic; FlexShard uses the same `_c10d_functional` ops
+- [x] Mixed-placement model tested — `Shard(0)` + `Shard(dim!=0)` in same graph; `reassign_to_pg_pass` correctly reassigns both all-gathers. Tested in `test_flex_shard_passes.py::TestReassignToPgComposition::test_reassign_mixed_placements`
 
 ### Phase 4: End-to-end integration
 
@@ -1442,5 +1453,6 @@ failure narrows the bug to one specific concern.
 - SimpleFSDP impl: `torchtitan/experiments/graph_trainer/simple_fsdp.py`
 - FlexShard impl: `torchtitan/experiments/flex_shard/flex_shard.py`
 - Graph passes: `torchtitan/experiments/graph_trainer/passes.py`
-- Reshard-after-forward: `torchtitan/experiments/graph_trainer/reshard_after_forward.py`
+- Reshard-after-forward (SimpleFSDP): `torchtitan/experiments/graph_trainer/reshard_after_forward.py`
+- Reshard-after-forward (FlexShard): `torchtitan/experiments/flex_shard/reshard_after_forward.py`
 - FlexShard design doc: `torchtitan/experiments/flex_shard/flex_shard.md`
