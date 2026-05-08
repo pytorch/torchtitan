@@ -54,29 +54,44 @@ def _get_lora_cls(parent_cls: type) -> type:
     """Get or create a LoRA subclass for *parent_cls* (e.g. Linear, Float8Linear).
 
     The returned class has a proper ``Config`` that extends the parent's Config
-    with LoRA adapter configs (``lora_a``, ``lora_b``) and ``lora_scaling``.
-    Adapters are built in ``__init__`` from their stored configs, following
-    the standard torchtitan Config → build pattern.
+    with ``rank`` and ``alpha``.  Adapters are built in ``__init__`` from the
+    base config's dimensions and sharding.
     """
     if parent_cls in _lora_class_cache:
         return _lora_class_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
+    parent_config_cls = parent_cls.Config
 
     class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
-            lora_a: Linear.Config
-            lora_b: Linear.Config
-            lora_scaling: float
+            rank: int
+            alpha: float
 
         def __init__(self, config: Config) -> None:
             super().__init__(config)
             for param in nn.Module.parameters(self):
                 param.requires_grad_(False)
-            self._lora_scaling = config.lora_scaling
-            self.lora_a = config.lora_a.build()
-            self.lora_b = config.lora_b.build()
+            self._lora_scaling = config.alpha / config.rank
+            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
+                config.sharding_config
+            )
+            self.lora_a = Linear.Config(
+                in_features=config.in_features,
+                out_features=config.rank,
+                bias=False,
+                sharding_config=lora_a_sharding,
+                param_init={
+                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
+                },
+            ).build()
+            self.lora_b = Linear.Config(
+                in_features=config.rank,
+                out_features=config.out_features,
+                bias=False,
+                sharding_config=lora_b_sharding,
+                param_init={"weight": nn.init.zeros_},
+            ).build()
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             base_out = super().forward(input)
@@ -167,26 +182,10 @@ class LoRAConverter(ModelConfigConverter):
         """Create a LoRALinear.Config from a base Linear.Config."""
         assert cfg._owner is not None
         lora_cls = _get_lora_cls(cfg._owner)
-        lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(cfg.sharding_config)
-        return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
+        return lora_cls.Config(
             **{f.name: getattr(cfg, f.name) for f in fields(cfg)},
-            lora_a=Linear.Config(
-                in_features=cfg.in_features,
-                out_features=self.rank,
-                bias=False,
-                sharding_config=lora_a_sharding,
-                param_init={
-                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
-                },
-            ),
-            lora_b=Linear.Config(
-                in_features=self.rank,
-                out_features=cfg.out_features,
-                bias=False,
-                sharding_config=lora_b_sharding,
-                param_init={"weight": nn.init.zeros_},
-            ),
-            lora_scaling=self.alpha / self.rank,
+            rank=self.rank,
+            alpha=self.alpha,
         )
 
     def convert(self, model_config) -> None:
