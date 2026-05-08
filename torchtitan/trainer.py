@@ -425,7 +425,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
-            self.loss_fn.enable_spmd_types(parallel_dims.spmd_dp_axes())
+            self.loss_fn.enable_spmd_types()
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -663,7 +663,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         DP axes get S(0) (batch-sharded).
         """
-        dp_axes = self.parallel_dims.spmd_dp_axes()
+        from torchtitan.distributed.spmd_state import spmd_state
+
+        dp_axes = spmd_state().dp_axes
 
         if len(dp_axes) <= 1:
             spmd_type = {dp_axes[0]: spmd.S(0)} if dp_axes else {}
