@@ -1272,14 +1272,14 @@ FlexShard Core (always parametrization-based)
 
 ## Implementation Plan
 
-### Phase 1: Traceable communication
+### Phase 1: Traceable communication ✓
 
-- [ ] Add `_c10d_functional` versions of unshard/reduce_grad to each Placement subclass (`Shard`, `FlatShard` — `Owned` and `RaggedShard` are out of scope, see Gaps #4 and #6)
-- [ ] Assert even divisibility: `shape[dim] % world_size == 0` for all `Shard(dim)` placements (see Gap #1; uneven support deferred to Phase 5)
-- [ ] Reject `Owned` and `RaggedShard` placements with clear errors at init (graph mode support deferred to Phase 5, see Gaps #4 and #6)
-- [ ] Assert 1D mesh at init (multi-mesh TP/EP composition deferred to Phase 5+, see Gap #13)
-- [ ] **Blocking gate**: validate under `FakeTensorMode` that byte buffer `view(dtype).view(shape)` operations trace correctly (see Gap #5). If they fail, adopt the typed-per-bucket storage fallback before proceeding to Phase 2
-- [ ] Unit tests: trace a simple model with FlexShard, verify comm nodes appear in FX graph
+- [x] Add `_c10d_functional` versions of unshard/reduce_grad: `ShardParametrization` (with chunk+cat for dim != 0) and `FlatShardParametrization` in `flex_shard.py`
+- [x] Assert even divisibility: `shape[dim] % world_size == 0` for all `Shard(dim)` placements, `numel % world_size == 0` for `FlatShard` (see Gap #1; uneven support deferred to Phase 5)
+- [x] Reject `Owned` and `RaggedShard` placements with clear errors at init via `_validate_placements_for_tracing()` called from `flex_shard()` (graph mode support deferred to Phase 5, see Gaps #4 and #6). **TODO Phase 5: restore Owned/RaggedShard support** — add traceable parametrization classes for both, then relax the validation
+- [x] Assert 1D mesh at init (multi-mesh TP/EP composition deferred to Phase 5+, see Gap #13)
+- [x] **Blocking gate**: validated under `FakeTensorMode` that byte buffer `view(dtype).view(shape)` operations trace correctly — all three patterns pass (basic view, byte offset slice, mixed-dtype regions)
+- [x] Unit tests in `test_flex_shard_tracing.py`: FakeTensorMode byte buffer tests, FX graph structure tests (verify `all_gather_into_tensor`/`wait_tensor`/`chunk`/`cat`/`view` nodes), init validation tests, distributed correctness tests
 
 ### Phase 2: Parametrization and API
 
@@ -1346,6 +1346,7 @@ failure narrows the bug to one specific concern.
 
 ### Phase 5: `Owned`, `RaggedShard`, uneven sharding, and multi-mesh composition
 
+- [ ] **Restore Owned/RaggedShard support**: add traceable parametrization classes for both placement types, then relax `_validate_placements_for_tracing()` in `flex_shard()` to accept them (currently rejected unconditionally since Phase 1)
 - [ ] Pre-investigate `_c10d_functional.broadcast` backward registration and `FakeTensorMode` compatibility
 - [ ] Verify `_OwnedUnshard` custom autograd function survives `inductor_decomposition_pass` retrace (see Gap #4)
 - [ ] Implement `Owned` graph mode: `OwnedParametrization` using `broadcast` / `all_reduce` (see Gap #4)
