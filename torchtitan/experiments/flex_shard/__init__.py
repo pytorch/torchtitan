@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from .flex_shard import (
+    auto_buckets,
+    BucketSpec,
     disable_active_parametrization,
     DStorage,
     flat_shard_placements,
@@ -27,6 +29,8 @@ from .flex_shard import (
 
 
 __all__ = [
+    "auto_buckets",
+    "BucketSpec",
     "disable_active_parametrization",
     "DStorage",
     "flat_shard_placements",
