@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from .flex_shard import (
+    disable_active_parametrization,
     DStorage,
     flat_shard_placements,
     FlatShard,
@@ -26,6 +27,7 @@ from .flex_shard import (
 
 
 __all__ = [
+    "disable_active_parametrization",
     "DStorage",
     "flat_shard_placements",
     "FlatShard",
