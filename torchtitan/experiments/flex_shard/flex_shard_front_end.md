@@ -354,9 +354,13 @@ Typed-per-bucket fallback (graph mode only):
   .view(shape_A)   .view(shape_B)                 <-- no dtype cast needed
 ```
 
-**Decision gate**: The FakeTensorMode investigation is a **blocking item in Phase 1**
+**Decision gate**: ~~The FakeTensorMode investigation is a **blocking item in Phase 1**
 before proceeding to Phase 2. If `view(dtype)` reinterpretation fails under symbolic
-tracing, adopt the typed-storage fallback before building parametrization on top of it.
+tracing, adopt the typed-storage fallback before building parametrization on top of it.~~
+**Resolved (Phase 1)**: all three test patterns pass under `FakeTensorMode` —
+basic `view(dtype)`, byte offset slice + `view(dtype)` + `view(shape)`, and
+mixed-dtype regions (bf16 + fp32 in one uint8 buffer). The typed-per-bucket
+fallback is **not needed**. See `test_flex_shard_tracing.py::TestFakeTensorModeByteBuffer`.
 
 ### 6. Handle `RaggedShard` under symbolic tracing
 
