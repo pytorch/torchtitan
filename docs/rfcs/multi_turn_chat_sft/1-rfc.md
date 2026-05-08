@@ -3,9 +3,9 @@
 
 This RFC decides how torchtitan should turn a multi-turn `messages` list into `(input_ids, labels)` for SFT.
 
-- **Data contract:** `messages + optional keep_loss`, where `keep_loss[i]` says whether message `i` should get cross-entropy loss.
+- **Data contract:** `messages + keep_loss`, where `keep_loss[i]` says whether message `i` should get cross-entropy loss.
 - **V1 algorithm:** render with the model's stock chat template, recover per-message token spans by incremental rendering, and fall back to message-payload diff when the template rewrites history.
-- **Long-term production grade** A Python renderer, per model family. It can run as-rendered, preserve reasoning, or branch per assistant turn as an explicit policy choice.
+- **Long-term production grade** A Python renderer per model family. It can run as-rendered, preserve reasoning, or branch per assistant turn as an explicit policy choice.
 - **Thinking policy:** default to `AS_RENDERED` plus a visible audit. If the audit shows stripped intermediate reasoning and you want that reasoning supervised, opt into `PRESERVE_WITH_TEMPLATE` or `PER_ASSISTANT`.
 
 `return_assistant_tokens_mask=True` is a valid opt-in when a verified `{% generation %}` template is available. It should not be the default: 0 of 8 probed stock instruct templates had those markers.
@@ -15,8 +15,6 @@ This RFC decides how torchtitan should turn a multi-turn `messages` list into `(
 Multi-turn SFT takes `messages` and produces `(input_ids, labels)` for cross-entropy. For modern chat models — Qwen3, DeepSeek-R1, Nemotron 3, gpt-oss — the chat template can rewrite history, strip reasoning, or use position-dependent close tokens. The default approach silently zeros gradients on real datasets.
 
 This RFC picks a data contract, a span-recovery algorithm, and a thinking-trace policy. Where the code lives is a follow-up PR.
-
-**Answer preview:** dataset rows are `messages + optional keep_loss`. Default policy supervises every assistant turn under a single rendered conversation, with a visible audit when the chat template strips intermediate reasoning. Two opt-in alternatives — `PRESERVE_WITH_TEMPLATE` and `PER_ASSISTANT` — handle reasoning-heavy datasets where the default's lost CoT supervision matters.
 
 ## 2. SFT vs RL in multi-turn preparation
 
@@ -110,12 +108,6 @@ Branch the conversation so every assistant turn appears as the *terminal* turn o
 
 - **Pros:** every supervised turn matches inference distribution; both `<think>` blocks get gradient (each as a terminal turn in different rows).
 - **Cons:** ~K× sample multiplication; mixing weights must compensate (count supervised tokens, not raw rows; see §12).
-
-### Choosing
-
-- Conversations short or no `<think>` in dataset → `AS_RENDERED` is a no-op.
-- Long conversations with rich `<think>` in every turn → `PER_ASSISTANT`.
-- Researcher with empirically validated forked template → `PRESERVE_WITH_TEMPLATE`.
 
 **Decision: default `AS_RENDERED` + audit. The other two are explicit opt-ins.**
 
@@ -326,7 +318,9 @@ A3 final-only          — simplest; only trains the last assistant.
 A4 renderer-emitted    — most precise; requires per-model Python code.
 ```
 
-**Recommendation for torchtitan:** v1 uses **A1**. Reason: works with stock HF templates today; correctness via dispatcher (incremental → message-payload-diff fallback). **A2 opt-in** when a verified tagged template exists (TRL's path). **A3 only** for one-shot prompt/completion datasets. **A4 long-term** when renderers expose `tokenize_message_parts` (a future renderer-protocol PR).
+**Recommendation for torchtitan:**
+v1 uses **A1**. Reason: works with stock HF templates;
+**A4 long-term** when renderers expose `tokenize_message_parts` (a future renderer-protocol PR).
 
 ## 6. Axis B — who owns the chat format?
 
@@ -497,11 +491,11 @@ C1 single sample      — what most SFT libraries do; avoids row explosion.
 C2 branched samples   — preserves terminal-turn thinking; ~K× row count.
 ```
 
-**Recommendation:** default **C1** because that's what most production SFT libraries do and it avoids row explosion. Offer **C2 (`PER_ASSISTANT`)** when preserving terminal-turn thinking is more important than dataset size. Mixture weights after C2 expansion should be **by supervised tokens, not by row count** (a 4-turn → 4-row expansion has 4× the rows but the same supervised-token volume).
+**Recommendation:** default **C1** because that's what most production SFT libraries do and it avoids row explosion.
 
 ## 8. Recommended paths
 
-**V1 default path = A1 + B1 + C1 + AS_RENDERED.** Render with the model's stock HF chat template, recover assistant spans with the incremental → message-payload-diff dispatcher, and keep one row per conversation.
+**V1 default path = A1 + B1 + C1 + AS_RENDERED.** Render with the model's stock HF chat template, recover assistant spans and keep one row per conversation.
 
 Why this is the v1 recommendation:
 - No per-model code is required; the tokenizer already ships the chat template.
@@ -515,7 +509,9 @@ What this gives up:
 - The message-payload-diff fallback must erase all rendered payload fields, including `tool_calls`, and must use a sentinel that cannot collide with data.
 - Stock-template tool-format bugs remain stock-template bugs.
 
-**Long-term renderer path = A4 + B3 + C1/C2.** A Python renderer emits tokens and token ownership together. It can run as-rendered, preserve reasoning, or branch per assistant turn as an explicit policy choice.
+**Long-term renderer path = A4 + B3 + C1.** A Python renderer emits tokens and token ownership together. It can run as-rendered, preserve reasoning, or branch per assistant turn as an explicit policy choice.
+
+Examples: torchtune, Tinker (except its Kimi K2 path which is C2), LLaMA-Factory, internal reference, verifiers (renderer package), slime.
 
 Why this is the long-term target:
 - Token ownership is produced directly; no span recovery heuristic is needed.
