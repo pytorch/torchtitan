@@ -111,6 +111,10 @@ def llama3_debugmodel_lora() -> Trainer.Config:
     config.model_spec = model_registry(
         "debugmodel",
         converters=[
+            Float8LinearConverter.Config(
+                emulate=True,
+                model_compile_enabled=False,
+            ),
             LoRAConverter.Config(
                 rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
             ),
