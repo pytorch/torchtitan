@@ -206,6 +206,17 @@ class ParallelDims:
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
+        # Initialize global SPMD state for forward-time access.
+        if self.full_spmd_types:
+            from torchtitan.distributed.spmd_state import SpmdState, init_spmd_state
+
+            init_spmd_state(SpmdState(
+                dp_axes=self.spmd_dp_axes(),
+                tp_axis=self.get_spmd_axis("tp"),
+                cp_axis=self.get_spmd_axis("cp"),
+                pgs=dict(self._spmd_pgs),
+            ))
+
         # Validate mesh sizes
         self._validate_meshes()
 
