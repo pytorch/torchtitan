@@ -9,7 +9,7 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.config import Configurable
+from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -575,7 +575,7 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    converters: list[Configurable.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:

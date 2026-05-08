@@ -588,10 +588,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module llama3 --config llama3_debugmodel_lora",
                     "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
                 ],
             ],
             "LoRA training test",
             "lora",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [

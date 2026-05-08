@@ -10,7 +10,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config import Configurable
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
 from torchtitan.models.common.config_utils import make_token_dispatcher_config
@@ -348,7 +348,7 @@ gptoss_configs = {
 def model_registry(
     flavor: str,
     moe_comm_backend: str = "standard",
-    converters: list[Configurable.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,

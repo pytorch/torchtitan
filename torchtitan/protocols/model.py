@@ -19,6 +19,11 @@ class ModelConfigConverter(Configurable):
     (e.g. quantization, LoRA).
     """
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    @abstractmethod
     def convert(self, model_config) -> None:
         raise NotImplementedError
 

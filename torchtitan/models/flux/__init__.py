@@ -9,7 +9,7 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.config import Configurable
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.utils import validate_converter_order
@@ -546,7 +546,7 @@ flux_configs = {
 
 def model_registry(
     flavor: str,
-    converters: list[Configurable.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = flux_configs[flavor]()
     if converters is not None:

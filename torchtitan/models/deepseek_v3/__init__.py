@@ -11,7 +11,7 @@ from typing import Literal
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config import Configurable
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
@@ -535,7 +535,7 @@ def model_registry(
     attn_backend: str = "sdpa",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
-    converters: list[Configurable.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
