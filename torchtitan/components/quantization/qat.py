@@ -92,14 +92,15 @@ def _noop_init(param: nn.Parameter) -> None:
     pass
 
 
+_patched_classes: dict[type, type] = {}
+
+
 def _patch_module_protocol(mod: nn.Module) -> None:
     """Make torchao-created modules satisfy torchtitan's Module protocol.
 
-    ``torchao.quantize_()`` replaces ``nn.Linear`` with classes like
-    ``FakeQuantizedLinear`` that don't inherit from torchtitan's ``Module``.
-    This patches the class hierarchy so ``verify_module_protocol()`` passes,
-    and sets ``_param_init`` to skip re-initialization (params are already
-    initialized by the original Linear).
+    ``torchao.quantize_()`` creates classes like ``FakeQuantizedLinear``
+    that don't inherit from torchtitan's ``Module``. This patches the
+    class hierarchy and sets ``_param_init`` to skip re-initialization.
     """
     for child in mod.modules():
         if not isinstance(child, Module):
@@ -108,21 +109,21 @@ def _patch_module_protocol(mod: nn.Module) -> None:
                 patched = type(cls.__name__, (cls, Module), {})
                 _patched_classes[cls] = patched
             child.__class__ = _patched_classes[cls]
-            child._param_init = {  # pyrefly: ignore [bad-argument-type]
-                name: _noop_init for name, _ in child.named_parameters(recurse=False)
+            child._param_init = {  # type: ignore[assignment]
+                name: _noop_init
+                for name, _ in child.named_parameters(recurse=False)
             }
-
-
-_patched_classes: dict[type, type] = {}
 
 
 @dataclass(kw_only=True, slots=True)
 class QATLinearConfig(QuantizedLinearConfig):
     """Config that builds a Linear then applies QAT fake quantization.
 
-    ``torchao.quantize_()`` replaces ``nn.Linear`` children of a parent
-    module, so ``build()`` wraps the freshly built Linear in a temporary
-    parent, runs ``quantize_()``, and returns the swapped child.
+    Unlike ``MXFP8Linear`` / ``Float8Linear`` which call ``quantize_(self)``
+    in ``__init__``, QAT's ``quantize_()`` *replaces* the module rather than
+    wrapping parameters in-place. So ``build()`` wraps the freshly built
+    Linear in a temporary parent, runs ``quantize_()``, and returns the
+    swapped ``FakeQuantizedLinear``.
     """
 
     _scheme: str = "int4_weight_only"
@@ -149,52 +150,15 @@ class QATLinearConfig(QuantizedLinearConfig):
         return result
 
 
-def convert_qat_to_linear(model: nn.Module) -> None:
-    """Strip FakeQuantizedLinear back to plain nn.Linear.
-
-    Walks the module tree and replaces any FakeQuantizedLinear with
-    a plain nn.Linear carrying the same weight and bias. Called at
-    end of training so saved checkpoints have clean weights.
-    """
-    replacements: list[tuple[nn.Module, str, nn.Module]] = []
-    for name, mod in model.named_modules():
-        if type(mod).__name__ in (
-            "FakeQuantizedLinear",
-            "NVFP4FakeQuantizedLinear",
-            "MXFakeQuantizedLinear",
-        ):
-            new_linear = nn.Linear(
-                mod.in_features,  # pyrefly: ignore [bad-argument-type]
-                mod.out_features,  # pyrefly: ignore [bad-argument-type]
-                bias=mod.bias is not None,
-                device=mod.weight.device,
-                dtype=mod.weight.dtype,
-            )
-            new_linear.weight = mod.weight  # pyrefly: ignore [bad-assignment]
-            if mod.bias is not None:
-                new_linear.bias = mod.bias  # pyrefly: ignore [bad-assignment]
-            replacements.append((name, mod, new_linear))
-
-    for name, _old, new_linear in replacements:
-        parts = name.rsplit(".", 1)
-        if len(parts) == 1:
-            setattr(model, parts[0], new_linear)
-        else:
-            parent = model.get_submodule(parts[0])
-            setattr(parent, parts[1], new_linear)
-
-    if replacements:
-        logger.info(
-            f"Converted {len(replacements)} FakeQuantizedLinear modules back to nn.Linear"
-        )
-
-
 class QATConverter(QuantizationConverter):
     """Apply quantization-aware training to Linear layers in a model.
 
     Operates on the model config tree: Linear configs are replaced with
-    ``QATLinear.Config`` which builds a QATLinear that applies fake
-    quantization via ``torchao.quantize_()`` in its constructor.
+    ``QATLinearConfig`` which builds a ``FakeQuantizedLinear`` via
+    ``torchao.quantize_()``.
+
+    QAT is mutually exclusive with other quantization converters
+    (Float8, MXFP8) — do not combine them in the same converters list.
 
     Supported schemes:
       - ``"int4_weight_only"`` -- int4 weight-only fake quantization
@@ -233,7 +197,7 @@ class QATConverter(QuantizationConverter):
         )
 
     def convert(self, model_config) -> None:
-        """Walk the model config tree, replacing Linear configs with QATLinear configs."""
+        """Walk the model config tree, replacing Linear configs with QATLinearConfig."""
         for _fqn, config, parent, attr in model_config.traverse(Linear.Config):
             new_config = QATLinearConfig(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
