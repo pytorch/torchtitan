@@ -15,8 +15,12 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.profiler as torch_profiler
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import DataParallelMeshDims
 
-from torchtitan.experiments.flex_shard import flex_shard
+from torchtitan.experiments.flex_shard import (
+    flex_shard,
+    lift_params_to_global_spmd_mesh,
+)
 
 TRACE_DIR = "/data/users/weif/code-review/torchtitan/profiler_traces"
 
@@ -50,17 +54,18 @@ def main():
     world_size = dist.get_world_size()
     torch.cuda.set_device(rank % torch.cuda.device_count())
     device = torch.device("cuda", torch.cuda.current_device())
-    mesh = init_device_mesh("cuda", (world_size,))
+    mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
 
     # Build model with per-layer wrapping
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     model = MultiLayerMLP().to(device)
+    lift_params_to_global_spmd_mesh(model, mesh)
 
     # Wrap each layer first, then root
     for i, layer in enumerate(model.layers):
-        flex_shard(layer, mesh, module_fqn=f"layers.{i}")
-    flex_shard(model, mesh, module_fqn="root")
+        flex_shard(layer, mesh, DataParallelMeshDims(shard="fsdp"))
+    flex_shard(model, mesh, DataParallelMeshDims(shard="fsdp"))
 
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-5)
 

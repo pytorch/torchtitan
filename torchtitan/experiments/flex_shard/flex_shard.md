@@ -1,6 +1,8 @@
 # FlexShard
 
-Implementation: https://github.com/pytorch/pytorch/pull/174267
+> **Status note:** This file is the high-level FlexShard overview. The canonical
+> phase-by-phase status and validation log is
+> [flex_shard_front_end.md](flex_shard_front_end.md).
 
 ## Motivation
 
@@ -19,9 +21,10 @@ Concrete use cases enabled by pluggable placements:
 
 > **Note:** FlexShard is a prototype. The API below reflects the current design but is not finalized and may change as we iterate.
 
-### `flex_shard(module, mesh, shard_placement_fn=None) → FlexShardModule`
+### `flex_shard(module, mesh, dp_mesh_dims, shard_placement_fn=None, buckets=None, apply_reshard_checkpoint=True) → FlexShardModule`
 
 ```python
+from torch.distributed.fsdp import DataParallelMeshDims
 from torchtitan.experiments.flex_shard import (
     flex_shard,
     per_param_placements,      # Shard(0) per param (FSDP2-style, default)
@@ -29,11 +32,31 @@ from torchtitan.experiments.flex_shard import (
     param_boundary_placements, # one param per rank (veScale-FSDP-style)
 )
 
-mesh = init_device_mesh("cuda", (world_size,))
+mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+dp_mesh_dims = DataParallelMeshDims(shard="fsdp")
+model.parallelize(mesh, wrap_forward=False, distribute_buffers=False)
 
-flex_shard(model, mesh)                                              # default: per_param
-flex_shard(model, mesh, shard_placement_fn=flat_shard_placements)    # FSDP1-style
-flex_shard(model, mesh, shard_placement_fn=param_boundary_placements)# veScale-FSDP-style
+flex_shard(model, mesh, dp_mesh_dims)                                              # default: per_param
+flex_shard(model, mesh, dp_mesh_dims, shard_placement_fn=flat_shard_placements)    # FSDP1-style
+flex_shard(model, mesh, dp_mesh_dims, shard_placement_fn=param_boundary_placements)# veScale-FSDP-style
+```
+
+For FSDP + TP global SPMD composition, pass the full named mesh and identify the
+data-parallel dim with `dp_mesh_dims`. Parameters must already be DTensors on
+that full mesh with the DP dim replicated.
+
+```python
+from torch.distributed.fsdp import DataParallelMeshDims
+
+mesh = init_device_mesh("cuda", (dp_size, tp_size), mesh_dim_names=("fsdp", "tp"))
+model.parallelize(mesh, activation_mesh=mesh["tp"], distribute_buffers=False)
+flex_shard(
+    model,
+    mesh,
+    shard_placement_fn={"*": Shard(0)},
+    buckets=buckets,
+    dp_mesh_dims=DataParallelMeshDims(shard="fsdp"),
+)
 ```
 
 Same scaffolding, different `shard_placement_fn` — no need to rewrite unshard/reduce_grad hooks, buffer management, or gradient reduction for each strategy. Custom placement functions just return a `dict[str, tuple[Placement, ...]]` mapping each parameter FQN to its placement.
@@ -148,7 +171,7 @@ Shard(0) → Each rank gets (25, 256) local shard
 ```
 
 ```python
-flex_shard(model, mesh)  # default: Shard(0) for all params
+flex_shard(model, mesh, dp_mesh_dims)  # default: Shard(0) for all params
 ```
 
 ### `FlatShard(flat_offset, numel, total_flat_numel)` — Flat-Concat Sharding
@@ -188,7 +211,7 @@ class FlatShard(Placement):
 ```
 
 ```python
-flex_shard(model, mesh, shard_placement_fn=flat_shard_placements)
+flex_shard(model, mesh, dp_mesh_dims, shard_placement_fn=flat_shard_placements)
 ```
 
 **When FlatShard is needed**: FSDP1-style flat-concat sharding where shard boundaries don't align with parameter boundaries. This is the only placement where the local shard has no valid ND shape — it's inherently 1D.
@@ -205,7 +228,12 @@ Owned(2) → Rank 2 has full (100, 256), other ranks have empty tensor
 `Owned(r)` is a special case of `RaggedShard(dims=(0,), local_units=(..., 1, ..., 0, ...))` where only rank `r` has a non-zero unit. It exists as a simpler API for the common case, and DStorage can optimize it with `dist.reduce` to the owner instead of variable-size reduce-scatter.
 
 ```python
-flex_shard(model, mesh, shard_placement_fn=param_boundary_placements)
+flex_shard(
+    model,
+    mesh,
+    dp_mesh_dims,
+    shard_placement_fn=param_boundary_placements,
+)
 ```
 
 ### `RaggedShard(dims, local_units)` — Asymmetric Sharding
@@ -232,34 +260,38 @@ By focusing on placement and metadata as the shared abstraction, FlexShard minim
 
 ## Status and Next Steps
 
-### Completed
+This section is intentionally brief. For implementation history, test commands,
+and phase-by-phase validation, see
+[flex_shard_front_end.md](flex_shard_front_end.md), which is the canonical status
+document.
+
+### Current Status
+
+FlexShard is implemented through Phase 5 in the Graph Trainer front-end plan:
 
 - Core `Placement` abstraction with four implementations: `Shard`, `FlatShard`, `Owned`, `RaggedShard`
-- `DStorage` unified byte buffer with automatic unshard/reduce_grad lifecycle hooks
-- Nested module wrapping (wrap inner modules first, then outer)
-- Mixed-dtype support within a single buffer (proper alignment per dtype)
-- Meta device initialization
-- DTensor-compatible metadata interface (`set_sharding_info`, `get_placements`, `get_global_shape`)
-- Multi-rank test coverage with `torchrun`
+- `DStorage` unified byte buffer, per-bucket `BucketSpec`, and automatic unshard/reduce_grad lifecycle support
+- Property-based parametrization that emits `_c10d_functional` ops for graph tracing while preserving logical `state_dict()` keys
+- Graph Trainer pass integration via `flex_shard_reshard_after_fwd`, including mixed precision, offload, uneven sharding, `Owned`, and `RaggedShard` patterns
+- Mixed precision, CPU offload, checkpoint round-trip tests, and precompile round-trip tests
+- Reshard-after-forward support across eager, JIT, and AOT
+- Multi-mesh FSDP + TP/EP composition through `DTensorAwareParametrization`
+- Multi-rank unit, integration, and full-model loss comparison coverage documented in the front-end status log
 
-### Not Yet Started
+### Remaining Work
 
-- Checkpointing / state dict integration (save/load sharded checkpoints)
-- CPU offloading (move sharded params to host memory between forward/backward)
-- Backward prefetching (overlap next module's all-gather with current backward)
-- Mixed-precision training (compute in low precision, communicate in full precision)
-- `torch.compile` compatibility
-- Multi-dimensional mesh support (currently 1D only)
-- Multi-dim `RaggedShard` (single-dim only, raises `NotImplementedError` for multi-dim)
-- Numerical parity validation against DDP (blocked on [ThreadBasedRNGTracker](https://github.com/pytorch/pytorch/pull/174446))
+- Prefetch optimization for CPU offload: overlap H2D transfer of the next bucket with compute on the current bucket
+- `get_buckets(user_buckets=...)` pass-through so model-provided bucket layouts can feed manual bucketing directly
+- Full DeepSeek EP validation; current EP coverage verifies double-wrapping behavior and excludes already-wrapped expert params
+- Broader performance and convergence validation on representative workloads beyond the current debug/full-model comparisons
 
 ### Path to Production
 
 1. **Harden the API**: Gather feedback on the `Placement` interface and `shard_placement_fn` signature. The current API is a prototype and may change.
-2. **Feature parity with FSDP2**: Add checkpointing, CPU offloading, backward prefetching, and mixed-precision support to match FSDP2's feature set.
-3. **Compiler integration**: Validate `torch.compile` compatibility and explore FlexShard as a unified front-end across eager and compiled execution.
+2. **Close remaining performance gaps**: Add bucket prefetching and continue measuring eager vs compiled communication behavior.
+3. **Broaden production coverage**: Extend convergence, checkpoint, and multi-parallelism validation to larger representative workloads.
 4. **Upstream to PyTorch**: Move core components (`Placement`, `DStorage`) from `torchtitan/experiments/` into `torch.distributed` once the API stabilizes.
-5. **Convergence testing**: Validate loss convergence on representative workloads (e.g., Llama on C4) across all placement types and parallelism configurations.
+5. **Maintain compiler integration**: Keep FlexShard's traceable parametrization path aligned with Graph Trainer and PyTorch compiler changes.
 
 ## References
 
