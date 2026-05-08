@@ -76,7 +76,10 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.memory_policy cpu_offload_all
 
 # Disable CUDA graphs (for debugging)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.no-enable_cudagraph
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.disable_passes cudagraph_pass
+
+# Disable specific passes by name
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.disable_passes custom_codegen_pass,cudagraph_pass
 
 # Disable all graph passes (for debugging)
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.no-enable_passes
