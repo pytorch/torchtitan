@@ -262,9 +262,8 @@ def construct_default_graph_passes(
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    use_cudagraph = config.compile.enable_cudagraph and is_cudagraph_compatible(
-        traced_result.gm
-    )
+    cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
+    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
@@ -288,6 +287,32 @@ def construct_default_graph_passes(
     return passes
 
 
+def _get_pass_name(pass_fn: Callable) -> str:
+    return (
+        pass_fn.func.__name__
+        if isinstance(pass_fn, functools.partial)
+        else pass_fn.__name__
+    )
+
+
+def _filter_disabled_passes(
+    passes: list[Callable], disable_names: list[str]
+) -> list[Callable]:
+    """Remove passes whose names exactly match any entry in ``disable_names``."""
+    disable_set = set(disable_names)
+    filtered = []
+    skipped = []
+    for pass_fn in passes:
+        name = _get_pass_name(pass_fn)
+        if name in disable_set:
+            skipped.append(name)
+        else:
+            filtered.append(pass_fn)
+    if skipped:
+        logger.info(f"Disabled {len(skipped)} graph passes: {skipped}")
+    return filtered
+
+
 def apply_graph_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
@@ -307,22 +332,18 @@ def apply_graph_passes(
             and before/after graphs to tlparse for each pass.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
-    pass_names = [
-        pass_fn.func.__name__
-        if isinstance(pass_fn, functools.partial)
-        else pass_fn.__name__
-        for pass_fn in passes
-    ]
+    disable_patterns = (
+        compile_config.disable_passes if compile_config is not None else []
+    )
+    if disable_patterns:
+        passes = _filter_disabled_passes(passes, disable_patterns)
+    pass_names = [_get_pass_name(pass_fn) for pass_fn in passes]
     pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
     logger.info(f"Applying {len(passes)} graph passes:\n  {pass_list}")
     all_passes_start = time.perf_counter()
     tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
     for pass_fn in passes:
-        pass_name = (
-            pass_fn.func.__name__
-            if isinstance(pass_fn, functools.partial)
-            else pass_fn.__name__
-        )
+        pass_name = _get_pass_name(pass_fn)
         if debug:
             tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
             before_snapshot = snapshot_graph(gm)
