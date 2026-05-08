@@ -13,6 +13,7 @@ import torch
 import spmd_types as spmd
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -241,11 +242,6 @@ class ChunkedCELoss(BaseLoss):
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None
-        self._full_spmd_types: bool = False
-
-    def enable_spmd_types(self) -> None:
-        """Enable SPMD type tracking. Axes/PGs are read from global state."""
-        self._full_spmd_types = True
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
@@ -314,9 +310,7 @@ class ChunkedCELoss(BaseLoss):
 
         # spmd_types: chunk_loss is P on DP axes. Reinterpret total_loss
         # from R to P so P + P = P accumulates without per-chunk all-reduces.
-        if self._full_spmd_types:
-            from torchtitan.distributed.spmd_state import spmd_state
-
+        if is_spmd_active():
             for axis in spmd_state().dp_axes:
                 total_loss = spmd.reinterpret(
                     total_loss, axis, src=spmd.R, dst=spmd.P, expert_mode=True
