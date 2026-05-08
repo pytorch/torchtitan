@@ -169,6 +169,98 @@ class TestParametrizationTracing(unittest.TestCase):
         has_reshape = "view" in op_names_str or "reshape" in op_names_str
         self.assertTrue(has_reshape, f"Expected view/reshape in graph, got: {op_names}")
 
+    def test_owned_parametrization_traces(self):
+        """OwnedParametrization traces with broadcast+wait_tensor in graph."""
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        from torchtitan.experiments.flex_shard import OwnedParametrization
+
+        with FakeTensorMode():
+            param = OwnedParametrization(
+                owner_rank=0,
+                group_name="fake_pg",
+                world_size=2,
+            )
+            # Full param (all ranks store full copy in parametrization mode)
+            full_param = torch.randn(8, 8)
+
+            gm = make_fx(param, tracing_mode="fake")(full_param)
+
+        op_names = [
+            n.target.__name__ if callable(n.target) else str(n.target)
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+        ]
+        op_names_str = " ".join(op_names)
+        self.assertIn("broadcast", op_names_str)
+        self.assertIn("wait_tensor", op_names_str)
+
+    def test_uneven_shard_dim0_traces(self):
+        """ShardParametrization with uneven split traces with pad+narrow."""
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        from torchtitan.experiments.flex_shard import ShardParametrization
+
+        with FakeTensorMode():
+            param = ShardParametrization(
+                shard_dim=0,
+                group_name="fake_pg",
+                world_size=2,
+                padded_shard_size=4,  # ceil(7/2) = 4
+                global_dim_size=7,
+            )
+            # Local shard: last rank gets 3, padded to 4
+            local_shard = torch.randn(3, 8)
+
+            gm = make_fx(param, tracing_mode="fake")(local_shard)
+
+        op_names = [
+            n.target.__name__ if callable(n.target) else str(n.target)
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+        ]
+        op_names_str = " ".join(op_names)
+        self.assertIn("all_gather_into_tensor", op_names_str)
+        self.assertIn("wait_tensor", op_names_str)
+        # Padding cat and final slice/narrow
+        self.assertIn("cat", op_names_str)
+        has_slice_or_narrow = "slice" in op_names_str or "narrow" in op_names_str
+        self.assertTrue(has_slice_or_narrow)
+
+    def test_ragged_shard_parametrization_traces(self):
+        """RaggedShardParametrization traces with pad+gather+chunk+narrow+cat."""
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        from torchtitan.experiments.flex_shard import RaggedShardParametrization
+
+        with FakeTensorMode():
+            param = RaggedShardParametrization(
+                shard_dim=0,
+                split_sizes=[3, 5],  # rank 0 gets 3, rank 1 gets 5
+                group_name="fake_pg",
+                world_size=2,
+            )
+            # Rank 0's local shard: shape (3, 8), max is 5 so will be padded
+            local_shard = torch.randn(3, 8)
+
+            gm = make_fx(param, tracing_mode="fake")(local_shard)
+
+        op_names = [
+            n.target.__name__ if callable(n.target) else str(n.target)
+            for n in gm.graph.nodes
+            if n.op == "call_function"
+        ]
+        op_names_str = " ".join(op_names)
+        self.assertIn("all_gather_into_tensor", op_names_str)
+        self.assertIn("wait_tensor", op_names_str)
+        # Padding cat, chunk/split for reassembly, slice/narrow for each chunk,
+        # final cat.
+        self.assertIn("cat", op_names_str)
+        has_chunk_or_split = "chunk" in op_names_str or "split" in op_names_str
+        self.assertTrue(has_chunk_or_split)
+        has_slice_or_narrow = "slice" in op_names_str or "narrow" in op_names_str
+        self.assertTrue(has_slice_or_narrow)
+
 
 # ---------------------------------------------------------------------------
 # Step 7: Validation tests
@@ -187,7 +279,8 @@ class TestInitValidation(unittest.TestCase):
         mesh.size.return_value = size
         return mesh
 
-    def test_rejects_multidim_mesh(self):
+    def test_accepts_multidim_mesh(self):
+        """Multi-dim mesh is accepted (Phase 5: multi-mesh composition)."""
         from torchtitan.experiments.flex_shard.flex_shard import (
             _validate_placements_for_tracing,
             Shard,
@@ -195,29 +288,47 @@ class TestInitValidation(unittest.TestCase):
 
         mesh = self._make_mock_mesh(ndim=2)
         param = nn.Parameter(torch.randn(8, 8))
-        with self.assertRaises(ValueError, msg="1D mesh"):
-            _validate_placements_for_tracing(
-                param_placements={"weight": (Shard(0),)},
-                named_params=[("weight", param)],
-                mesh=mesh,
-            )
+        # Should not raise (multi-mesh supported since Phase 5)
+        _validate_placements_for_tracing(
+            param_placements={"weight": (Shard(0),)},
+            named_params=[("weight", param)],
+            mesh=mesh,
+        )
 
-    def test_rejects_owned(self):
+    def test_rejects_owned_invalid_rank(self):
+        """Owned with owner_rank >= world_size is rejected."""
         from torchtitan.experiments.flex_shard.flex_shard import (
             _validate_placements_for_tracing,
             Owned,
         )
 
-        mesh = self._make_mock_mesh(ndim=1)
+        mesh = self._make_mock_mesh(ndim=1, size=4)
         param = nn.Parameter(torch.randn(8, 8))
-        with self.assertRaises(ValueError, msg="Owned"):
+        with self.assertRaises(ValueError, msg="owner_rank"):
             _validate_placements_for_tracing(
-                param_placements={"weight": (Owned(0),)},
+                param_placements={"weight": (Owned(4),)},
                 named_params=[("weight", param)],
                 mesh=mesh,
             )
 
-    def test_rejects_ragged_shard(self):
+    def test_accepts_owned(self):
+        """Owned with valid owner_rank is accepted."""
+        from torchtitan.experiments.flex_shard.flex_shard import (
+            _validate_placements_for_tracing,
+            Owned,
+        )
+
+        mesh = self._make_mock_mesh(ndim=1, size=4)
+        param = nn.Parameter(torch.randn(8, 8))
+        # Should not raise
+        _validate_placements_for_tracing(
+            param_placements={"weight": (Owned(0),)},
+            named_params=[("weight", param)],
+            mesh=mesh,
+        )
+
+    def test_accepts_ragged_shard(self):
+        """RaggedShard with correct local_units length is accepted (Phase 5)."""
         from torchtitan.experiments.flex_shard.flex_shard import (
             _validate_placements_for_tracing,
             RaggedShard,
@@ -225,14 +336,31 @@ class TestInitValidation(unittest.TestCase):
 
         mesh = self._make_mock_mesh(ndim=1, size=4)
         param = nn.Parameter(torch.randn(8, 8))
-        with self.assertRaises(ValueError, msg="RaggedShard"):
+        # Should not raise (RaggedShard supported since Phase 5)
+        _validate_placements_for_tracing(
+            param_placements={"weight": (RaggedShard((0,), (1, 2, 1, 1)),)},
+            named_params=[("weight", param)],
+            mesh=mesh,
+        )
+
+    def test_rejects_ragged_shard_bad_local_units(self):
+        """RaggedShard with wrong local_units length is rejected."""
+        from torchtitan.experiments.flex_shard.flex_shard import (
+            _validate_placements_for_tracing,
+            RaggedShard,
+        )
+
+        mesh = self._make_mock_mesh(ndim=1, size=4)
+        param = nn.Parameter(torch.randn(8, 8))
+        with self.assertRaises(ValueError, msg="local_units"):
             _validate_placements_for_tracing(
-                param_placements={"weight": (RaggedShard((0,), (1, 2, 1, 1)),)},
+                param_placements={"weight": (RaggedShard((0,), (1, 2)),)},
                 named_params=[("weight", param)],
                 mesh=mesh,
             )
 
-    def test_rejects_uneven_shard(self):
+    def test_accepts_uneven_shard(self):
+        """Uneven Shard is accepted (Phase 5: pad-to-uniform)."""
         from torchtitan.experiments.flex_shard.flex_shard import (
             _validate_placements_for_tracing,
             Shard,
@@ -240,14 +368,15 @@ class TestInitValidation(unittest.TestCase):
 
         mesh = self._make_mock_mesh(ndim=1, size=4)
         param = nn.Parameter(torch.randn(7, 8))  # dim 0 = 7, not divisible by 4
-        with self.assertRaises(ValueError, msg="evenly divisible"):
-            _validate_placements_for_tracing(
-                param_placements={"weight": (Shard(0),)},
-                named_params=[("weight", param)],
-                mesh=mesh,
-            )
+        # Should not raise (uneven supported since Phase 5)
+        _validate_placements_for_tracing(
+            param_placements={"weight": (Shard(0),)},
+            named_params=[("weight", param)],
+            mesh=mesh,
+        )
 
-    def test_rejects_uneven_flat_shard(self):
+    def test_accepts_uneven_flat_shard(self):
+        """Uneven FlatShard is accepted (Phase 5: pad-to-uniform)."""
         from torchtitan.experiments.flex_shard.flex_shard import (
             _validate_placements_for_tracing,
             FlatShard,
@@ -256,9 +385,25 @@ class TestInitValidation(unittest.TestCase):
         mesh = self._make_mock_mesh(ndim=1, size=4)
         # numel=49, not divisible by 4
         param = nn.Parameter(torch.randn(7, 7))
-        with self.assertRaises(ValueError, msg="evenly divisible"):
+        # Should not raise (uneven supported since Phase 5)
+        _validate_placements_for_tracing(
+            param_placements={"weight": (FlatShard(),)},
+            named_params=[("weight", param)],
+            mesh=mesh,
+        )
+
+    def test_rejects_shard_invalid_dim(self):
+        """Shard with dim >= ndim is rejected."""
+        from torchtitan.experiments.flex_shard.flex_shard import (
+            _validate_placements_for_tracing,
+            Shard,
+        )
+
+        mesh = self._make_mock_mesh(ndim=1, size=4)
+        param = nn.Parameter(torch.randn(8, 8))  # 2D tensor
+        with self.assertRaises(ValueError, msg="out of range"):
             _validate_placements_for_tracing(
-                param_placements={"weight": (FlatShard(),)},
+                param_placements={"weight": (Shard(2),)},
                 named_params=[("weight", param)],
                 mesh=mesh,
             )

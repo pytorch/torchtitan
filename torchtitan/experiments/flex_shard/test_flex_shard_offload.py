@@ -120,33 +120,6 @@ class TestBucketSpecOffloadPolicy(unittest.TestCase):
         self.assertIs(result, shard)
         self.assertEqual(result.device.type, "cpu")
 
-    def test_offload_rejects_hooks_mode(self):
-        """offload_policy + register_hooks=True raises ValueError."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import (
-            BucketSpec,
-            flex_shard,
-            OffloadPolicy,
-        )
-
-        # Need a real mesh — but this test needs NCCL; skip if not available
-        if not torch.cuda.is_available():
-            self.skipTest("CUDA not available")
-        if not torch.distributed.is_initialized():
-            self.skipTest("Distributed not initialized")
-
-        mesh = init_device_mesh("cuda", (torch.distributed.get_world_size(),))
-        model = nn.Linear(8, 4, bias=False, device="cuda")
-
-        with self.assertRaises(ValueError, msg="register_hooks"):
-            flex_shard(
-                model,
-                mesh,
-                buckets=[BucketSpec(patterns=["*"], offload_policy=OffloadPolicy())],
-                register_hooks=True,
-            )
-
 
 # ---------------------------------------------------------------------------
 # H2D transfer tests (single-process, needs CUDA)
@@ -219,22 +192,37 @@ class TestDistributedOffload(unittest.TestCase):
             torch.cuda.synchronize()
             torch.distributed.destroy_process_group()
 
-    def test_offloaded_param_on_cpu(self):
-        """Offloaded params are stored on CPU."""
+    def _init_mesh(self):
         from torch.distributed.device_mesh import init_device_mesh
 
+        return init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("fsdp",))
+
+    def _flex_shard(self, model, mesh, **kwargs):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
         from torchtitan.experiments.flex_shard import (
-            BucketSpec,
             flex_shard,
-            OffloadPolicy,
+            lift_params_to_global_spmd_mesh,
         )
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        lift_params_to_global_spmd_mesh(model, mesh)
+        return flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            **kwargs,
+        )
+
+    def test_offloaded_param_on_cpu(self):
+        """Offloaded params are stored on CPU."""
+        from torchtitan.experiments.flex_shard import BucketSpec, OffloadPolicy
+
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[BucketSpec(patterns=["*"], offload_policy=OffloadPolicy())],
@@ -246,20 +234,14 @@ class TestDistributedOffload(unittest.TestCase):
 
     def test_offloaded_forward_output_on_gpu(self):
         """Forward output is on GPU despite CPU param storage."""
-        from torch.distributed.device_mesh import init_device_mesh
+        from torchtitan.experiments.flex_shard import BucketSpec, OffloadPolicy
 
-        from torchtitan.experiments.flex_shard import (
-            BucketSpec,
-            flex_shard,
-            OffloadPolicy,
-        )
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[BucketSpec(patterns=["*"], offload_policy=OffloadPolicy())],
@@ -272,20 +254,18 @@ class TestDistributedOffload(unittest.TestCase):
 
     def test_offloaded_gradient_on_cpu(self):
         """After backward, param.grad is on CPU."""
-        from torch.distributed.device_mesh import init_device_mesh
-
         from torchtitan.experiments.flex_shard import (
             BucketSpec,
-            flex_shard,
+            disable_active_parametrization,
             OffloadPolicy,
         )
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[BucketSpec(patterns=["*"], offload_policy=OffloadPolicy())],
@@ -297,21 +277,20 @@ class TestDistributedOffload(unittest.TestCase):
         loss = output.sum()
         loss.backward()
 
-        self.assertIsNotNone(model.weight.grad)
-        self.assertEqual(model.weight.grad.device.type, "cpu")
+        with disable_active_parametrization():
+            grad = model.weight.grad
+        self.assertIsNotNone(grad)
+        self.assertEqual(grad.device.type, "cpu")
 
     def test_offload_with_mixed_precision(self):
         """Offloading + mp_policy compose correctly."""
-        from torch.distributed.device_mesh import init_device_mesh
-
         from torchtitan.experiments.flex_shard import (
             BucketSpec,
-            flex_shard,
             MixedPrecisionPolicy,
             OffloadPolicy,
         )
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
@@ -319,7 +298,7 @@ class TestDistributedOffload(unittest.TestCase):
         mp = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32
         )
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[
@@ -343,15 +322,9 @@ class TestDistributedOffload(unittest.TestCase):
 
     def test_per_bucket_offload(self):
         """Only offloaded buckets are on CPU; others stay on GPU."""
-        from torch.distributed.device_mesh import init_device_mesh
+        from torchtitan.experiments.flex_shard import BucketSpec, OffloadPolicy
 
-        from torchtitan.experiments.flex_shard import (
-            BucketSpec,
-            flex_shard,
-            OffloadPolicy,
-        )
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Sequential(
             nn.Linear(8, 8, bias=False, device="cuda"),
@@ -360,7 +333,7 @@ class TestDistributedOffload(unittest.TestCase):
         for p in model.parameters():
             torch.distributed.broadcast(p.data, src=0)
 
-        flex_shard(
+        self._flex_shard(
             model,
             mesh,
             buckets=[
@@ -377,15 +350,13 @@ class TestDistributedOffload(unittest.TestCase):
 
     def test_offloaded_numerics_match_gpu(self):
         """Offloaded forward/backward matches non-offloaded numerics."""
-        from torch.distributed.device_mesh import init_device_mesh
-
         from torchtitan.experiments.flex_shard import (
             BucketSpec,
-            flex_shard,
+            disable_active_parametrization,
             OffloadPolicy,
         )
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         # Create two identical models
         torch.manual_seed(42)
@@ -397,8 +368,8 @@ class TestDistributedOffload(unittest.TestCase):
         torch.distributed.broadcast(model_cpu.weight.data, src=0)
 
         # Shard both
-        flex_shard(model_gpu, mesh, buckets=[["*"]])
-        flex_shard(
+        self._flex_shard(model_gpu, mesh, buckets=[["*"]])
+        self._flex_shard(
             model_cpu,
             mesh,
             buckets=[BucketSpec(patterns=["*"], offload_policy=OffloadPolicy())],
@@ -416,11 +387,11 @@ class TestDistributedOffload(unittest.TestCase):
         # Backward
         out_gpu.sum().backward()
         out_cpu.sum().backward()
+        with disable_active_parametrization():
+            gpu_grad = model_gpu.weight.grad
+            cpu_grad = model_cpu.weight.grad
         # Compare grads (gpu grad is on cuda, cpu model grad is on cpu)
-        torch.testing.assert_close(
-            model_gpu.weight.grad,
-            model_cpu.weight.grad.to("cuda"),
-        )
+        torch.testing.assert_close(gpu_grad, cpu_grad.to("cuda"))
 
 
 # ---------------------------------------------------------------------------

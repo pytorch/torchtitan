@@ -26,8 +26,9 @@ def _build_mock_graph(pattern: str) -> torch.fx.GraphModule:
 
     Args:
         pattern: One of "shard_dim0", "shard_dim_nonzero", "flat_shard",
-            "simple_fsdp", "shard_dim0_offload", "shard_dim0_mp",
-            "flat_shard_mp", "shard_dim_nonzero_mp".
+            "simple_fsdp", "owned", "shard_dim0_offload", "shard_dim0_mp",
+            "flat_shard_mp", "shard_dim_nonzero_mp", "owned_mp",
+            "owned_offload".
     """
     graph = torch.fx.Graph()
 
@@ -36,12 +37,11 @@ def _build_mock_graph(pattern: str) -> torch.fx.GraphModule:
 
     cur = placeholder
 
-    # Optional pre-all_gather ops
+    # Determine base pattern
     if pattern.endswith("_offload"):
         base_pattern = pattern.rsplit("_offload", 1)[0]
         cur = graph.call_function(torch.ops.aten._to_copy.default, (cur,))
     elif pattern == "simple_fsdp":
-        # SimpleFSDP casts before all_gather
         cur = graph.call_function(
             torch.ops.prims.convert_element_type.default, (cur, torch.bfloat16)
         )
@@ -49,28 +49,41 @@ def _build_mock_graph(pattern: str) -> torch.fx.GraphModule:
     else:
         base_pattern = pattern.rsplit("_mp", 1)[0] if "_mp" in pattern else pattern
 
-    # all_gather → wait_tensor (must use .default overloads for bucketing predicates)
-    ag = graph.call_function(
-        torch.ops._c10d_functional.all_gather_into_tensor.default, (cur, 2, "fake")
-    )
-    wait = graph.call_function(torch.ops._c10d_functional.wait_tensor.default, (ag,))
+    # Owned uses broadcast instead of all_gather
+    if base_pattern == "owned":
+        bc = graph.call_function(
+            torch.ops._c10d_functional.broadcast.default, (cur, 0, "fake")
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, (bc,)
+        )
+        terminal = wait
+    else:
+        # all_gather → wait_tensor
+        ag = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            (cur, 2, "fake"),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, (ag,)
+        )
 
-    # Post-wait_tensor ops depend on pattern
-    terminal = wait
-    if base_pattern == "shard_dim0":
-        pass  # No post-processing for dim=0
-    elif base_pattern == "shard_dim_nonzero":
-        chunk = graph.call_function(torch.ops.aten.chunk.default, (wait, 2, 0))
-        gi0 = graph.call_function(operator.getitem, (chunk, 0))
-        gi1 = graph.call_function(operator.getitem, (chunk, 1))
-        cat = graph.call_function(torch.ops.aten.cat.default, ([gi0, gi1], 1))
-        terminal = cat
-    elif base_pattern == "flat_shard":
-        view = graph.call_function(torch.ops.aten.view.default, (wait, [4, 8]))
-        terminal = view
-    elif base_pattern == "simple_fsdp":
-        slc = graph.call_function(torch.ops.aten.slice.Tensor, (wait, 0, 0, 4))
-        terminal = slc
+        # Post-wait_tensor ops depend on pattern
+        terminal = wait
+        if base_pattern == "shard_dim0":
+            pass  # No post-processing for dim=0
+        elif base_pattern == "shard_dim_nonzero":
+            chunk = graph.call_function(torch.ops.aten.chunk.default, (wait, 2, 0))
+            gi0 = graph.call_function(operator.getitem, (chunk, 0))
+            gi1 = graph.call_function(operator.getitem, (chunk, 1))
+            cat = graph.call_function(torch.ops.aten.cat.default, ([gi0, gi1], 1))
+            terminal = cat
+        elif base_pattern == "flat_shard":
+            view = graph.call_function(torch.ops.aten.view.default, (wait, [4, 8]))
+            terminal = view
+        elif base_pattern == "simple_fsdp":
+            slc = graph.call_function(torch.ops.aten.slice.Tensor, (wait, 0, 0, 4))
+            terminal = slc
 
     # Optional mixed precision cast after terminal
     if "_mp" in pattern:
@@ -261,6 +274,27 @@ class TestRecomputePolicy(unittest.TestCase):
         for n in _get_annotated_nodes(gm):
             self.assertEqual(n.meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
+    def test_traced_bucket_policy_overrides_fallback(self):
+        """Per-bucket tensor metadata overrides the pass fallback."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("shard_dim0")
+        wait_node = next(
+            n
+            for n in gm.graph.nodes
+            if n.target is torch.ops._c10d_functional.wait_tensor.default
+        )
+        val = torch.empty(1)
+        val._flex_shard_reshard_after_forward = False
+        wait_node.meta["val"] = val
+
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=True)
+
+        for n in _get_annotated_nodes(gm):
+            self.assertEqual(n.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
 
 class TestMetadataTagging(unittest.TestCase):
     """Test flex_shard_placement metadata on terminal nodes."""
@@ -330,7 +364,7 @@ class TestSACComposition(unittest.TestCase):
         )
         from torchtitan.experiments.graph_trainer.passes import apply_sac_pass
 
-        for pattern in ("shard_dim0", "shard_dim_nonzero", "flat_shard"):
+        for pattern in ("shard_dim0", "shard_dim_nonzero", "flat_shard", "owned"):
             with self.subTest(pattern=pattern):
                 gm = _build_mock_graph(pattern)
 
@@ -373,6 +407,107 @@ class TestSACComposition(unittest.TestCase):
         for n in _get_annotated_nodes(gm):
             if n.meta.get("ac_graph_id") == 100000:
                 self.assertEqual(n.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+
+class TestOwnedPattern(unittest.TestCase):
+    """Test Owned unshard pattern annotation."""
+
+    def test_basic(self):
+        """Annotates broadcast + wait_tensor for Owned."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("owned")
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=True)
+
+        annotated = _get_annotated_nodes(gm)
+        targets = {n.target for n in annotated}
+        self.assertIn(torch.ops._c10d_functional.broadcast.default, targets)
+        self.assertIn(torch.ops._c10d_functional.wait_tensor.default, targets)
+        self.assertEqual(len(annotated), 2)
+
+    def test_with_offload(self):
+        """Annotates .to() before broadcast for offloaded params."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("owned_offload")
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=True)
+
+        annotated = _get_annotated_nodes(gm)
+        targets = {n.target for n in annotated}
+        self.assertIn(torch.ops.aten._to_copy.default, targets)
+        self.assertIn(torch.ops._c10d_functional.broadcast.default, targets)
+        self.assertIn(torch.ops._c10d_functional.wait_tensor.default, targets)
+        self.assertEqual(len(annotated), 3)
+
+    def test_with_mp(self):
+        """Annotates convert_element_type after wait_tensor for mixed precision."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("owned_mp")
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=True)
+
+        annotated = _get_annotated_nodes(gm)
+        targets = {n.target for n in annotated}
+        self.assertIn(torch.ops.prims.convert_element_type.default, targets)
+        self.assertEqual(len(annotated), 3)  # broadcast + wait + cast
+
+    def test_recompute_policy(self):
+        """Owned with reshard_after_forward=True sets MUST_RECOMPUTE."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("owned")
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=True)
+
+        for n in _get_annotated_nodes(gm):
+            self.assertEqual(n.meta["recompute"], CheckpointPolicy.MUST_RECOMPUTE)
+
+    def test_must_save_policy(self):
+        """Owned with reshard_after_forward=False sets MUST_SAVE."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("owned")
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=False)
+
+        for n in _get_annotated_nodes(gm):
+            self.assertEqual(n.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_tags_wait_tensor(self):
+        """Owned: terminal flex_shard_placement tag is on wait_tensor."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("owned")
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=True)
+
+        tagged = _get_tagged_nodes(gm)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(
+            tagged[0].target, torch.ops._c10d_functional.wait_tensor.default
+        )
+
+    def test_mp_tags_convert_element_type(self):
+        """Owned + MP: terminal is convert_element_type."""
+        from torchtitan.experiments.flex_shard.reshard_after_forward import (
+            annotate_flex_shard_all_gather,
+        )
+
+        gm = _build_mock_graph("owned_mp")
+        annotate_flex_shard_all_gather(gm, reshard_after_forward=True)
+
+        tagged = _get_tagged_nodes(gm)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0].target, torch.ops.prims.convert_element_type.default)
 
 
 class TestPassSignature(unittest.TestCase):

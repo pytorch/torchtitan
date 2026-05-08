@@ -168,20 +168,52 @@ class TestDistributedParametrization(unittest.TestCase):
             torch.cuda.synchronize()
             torch.distributed.destroy_process_group()
 
-    def test_param_access_triggers_allgather(self):
-        """Accessing module.weight returns the full (unsharded) tensor."""
+    def _init_mesh(self):
         from torch.distributed.device_mesh import init_device_mesh
 
-        from torchtitan.experiments.flex_shard import flex_shard
+        return init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("fsdp",))
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
+    def _flex_shard(self, model, mesh, **kwargs):
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            lift_params_to_global_spmd_mesh,
+            per_param_placements,
+        )
+
+        lift_params_to_global_spmd_mesh(model, mesh)
+        kwargs.setdefault("shard_placement_fn", per_param_placements)
+        kwargs.setdefault("buckets", [BucketSpec(["*"])])
+        return flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            **kwargs,
+        )
+
+    def _current_device(self):
+        return torch.device("cuda", torch.cuda.current_device())
+
+    def _expected_chunk(self, tensor, chunks, dim, rank):
+        result = list(torch.chunk(tensor, chunks, dim=dim))
+        empty_shape = list(tensor.shape)
+        empty_shape[dim] = 0
+        while len(result) < chunks:
+            result.append(tensor.new_empty(empty_shape))
+        return result[rank].contiguous()
+
+    def test_param_access_triggers_allgather(self):
+        """Accessing module.weight returns the full (unsharded) tensor."""
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         # Broadcast weights so all ranks start with the same full tensor
         torch.distributed.broadcast(model.weight.data, src=0)
         full_ref = model.weight.data.clone()
 
-        flex_shard(model, mesh, register_hooks=False)
+        self._flex_shard(model, mesh)
 
         # Accessing model.weight should trigger all-gather via property
         result = model.weight
@@ -189,16 +221,12 @@ class TestDistributedParametrization(unittest.TestCase):
 
     def test_state_dict_returns_sharded(self):
         """state_dict() returns sharded params, not unsharded."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
-        flex_shard(model, mesh, register_hooks=False)
+        self._flex_shard(model, mesh)
 
         sd = model.state_dict()
         # state_dict bypasses property, returns local shard
@@ -207,19 +235,14 @@ class TestDistributedParametrization(unittest.TestCase):
 
     def test_disable_guard_returns_sharded(self):
         """With guard disabled, param access returns raw sharded tensor."""
-        from torch.distributed.device_mesh import init_device_mesh
+        from torchtitan.experiments.flex_shard import disable_active_parametrization
 
-        from torchtitan.experiments.flex_shard import (
-            disable_active_parametrization,
-            flex_shard,
-        )
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
 
-        flex_shard(model, mesh, register_hooks=False)
+        self._flex_shard(model, mesh)
 
         with disable_active_parametrization():
             result = model.weight
@@ -228,11 +251,7 @@ class TestDistributedParametrization(unittest.TestCase):
 
     def test_forward_produces_correct_output(self):
         """Forward pass through parametrized model produces correct results."""
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from torchtitan.experiments.flex_shard import flex_shard
-
-        mesh = init_device_mesh("cuda", (self.world_size,))
+        mesh = self._init_mesh()
 
         model = nn.Linear(8, 4, bias=False, device="cuda")
         torch.distributed.broadcast(model.weight.data, src=0)
@@ -243,10 +262,509 @@ class TestDistributedParametrization(unittest.TestCase):
         torch.distributed.broadcast(x, src=0)
         ref_output = x @ ref_weight.t()
 
-        flex_shard(model, mesh, register_hooks=False)
+        self._flex_shard(model, mesh)
         output = model(x)
 
         torch.testing.assert_close(output, ref_output)
+
+    def test_global_spmd_mesh_param_access(self):
+        """Global SPMD mesh path derives the DP mesh and rewraps DTensor params."""
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.fsdp import DataParallelMeshDims
+        from torch.distributed.tensor import DTensor, Replicate
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            per_param_placements,
+        )
+
+        mesh = init_device_mesh(
+            "cuda",
+            (self.world_size, 1),
+            mesh_dim_names=("fsdp", "tp"),
+        )
+
+        model = nn.Linear(8, 4, bias=False, device="cuda")
+        torch.distributed.broadcast(model.weight.data, src=0)
+        full_ref = model.weight.detach().clone()
+        model.weight = nn.Parameter(
+            DTensor.from_local(
+                model.weight.detach(),
+                mesh,
+                [Replicate(), Replicate()],
+                run_check=False,
+                grad_placements=[Replicate(), Replicate()],
+            )
+        )
+
+        flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
+        )
+
+        result = model.weight
+        self.assertIsInstance(result, DTensor)
+        self.assertEqual(result.device_mesh.mesh_dim_names, ("tp",))
+        torch.testing.assert_close(result.to_local(), full_ref)
+
+    def test_cpu_init_distribute_tensor_to_cuda_storage(self):
+        """CPU-built params become CUDA sharded storage after DTensor distribute."""
+        from torch.distributed.fsdp import DataParallelMeshDims
+        from torch.distributed.tensor import distribute_tensor, Replicate
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            per_param_placements,
+        )
+
+        mesh = self._init_mesh()
+        device = self._current_device()
+
+        torch.manual_seed(42)
+        model = nn.Linear(8, 4, bias=False, device="cpu")
+        full_ref = model.weight.detach().clone().to(device)
+        model.weight = nn.Parameter(
+            distribute_tensor(model.weight, mesh, [Replicate()]),
+            requires_grad=model.weight.requires_grad,
+        )
+        self.assertEqual(model.weight.to_local().device, device)
+
+        flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
+        )
+
+        self.assertEqual(model.dstorage.byte_storage.device, device)
+        self.assertEqual(model.state_dict()["weight"].device, device)
+        torch.testing.assert_close(model.weight, full_ref)
+
+    def test_cpu_init_global_spmd_2d_storage_on_cuda(self):
+        """CPU-built params support full SPMD mesh before FlexShard."""
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.fsdp import DataParallelMeshDims
+        from torch.distributed.tensor import distribute_tensor, DTensor, Replicate
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            per_param_placements,
+        )
+
+        mesh = init_device_mesh(
+            "cuda",
+            (self.world_size, 1),
+            mesh_dim_names=("fsdp", "tp"),
+        )
+        device = self._current_device()
+
+        torch.manual_seed(42)
+        model = nn.Linear(8, 4, bias=False, device="cpu")
+        full_ref = model.weight.detach().clone().to(device)
+        model.weight = nn.Parameter(
+            distribute_tensor(model.weight, mesh, [Replicate(), Replicate()]),
+            requires_grad=model.weight.requires_grad,
+        )
+        self.assertEqual(model.weight.to_local().device, device)
+
+        flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
+        )
+
+        self.assertEqual(model.dstorage.byte_storage.device, device)
+        result = model.weight
+        self.assertIsInstance(result, DTensor)
+        self.assertEqual(result.device_mesh.mesh_dim_names, ("tp",))
+        torch.testing.assert_close(result.to_local(), full_ref)
+
+    def test_parallelize_without_materializing_state_keeps_cpu_until_flex_shard(self):
+        """Non-materializing parallelize avoids full CUDA params before FlexShard."""
+        from torch.distributed.fsdp import DataParallelMeshDims
+        from torch.distributed.tensor import DTensor, Replicate
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            per_param_placements,
+        )
+        from torchtitan.protocols.module import Module
+        from torchtitan.protocols.sharding import ShardingConfig
+        from torchtitan.protocols.types import MeshAxisName
+
+        mesh = self._init_mesh()
+        device = self._current_device()
+        Linear = Module.from_nn_module(nn.Linear)
+
+        torch.manual_seed(42)
+        model = Linear(8, 4, bias=False, device="cpu")
+        model._sharding_config = ShardingConfig(
+            state_shardings={
+                "weight": {MeshAxisName.DP_SHARD: Replicate()},
+            }
+        )
+        full_ref = model.weight.detach().clone()
+
+        before = torch.cuda.memory_allocated(device)
+        model.parallelize(
+            mesh,
+            wrap_forward=False,
+            distribute_buffers=False,
+            materialize_state=False,
+        )
+        after = torch.cuda.memory_allocated(device)
+        self.assertEqual(after, before)
+        self.assertEqual(model.weight.device.type, "cpu")
+        self.assertNotIsInstance(model.weight, DTensor)
+
+        flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
+        )
+
+        expected = self._expected_chunk(
+            full_ref.to(device), self.world_size, dim=0, rank=self.rank
+        )
+        self.assertEqual(model.dstorage.byte_storage.device, device)
+        self.assertEqual(
+            model.dstorage.byte_storage.numel(),
+            expected.numel() * expected.element_size(),
+        )
+        torch.testing.assert_close(model.state_dict()["weight"], expected)
+        torch.testing.assert_close(model.weight.cpu(), full_ref)
+
+    def test_parallelize_without_materializing_state_extracts_tp_local_param(self):
+        """Non-materialized SPMD metadata drives TP-local FlexShard storage."""
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.fsdp import DataParallelMeshDims
+        from torch.distributed.tensor import DTensor, Replicate, Shard as DTensorShard
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            per_param_placements,
+        )
+        from torchtitan.protocols.module import Module
+        from torchtitan.protocols.sharding import ShardingConfig
+        from torchtitan.protocols.types import MeshAxisName
+
+        mesh = init_device_mesh(
+            "cuda",
+            (1, self.world_size),
+            mesh_dim_names=("fsdp", "tp"),
+        )
+        device = self._current_device()
+        Linear = Module.from_nn_module(nn.Linear)
+
+        torch.manual_seed(42)
+        model = Linear(8, 4, bias=False, device="cpu")
+        model._sharding_config = ShardingConfig(
+            state_shardings={
+                "weight": {
+                    MeshAxisName.DP_SHARD: Replicate(),
+                    MeshAxisName.TP: DTensorShard(0),
+                },
+            }
+        )
+        full_ref = model.weight.detach().clone()
+
+        model.parallelize(
+            mesh,
+            activation_mesh=mesh["tp"],
+            wrap_forward=False,
+            distribute_buffers=False,
+            materialize_state=False,
+        )
+        self.assertEqual(model.weight.device.type, "cpu")
+        self.assertNotIsInstance(model.weight, DTensor)
+
+        flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[BucketSpec(["*"])],
+        )
+
+        result = model.weight
+        self.assertIsInstance(result, DTensor)
+        self.assertEqual(result.device_mesh.mesh_dim_names, ("tp",))
+        tp_rank = mesh.get_coordinate()[1]
+        expected_local = self._expected_chunk(
+            full_ref.to(device), self.world_size, dim=0, rank=tp_rank
+        )
+        torch.testing.assert_close(result.to_local(), expected_local)
+        self.assertEqual(
+            model.dstorage.byte_storage.numel(),
+            expected_local.numel() * expected_local.element_size(),
+        )
+
+    def test_cpu_init_with_cpu_offload_keeps_storage_on_cpu(self):
+        """CPU init and CPU offload are distinct: storage stays CPU, compute is CUDA."""
+        from torch.distributed.fsdp import DataParallelMeshDims
+        from torch.distributed.tensor import distribute_tensor, Replicate
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            OffloadPolicy,
+            per_param_placements,
+        )
+
+        mesh = self._init_mesh()
+        device = self._current_device()
+
+        torch.manual_seed(42)
+        model = nn.Linear(8, 4, bias=False, device="cpu")
+        full_ref = model.weight.detach().clone().to(device)
+        model.weight = nn.Parameter(
+            distribute_tensor(model.weight, mesh, [Replicate()]),
+            requires_grad=model.weight.requires_grad,
+        )
+
+        flex_shard(
+            model,
+            mesh,
+            DataParallelMeshDims(shard="fsdp"),
+            shard_placement_fn=per_param_placements,
+            buckets=[
+                BucketSpec(
+                    patterns=["*"],
+                    offload_policy=OffloadPolicy(pin_memory=True),
+                )
+            ],
+        )
+
+        self.assertEqual(model.dstorage.byte_storage.device.type, "cpu")
+        self.assertTrue(model.dstorage.byte_storage.is_pinned())
+        result = model.weight
+        self.assertEqual(result.device, device)
+        torch.testing.assert_close(result, full_ref)
+
+    def test_plain_cpu_params_rejected_with_global_spmd(self):
+        """Global SPMD FlexShard requires full-mesh state metadata."""
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        from torchtitan.experiments.flex_shard import (
+            BucketSpec,
+            flex_shard,
+            per_param_placements,
+        )
+
+        mesh = self._init_mesh()
+        model = nn.Linear(8, 4, bias=False, device="cpu")
+
+        with self.assertRaisesRegex(ValueError, "DTensors.*annotated"):
+            flex_shard(
+                model,
+                mesh,
+                DataParallelMeshDims(shard="fsdp"),
+                shard_placement_fn=per_param_placements,
+                buckets=[BucketSpec(["*"])],
+            )
+
+    def test_checkpoint_roundtrip_with_guard(self):
+        """Per-rank save/load roundtrip preserves sharded params and forward correctness.
+
+        FlexShard params are plain tensors (not DTensors), so checkpoint uses
+        per-rank torch.save/load. disable_active_parametrization ensures
+        state_dict access and load_state_dict don't trigger collectives.
+        """
+        import os
+        import shutil
+        import tempfile
+
+        from torchtitan.experiments.flex_shard import disable_active_parametrization
+
+        mesh = self._init_mesh()
+
+        # Create and shard model
+        torch.manual_seed(42)
+        model = nn.Linear(8, 4, bias=False, device="cuda")
+        torch.distributed.broadcast(model.weight.data, src=0)
+        full_ref = model.weight.data.clone()
+
+        self._flex_shard(model, mesh)
+
+        # state_dict returns sharded params (bypasses property)
+        sd_before = {k: v.clone() for k, v in model.state_dict().items()}
+        expected_rows = 4 // self.world_size
+        self.assertEqual(sd_before["weight"].shape, (expected_rows, 8))
+
+        # Guard also returns sharded params via param access
+        with disable_active_parametrization():
+            guarded_weight = model.weight
+        self.assertEqual(guarded_weight.shape, (expected_rows, 8))
+
+        # Share tmpdir across ranks
+        obj_list = [tempfile.mkdtemp() if self.rank == 0 else ""]
+        torch.distributed.broadcast_object_list(obj_list, src=0)
+        tmpdir = obj_list[0]
+
+        try:
+            # Per-rank save
+            torch.save(
+                model.state_dict(),
+                os.path.join(tmpdir, f"rank_{self.rank}.pt"),
+            )
+            torch.distributed.barrier()
+
+            # Create fresh model with different weights, shard it
+            torch.manual_seed(99)
+            model2 = nn.Linear(8, 4, bias=False, device="cuda")
+            torch.distributed.broadcast(model2.weight.data, src=0)
+            self._flex_shard(model2, mesh)
+
+            # Per-rank load
+            sd2 = torch.load(
+                os.path.join(tmpdir, f"rank_{self.rank}.pt"),
+                weights_only=True,
+                map_location=f"cuda:{self.rank}",
+            )
+            model2.load_state_dict(sd2)
+        finally:
+            torch.distributed.barrier()
+            if self.rank == 0:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Sharded params should match
+        sd_after = model2.state_dict()
+        torch.testing.assert_close(sd_after["weight"], sd_before["weight"])
+
+        # Forward should produce the same result as original full weights
+        x = torch.randn(2, 8, device="cuda")
+        torch.distributed.broadcast(x, src=0)
+        ref_output = x @ full_ref.t()
+        output = model2(x)
+        torch.testing.assert_close(output, ref_output)
+
+    def _to_dtensor_sd(self, model, mesh):
+        """Wrap FlexShard state_dict as DTensors for DCP.
+
+        Maps FlexShard placements to DTensor Shard(0):
+        - Shard(dim): each rank holds a chunk along dim → DTensor Shard(dim)
+        - FlatShard: in parametrization mode, decomposed to per-param
+          FlatShard(0, numel, numel), i.e. 1D Shard(0) → DTensor Shard(0)
+        """
+        from torch.distributed.tensor import DTensor, Shard as DTensorShard
+
+        from torchtitan.experiments.flex_shard import Shard as FlexShard
+        from torchtitan.experiments.flex_shard.flex_shard import FlatShard
+
+        sd = {}
+        plain_sd = model.state_dict()
+        fqn_to_placement = {}
+        for ds in model.dstorages:
+            for fqn, info in ds.param_infos.items():
+                fqn_to_placement[fqn] = info.placements
+        for k, v in plain_sd.items():
+            placements = fqn_to_placement.get(k)
+            if placements is not None:
+                dt_placements = []
+                for p in placements:
+                    if isinstance(p, FlexShard):
+                        dt_placements.append(DTensorShard(p.dim))
+                    elif isinstance(p, FlatShard):
+                        # Per-param FlatShard(0, numel, numel) is 1D Shard(0)
+                        dt_placements.append(DTensorShard(0))
+                    else:
+                        raise ValueError(f"Unsupported placement {p}")
+                sd[k] = DTensor.from_local(v, mesh, dt_placements, run_check=False)
+            else:
+                sd[k] = v
+        return sd
+
+    def _dcp_roundtrip(self, model, model2, mesh, full_ref):
+        """Save model via DCP, load into model2, verify correctness."""
+        import shutil
+        import tempfile
+
+        import torch.distributed.checkpoint as dcp
+        from torch.distributed.tensor import DTensor
+
+        sd_before_clone = {k: v.clone() for k, v in model.state_dict().items()}
+
+        obj_list = [tempfile.mkdtemp() if self.rank == 0 else ""]
+        torch.distributed.broadcast_object_list(obj_list, src=0)
+        tmpdir = obj_list[0]
+
+        try:
+            dcp.save(self._to_dtensor_sd(model, mesh), checkpoint_id=tmpdir)
+
+            sd2 = self._to_dtensor_sd(model2, mesh)
+            dcp.load(sd2, checkpoint_id=tmpdir)
+
+            plain_sd2 = model2.state_dict()
+            for k, v in sd2.items():
+                local = v.to_local() if isinstance(v, DTensor) else v
+                plain_sd2[k].copy_(local)
+        finally:
+            torch.distributed.barrier()
+            if self.rank == 0:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Sharded params should match original
+        sd_after = model2.state_dict()
+        for k in sd_before_clone:
+            torch.testing.assert_close(
+                sd_after[k], sd_before_clone[k], msg=f"{k} mismatch"
+            )
+
+        # Forward should produce the same result as original full weights
+        x = torch.randn(2, 8, device="cuda")
+        torch.distributed.broadcast(x, src=0)
+        ref_output = x @ full_ref.t()
+        output = model2(x)
+        torch.testing.assert_close(output, ref_output)
+
+    def test_dcp_save_load_shard(self):
+        """DCP roundtrip with Shard(0) (FSDP2-style)."""
+        mesh = self._init_mesh()
+
+        torch.manual_seed(42)
+        model = nn.Linear(8, 4, bias=False, device="cuda")
+        torch.distributed.broadcast(model.weight.data, src=0)
+        full_ref = model.weight.data.clone()
+        self._flex_shard(model, mesh)
+
+        torch.manual_seed(99)
+        model2 = nn.Linear(8, 4, bias=False, device="cuda")
+        torch.distributed.broadcast(model2.weight.data, src=0)
+        self._flex_shard(model2, mesh)
+
+        self._dcp_roundtrip(model, model2, mesh, full_ref)
+
+    def test_dcp_save_load_flat_shard(self):
+        """DCP roundtrip with FlatShard (FSDP1-style)."""
+        from torchtitan.experiments.flex_shard import flat_shard_placements
+
+        mesh = self._init_mesh()
+
+        torch.manual_seed(42)
+        model = nn.Linear(8, 4, bias=False, device="cuda")
+        torch.distributed.broadcast(model.weight.data, src=0)
+        full_ref = model.weight.data.clone()
+        self._flex_shard(model, mesh, shard_placement_fn=flat_shard_placements)
+
+        torch.manual_seed(99)
+        model2 = nn.Linear(8, 4, bias=False, device="cuda")
+        torch.distributed.broadcast(model2.weight.data, src=0)
+        self._flex_shard(model2, mesh, shard_placement_fn=flat_shard_placements)
+
+        self._dcp_roundtrip(model, model2, mesh, full_ref)
 
 
 if __name__ == "__main__":
