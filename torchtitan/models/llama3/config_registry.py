@@ -131,9 +131,6 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
     config.loss = CrossEntropyLoss.Config()
     return config
 
-
-
-
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
