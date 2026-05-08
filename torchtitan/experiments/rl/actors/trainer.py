@@ -81,6 +81,9 @@ class PolicyTrainer(Actor, Configurable):
         ac_config: ActivationCheckpointConfig = field(
             default_factory=lambda: ActivationCheckpointConfig(mode="none")
         )
+        logprobs_chunk_size: int | None = None
+        """If set, compute logprobs in chunks of this many tokens to reduce
+        peak memory. When None (default), the full sequence is computed at once."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
 
@@ -315,7 +318,9 @@ class PolicyTrainer(Actor, Configurable):
             logits = self.model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        all_policy_logprobs = compute_logprobs(logits, token_ids)
+        all_policy_logprobs = compute_logprobs(
+            logits, token_ids, chunk_size=self.config.logprobs_chunk_size
+        )
         policy_logprobs = extract_response_logprobs(
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )

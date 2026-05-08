@@ -11,11 +11,23 @@ from torchtitan.observability import structured_logger as sl
 
 
 @sl.log_trace_span("compute_logprobs")
-def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+def compute_logprobs(
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    *,
+    chunk_size: int | None = None,
+) -> torch.Tensor:
     """Compute per-token logprobs from logits.
 
     Returns logprobs for positions 1..N (the predicted tokens).
     Output shape is ``[batch, seq_len - 1]``.
+
+    Args:
+        logits: Model output logits, shape [batch, seq_len, vocab_size].
+        token_ids: Input token IDs, shape [batch, seq_len].
+        chunk_size: If set, process log_softmax in chunks of this many tokens
+            along the sequence dimension to reduce peak memory. When None
+            (default), the full sequence is computed at once.
     """
     from torch.distributed.tensor import DTensor
 
@@ -24,10 +36,32 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
     # plain tensor — materialize once here.
     if isinstance(logits, DTensor):
         logits = logits.to_local()
-    shift_logits = logits[:, :-1, :].float()
+
+    if chunk_size is not None and chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+
+    # Shift: logits[:-1] predict token_ids[1:]
+    shift_logits = logits[:, :-1, :]
     shift_targets = token_ids[:, 1:]
-    logprobs = F.log_softmax(shift_logits, dim=-1)
-    return logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
+
+    if chunk_size is None or shift_logits.shape[1] <= chunk_size:
+        # Full computation — simple and fast, but uses more memory.
+        # Also covers shift_logits.shape[1] == 0 (single-token input),
+        # keeping grad_fn intact.
+        log_probs = F.log_softmax(shift_logits.float(), dim=-1)
+        return log_probs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
+
+    # Chunked log_softmax + gather to avoid materializing full [seq, vocab] fp32
+    seq_len = shift_logits.shape[1]
+    chunks = []
+    for start in range(0, seq_len, chunk_size):
+        end = min(start + chunk_size, seq_len)
+        chunk_logits = shift_logits[:, start:end, :].float()
+        chunk_lp = F.log_softmax(chunk_logits, dim=-1)
+        chunk_targets = shift_targets[:, start:end].unsqueeze(-1)
+        chunks.append(chunk_lp.gather(2, chunk_targets).squeeze(-1))
+
+    return torch.cat(chunks, dim=1)
 
 
 @sl.log_trace_span("extract_response_logprobs")
