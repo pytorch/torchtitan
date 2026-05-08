@@ -9,8 +9,6 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Replicate
-from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
@@ -56,10 +54,6 @@ def _compute_learned_pos_embeds(
     it to each image's (h, w) resolution, and permutes to block order matching
     the patch layout from the collator.
 
-    This function operates on plain tensors. When pos_embed is a DTensor,
-    callers should wrap this with ``local_map`` to handle DTensor ↔ local
-    conversion automatically.
-
     Args:
         learned_pos_embed: (num_position_embeddings, dim) learnable position embeddings
         grid_thw: (num_vision, 3) with patch counts [t, h, w] per visual item
@@ -72,11 +66,10 @@ def _compute_learned_pos_embeds(
         learned_pos: (num_vision, max_num_patch, dim) interpolated position embeddings
     """
     num_vision = grid_thw.shape[0]
-    device = grid_thw.device
     dtype = learned_pos_embed.dtype
     merge_size = spatial_merge_size
 
-    pos_embeds = torch.zeros(num_vision, max_num_patch, dim, device=device, dtype=dtype)
+    pos_embeds = learned_pos_embed.new_zeros(num_vision, max_num_patch, dim)
 
     # Group images by (h, w) to batch compute position embeddings
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -521,9 +514,6 @@ class Qwen3VLVisionEncoder(Module):
         )
         # Cached RoPE freq table — recomputed only when max_hw grows
         self._cached_freq_table: torch.Tensor | None = None
-        # Cached local_map wrapper for learned pos embed computation (created
-        # on first use when pos_embed is a DTensor from TP/FSDP wrapping)
-        self._local_map_learned_pos_fn = None
 
         self.layers = ModuleDict(
             {
@@ -574,11 +564,6 @@ class Qwen3VLVisionEncoder(Module):
         - ``_compute_learned_pos_embeds``: bilinear-interpolated learned embeddings
         - ``_compute_2d_rope_cache``: 2D RoPE cache
 
-        When ``pos_embed`` is a DTensor (from TP/FSDP wrapping), the learned
-        embedding computation is wrapped with ``local_map`` to run interpolation
-        and indexing ops on local tensors while preserving proper gradient
-        placements.
-
         Args:
             grid_thw: (num_vision, 3) with pixel patch counts [t, h, w] per visual item
             max_num_patch: Maximum number of patches (for padding)
@@ -595,37 +580,14 @@ class Qwen3VLVisionEncoder(Module):
         if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:
             self._cached_freq_table = self.rotary_pos_emb(max_hw)
 
-        # Compute learned position embeddings
-        # When pos_embed is a DTensor (from TP/FSDP wrapping), use local_map
-        # so that interpolation and indexing ops run on local tensors while
-        # local_map handles DTensor ↔ local conversion and gradient placements
-        learned_pos_embed = self.pos_embed
-        if isinstance(learned_pos_embed, DTensor):
-            if self._local_map_learned_pos_fn is None:
-                self._local_map_learned_pos_fn = local_map(
-                    _compute_learned_pos_embeds,
-                    in_placements=((Replicate(),), None, None, None, None, None),
-                    out_placements=((Replicate(),),),
-                    in_grad_placements=((Replicate(),), None, None, None, None, None),
-                    device_mesh=learned_pos_embed.device_mesh,
-                )
-            learned_pos = self._local_map_learned_pos_fn(
-                learned_pos_embed,
-                grid_thw,  # pyrefly: ignore [bad-argument-count]
-                max_num_patch,
-                self.num_grid_per_side,
-                self.spatial_merge_size,
-                self.config.dim,
-            )
-        else:
-            learned_pos = _compute_learned_pos_embeds(
-                learned_pos_embed,
-                grid_thw,
-                max_num_patch,
-                self.num_grid_per_side,
-                self.spatial_merge_size,
-                self.config.dim,
-            )
+        learned_pos = _compute_learned_pos_embeds(
+            self.pos_embed,
+            grid_thw,
+            max_num_patch,
+            self.num_grid_per_side,
+            self.spatial_merge_size,
+            self.config.dim,
+        )
 
         rope_cache = _compute_2d_rope_cache(
             self._cached_freq_table,

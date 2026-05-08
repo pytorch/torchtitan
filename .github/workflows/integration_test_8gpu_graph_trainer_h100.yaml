@@ -59,9 +59,27 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
+        # Dependencies for DeepEP compilation (NVSHMEM needs libcudacxx, IB headers).
+        sudo apt-get update -qq && sudo apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
+
+        # CCCL headers live under include/cccl/ in CUDA 13+ — symlink so
+        # NVSHMEM's #include "cuda/std/tuple" resolves correctly.
+        sudo ln -sf /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda
+
+        # Install DeepEP for HybridEP integration test.
+        # Pinned to a known-good commit on the hybrid-ep branch to avoid
+        # breakage from upstream changes. Update the commit hash when
+        # upgrading to a newer DeepEP version.
+        DEEPEP_COMMIT=1b8f467
+        git clone --branch hybrid-ep https://github.com/deepseek-ai/deepep.git /tmp/deepep
+        pushd /tmp/deepep && git checkout $DEEPEP_COMMIT
+        CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST="9.0" pip install --no-build-isolation -e .
+        popd
+
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
         # NVLS according to several CI runs.
-        NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        # DeepEP needs CUDA_HOME specified to JIT kernels.
+        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
         # Run the MoE numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "moe"
