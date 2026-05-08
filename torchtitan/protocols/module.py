@@ -459,7 +459,7 @@ class Module(nn.Module, Configurable):
                     if tp_out_placement is not None
                     else spmd.R
                 )
-                self._setup_tp(tp_pg, tp_out_type)
+                self._setup_tp(tp_out_type)
 
     # ----- DTensor input/output helpers (unchanged from main) -----
 

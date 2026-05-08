@@ -461,15 +461,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
-            tp_axis = parallel_dims.get_spmd_axis("tp")
-            self.loss_fn.enable_spmd_types(
-                parallel_dims.spmd_dp_axes(),
-                tp_axis=tp_axis if tp_axis.size() > 1 else None,
-                tp_pg=parallel_dims.get_spmd_pg("tp"),
-            )
+            self.loss_fn.enable_spmd_types()
 
         if config.parallelism.full_spmd_types:
-            tp_pg = parallel_dims.get_spmd_pg("tp")
+            from torchtitan.distributed.spmd_state import spmd_state
+
+            tp_pg = spmd_state().tp_pg
             if tp_pg is not None:
                 for model in self.model_parts:
                     convert_tp_states_for_compute(model, tp_pg)
@@ -708,15 +705,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Annotate inputs, labels, and positions with spmd_types.
 
-        DP axes get S(0) (batch-sharded). TP axis gets R (replicated —
-        each TP rank sees the same tokens).
+        DP axes get S(0) (batch-sharded). TP axis gets R (replicated).
         """
-        dp_axes = self.parallel_dims.spmd_dp_axes()
-        tp_axis = self.parallel_dims.get_spmd_axis("tp")
+        from torchtitan.distributed.spmd_state import spmd_state
+
+        state = spmd_state()
+        dp_axes = state.dp_axes
 
         spmd_type: dict = {}
-        if tp_axis.size() > 1:
-            spmd_type[tp_axis] = spmd.R
+        if state.tp_active:
+            spmd_type[state.tp_axis] = spmd.R
 
         if len(dp_axes) <= 1:
             for axis in dp_axes:

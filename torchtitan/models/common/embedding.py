@@ -37,26 +37,26 @@ class Embedding(nn.Embedding, Module):
 
     def __init__(self, config: Config):
         super().__init__(config.num_embeddings, config.embedding_dim)
-        self._tp_pg = None
-        self._tp_rank: int = 0
         self._tp_out_type = None
 
-    def _setup_tp(self, tp_pg, tp_out_type) -> None:
-        """Configure TP vocab-parallel state. Called at parallelize time."""
-        self._tp_pg = tp_pg
-        self._tp_rank = dist.get_rank(tp_pg)
+    def _setup_tp(self, tp_out_type) -> None:
+        """Configure TP vocab-parallel output type. Called at parallelize time."""
         self._tp_out_type = tp_out_type
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        from torchtitan.distributed.spmd_state import spmd_state
+
+        state = spmd_state()
+        tp_pg = state.tp_pg
         weight = self.weight
         chunk_size = weight.shape[0]
-        offset = self._tp_rank * chunk_size
+        offset = dist.get_rank(tp_pg) * chunk_size if tp_pg is not None else 0
         mask = (input >= offset) & (input < offset + chunk_size)
         local_input = (input - offset).clamp(0, chunk_size - 1)
         out = F.embedding(local_input, weight)
         out = out * mask.unsqueeze(-1).to(out.dtype)
-        if self._tp_pg is not None:
+        if tp_pg is not None:
             out = spmd.redistribute(
-                out, self._tp_pg, src=spmd.P, dst=self._tp_out_type
+                out, tp_pg, src=spmd.P, dst=self._tp_out_type
             )
         return out
