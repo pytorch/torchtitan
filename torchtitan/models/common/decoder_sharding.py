@@ -90,17 +90,6 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     )
 
 
-def rowwise_spmd_config(*, output_sp: bool = False) -> GlobalSpmdConfig:
-    """SPMD output redistribution for rowwise linear: Partial@TP -> S(1) or R."""
-    dst_tp = spmd.S(1) if output_sp else spmd.R
-    return GlobalSpmdConfig(
-        output=SpmdRedist(
-            src=SpmdAnnotation(types={TP: spmd.P}),
-            dst=SpmdAnnotation(types={TP: dst_tp}),
-        ),
-    )
-
-
 def norm_config(*, enable_sp: bool) -> ShardingConfig:
     """Norm sharding.
 
@@ -193,82 +182,62 @@ def set_gqa_inner_attention_local_map(
     )
 
 
-def lm_head_output_spmd_config(*, loss_parallel: bool) -> GlobalSpmdConfig | None:
-    """Output redistribute for colwise lm_head: S(2)@TP -> R@TP.
+# ---------------------------------------------------------------------------
+# Constant SPMD annotations — resolved at parallelize time.
+# Size-1 axes are automatically dropped by spmd_types.
+# ---------------------------------------------------------------------------
 
-    The lm_head outputs 3D ``[batch, seq, vocab]`` with vocab (dim 2)
-    sharded on TP. Returns ``None`` when loss_parallel is enabled.
-    """
-    if loss_parallel:
-        return None
-    return GlobalSpmdConfig(
-        output=SpmdRedist(
-            src=SpmdAnnotation(types={TP: spmd.S(2)}),
+# lm_head output: S(2)@TP -> R@TP (all-gather vocab dim)
+LM_HEAD_OUTPUT_REDIST = GlobalSpmdConfig(
+    output=SpmdRedist(
+        src=SpmdAnnotation(types={TP: spmd.S(2)}),
+        dst=SpmdAnnotation(types={TP: spmd.R}),
+    ),
+)
+
+# SP input redistribute: S(1)@TP -> R@TP
+SP_INPUT_REDIST = GlobalSpmdConfig(
+    inputs=(
+        SpmdRedist(
+            src=SpmdAnnotation(types={TP: spmd.S(1)}),
             dst=SpmdAnnotation(types={TP: spmd.R}),
         ),
-    )
+    ),
+)
 
+# Embedding output [B, L, D] — SP variant (TP on seq dim)
+EMBED_OUT_SP = LocalSpmdConfig(
+    out=SpmdAnnotation(
+        partition_spec=((DP_REPLICATE, DP_SHARD), (CP, TP), None),
+    ),
+)
 
-def sp_input_redist(*, enable_sp: bool) -> GlobalSpmdConfig | None:
-    """Input redistribute for SP: S(1)@TP -> R@TP on the first positional arg.
+# Embedding output [B, L, D] — no SP (TP is R, not sharded)
+EMBED_OUT = LocalSpmdConfig(
+    out=SpmdAnnotation(
+        types={TP: spmd.R},
+        partition_spec=((DP_REPLICATE, DP_SHARD), CP, None),
+    ),
+)
 
-    Returns ``None`` when SP is disabled (no redistribute needed).
-    """
-    if not enable_sp:
-        return None
+# Inner attention q/k/v: (batch, seq, heads, head_dim)
+QKV_LOCAL_SPMD = LocalSpmdConfig(
+    inputs=(
+        SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+        SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+        SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+    ),
+    out=SpmdAnnotation(partition_spec=((DP_REPLICATE, DP_SHARD), CP, TP, None)),
+)
+
+# Rowwise output redistribute: P@TP -> R@TP (or S(1)@TP for SP)
+def rowwise_spmd_config(*, output_sp: bool) -> GlobalSpmdConfig:
+    dst_type = spmd.S(1) if output_sp else spmd.R
     return GlobalSpmdConfig(
-        inputs=(
-            SpmdRedist(
-                src=SpmdAnnotation(types={TP: spmd.S(1)}),
-                dst=SpmdAnnotation(types={TP: spmd.R}),
-            ),
+        output=SpmdRedist(
+            src=SpmdAnnotation(types={TP: spmd.P}),
+            dst=SpmdAnnotation(types={TP: dst_type}),
         ),
-    )
-
-
-def set_embedding_local_spmd(
-    tok_embeddings_cfg,
-    *,
-    dp_replicate_enabled: bool = False,
-    dp_shard_enabled: bool = True,
-    enable_tp: bool = False,
-    enable_sp: bool = False,
-) -> None:
-    """Install a ``LocalSpmdConfig`` on the tok_embeddings config.
-
-    The embedding output is ``[B, L, D]``: batch-sharded on DP, and
-    ``S(1)`` on TP when SP is enabled (otherwise ``R`` on TP).
-    """
-    batch_axes: list = []
-    if dp_replicate_enabled:
-        batch_axes.append(DP_REPLICATE)
-    if dp_shard_enabled:
-        batch_axes.append(DP_SHARD)
-
-    sharded_axes = batch_axes.copy()
-    if enable_tp and enable_sp:
-        sharded_axes.append(TP)
-
-    needs_spec = len(sharded_axes) > 1
-
-    if needs_spec:
-        out_type: dict = {axis: spmd.V for axis in sharded_axes}
-        if enable_tp and not enable_sp:
-            out_type[TP] = spmd.R
-        batch_entry = tuple(batch_axes) if len(batch_axes) > 1 else batch_axes[0]
-        tp_entry = TP if (enable_tp and enable_sp) else None
-        spec = (batch_entry, tp_entry, None)
-        out_annotation = SpmdAnnotation(types=out_type, partition_spec=spec)
-    else:
-        out_type = {}
-        if batch_axes:
-            out_type[batch_axes[0]] = spmd.S(0)
-        if enable_tp:
-            out_type[TP] = spmd.S(1) if enable_sp else spmd.R
-        out_annotation = SpmdAnnotation(types=out_type)
-
-    tok_embeddings_cfg.local_spmd = LocalSpmdConfig(
-        out=out_annotation,
     )
 
 
@@ -309,7 +278,7 @@ def set_dense_ffn_sharding(
 
 
 def set_decoder_sharding_config(
-    config, *, loss_parallel: bool, enable_sp: bool, full_spmd_types: bool = False,
+    config, *, loss_parallel: bool, enable_sp: bool,
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     ``output``, and the root ``freqs_cis`` buffer.
@@ -343,8 +312,3 @@ def set_decoder_sharding_config(
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
         out_dst_shardings=dense_activation_placement(tp=loss_tp),
     )
-    if full_spmd_types:
-        # SPMD path doesn't use DTensor loss_parallel; always all-gather output.
-        config.lm_head.global_spmd = lm_head_output_spmd_config(
-            loss_parallel=False,
-        )

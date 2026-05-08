@@ -15,7 +15,7 @@ from datetime import timedelta
 from typing import Annotated, Any, cast
 
 import spmd_types as spmd
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
+from torchtitan.distributed.spmd_state import is_spmd_active, mesh, spmd_state
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
@@ -27,6 +27,8 @@ from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.protocols.module import preserve_buffer_spmd
+from torchtitan.protocols.sharding import SpmdAnnotation
+from torchtitan.protocols.types import MeshAxisName
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -463,7 +465,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
 
         if is_spmd_active():
-            
+            from torchtitan.distributed.spmd_state import spmd_state
 
             tp_pg = spmd_state().tp_pg
             if tp_pg is not None:
@@ -695,35 +697,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # spmd_types helpers
     # ------------------------------------------------------------------
 
+    # Input annotation: (batch, seq) — DP on batch, CP on seq, TP replicated.
+    _INPUT_ANNOTATION = SpmdAnnotation(
+        types={MeshAxisName.TP: spmd.R},
+        partition_spec=((MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD), MeshAxisName.CP),
+    )
+
     def _annotate_inputs_spmd_types(
         self,
         inputs: torch.Tensor,
         labels: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Annotate inputs, labels, and positions with spmd_types.
-
-        DP axes get S(0) (batch-sharded). TP axis gets R (replicated).
-        """
-        state = spmd_state()
-        dp_axes = state.dp_axes
-
-        spmd_type: dict = {}
-        if state.tp_active:
-            spmd_type[state.tp_axis] = spmd.R
-
-        if len(dp_axes) <= 1:
-            for axis in dp_axes:
-                spmd_type[axis] = spmd.S(0)
-            if spmd_type:
+        """Annotate inputs, labels, and positions with spmd_types."""
+        resolved = self._INPUT_ANNOTATION.resolve()
+        if resolved:
+            if isinstance(resolved, tuple):
+                types, spec = resolved
                 for t in (inputs, labels, positions):
-                    spmd.assert_type(t, spmd_type)
-        else:
-            for axis in dp_axes:
-                spmd_type[axis] = spmd.V
-            for t in (inputs, labels, positions):
-                spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
-                spmd.assert_type(t, spmd_type, spec)
+                    spmd.assert_type(t, types, spec)
+            else:
+                for t in (inputs, labels, positions):
+                    spmd.assert_type(t, resolved)
 
         return inputs, labels
 

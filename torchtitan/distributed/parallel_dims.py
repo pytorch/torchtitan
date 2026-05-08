@@ -202,25 +202,15 @@ class ParallelDims:
         }
         if self.full_spmd_types:
             self._meshes["dp_shard"] = dense_mesh["dp_shard"]
-            if self.cp > 1:
-                # FSDP needs dp_shard*cp combined for weight sharding
-                # and gradient sync across CP ranks. Create a separate
-                # global mesh so get_mesh(["dp_replicate", "fsdp", "tp"])
-                # works for the FSDP setup in parallelize.py.
-                fsdp_dense_mesh = unflatten_mesh(
-                    self._world_mesh,
-                    ("pp", "dp_replicate", "fsdp", "tp"),
-                    (self.pp, self.dp_replicate, fsdp, self.tp),
-                )
-                self._global_meshes["fsdp_dense"] = fsdp_dense_mesh
-                self._meshes["fsdp"] = fsdp_dense_mesh["fsdp"]
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
-        # Populate global SPMD state from the dense mesh PGs.
+        # Populate global SPMD state: always-valid axes + PGs.
         if self.full_spmd_types:
             from spmd_types import MeshAxis
-            from torchtitan.distributed.spmd_state import SpmdState, init_spmd_state
+            from torchtitan.distributed.spmd_state import (
+                MeshAxes, SpmdState, init_spmd_state,
+            )
 
             axes: dict[str, Any] = {}
             pgs: dict[str, Any] = {}
@@ -238,19 +228,12 @@ class ParallelDims:
 
             dp_names = ("dp_replicate", "dp_shard", "cp")
             dp_axes = [axes[n] for n in dp_names if axes[n].size() > 1]
-            all_axes = frozenset(
-                a for n in ("dp_replicate", "dp_shard", "cp", "tp")
-                if (a := axes[n]).size() > 1
-            )
+            all_axes = frozenset(a for a in axes.values() if a.size() > 1)
 
-            init_spmd_state(SpmdState(
-                dp_axes=dp_axes,
-                tp_axis=axes.get("tp"),
-                cp_axis=axes.get("cp"),
-                all_axes=all_axes,
-                _axes=axes,
-                pgs=pgs,
-            ))
+            init_spmd_state(
+                MeshAxes(**axes),
+                SpmdState(dp_axes=dp_axes, all_axes=all_axes, pgs=pgs),
+            )
 
         # Validate mesh sizes
         self._validate_meshes()
@@ -276,8 +259,6 @@ class ParallelDims:
         }
         if self.full_spmd_types:
             expected_sizes["dp_shard"] = self.dp_shard
-            if self.cp > 1:
-                expected_sizes["fsdp"] = self.dp_shard * self.cp
         else:
             expected_sizes["fsdp"] = self.dp_shard * self.cp
 

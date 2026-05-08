@@ -27,6 +27,12 @@ NamedPlacement = dict[MeshAxisName, Placement]
 NamedSpmdType = dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
 
 
+def _resolve_axis(name: MeshAxisName):
+    """Resolve a MeshAxisName to a MeshAxis via the global mesh."""
+    from torchtitan.distributed.spmd_state import mesh
+    return getattr(mesh(), name.value)
+
+
 # ---------------------------------------------------------------------------
 # SPMD annotation and config types
 # ---------------------------------------------------------------------------
@@ -45,27 +51,52 @@ class SpmdAnnotation:
             multiple axes shard different tensor dims.
     """
 
-    types: NamedSpmdType
+    types: NamedSpmdType = field(default_factory=dict)
     partition_spec: tuple | None = None
 
-    def resolve(self) -> spmd.PerMeshAxisSpmdTypes | tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec]:
-        from torchtitan.distributed.spmd_state import spmd_state
+    def resolve(
+        self,
+    ) -> spmd.PerMeshAxisSpmdTypes | tuple[spmd.PerMeshAxisSpmdTypes, spmd.PartitionSpec]:
+        # Axes in partition_spec but not in types default to V.
+        effective_types = dict(self.types)
+        if self.partition_spec is not None:
+            from torch.utils._pytree import tree_leaves
 
-        state = spmd_state()
+            for leaf in tree_leaves(self.partition_spec):
+                if isinstance(leaf, MeshAxisName) and leaf not in effective_types:
+                    effective_types[leaf] = spmd.V
+
         resolved = {
-            state.axis(name.value): t
-            for name, t in self.types.items()
-            if state.axis(name.value).size() > 1
+            _resolve_axis(name): t
+            for name, t in effective_types.items()
+            if _resolve_axis(name).size() > 1
         }
         if self.partition_spec is not None:
             from torch.utils._pytree import tree_map_only
 
-            spec = tree_map_only(
+            def _resolve_or_drop(name: MeshAxisName):
+                ax = _resolve_axis(name)
+                return ax if ax.size() > 1 else None
+
+            raw_spec = tree_map_only(
                 MeshAxisName,
-                lambda n: state.axis(n.value),
+                _resolve_or_drop,
                 self.partition_spec,
             )
-            return (resolved, spmd.PartitionSpec(*spec))
+            # Clean up spec: filter None from tuples, unwrap singletons.
+            cleaned = []
+            for entry in raw_spec:
+                if isinstance(entry, tuple):
+                    filtered = tuple(e for e in entry if e is not None)
+                    if len(filtered) == 0:
+                        cleaned.append(None)
+                    elif len(filtered) == 1:
+                        cleaned.append(filtered[0])
+                    else:
+                        cleaned.append(filtered)
+                else:
+                    cleaned.append(entry)
+            return (resolved, spmd.PartitionSpec(*cleaned))
         return resolved
 
 
@@ -227,12 +258,9 @@ def resolve_spmd(
     """Resolve NamedPlacement to {MeshAxis: spmd_type}. Skips disabled axes."""
     if named is None:
         return None
-    from torchtitan.distributed.spmd_state import spmd_state
-
-    state = spmd_state()
     result: spmd.PerMeshAxisSpmdTypes = {}
     for axis_name, placement in named.items():
-        axis = state.axis(axis_name.value)
+        axis = _resolve_axis(axis_name)
         if axis.size() <= 1:
             continue
         result[axis] = placement_to_spmd_type(placement, is_compute=is_compute)
