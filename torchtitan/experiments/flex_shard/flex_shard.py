@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+import logging
 import sys
 from collections.abc import Callable, Generator
 
@@ -455,6 +457,8 @@ class FlatShard(Placement):
 
 
 __all__ = [
+    "auto_buckets",
+    "BucketSpec",
     "disable_active_parametrization",
     "DStorage",
     "flat_shard_placements",
@@ -476,8 +480,9 @@ __all__ = [
 ]
 
 
-# Module attribute name for storing DStorage
+# Module attribute names for storing DStorage
 _DSTORAGE_ATTR = "_dstorage"
+_DSTORAGES_ATTR = "_dstorages"
 
 # Hidden attribute names for placement metadata on plain tensors
 _PLACEMENTS_ATTR = "_placements"
@@ -539,6 +544,104 @@ def _validate_placements_for_tracing(
                         f"Parameter '{fqn}' has {param.numel()} elements, "
                         f"which is not evenly divisible by "
                         f"world_size={world_size}. Pad the parameter."
+                    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: Bucket assignment and validation
+# ---------------------------------------------------------------------------
+
+
+def _assign_params_to_buckets(
+    param_fqns: list[str],
+    buckets: list[list[str] | BucketSpec],
+) -> list[list[str]]:
+    """Assign each param FQN to exactly one bucket via fnmatch.
+
+    Returns:
+        List of lists: assignments[i] = [fqn, ...] for bucket i.
+
+    Raises:
+        ValueError: if any param matches zero or multiple buckets.
+    """
+    param_to_buckets: dict[str, list[int]] = {fqn: [] for fqn in param_fqns}
+    for bucket_idx, bucket in enumerate(buckets):
+        patterns = _get_bucket_patterns(bucket)
+        for fqn in param_fqns:
+            for pattern in patterns:
+                if fnmatch.fnmatch(fqn, pattern):
+                    param_to_buckets[fqn].append(bucket_idx)
+                    break  # one match per bucket is enough
+
+    # Check for orphans
+    orphans = [fqn for fqn, idxs in param_to_buckets.items() if len(idxs) == 0]
+    if orphans:
+        orphan_list = "\n  ".join(orphans)
+        raise ValueError(
+            f"flex_shard: {len(orphans)} parameters not covered by any bucket:\n"
+            f"  {orphan_list}\n"
+            'Add these to an existing bucket or add a catch-all bucket: ["*"]'
+        )
+
+    # Check for overlaps
+    overlaps = {fqn: idxs for fqn, idxs in param_to_buckets.items() if len(idxs) > 1}
+    if overlaps:
+        lines = []
+        for fqn, idxs in overlaps.items():
+            bucket_descs = ", ".join(
+                f"bucket {i} {_get_bucket_patterns(buckets[i])}" for i in idxs
+            )
+            lines.append(f"  {fqn} -> {bucket_descs}")
+        overlap_list = "\n".join(lines)
+        raise ValueError(
+            f"flex_shard: {len(overlaps)} parameters matched multiple buckets:\n"
+            f"{overlap_list}\n"
+            "Ensure each parameter matches exactly one bucket."
+        )
+
+    # Build assignments
+    assignments: list[list[str]] = [[] for _ in buckets]
+    for fqn, idxs in param_to_buckets.items():
+        assignments[idxs[0]].append(fqn)
+
+    return assignments
+
+
+def _validate_bucket_placements(
+    bucket_assignments: list[list[str]],
+    param_placements: dict[str, tuple[Placement, ...]],
+    buckets: list[list[str] | BucketSpec],
+) -> None:
+    """Validate that all params in each bucket share the same placement type.
+
+    Shard(0) + Shard(0) is valid. Shard(0) + Shard(1) is not.
+    Shard + FlatShard is not. Owned(0) + Owned(1) is not.
+    """
+    for bucket_idx, fqns in enumerate(bucket_assignments):
+        if not fqns:
+            continue
+        reference_placement = param_placements[fqns[0]][0]
+        for fqn in fqns[1:]:
+            placement = param_placements[fqn][0]
+            if type(placement) is not type(reference_placement):
+                raise ValueError(
+                    f"Bucket {bucket_idx} "
+                    f"{_get_bucket_patterns(buckets[bucket_idx])} "
+                    f"has mixed placement types: '{fqns[0]}' uses "
+                    f"{type(reference_placement).__name__} but '{fqn}' uses "
+                    f"{type(placement).__name__}. "
+                    "All params in a bucket must share the same placement type."
+                )
+            if isinstance(placement, Shard) and isinstance(reference_placement, Shard):
+                if placement.dim != reference_placement.dim:
+                    raise ValueError(
+                        f"Bucket {bucket_idx} "
+                        f"{_get_bucket_patterns(buckets[bucket_idx])} "
+                        f"has mixed shard dimensions: '{fqns[0]}' uses "
+                        f"Shard({reference_placement.dim}) but '{fqn}' uses "
+                        f"Shard({placement.dim}). "
+                        "All Shard params in a bucket must share the same "
+                        "dimension."
                     )
 
 
@@ -628,20 +731,51 @@ def is_flex_shard_param(tensor: torch.Tensor) -> bool:
 
 
 class FlexShardModule:
-    """Mixin added to modules after flex_shard(). Provides sharding methods directly on the module."""
+    """Mixin added to modules after flex_shard(). Provides sharding methods."""
 
     def unshard(self) -> None:
-        getattr(self, _DSTORAGE_ATTR).unshard()
+        for storage in getattr(self, _DSTORAGES_ATTR):
+            storage.unshard()
 
     def reshard(self) -> None:
         raise NotImplementedError
 
     def reduce_grad(self) -> None:
-        getattr(self, _DSTORAGE_ATTR).reduce_grad()
+        for storage in getattr(self, _DSTORAGES_ATTR):
+            storage.reduce_grad()
 
     @property
     def dstorage(self) -> DStorage:
+        """First (or only) DStorage. For multi-bucket, use .dstorages."""
         return getattr(self, _DSTORAGE_ATTR)
+
+    @property
+    def dstorages(self) -> list:
+        """All DStorage instances (one per bucket)."""
+        return getattr(self, _DSTORAGES_ATTR)
+
+
+@dataclass
+class BucketSpec:
+    """Specification for a parameter communication bucket.
+
+    Args:
+        patterns: fnmatch glob patterns matched against parameter FQNs.
+            A parameter matches this bucket if its FQN matches any pattern.
+        mp_policy: Mixed precision policy for this bucket (Phase 2c).
+        offload_policy: CPU offload policy for this bucket (Phase 2c).
+    """
+
+    patterns: list[str]
+    mp_policy: Any = None
+    offload_policy: Any = None
+
+
+def _get_bucket_patterns(bucket: list | BucketSpec) -> list[str]:
+    """Extract patterns from a bucket (list[str] or BucketSpec)."""
+    if isinstance(bucket, BucketSpec):
+        return bucket.patterns
+    return bucket
 
 
 class Owned(Placement):
@@ -1463,6 +1597,24 @@ def param_boundary_placements(
     return {fqn: (Owned(assignments[fqn]),) for fqn, _ in named_params}
 
 
+def auto_buckets(module: nn.Module) -> list[list[str]]:
+    """Generate one bucket per direct child module.
+
+    Returns a list of bucket patterns suitable for the ``buckets`` parameter
+    of :func:`flex_shard`. Each bucket contains a single ``"child_name.*"``
+    pattern matching all parameters under that child.
+
+    Example::
+
+        >>> buckets = auto_buckets(model)
+        >>> flex_shard(model, mesh, buckets=buckets)
+    """
+    children = list(module.named_children())
+    if not children:
+        return [["*"]]
+    return [[f"{name}.*"] for name, _ in children]
+
+
 def _create_param_infos(
     named_params: list[tuple[str, nn.Parameter]],
     mesh: DeviceMesh,
@@ -1664,28 +1816,51 @@ PlacementFn = Callable[
     dict[str, tuple[Placement, ...]],
 ]
 
-# TODO: flex_shard(buckets=[module1, module2, ...]
-# prefer full fqn to nn.Parameter(torch.Tensor)
-# ._wrapped_(compile)._wrapped_(ac).xxx
-# FQN : string = nn.Parameter()
-# shard_placement_fn(model):
+logger = logging.getLogger(__name__)
 
-#    for submodule in model.modules():
-#        if isinstancE(submodule, EPModule):
-#            return {param: Shard(1)}
-#         else:
-#             return {Shard(0)}
 
-# model: nn.Module, top-level fqn,
-# shard_placement_fn: specify [module/param_fqn] : [placement]
-# bukceting: [[embedding], [layer1_fqn], [layer2_fqn], [output, output_norm]] 1:1 mapping to DStorage
-# flex_shard(backend="parameter_server")
+def _resolve_placement_fn(
+    shard_placement_fn: PlacementFn | dict[str, Placement] | None,
+) -> PlacementFn:
+    """Normalize shard_placement_fn to a callable.
+
+    Accepts:
+    - None: defaults to per_param_placements (Shard(0) per param)
+    - dict[str, Placement]: fnmatch patterns, first match wins
+    - Callable: used directly
+    """
+    if shard_placement_fn is None:
+        return per_param_placements
+    if isinstance(shard_placement_fn, dict):
+        pattern_map = shard_placement_fn
+
+        def fn(
+            named_params: list[tuple[str, nn.Parameter]],
+            mesh: DeviceMesh,
+        ) -> dict[str, tuple[Placement, ...]]:
+            result: dict[str, tuple[Placement, ...]] = {}
+            for fqn, _ in named_params:
+                for pattern, placement in pattern_map.items():
+                    if fnmatch.fnmatch(fqn, pattern):
+                        result[fqn] = (placement,)
+                        break
+                else:
+                    raise ValueError(
+                        f"Parameter '{fqn}' does not match any placement pattern. "
+                        f'Add a catch-all pattern: {{"*": Shard(0)}}'
+                    )
+            return result
+
+        return fn
+    return shard_placement_fn
 
 
 def flex_shard(
     module: nn.Module,
     mesh: DeviceMesh,
-    shard_placement_fn: PlacementFn | None = None,
+    shard_placement_fn: PlacementFn | dict[str, Placement] | None = None,
+    *,
+    buckets: list[list[str] | BucketSpec] | None = None,
     reshard_after_forward: bool = True,
     register_hooks: bool = False,
     module_fqn: str = "",
@@ -1695,13 +1870,14 @@ def flex_shard(
 
     This function:
     1. Collects parameters from the module (excluding already-wrapped submodules)
-    2. Creates a single unified byte buffer for all parameters (regardless of dtype)
-    3. Replaces each parameter with a plain tensor annotated with placement metadata
-       (a typed view into the byte buffer at the appropriate offset)
-    4. Optionally registers forward/backward hooks for automatic unshard/reduce_grad
-    5. Stores DStorage on the module (accessible via module.dstorage)
+    2. Groups parameters into communication buckets (one per bucket, or all in one)
+    3. Creates a unified byte buffer per bucket for all its parameters
+    4. Replaces each parameter with a plain tensor annotated with placement metadata
+    5. Optionally registers forward/backward hooks for automatic unshard/reduce_grad
+    6. Stores DStorages on the module (accessible via module.dstorages)
 
-    The unified byte buffer enables a single all-gather operation for all parameters.
+    Each bucket gets its own byte buffer and DStorage, enabling independent
+    all-gather operations per bucket.
 
     Nested wrapping is supported: apply flex_shard to inner modules first,
     then to outer modules. The outer module's storage will exclude parameters
@@ -1710,46 +1886,48 @@ def flex_shard(
     Args:
         module: The module to shard. Can have real or meta device parameters.
         mesh: The device mesh for sharding. Currently only 1D mesh is supported.
-        shard_placement_fn: A function that maps (named_params, mesh) to a dict
-            of per-param placements. Built-in options:
-            - per_param_placements (default): Shard(0) per parameter (FSDP2-style)
-            - flat_shard_placements: FSDP1-style flat-concat sharding
-            - param_boundary_placements: one param per rank with greedy bin-packing
-            Custom functions can return any Placement subclass per parameter.
+        shard_placement_fn: Determines per-parameter placements. Accepts:
+            - None (default): uses per_param_placements (Shard(0) per param)
+            - dict[str, Placement]: fnmatch patterns, first match wins
+            - Callable: (named_params, mesh) -> dict of per-param placements
+            Built-in callables: per_param_placements, flat_shard_placements,
+            param_boundary_placements.
+        buckets: Optional list of bucket specifications. Each bucket is either
+            a list of fnmatch patterns or a BucketSpec. When None (default),
+            all parameters go into a single bucket. Use auto_buckets() to
+            generate one bucket per direct child module.
         reshard_after_forward: If True (default), reshard parameters after forward
             to save memory. Parameters will be re-unsharded in backward.
             If False, keep parameters unsharded between forward and backward.
-        register_hooks: If True (default), register forward/backward hooks for
-            automatic unshard/reduce_grad. If False, caller must manually call
-            unshard()/reduce_grad().
+        register_hooks: If True, register forward/backward hooks for
+            automatic unshard/reduce_grad. If False (default), uses
+            property-based parametrization instead.
+        module_fqn: Fully qualified name prefix for profiling labels.
 
     Returns:
-        The module (mutated in-place). Use module.storage to access internals.
+        The module (mutated in-place). Use module.dstorages to access internals.
 
     Example::
 
         >>> mesh = init_device_mesh("cuda", (world_size,))
         >>> model = Transformer(args)
-        >>> # Nested wrapping: wrap layers first, then root
-        >>> for layer in model.layers:
-        ...     flex_shard(layer, mesh)
-        >>> storage = flex_shard(model, mesh)  # Only wraps non-layer params
-        >>> # Forward/backward now work automatically with hooks
-        >>> output = model(input)
-        >>> output.sum().backward()
+        >>> # Single bucket (default):
+        >>> flex_shard(model, mesh)
+        >>> # Explicit buckets:
+        >>> flex_shard(model, mesh, buckets=[["attn.*"], ["ffn.*"]])
+        >>> # Auto buckets (one per child):
+        >>> flex_shard(model, mesh, buckets=auto_buckets(model))
 
     Note:
         - Parameters of different dtypes are supported in a single unified buffer
         - Proper alignment is maintained for each dtype
         - Parameters on meta device will have uninitialized storage
-        - The returned DStorage is also stored on module._dstorage
-        - Forward/backward hooks are automatically registered for unshard/reduce_grad
+        - Each bucket must have consistent placement types
     """
-    if shard_placement_fn is None:
-        shard_placement_fn = per_param_placements
+    resolved_fn = _resolve_placement_fn(shard_placement_fn)
 
     # Check if module is already wrapped
-    if getattr(module, _DSTORAGE_ATTR, None) is not None:
+    if getattr(module, _DSTORAGES_ATTR, None) is not None:
         raise ValueError(
             f"Module {type(module).__name__} already has DStorage. "
             "Cannot apply flex_shard twice to the same module."
@@ -1774,45 +1952,80 @@ def flex_shard(
         else:
             device = torch.device(device)
 
-    # Create parameter infos with local shapes and byte offsets
-    param_placements = shard_placement_fn(named_params, mesh)
+    # Resolve placements for all params
+    param_placements = resolved_fn(named_params, mesh)
     _validate_placements_for_tracing(param_placements, named_params, mesh)
-    param_infos, total_bytes, total_unsharded_bytes = _create_param_infos(
-        named_params, mesh, param_placements
-    )
 
-    # Allocate unified byte storage
-    byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
+    # Resolve buckets
+    if buckets is None:
+        buckets_resolved: list[list[str] | BucketSpec] = [["*"]]
+    else:
+        buckets_resolved = buckets
 
-    # Pack original data into byte storage via placement.extract_local_shard()
-    _write_params_to_dstorage(byte_storage, named_params, param_infos, mesh)
+    param_fqns = [fqn for fqn, _ in named_params]
+    bucket_assignments = _assign_params_to_buckets(param_fqns, buckets_resolved)
+    _validate_bucket_placements(bucket_assignments, param_placements, buckets_resolved)
 
-    # Replace each parameter with annotated plain tensor (before creating DStorage)
-    for fqn, info in param_infos.items():
-        local_view = byte_storage[
-            info.byte_offset : info.byte_offset + info.local_numel * info.dtype.itemsize
-        ]
-        typed_view = local_view.view(info.dtype).view(info.local_shape)
-        new_param = nn.Parameter(typed_view, requires_grad=info.requires_grad)
-        _create_sharded_view(new_param, info, mesh)
-        _set_param_on_module(module, fqn, new_param)
+    # Log bucket coverage
+    if logger.isEnabledFor(logging.DEBUG):
+        lines = ["flex_shard bucket coverage:"]
+        total_params = 0
+        for i, fqns in enumerate(bucket_assignments):
+            patterns = _get_bucket_patterns(buckets_resolved[i])
+            lines.append(f"  bucket {i} {patterns}: {len(fqns)} params")
+            total_params += len(fqns)
+        lines.append(
+            f"  total: {total_params} params across " f"{len(buckets_resolved)} buckets"
+        )
+        logger.debug("\n".join(lines))
 
-    # Create DStorage (after sharded params are registered)
-    # This also registers forward/backward hooks if requested
-    storage = DStorage(
-        byte_storage,
-        param_infos,
-        mesh,
-        total_bytes,
-        total_unsharded_bytes,
-        module,
-        reshard_after_forward=reshard_after_forward,
-        register_hooks=register_hooks,
-        module_fqn=module_fqn,
-    )
+    # Per-bucket: create param_infos, byte buffer, replace params, create DStorage
+    named_params_dict = dict(named_params)
+    storages: list[DStorage] = []
 
-    # Store DStorage on module (accessible via module.dstorage)
-    setattr(module, _DSTORAGE_ATTR, storage)
+    for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
+        if not bucket_fqns:
+            continue
+
+        bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
+        bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
+
+        param_infos, total_bytes, total_unsharded_bytes = _create_param_infos(
+            bucket_named_params, mesh, bucket_placements
+        )
+
+        byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
+        _write_params_to_dstorage(byte_storage, bucket_named_params, param_infos, mesh)
+
+        for fqn, info in param_infos.items():
+            local_view = byte_storage[
+                info.byte_offset : info.byte_offset
+                + info.local_numel * info.dtype.itemsize
+            ]
+            typed_view = local_view.view(info.dtype).view(info.local_shape)
+            new_param = nn.Parameter(typed_view, requires_grad=info.requires_grad)
+            _create_sharded_view(new_param, info, mesh)
+            _set_param_on_module(module, fqn, new_param)
+
+        bucket_fqn = (
+            f"{module_fqn}_bucket{bucket_idx}" if module_fqn else f"bucket{bucket_idx}"
+        )
+        storage = DStorage(
+            byte_storage,
+            param_infos,
+            mesh,
+            total_bytes,
+            total_unsharded_bytes,
+            module,
+            reshard_after_forward=reshard_after_forward,
+            register_hooks=register_hooks,
+            module_fqn=bucket_fqn,
+        )
+        storages.append(storage)
+
+    # Store DStorages on module
+    setattr(module, _DSTORAGES_ATTR, storages)
+    setattr(module, _DSTORAGE_ATTR, storages[0] if storages else None)
 
     # Change module class to include FlexShardModule mixin
     cls = type(module)
@@ -1824,38 +2037,39 @@ def flex_shard(
         group_name = mesh.get_group().group_name
         world_size = mesh.size()
 
-        # Group parametrizations by leaf module
+        # Group parametrizations by leaf module (across all buckets)
         module_param_map: dict[nn.Module, dict[str, nn.Module]] = {}
 
-        for fqn, info in param_infos.items():
-            placement = info.placements[0]
-            if isinstance(placement, Shard):
-                p = ShardParametrization(
-                    shard_dim=placement.dim,
-                    group_name=group_name,
-                    world_size=world_size,
-                )
-            elif isinstance(placement, FlatShard):
-                p = FlatShardParametrization(
-                    group_name=group_name,
-                    world_size=world_size,
-                    original_shape=info.global_shape,
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported placement for parametrization: {placement}"
-                )
+        for s in storages:
+            for fqn, info in s._param_infos.items():
+                placement = info.placements[0]
+                if isinstance(placement, Shard):
+                    p = ShardParametrization(
+                        shard_dim=placement.dim,
+                        group_name=group_name,
+                        world_size=world_size,
+                    )
+                elif isinstance(placement, FlatShard):
+                    p = FlatShardParametrization(
+                        group_name=group_name,
+                        world_size=world_size,
+                        original_shape=info.global_shape,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported placement for parametrization: " f"{placement}"
+                    )
 
-            # Find the leaf module owning this param
-            parts = fqn.split(".")
-            leaf_mod = module
-            for part in parts[:-1]:
-                leaf_mod = getattr(leaf_mod, part)
-            local_name = parts[-1]
+                # Find the leaf module owning this param
+                parts = fqn.split(".")
+                leaf_mod = module
+                for part in parts[:-1]:
+                    leaf_mod = getattr(leaf_mod, part)
+                local_name = parts[-1]
 
-            if leaf_mod not in module_param_map:
-                module_param_map[leaf_mod] = {}
-            module_param_map[leaf_mod][local_name] = p
+                if leaf_mod not in module_param_map:
+                    module_param_map[leaf_mod] = {}
+                module_param_map[leaf_mod][local_name] = p
 
         for mod, param_map in module_param_map.items():
             _register_parametrization(mod, param_map)

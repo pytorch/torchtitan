@@ -1228,18 +1228,26 @@ and pass user-specified buckets through from the model's `parallelize.py`.
 
 ### Auto-Bucket Generation
 
-For convenience, `flex_shard` can auto-generate buckets from model structure when
-`buckets=None`:
+`auto_buckets()` is a public helper that generates one bucket per direct child module:
 
 ```python
-def _auto_buckets(module: nn.Module) -> list[list[str]]:
+def auto_buckets(module: nn.Module) -> list[list[str]]:
     """Generate one bucket per direct child module."""
-    return [[name] for name, _ in module.named_children()]
+    children = list(module.named_children())
+    if not children:
+        return [["*"]]
+    return [[f"{name}.*"] for name, _ in children]
 ```
 
-This gives reasonable defaults (one bucket per top-level submodule) without requiring
-the user to manually list FQNs. Used in both execution contexts when no explicit
-buckets are provided.
+When `buckets=None` (the default), all parameters go into a single bucket. Users
+call `auto_buckets()` explicitly when they want per-child bucketing:
+
+```python
+flex_shard(model, mesh, buckets=auto_buckets(model))
+```
+
+This separation keeps the default simple (whole-model = one bucket) while making
+per-child bucketing a one-liner when needed.
 
 ## Proposed Architecture
 
@@ -1294,14 +1302,16 @@ FlexShard Core (always parametrization-based)
 - [x] `flex_shard()` creates per-param parametrization instances grouped by leaf module, wiring `Shard` → `ShardParametrization`, `FlatShard` → `FlatShardParametrization`
 - [x] Unit tests in `test_flex_shard_parametrization.py`: guard behavior (disable/restore/exception safety), property registration (dynamic subclass, state_dict bypass, multi-param), distributed correctness (param access triggers all-gather, state_dict returns sharded, guard disables all-gather, forward correctness)
 
-### Phase 2b: BucketSpec and bucket validation
+### Phase 2b: BucketSpec and bucket validation ✓
 
-- [ ] Implement `BucketSpec` dataclass with `patterns`, `mp_policy`, `offload_policy`
-- [ ] Implement bucket validation: reject orphan params, overlapping params, mismatched placement type/dimension within a bucket; emit coverage summary at `logger.debug` level
-- [ ] Implement fnmatch-based `shard_placement_fn` dict form (see "Unified API" section)
-- [ ] Create per-bucket DStorage instances from bucket spec
-- [ ] Implement auto-bucket generation (`_auto_buckets()`) for `buckets=None` default
-- [ ] Unit tests: bucket validation catches orphans and overlaps
+- [x] Implement `BucketSpec` dataclass with `patterns`, `mp_policy`, `offload_policy` fields (`mp_policy`/`offload_policy` are placeholders — behavior implemented in Phase 2c)
+- [x] Implement bucket validation: `_assign_params_to_buckets()` rejects orphan params and overlapping params with actionable error messages; `_validate_bucket_placements()` rejects mismatched placement type or shard dimension within a bucket; coverage summary emitted at `logger.debug` level
+- [x] Implement fnmatch-based `shard_placement_fn` dict form via `_resolve_placement_fn()` — accepts `None` (default `per_param_placements`), `dict[str, Placement]` (fnmatch patterns, first match wins), or callable (pass-through)
+- [x] Create per-bucket DStorage instances: `flex_shard()` body refactored to loop over bucket assignments, creating independent `byte_storage`, `param_infos`, and `DStorage` per bucket; module stores `_dstorages` (list) and `_dstorage` (first element, backward compat)
+- [x] `FlexShardModule` updated: `unshard()`/`reduce_grad()` iterate all storages; `.dstorage`/`.dstorages` properties added
+- [x] `buckets=None` defaults to single bucket (`["*"]`); `auto_buckets()` is a public helper generating one bucket per direct child module (user calls explicitly, not the default)
+- [x] `flex_shard()` signature updated: `shard_placement_fn` accepts `PlacementFn | dict[str, Placement] | None`; `buckets`, `reshard_after_forward`, `register_hooks`, `module_fqn` are keyword-only
+- [x] Unit tests in `test_flex_shard_buckets.py`: fnmatch placement dict (5 tests), bucket assignment (6 tests), placement validation (5 tests), auto_buckets (3 tests), BucketSpec (2 tests), distributed per-bucket DStorage (4 tests)
 
 ### Phase 2c: Memory management and mixed precision
 
