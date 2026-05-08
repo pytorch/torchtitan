@@ -125,18 +125,24 @@ class _PaddedShard(Shard):
 
 
 # ---------------------------------------------------------------------------
-# DP shard mesh tests (single-process, no PG required)
+# Shard mesh tests (single-process CPU)
 # ---------------------------------------------------------------------------
 
 
-class TestDPShardMesh(TestCase):
-    """Test FlexShard DP shard mesh derivation."""
+class TestFlexShardMesh(TestCase):
+    """Test FlexShard shard mesh validation."""
 
-    def test_dp_mesh_dims_derives_shard_submesh(self):
-        from torch.distributed.fsdp import DataParallelMeshDims
-
+    def test_accepts_1d_mesh(self):
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _get_dp_shard_mesh,
+            _validate_flex_shard_mesh,
+        )
+
+        with single_rank_cpu_mesh() as mesh:
+            _validate_flex_shard_mesh(mesh)
+
+    def test_rejects_multi_dim_mesh(self):
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_flex_shard_mesh,
         )
 
         with single_rank_cpu_mesh():
@@ -145,79 +151,8 @@ class TestDPShardMesh(TestCase):
                 (1, 1),
                 mesh_dim_names=("fsdp", "tp"),
             )
-            shard_mesh = _get_dp_shard_mesh(mesh, DataParallelMeshDims(shard="fsdp"))
-
-        self.assertEqual(shard_mesh.mesh_dim_names, ("fsdp",))
-
-    def test_dp_mesh_dims_flattens_multiple_shard_dims(self):
-        from torch.distributed.fsdp import DataParallelMeshDims
-
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _get_dp_shard_mesh,
-        )
-
-        with single_rank_cpu_mesh():
-            mesh = init_device_mesh(
-                "cpu",
-                (1, 1, 1),
-                mesh_dim_names=("dp0", "dp1", "tp"),
-            )
-            shard_mesh = _get_dp_shard_mesh(
-                mesh,
-                DataParallelMeshDims(shard=("dp0", "dp1")),
-            )
-
-        self.assertEqual(shard_mesh.mesh_dim_names, ("dp0_dp1",))
-
-    def test_dp_mesh_dims_requires_named_mesh(self):
-        from torch.distributed.fsdp import DataParallelMeshDims
-
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _get_dp_shard_mesh,
-        )
-
-        with single_rank_cpu_mesh():
-            mesh = init_device_mesh("cpu", (1,))
-            with self.assertRaisesRegex(ValueError, "mesh_dim_names"):
-                _get_dp_shard_mesh(mesh, DataParallelMeshDims(shard="fsdp"))
-
-    def test_dp_mesh_dims_rejects_missing_dim(self):
-        from torch.distributed.fsdp import DataParallelMeshDims
-
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _get_dp_shard_mesh,
-        )
-
-        with single_rank_cpu_mesh():
-            mesh = init_device_mesh(
-                "cpu",
-                (1, 1),
-                mesh_dim_names=("fsdp", "tp"),
-            )
-            with self.assertRaisesRegex(ValueError, "not found"):
-                _get_dp_shard_mesh(
-                    mesh,
-                    DataParallelMeshDims(shard="missing"),
-                )
-
-    def test_dp_mesh_dims_rejects_replicate_until_hsdp_supported(self):
-        from torch.distributed.fsdp import DataParallelMeshDims
-
-        from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _get_dp_shard_mesh,
-        )
-
-        with single_rank_cpu_mesh():
-            mesh = init_device_mesh(
-                "cpu",
-                (1, 1, 1),
-                mesh_dim_names=("rep", "fsdp", "tp"),
-            )
-            with self.assertRaisesRegex(NotImplementedError, "replicate"):
-                _get_dp_shard_mesh(
-                    mesh,
-                    DataParallelMeshDims(shard="fsdp", replicate="rep"),
-                )
+            with self.assertRaisesRegex(ValueError, "1D DeviceMesh"):
+                _validate_flex_shard_mesh(mesh)
 
 
 # ---------------------------------------------------------------------------
@@ -602,8 +537,6 @@ class TestDistributedBuckets(FSDPTest):
         )
 
     def _flex_shard(self, model, mesh, **kwargs):
-        from torch.distributed.fsdp import DataParallelMeshDims
-
         from torchtitan.experiments.flex_shard import flex_shard
         from torchtitan.experiments.flex_shard.example.shard import per_param_placements
 
@@ -612,7 +545,6 @@ class TestDistributedBuckets(FSDPTest):
         return flex_shard(
             model,
             mesh,
-            DataParallelMeshDims(shard="fsdp"),
             **kwargs,
         )
 

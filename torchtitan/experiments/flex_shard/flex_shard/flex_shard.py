@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from torch.distributed.fsdp import DataParallelMeshDims
 
 from .bucket_runtime import (
     _create_eager_param_states,
@@ -39,8 +38,8 @@ from .bucket_storage import (
 )
 from .utils import (
     _get_device_from_mesh,
-    _get_dp_shard_mesh,
     _get_managed_named_params,
+    _validate_flex_shard_mesh,
     _validate_bucket_placements,
     _validate_eager_params,
     _validate_placements,
@@ -83,7 +82,6 @@ class PreparedFlexShardInputs:
 def _prepare_flex_shard_inputs(
     module: nn.Module,
     mesh: DeviceMesh,
-    dp_mesh_dims: DataParallelMeshDims,
     shard_placement_fn: PlacementFn,
     buckets: list[BucketSpec],
 ) -> PreparedFlexShardInputs:
@@ -97,7 +95,8 @@ def _prepare_flex_shard_inputs(
             "All parameters may belong to already-wrapped submodules."
         )
 
-    shard_mesh = _get_dp_shard_mesh(mesh, dp_mesh_dims)
+    _validate_flex_shard_mesh(mesh)
+    shard_mesh = mesh
     all_params_meta = all(param.device.type == "meta" for _, param in named_params)
     device = (
         torch.device("meta") if all_params_meta else _get_device_from_mesh(shard_mesh)
@@ -141,7 +140,6 @@ def _prepare_flex_shard_inputs(
 def flex_shard(
     module: nn.Module,
     mesh: DeviceMesh,
-    dp_mesh_dims: DataParallelMeshDims,
     shard_placement_fn: PlacementFn,
     buckets: list[BucketSpec],
 ) -> FlexShardModule:
@@ -165,11 +163,9 @@ def flex_shard(
 
     Args:
         module: The module to shard. Can have real or meta device parameters.
-        mesh: The named device mesh for sharding.
-        dp_mesh_dims: Names for the data-parallel dimensions in ``mesh``.
-            FlexShard derives its DP shard mesh from ``mesh``.
+        mesh: The 1D device mesh for sharding.
         shard_placement_fn: Required callable that maps
-            ``(named_params, dp_shard_mesh)`` to per-parameter placements.
+            ``(named_params, mesh)`` to per-parameter placements.
             The minimal eager path expects one ``Placement`` per parameter.
             Example ``Shard(0)`` placements are available under
             ``torchtitan.experiments.flex_shard.example.shard``.
@@ -188,7 +184,6 @@ def flex_shard(
         >>> flex_shard(
         ...     model,
         ...     mesh,
-        ...     DataParallelMeshDims(shard="fsdp"),
         ...     shard_placement_fn=per_param_placements,
         ...     buckets=[BucketSpec(["*"])],
         ... )
@@ -196,7 +191,6 @@ def flex_shard(
         >>> flex_shard(
         ...     model,
         ...     mesh,
-        ...     DataParallelMeshDims(shard="fsdp"),
         ...     shard_placement_fn=per_param_placements,
         ...     buckets=[BucketSpec(["attn.*"]), BucketSpec(["ffn.*"])],
         ... )
@@ -209,7 +203,6 @@ def flex_shard(
     inputs = _prepare_flex_shard_inputs(
         module,
         mesh,
-        dp_mesh_dims,
         shard_placement_fn,
         buckets,
     )

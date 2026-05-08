@@ -15,7 +15,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import DataParallelMeshDims
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     ModelArgs,
     Transformer,
@@ -60,7 +59,6 @@ def flex_shard_cpu(
     return flex_shard(
         model,
         mesh,
-        DataParallelMeshDims(shard="fsdp"),
         shard_placement_fn=per_param_placements,
         buckets=buckets,
     )

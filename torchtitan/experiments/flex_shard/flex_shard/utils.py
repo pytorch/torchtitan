@@ -11,7 +11,6 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
-from torch.distributed.fsdp import DataParallelMeshDims
 
 from .param_access import _DSTORAGE_ATTR
 from .placement_contract import Placement
@@ -155,49 +154,12 @@ def _get_managed_named_params(
     return managed_params
 
 
-def _validate_flex_shard_mesh(
-    mesh: DeviceMesh,
-    dp_mesh_dims: DataParallelMeshDims,
-) -> None:
+def _validate_flex_shard_mesh(mesh: DeviceMesh) -> None:
     """Validate mesh inputs for FlexShard eager mode."""
-    if dp_mesh_dims.shard is None:
-        raise ValueError("flex_shard requires dp_mesh_dims.shard to be set")
-    if dp_mesh_dims.replicate is not None:
-        raise NotImplementedError(
-            "flex_shard eager mode does not yet support dp_mesh_dims.replicate"
-        )
-    if mesh.mesh_dim_names is None:
-        raise ValueError("mesh must have mesh_dim_names when dp_mesh_dims is provided")
-
-    mesh_names = tuple(mesh.mesh_dim_names)
-    axis_names = dp_mesh_dims.shard_names + dp_mesh_dims.replicate_names
-    if len(set(axis_names)) != len(axis_names):
+    if mesh.ndim != 1:
         raise ValueError(
-            f"dp_mesh_dims contains duplicate mesh axis names: {axis_names}"
+            f"flex_shard requires a 1D DeviceMesh, but got {mesh.ndim}D mesh"
         )
-    for name in axis_names:
-        if name not in mesh_names:
-            raise ValueError(
-                f"Mesh axis name {name!r} not found in mesh.mesh_dim_names {mesh_names}"
-            )
-
-
-def _get_submesh(mesh: DeviceMesh, names: tuple[str, ...]) -> DeviceMesh:
-    """Return one mesh axis or flatten several named mesh axes."""
-    if len(names) == 1:
-        return mesh[names[0]]
-    return mesh[names]._flatten("_".join(names))
-
-
-def _get_dp_shard_mesh(
-    mesh: DeviceMesh,
-    dp_mesh_dims: DataParallelMeshDims,
-) -> DeviceMesh:
-    """Derive FlexShard's DP shard mesh from the input mesh."""
-    _validate_flex_shard_mesh(mesh, dp_mesh_dims)
-
-    assert mesh.mesh_dim_names is not None
-    return _get_submesh(mesh, dp_mesh_dims.shard_names)
 
 
 def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:

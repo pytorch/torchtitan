@@ -9,7 +9,6 @@ import copy
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import DataParallelMeshDims
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest, get_devtype
 from torch.testing._internal.common_utils import run_tests
@@ -68,7 +67,6 @@ class TestFlexShardTraining(FSDPTest):
         flex_shard(
             model,
             mesh,
-            DataParallelMeshDims(shard="fsdp"),
             shard_placement_fn=per_param_placements,
             buckets=transformer_bucket_specs(
                 args.n_layers,
@@ -116,7 +114,6 @@ class TestFlexShardTraining(FSDPTest):
         flex_shard(
             model,
             mesh,
-            DataParallelMeshDims(shard="fsdp"),
             shard_placement_fn=per_param_placements,
             buckets=[
                 BucketSpec(
