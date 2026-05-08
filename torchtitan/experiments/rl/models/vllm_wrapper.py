@@ -28,6 +28,7 @@ from torchtitan.config import (
     CompileConfig,
     DebugConfig,
     ParallelismConfig,
+    TrainingConfig,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
@@ -171,13 +172,8 @@ class TorchTitanVLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Build ParallelDims directly from the torchtitan-side parallelism
-        # config (the controller's source of truth). vLLM's ``parallel_config``
-        # carries the same TP/EP values translated for vLLM's scheduler, but
-        # we don't reconstruct from it — that round-trip is lossy and couples
-        # the wrapper to vLLM's internal naming. ``world_size`` comes from
-        # the live process group, which the caller has already set up to
-        # match TP × EP-effective ranks.
+        # Build ParallelDims from the torchtitan ParallelismConfig (the
+        # controller's source of truth) rather than vLLM's parallel_config.
         self.parallel_dims = ParallelDims(
             dp_replicate=parallelism.data_parallel_replicate_degree,
             dp_shard=1,
@@ -194,8 +190,6 @@ class TorchTitanVLLMModelWrapper(Module):
         # TODO: Refactor update_from_config to accept ParallelismConfig
         # directly instead of requiring a trainer_config wrapper.
         from types import SimpleNamespace
-
-        from torchtitan.config import TrainingConfig
 
         self.config.update_from_config(
             trainer_config=SimpleNamespace(
