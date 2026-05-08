@@ -1161,6 +1161,10 @@ _reshard_checkpoint_enabled: ContextVar[bool] = ContextVar(
     "_reshard_checkpoint_enabled",
     default=True,
 )
+_reshard_checkpoint_recompute: ContextVar[bool] = ContextVar(
+    "_reshard_checkpoint_recompute",
+    default=False,
+)
 
 
 def _set_tensor_reshard_after_forward(
@@ -1200,6 +1204,17 @@ def _disable_reshard_checkpoint() -> Generator[None, None, None]:
         yield
     finally:
         _reshard_checkpoint_enabled.reset(token)
+
+
+@contextmanager
+def _mark_reshard_checkpoint_recompute(ctx: Any) -> Generator[None, None, None]:
+    """Mark execution as FlexShard checkpoint recomputation."""
+    token = _reshard_checkpoint_recompute.set(True)
+    try:
+        with ctx:
+            yield
+    finally:
+        _reshard_checkpoint_recompute.reset(token)
 
 
 _wrap_class_counter = 0
@@ -2180,7 +2195,8 @@ def _compose_reshard_with_ac_policy(ac_context_fn):
                 return _orig(sctx, func, *args, **kwargs)
 
             ctx.policy_fn = merged_policy
-        return contexts
+        forward_ctx, recompute_ctx = contexts
+        return forward_ctx, _mark_reshard_checkpoint_recompute(recompute_ctx)
 
     return merged_context_fn
 
@@ -3134,7 +3150,10 @@ def _wrap_with_reshard(child: nn.Module) -> nn.Module:
     from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
     def _reshard_only_context_fn():
-        return create_selective_checkpoint_contexts(_flex_shard_reshard_policy)
+        forward_ctx, recompute_ctx = create_selective_checkpoint_contexts(
+            _flex_shard_reshard_policy
+        )
+        return forward_ctx, _mark_reshard_checkpoint_recompute(recompute_ctx)
 
     if isinstance(child, CheckpointWrapper):
         # AC already applied — unwrap, merge policies, re-wrap
@@ -3390,15 +3409,18 @@ def _install_batched_allgather_hooks(
             def _prefetch_next_bucket():
                 if all_gather_context.pending is not None:
                     return
-                for idx, bucket in enumerate(all_gather_context.buckets):
+                prefetch_order = all_gather_context.buckets
+                if _reshard_checkpoint_recompute.get():
+                    prefetch_order = prefetch_order[::-1]
+                for idx, bucket in enumerate(prefetch_order):
                     if bucket is all_gather_bucket:
                         break
                 else:
                     return
                 next_idx = idx + 1
-                if next_idx >= len(all_gather_context.buckets):
+                if next_idx >= len(prefetch_order):
                     return
-                next_bucket = all_gather_context.buckets[next_idx]
+                next_bucket = prefetch_order[next_idx]
                 all_gather_context.pending = PendingEagerAllGather(
                     bucket=next_bucket,
                     result=_begin_bucket_unshard(next_bucket),
