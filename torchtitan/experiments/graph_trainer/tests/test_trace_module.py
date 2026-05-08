@@ -1495,6 +1495,141 @@ class TestTraceFSDP(FSDPTest):
         )
 
 
+@unittest.skipIf(torch.cuda.device_count() < 2, "CP trace test requires 2 GPUs")
+class TestTraceContextParallel(FSDPTest):
+    @property
+    def world_size(self):
+        return 2
+
+    def _trace_llama3_step_code(
+        self,
+        *,
+        dp_shard_degree: int,
+        context_parallel_degree: int,
+    ) -> dict[str, object]:
+        import os
+        import tempfile
+
+        import torch.distributed as dist
+
+        from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+            graph_trainer_llama3_debugmodel,
+        )
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+        old_local_rank = os.environ.get("LOCAL_RANK")
+        os.environ["LOCAL_RANK"] = str(dist.get_rank() % torch.cuda.device_count())
+
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+
+        trainer = None
+        try:
+            with tempfile.TemporaryDirectory() as dump_folder:
+                config = graph_trainer_llama3_debugmodel()
+                config.dump_folder = dump_folder
+                config.training.local_batch_size = 2
+                config.training.seq_len = 128
+                config.training.steps = 1
+                config.parallelism.data_parallel_replicate_degree = 1
+                config.parallelism.data_parallel_shard_degree = dp_shard_degree
+                config.parallelism.context_parallel_degree = context_parallel_degree
+                config.parallelism.tensor_parallel_degree = 1
+                config.activation_checkpoint.mode = "none"
+                config.compile.enable = False
+                config.compile.enable_passes = False
+                config.debug.enable_structured_logging = False
+                config.model_spec.model.layers = config.model_spec.model.layers[:1]
+
+                trainer = GraphTrainer(config)
+                tokens = torch.randint(
+                    0,
+                    trainer.model_config.vocab_size,
+                    (config.training.local_batch_size, config.training.seq_len),
+                    device=trainer.device,
+                )
+                labels = torch.randint(
+                    0,
+                    trainer.model_config.vocab_size,
+                    (config.training.local_batch_size, config.training.seq_len),
+                    device=trainer.device,
+                )
+                trainer.forward_backward_step(
+                    input_dict={"input": tokens},
+                    labels=labels,
+                    global_valid_tokens=torch.tensor(
+                        labels.numel(), device=trainer.device
+                    ),
+                )
+                assert trainer._traced_step is not None
+                code_lines = trainer._traced_step.gm.graph.python_code(
+                    "self"
+                ).src.splitlines()
+                sdpa_line = next(
+                    (
+                        idx
+                        for idx, line in enumerate(code_lines)
+                        if "scaled_dot_product" in line
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(
+                    sdpa_line,
+                    "Expected SDPA in generated code:\n" + "\n".join(code_lines),
+                )
+                assert sdpa_line is not None
+                all_gather_pg_names_before_sdpa = []
+                for node in trainer._traced_step.gm.graph.nodes:
+                    if "scaled_dot_product" in str(node.target):
+                        break
+                    if "all_gather_into_tensor" in str(node.target):
+                        all_gather_pg_names_before_sdpa.append(node.args[2])
+
+                cp_pg_name = (
+                    trainer.parallel_dims.get_mesh("cp").get_group().group_name
+                    if trainer.parallel_dims.cp_enabled
+                    else None
+                )
+                fsdp_pg_name = (
+                    trainer.parallel_dims.get_mesh("fsdp").get_group().group_name
+                )
+                code = trainer._traced_step.gm.graph.python_code("self").src
+                trainer.close()
+                trainer = None
+                return {
+                    "code": code,
+                    "all_gather_pg_names_before_sdpa": (
+                        all_gather_pg_names_before_sdpa
+                    ),
+                    "cp_pg_name": cp_pg_name,
+                    "fsdp_pg_name": fsdp_pg_name,
+                }
+        finally:
+            if trainer is not None:
+                trainer.close()
+            if old_local_rank is None:
+                os.environ.pop("LOCAL_RANK", None)
+            else:
+                os.environ["LOCAL_RANK"] = old_local_rank
+
+    def test_llama3_cp_only_codegen_all_gather_before_sdpa(self):
+        cp_trace = self._trace_llama3_step_code(
+            dp_shard_degree=1,
+            context_parallel_degree=2,
+        )
+        # Verify AG along CP PG exists before SDPA
+        self.assertIn(
+            cp_trace["cp_pg_name"],
+            cp_trace["all_gather_pg_names_before_sdpa"],
+            "Expected CP all_gather on the CP mesh before SDPA. "
+            f"CP pg={cp_trace['cp_pg_name']}, "
+            f"FSDP pg={cp_trace['fsdp_pg_name']}, "
+            "pre-SDPA all_gather pgs="
+            f"{cp_trace['all_gather_pg_names_before_sdpa']}.\n"
+            f"Generated code:\n{cp_trace['code']}",
+        )
+
+
 class TestAutogradGradVsBackwardFSDP(FSDPTest):
     """Verify autograd.grad() and loss.backward() have identical peak memory with FSDP."""
 
