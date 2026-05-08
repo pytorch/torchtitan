@@ -8,6 +8,7 @@ from .flex_shard import (
     DStorage,
     flat_shard_placements,
     FlatShard,
+    FlatShardParametrization,
     flex_shard,
     FlexShardModule,
     get_global_shape,
@@ -20,6 +21,7 @@ from .flex_shard import (
     RaggedShard,
     set_sharding_info,
     Shard,
+    ShardParametrization,
 )
 
 
@@ -27,6 +29,7 @@ __all__ = [
     "DStorage",
     "flat_shard_placements",
     "FlatShard",
+    "FlatShardParametrization",
     "flex_shard",
     "FlexShardModule",
     "get_global_shape",
@@ -39,4 +42,5 @@ __all__ = [
     "RaggedShard",
     "set_sharding_info",
     "Shard",
+    "ShardParametrization",
 ]
