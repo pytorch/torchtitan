@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import torch
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
@@ -204,10 +205,12 @@ class ParallelDims:
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
-        # Populate global SPMD state from the dense mesh PGs.
+        # Populate global SPMD state: always-valid axes + PGs.
         if self.full_spmd_types:
             from spmd_types import MeshAxis
-            from torchtitan.distributed.spmd_state import SpmdState, init_spmd_state
+            from torchtitan.distributed.spmd_state import (
+                MeshAxes, SpmdState, init_spmd_state,
+            )
 
             axes: dict[str, Any] = {}
             pgs: dict[str, Any] = {}
@@ -225,19 +228,12 @@ class ParallelDims:
 
             dp_names = ("dp_replicate", "dp_shard", "cp")
             dp_axes = [axes[n] for n in dp_names if axes[n].size() > 1]
-            all_axes = frozenset(
-                a for n in ("dp_replicate", "dp_shard", "cp", "tp")
-                if (a := axes[n]).size() > 1
-            )
+            all_axes = frozenset(a for a in axes.values() if a.size() > 1)
 
-            init_spmd_state(SpmdState(
-                dp_axes=dp_axes,
-                tp_axis=axes.get("tp"),
-                cp_axis=axes.get("cp"),
-                all_axes=all_axes,
-                _axes=axes,
-                pgs=pgs,
-            ))
+            init_spmd_state(
+                MeshAxes(**axes),
+                SpmdState(dp_axes=dp_axes, all_axes=all_axes, pgs=pgs),
+            )
 
         # Validate mesh sizes
         self._validate_meshes()
@@ -369,6 +365,18 @@ class ParallelDims:
         if not self._meshes:
             self.build_mesh()
         return {k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1}
+
+    def tp_shard(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
+        """Shard tensor along dim across TP ranks, matching DTensor's sharding."""
+        from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
+
+        tp_mesh = self.get_mesh("tp")
+        dtensor = distribute_tensor(
+            tensor, tp_mesh, placements=[Shard(dim)]
+        )
+        return dtensor._local_tensor
+
+
 
     @property
     def world_mesh(self) -> DeviceMesh:
