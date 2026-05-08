@@ -81,7 +81,7 @@ def has_quantization(model_config) -> bool:
         quant_linear_configs.append(Float8Linear.Config)
 
     quant_experts_configs = tuple(
-        cls.Config
+        cls.Config  # type: ignore[attr-defined]
         for cls in (*_float8_experts_cache.values(), *_mxfp8_experts_cache.values())
     )
 
