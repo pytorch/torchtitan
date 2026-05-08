@@ -21,7 +21,7 @@ from .utils import _set_param_on_module
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placements import LocalStorageLayout, Placement
+    from .placements import Placement
 
 
 @dataclass(frozen=True)
@@ -188,6 +188,153 @@ class DStorage:
         self._module = module
         self._reshard_after_forward = reshard_after_forward
 
+    @classmethod
+    def from_bucket(
+        cls,
+        module: nn.Module,
+        named_params: list[tuple[str, nn.Parameter]],
+        param_placements: dict[str, tuple[Placement, ...]],
+        mesh: DeviceMesh,
+        device: torch.device,
+        bucket_spec: BucketSpec,
+    ) -> DStorage:
+        """Create storage for one bucket and install its sharded parameters."""
+        param_infos, total_bytes = cls.create_param_infos(
+            named_params,
+            mesh,
+            param_placements,
+        )
+
+        if bucket_spec.offload_policy is not None:
+            byte_storage = torch.empty(
+                total_bytes,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=bucket_spec.offload_policy.pin_memory,
+            )
+            expected_param_device = torch.device("cpu")
+        else:
+            byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
+            expected_param_device = torch.device(device)
+
+        storage = cls(
+            byte_storage,
+            param_infos,
+            mesh,
+            total_bytes,
+            module,
+            reshard_after_forward=bucket_spec.reshard_after_forward,
+        )
+        storage.copy_params_from(named_params)
+        storage.install_sharded_params(expected_param_device)
+        return storage
+
+    @staticmethod
+    def _compute_local_storage_layout(
+        global_shape: torch.Size,
+        dtype: torch.dtype,
+        mesh: DeviceMesh,
+        placements: tuple[Placement, ...],
+    ):
+        """Compute the placement-owned local storage layout."""
+        rank = mesh.get_local_rank()
+        world_size = mesh.size()
+        placement = _get_single_placement(placements)
+        return placement.local_storage_layout(global_shape, dtype, rank, world_size)
+
+    @classmethod
+    def create_param_infos(
+        cls,
+        named_params: list[tuple[str, nn.Parameter]],
+        mesh: DeviceMesh,
+        param_placements: dict[str, tuple[Placement, ...]],
+    ) -> tuple[dict[str, ParamInfo], int]:
+        """
+        Create ParamInfo for each parameter, computing local layout and byte offsets.
+
+        The caller validates that each bucket uses compatible placements and a
+        uniform dtype. Each placement owns its per-parameter local storage layout;
+        bucket storage only places those layouts sequentially in the byte buffer.
+        """
+        param_infos: dict[str, ParamInfo] = {}
+        current_byte_offset = 0
+
+        for fqn, param in named_params:
+            placements = param_placements[fqn]
+            global_shape = param.shape
+            global_stride = make_contiguous_strides_for(global_shape)
+            dtype = param.dtype
+            local_storage_layout = cls._compute_local_storage_layout(
+                global_shape, dtype, mesh, placements
+            )
+            global_numel = param.numel()
+
+            if local_storage_layout.storage_nbytes > 0:
+                byte_offset = current_byte_offset
+                current_byte_offset += local_storage_layout.storage_nbytes
+            else:
+                byte_offset = 0
+
+            info = ParamInfo(
+                fqn=fqn,
+                global_shape=global_shape,
+                global_stride=tuple(global_stride),
+                dtype=dtype,
+                requires_grad=param.requires_grad,
+                placements=placements,
+                local_shape=local_storage_layout.local_shape,
+                local_numel=local_storage_layout.local_numel,
+                byte_offset=byte_offset,
+                storage_nbytes=local_storage_layout.storage_nbytes,
+                global_numel=global_numel,
+            )
+            param_infos[fqn] = info
+
+        return param_infos, current_byte_offset
+
+    def copy_params_from(
+        self,
+        named_params: list[tuple[str, nn.Parameter]],
+    ) -> None:
+        """Pack original parameter data into byte storage."""
+        my_rank = self._mesh.get_local_rank()
+        world_size = self._mesh.size()
+
+        for fqn, param in named_params:
+            info = self._param_infos[fqn]
+            info.placement.copy_param_to_storage(
+                self._byte_storage,
+                info,
+                param,
+                my_rank,
+                world_size,
+            )
+
+    def install_sharded_params(
+        self,
+        expected_device: torch.device,
+    ) -> None:
+        """Replace original module parameters with local storage views."""
+        for fqn, info in self._param_infos.items():
+            typed_view = info.placement.make_local_storage_view(
+                self._byte_storage,
+                info,
+            )
+            new_param = nn.Parameter(typed_view, requires_grad=info.requires_grad)
+            if new_param.device != expected_device:
+                raise AssertionError(
+                    f"Expected sharded parameter {fqn!r} on "
+                    f"{expected_device}, but got {new_param.device}"
+                )
+            set_sharding_info(
+                new_param,
+                placements=info.placements,
+                global_shape=info.global_shape,
+                global_stride=info.global_stride,
+                mesh=self._mesh,
+            )
+            _set_param_on_module(self._module, fqn, new_param)
+
     @property
     def byte_storage(self) -> torch.Tensor:
         """The underlying unified byte storage tensor (sharded)."""
@@ -224,102 +371,6 @@ class DStorage:
         return info.placement.make_local_storage_view(self._byte_storage, info)
 
 
-def _compute_local_storage_layout(
-    global_shape: torch.Size,
-    dtype: torch.dtype,
-    mesh: DeviceMesh,
-    placements: tuple[Placement, ...],
-) -> LocalStorageLayout:
-    """Compute the placement-owned local storage layout."""
-    rank = mesh.get_local_rank()
-    world_size = mesh.size()
-    placement = _get_single_placement(placements)
-    return placement.local_storage_layout(global_shape, dtype, rank, world_size)
-
-
-def _create_param_infos(
-    named_params: list[tuple[str, nn.Parameter]],
-    mesh: DeviceMesh,
-    param_placements: dict[str, tuple[Placement, ...]],
-) -> tuple[dict[str, ParamInfo], int]:
-    """
-    Create ParamInfo for each parameter, computing local layout and byte offsets.
-
-    The caller validates that each bucket uses compatible placements and a
-    uniform dtype. Each placement owns its per-parameter local storage layout;
-    bucket storage only places those layouts sequentially in the byte buffer.
-
-    Args:
-        named_params: List of (fqn, param) tuples
-        mesh: DP shard mesh used for sharding
-        param_placements: Dict mapping FQN to placement tuple for each parameter
-
-    Returns:
-        param_infos: dict mapping FQN to ParamInfo
-        total_bytes: total bytes needed for the sharded buffer
-    """
-    param_infos: dict[str, ParamInfo] = {}
-    current_byte_offset = 0
-
-    for fqn, param in named_params:
-        placements = param_placements[fqn]
-        global_shape = param.shape
-        global_stride = make_contiguous_strides_for(global_shape)
-        dtype = param.dtype
-        local_storage_layout = _compute_local_storage_layout(
-            global_shape, dtype, mesh, placements
-        )
-        global_numel = param.numel()
-
-        if local_storage_layout.storage_nbytes > 0:
-            byte_offset = current_byte_offset
-            current_byte_offset += local_storage_layout.storage_nbytes
-        else:
-            byte_offset = 0
-
-        info = ParamInfo(
-            fqn=fqn,
-            global_shape=global_shape,
-            global_stride=tuple(global_stride),
-            dtype=dtype,
-            requires_grad=param.requires_grad,
-            placements=placements,
-            local_shape=local_storage_layout.local_shape,
-            local_numel=local_storage_layout.local_numel,
-            byte_offset=byte_offset,
-            storage_nbytes=local_storage_layout.storage_nbytes,
-            global_numel=global_numel,
-        )
-        param_infos[fqn] = info
-
-    return param_infos, current_byte_offset
-
-
-def _write_params_to_dstorage(
-    byte_storage: torch.Tensor,
-    named_params: list[tuple[str, nn.Parameter]],
-    param_infos: dict[str, ParamInfo],
-    mesh: DeviceMesh,
-) -> None:
-    """Pack original parameter data into byte storage.
-
-    Calls placement.extract_local_shard() to get each rank's typed local shard,
-    then copies it as uint8 into the byte buffer.
-    """
-    my_rank = mesh.get_local_rank()
-    world_size = mesh.size()
-
-    for fqn, param in named_params:
-        info = param_infos[fqn]
-        info.placement.copy_param_to_storage(
-            byte_storage,
-            info,
-            param,
-            my_rank,
-            world_size,
-        )
-
-
 def _materialize_bucket_storages(
     module: nn.Module,
     named_params: list[tuple[str, nn.Parameter]],
@@ -344,49 +395,14 @@ def _materialize_bucket_storages(
 
         bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
         bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
-        param_infos, total_bytes = _create_param_infos(
-            bucket_named_params, mesh, bucket_placements
-        )
-
-        if bucket_spec.offload_policy is not None:
-            byte_storage = torch.empty(
-                total_bytes,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=bucket_spec.offload_policy.pin_memory,
-            )
-            expected_param_device = torch.device("cpu")
-        else:
-            byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
-            expected_param_device = torch.device(device)
-
-        _write_params_to_dstorage(byte_storage, bucket_named_params, param_infos, mesh)
-
-        for fqn, info in param_infos.items():
-            typed_view = info.placement.make_local_storage_view(byte_storage, info)
-            new_param = nn.Parameter(typed_view, requires_grad=info.requires_grad)
-            if new_param.device != expected_param_device:
-                raise AssertionError(
-                    f"Expected sharded parameter {fqn!r} on "
-                    f"{expected_param_device}, but got {new_param.device}"
-                )
-            set_sharding_info(
-                new_param,
-                placements=info.placements,
-                global_shape=info.global_shape,
-                global_stride=info.global_stride,
-                mesh=mesh,
-            )
-            _set_param_on_module(module, fqn, new_param)
-
         storages.append(
-            DStorage(
-                byte_storage,
-                param_infos,
-                mesh,
-                total_bytes,
+            DStorage.from_bucket(
                 module,
-                reshard_after_forward=bucket_spec.reshard_after_forward,
+                bucket_named_params,
+                bucket_placements,
+                mesh,
+                device,
+                bucket_spec,
             )
         )
 

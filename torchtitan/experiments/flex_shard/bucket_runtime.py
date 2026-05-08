@@ -67,6 +67,28 @@ class BucketCommContext:
     reduce_scatter_states: list[PendingReduceGrad] = field(default_factory=list)
     reduce_scatter_callback_queued: bool = False
 
+    @classmethod
+    def get_or_create(
+        cls,
+        root_module: nn.Module,
+        device: torch.device,
+    ) -> BucketCommContext:
+        contexts = getattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, None)
+        if contexts is None:
+            contexts = {}
+            setattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, contexts)
+
+        context = contexts.get(device)
+        if context is None:
+            device_handle = _get_device_handle(device.type)
+            context = cls(
+                device_handle=device_handle,
+                all_gather_stream=device_handle.Stream(priority=-1),
+                reduce_scatter_stream=device_handle.Stream(priority=-1),
+            )
+            contexts[device] = context
+        return context
+
     def queue_reduce_scatter_wait(self) -> None:
         """Queue a post-backward wait for reduce-scatter work."""
         if self.reduce_scatter_callback_queued:
@@ -143,6 +165,74 @@ class BucketRuntime:
     use_autograd_unshard: bool
     collected_grads: dict[int, torch.Tensor] = field(default_factory=dict)
 
+    @classmethod
+    def from_storage(
+        cls,
+        storage: DStorage,
+        module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
+        context: BucketCommContext | None = None,
+    ) -> BucketRuntime | None:
+        """Create runtime state for one storage bucket."""
+        entries = cls._get_param_entries(storage, module_param_map)
+        logger.debug(
+            f"Batched hooks: {len(entries)}/{len(storage._param_infos)} params matched"
+        )
+        if not entries:
+            return None
+        if context is None:
+            context = BucketCommContext.get_or_create(
+                storage._module,
+                cls._comm_device(storage, entries),
+            )
+        return cls(
+            storage=storage,
+            entries=entries,
+            context=context,
+            debug_fqn=_get_storage_debug_fqn(storage),
+            use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
+        )
+
+    @staticmethod
+    def _get_param_entries(
+        storage: DStorage,
+        module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
+    ) -> list[ParamEntry]:
+        """Return params in a bucket with their owning module and access state."""
+        param_entries: list[ParamEntry] = []
+        for info in storage._param_infos.values():
+            parts = info.fqn.split(".")
+            leaf_module = storage._module
+            for part in parts[:-1]:
+                child = getattr(leaf_module, part, None)
+                if child is None:
+                    wrapped = getattr(leaf_module, "_checkpoint_wrapped_module", None)
+                    if wrapped is not None:
+                        leaf_module = getattr(wrapped, part)
+                    else:
+                        leaf_module = getattr(leaf_module, part)
+                else:
+                    leaf_module = child
+            local_name = parts[-1]
+            if hasattr(leaf_module, "_checkpoint_wrapped_module"):
+                leaf_module = leaf_module._checkpoint_wrapped_module
+            if leaf_module in module_param_map:
+                param_state = module_param_map[leaf_module].get(local_name)
+                if param_state is not None:
+                    param_entries.append((leaf_module, local_name, param_state, info))
+        return param_entries
+
+    @staticmethod
+    def _comm_device(
+        storage: DStorage,
+        entries: list[ParamEntry],
+    ) -> torch.device:
+        """Return the device used for this bucket's collectives."""
+        comm_device = storage.byte_storage.device
+        for _, _, param_state, _ in entries:
+            if param_state.compute_device is not None:
+                return param_state.compute_device
+        return comm_device
+
     @property
     def infos(self) -> list[ParamInfo]:
         return [info for _, _, _, info in self.entries]
@@ -167,6 +257,49 @@ class BucketRuntime:
                 )
             local_shards.append(local_shard)
         return local_shards
+
+    def bucket_module(self) -> nn.Module:
+        """Find the deepest common ancestor module for this bucket's params."""
+        fqns = list(self.storage._param_infos.keys())
+        prefixes = [".".join(fqn.split(".")[:-1]) for fqn in fqns]
+        if not prefixes:
+            return self.storage._module
+        common = prefixes[0]
+        for prefix in prefixes[1:]:
+            i = 0
+            while i < len(common) and i < len(prefix) and common[i] == prefix[i]:
+                i += 1
+            common = common[:i]
+        # Trim to the last complete component so a partial name match is ignored.
+        if "." in common:
+            common = common[: common.rfind(".") + 1].rstrip(".")
+        elif common and common not in prefixes:
+            common = ""
+        if not common:
+            return self.storage._module
+        mod = self.storage._module
+        for part in common.split("."):
+            mod = getattr(mod, part)
+        return mod
+
+    def hook_target_module(self) -> nn.Module | None:
+        """Return the module whose forward should trigger this bucket."""
+        target = self.bucket_module()
+        if (
+            self.storage._reshard_after_forward
+            and target is self.storage._module
+            and any(
+                hasattr(child, "_checkpoint_wrapped_module")
+                for child in self.storage._module.modules()
+                if child is not self.storage._module
+            )
+        ):
+            logger.debug(
+                "Skipping root-level batched all-gather hook because child "
+                "checkpoint recomputation would not replay the root hook.",
+            )
+            return None
+        return getattr(target, "_checkpoint_wrapped_module", target)
 
     def begin_unshard(self) -> AllGatherUnshardHandle:
         """Begin this bucket's all-gather unshard on the shared stream."""
@@ -386,27 +519,6 @@ class _BucketAllGather(torch.autograd.Function):
         return (None, *([None] * ctx.num_inputs))
 
 
-def _get_or_create_comm_context(
-    root_module: nn.Module,
-    device: torch.device,
-) -> BucketCommContext:
-    contexts = getattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, None)
-    if contexts is None:
-        contexts = {}
-        setattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, contexts)
-
-    context = contexts.get(device)
-    if context is None:
-        device_handle = _get_device_handle(device.type)
-        context = BucketCommContext(
-            device_handle=device_handle,
-            all_gather_stream=device_handle.Stream(priority=-1),
-            reduce_scatter_stream=device_handle.Stream(priority=-1),
-        )
-        contexts[device] = context
-    return context
-
-
 def _storage_requires_batched_unshard(storage: DStorage) -> bool:
     """Return whether parameter access must use hook-provided tensors."""
     return bool(storage._param_infos)
@@ -445,55 +557,6 @@ def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
     )
 
 
-def _get_bucket_module(storage: DStorage) -> nn.Module:
-    """Find the deepest common ancestor module for a bucket's params.
-
-    For bucket "layers.0.*", returns model.layers[0].
-    For bucket "norm.*, output.*" (no common prefix), returns root.
-    """
-    fqns = list(storage._param_infos.keys())
-    prefixes = [".".join(fqn.split(".")[:-1]) for fqn in fqns]
-    if not prefixes:
-        return storage._module
-    common = prefixes[0]
-    for prefix in prefixes[1:]:
-        i = 0
-        while i < len(common) and i < len(prefix) and common[i] == prefix[i]:
-            i += 1
-        common = common[:i]
-    # Trim to the last complete component so a partial name match is ignored.
-    if "." in common:
-        common = common[: common.rfind(".") + 1].rstrip(".")
-    elif common and common not in prefixes:
-        common = ""
-    if not common:
-        return storage._module
-    mod = storage._module
-    for part in common.split("."):
-        mod = getattr(mod, part)
-    return mod
-
-
-def _get_hook_target_module(storage: DStorage) -> nn.Module | None:
-    """Return the module whose forward should trigger a bucket all-gather."""
-    target = _get_bucket_module(storage)
-    if (
-        storage._reshard_after_forward
-        and target is storage._module
-        and any(
-            hasattr(child, "_checkpoint_wrapped_module")
-            for child in storage._module.modules()
-            if child is not storage._module
-        )
-    ):
-        logger.debug(
-            "Skipping root-level batched all-gather hook because child "
-            "checkpoint recomputation would not replay the root hook.",
-        )
-        return None
-    return getattr(target, "_checkpoint_wrapped_module", target)
-
-
 def _get_param_leaf_module(
     module: nn.Module,
     fqn: str,
@@ -504,35 +567,6 @@ def _get_param_leaf_module(
     for part in parts[:-1]:
         leaf_module = getattr(leaf_module, part)
     return leaf_module, parts[-1]
-
-
-def _get_bucket_param_entries(
-    storage: DStorage,
-    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
-) -> list[ParamEntry]:
-    """Return params in a bucket with their owning module and access state."""
-    param_entries: list[ParamEntry] = []
-    for info in storage._param_infos.values():
-        parts = info.fqn.split(".")
-        leaf_module = storage._module
-        for part in parts[:-1]:
-            child = getattr(leaf_module, part, None)
-            if child is None:
-                wrapped = getattr(leaf_module, "_checkpoint_wrapped_module", None)
-                if wrapped is not None:
-                    leaf_module = getattr(wrapped, part)
-                else:
-                    leaf_module = getattr(leaf_module, part)
-            else:
-                leaf_module = child
-        local_name = parts[-1]
-        if hasattr(leaf_module, "_checkpoint_wrapped_module"):
-            leaf_module = leaf_module._checkpoint_wrapped_module
-        if leaf_module in module_param_map:
-            param_state = module_param_map[leaf_module].get(local_name)
-            if param_state is not None:
-                param_entries.append((leaf_module, local_name, param_state, info))
-    return param_entries
 
 
 def _create_eager_param_states(
@@ -592,10 +626,6 @@ def _install_batched_allgather_hooks(
     only, so parameter access will raise before collectives are emitted.
     """
     for storage in storages:
-        infos = list(storage._param_infos.values())
-        if not infos:
-            continue
-
         if not _storage_requires_batched_unshard(storage):
             continue
         if storage._reshard_after_forward and not _storage_uses_bucket_autograd_unshard(
@@ -603,30 +633,18 @@ def _install_batched_allgather_hooks(
         ):
             _raise_unsupported_bucket_autograd_unshard(storage)
 
-        param_entries = _get_bucket_param_entries(storage, module_param_map)
-        logger.debug(f"Batched hooks: {len(param_entries)}/{len(infos)} params matched")
-        if not param_entries:
+        bucket_runtime = BucketRuntime.from_storage(
+            storage=storage,
+            module_param_map=module_param_map,
+        )
+        if bucket_runtime is None:
             continue
 
-        comm_device = storage.byte_storage.device
-        for _, _, param_state, _ in param_entries:
-            if param_state.compute_device is not None:
-                comm_device = param_state.compute_device
-                break
-        ag_context = _get_or_create_comm_context(storage._module, comm_device)
-        bucket_runtime = BucketRuntime(
-            storage=storage,
-            entries=param_entries,
-            context=ag_context,
-            debug_fqn=_get_storage_debug_fqn(storage),
-            use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
-        )
-
-        target = _get_hook_target_module(storage)
+        target = bucket_runtime.hook_target_module()
         if target is None:
             continue
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
         target.register_forward_hook(bucket_runtime.post_forward_hook)
-        ag_context.buckets.append(bucket_runtime)
-        for _, _, param_state, _ in param_entries:
+        bucket_runtime.context.buckets.append(bucket_runtime)
+        for _, _, param_state, _ in bucket_runtime.entries:
             setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)

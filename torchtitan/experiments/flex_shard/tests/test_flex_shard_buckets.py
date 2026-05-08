@@ -34,8 +34,8 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.experiments.flex_shard import BucketSpec, is_flex_shard_param
 from torchtitan.experiments.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
-    _create_param_infos,
     _materialize_bucket_storages,
+    DStorage,
 )
 from torchtitan.experiments.flex_shard.placements import (
     LocalStorageLayout,
@@ -353,7 +353,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         ]
         placements = {fqn: (Shard(0),) for fqn, _ in named_params}
 
-        infos, total_bytes = _create_param_infos(named_params, mesh, placements)
+        infos, total_bytes = DStorage.create_param_infos(named_params, mesh, placements)
 
         tok_embeddings = infos["tok_embeddings.weight"]
         pos_embeddings = infos["pos_embeddings.weight"]
@@ -395,7 +395,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         padding_nbytes = 16
         placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
 
-        infos, total_bytes = _create_param_infos(named_params, mesh, placements)
+        infos, total_bytes = DStorage.create_param_infos(named_params, mesh, placements)
 
         tok_embeddings = infos["tok_embeddings.weight"]
         pos_embeddings = infos["pos_embeddings.weight"]
