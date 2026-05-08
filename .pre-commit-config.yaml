@@ -82,7 +82,8 @@ repos:
       language: system
       entry: |
         /bin/bash -c '
-        SENTINEL_DIR="/tmp/lychee_lock_${PPID}"
+        mkdir -p /tmp/lychee 2>/dev/null
+        SENTINEL_DIR="/tmp/lychee/lychee_lock_${PPID}"
         if ! command -v lychee >/dev/null 2>&1; then
             # mkdir is atomic; only one process will succeed in creating it
             if mkdir "$SENTINEL_DIR" 2>/dev/null; then
@@ -92,7 +93,7 @@ repos:
                   echo ""
                   echo "To enable local link checking, install Lychee:"
                   echo "  - MacOS: brew install lychee"
-                  echo "  - Linux/Windows: https://github.com"
+                  echo "  - Linux/Windows: https://github.com/lycheeverse/lychee"
                   echo "--------------------------------------------------------"
                 } > /dev/tty 2>/dev/null || true
             fi
