@@ -49,7 +49,7 @@ from .utils import (
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placements import Placement
+    from .placement_api import Placement
 
 
 __all__ = [
@@ -170,8 +170,9 @@ def flex_shard(
             FlexShard derives its DP shard mesh from ``mesh``.
         shard_placement_fn: Required callable that maps
             ``(named_params, dp_shard_mesh)`` to per-parameter placements.
-            The minimal eager path currently supports ``Shard(0)`` placements,
-            for example via ``per_param_placements``.
+            The minimal eager path expects one ``Placement`` per parameter.
+            Example ``Shard(0)`` placements are available under
+            ``torchtitan.experiments.flex_shard.example``.
         buckets: Required list of bucket specifications. Use
             ``[BucketSpec(["*"])]`` for a single whole-module bucket.
 
@@ -200,7 +201,7 @@ def flex_shard(
         ...     buckets=[BucketSpec(["attn.*"]), BucketSpec(["ffn.*"])],
         ... )
     Note:
-        - Each bucket must contain only ``Shard(0)`` placements.
+        - Each parameter must have exactly one placement.
         - Each bucket must contain one original parameter dtype. Split mixed
           dtype parameters into separate buckets.
         - Parameters on meta device will have uninitialized storage

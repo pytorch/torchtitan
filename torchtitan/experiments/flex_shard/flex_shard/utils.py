@@ -14,11 +14,11 @@ from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from .param_access import _DSTORAGE_ATTR
+from .placement_api import Placement
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placements import Placement
     from .bucket_storage import DStorage
 
 
@@ -27,6 +27,16 @@ def _with_fqn(label: str, fqn: str | None) -> str:
     if fqn:
         return f"{label} ({fqn})"
     return label
+
+
+def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
+    """Return the only placement supported by the minimal eager path."""
+    if len(placements) != 1:
+        raise ValueError(
+            "FlexShard eager mode currently supports exactly one placement "
+            f"per parameter, but got {len(placements)} placements."
+        )
+    return placements[0]
 
 
 def _module_path_common_prefix(paths: list[str]) -> str:
@@ -234,8 +244,6 @@ def _validate_placements(
     mesh: DeviceMesh,
 ) -> None:
     """Validate that placements are compatible with eager FlexShard."""
-    from .placements import _get_single_placement, Shard
-
     param_dict = dict(named_params)
     expected_fqns = set(param_dict)
     actual_fqns = set(param_placements)
@@ -252,23 +260,37 @@ def _validate_placements(
             f"parameters; {', '.join(msg_parts)}."
         )
 
+    rank = mesh.get_local_rank()
+    world_size = mesh.size()
     for fqn, placements in param_placements.items():
         placement = _get_single_placement(placements)
-        if type(placement) is not Shard:
+        if not isinstance(placement, Placement):
             raise TypeError(
-                "FlexShard eager mode currently supports only Shard "
-                f"placements, but {fqn!r} uses {type(placement).__name__}."
-            )
-        if placement.dim != 0:
-            raise ValueError(
-                "FlexShard eager mode currently supports only Shard(0) "
-                f"placements, but {fqn!r} uses {placement!r}."
+                "shard_placement_fn must return Placement instances, but "
+                f"{fqn!r} uses {type(placement).__name__}."
             )
         param = param_dict[fqn]
-        if placement.dim >= param.ndim:
+        try:
+            layout = placement.local_storage_layout(
+                param.shape,
+                param.dtype,
+                rank,
+                world_size,
+            )
+        except NotImplementedError as exc:
+            raise TypeError(
+                f"Placement {placement!r} for parameter {fqn!r} must implement "
+                "the FlexShard storage layout contract."
+            ) from exc
+        except Exception as exc:
             raise ValueError(
-                f"Parameter {fqn!r} has {param.ndim} dimensions but "
-                f"Shard(dim={placement.dim}) is out of range."
+                f"Placement {placement!r} is invalid for parameter {fqn!r} "
+                f"with shape {tuple(param.shape)}."
+            ) from exc
+        if layout.local_numel < 0 or layout.storage_nbytes < 0:
+            raise ValueError(
+                f"Placement {placement!r} returned negative storage layout "
+                f"values for parameter {fqn!r}."
             )
 
 

@@ -18,8 +18,8 @@ from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
     MixedPrecisionPolicy,
-    per_param_placements,
 )
+from torchtitan.experiments.flex_shard.example import per_param_placements
 from torchtitan.experiments.flex_shard.tests.common import (
     check_flex_shard_parity,
     expected_shard,

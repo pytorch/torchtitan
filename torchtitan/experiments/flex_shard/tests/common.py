@@ -24,8 +24,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
-    per_param_placements,
 )
+from torchtitan.experiments.flex_shard.example import per_param_placements
 
 
 @contextmanager

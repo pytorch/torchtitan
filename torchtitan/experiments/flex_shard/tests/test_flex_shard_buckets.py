@@ -31,16 +31,17 @@ from torch.testing._internal.common_fsdp import (
 )
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.flex_shard import BucketSpec, is_flex_shard_param
-from torchtitan.experiments.flex_shard.bucket_storage import (
+from torchtitan.experiments.flex_shard import (
+    BucketSpec,
+    is_flex_shard_param,
+    LocalStorageLayout,
+    Placement,
+)
+from torchtitan.experiments.flex_shard.example import Shard
+from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
     DStorage,
-)
-from torchtitan.experiments.flex_shard.placements import (
-    LocalStorageLayout,
-    Placement,
-    Shard,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,
@@ -53,8 +54,54 @@ from torchtitan.experiments.flex_shard.tests.common import (
 device_type = torch.device(get_devtype())
 
 
-class _UnsupportedPlacement(Placement):
+class _IncompletePlacement(Placement):
     pass
+
+
+class _TestPlacement(Placement):
+    def compute_local_shape(
+        self, global_shape: torch.Size, rank: int, world_size: int
+    ) -> torch.Size:
+        return global_shape
+
+    def compute_local_numel(
+        self, global_shape: torch.Size, rank: int, world_size: int
+    ) -> int:
+        return int(torch.Size(global_shape).numel())
+
+    def extract_local_shard(
+        self,
+        param: torch.Tensor,
+        rank: int,
+        world_size: int,
+    ) -> torch.Tensor:
+        return param.contiguous()
+
+    def assemble_from_shards(
+        self,
+        per_rank_shards: list[torch.Tensor],
+        global_shape: torch.Size,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return per_rank_shards[0].to(dtype).view(global_shape)
+
+    def pack_reduce_grad(
+        self,
+        tensors: list[torch.Tensor],
+        infos,
+        world_size: int,
+    ):
+        raise NotImplementedError
+
+    def unpack_reduced_grad(
+        self,
+        recv_buf: torch.Tensor,
+        infos,
+        layout,
+        rank: int,
+        world_size: int,
+    ):
+        raise NotImplementedError
 
 
 class _PaddedShard(Shard):
@@ -88,7 +135,7 @@ class TestDPShardMesh(TestCase):
     def test_dp_mesh_dims_derives_shard_submesh(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.utils import (
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
             _get_dp_shard_mesh,
         )
 
@@ -105,7 +152,7 @@ class TestDPShardMesh(TestCase):
     def test_dp_mesh_dims_flattens_multiple_shard_dims(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.utils import (
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
             _get_dp_shard_mesh,
         )
 
@@ -125,7 +172,7 @@ class TestDPShardMesh(TestCase):
     def test_dp_mesh_dims_requires_named_mesh(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.utils import (
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
             _get_dp_shard_mesh,
         )
 
@@ -137,7 +184,7 @@ class TestDPShardMesh(TestCase):
     def test_dp_mesh_dims_rejects_missing_dim(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.utils import (
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
             _get_dp_shard_mesh,
         )
 
@@ -156,7 +203,7 @@ class TestDPShardMesh(TestCase):
     def test_dp_mesh_dims_rejects_replicate_until_hsdp_supported(self):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard.utils import (
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
             _get_dp_shard_mesh,
         )
 
@@ -183,7 +230,7 @@ class TestBucketAssignment(TestCase):
 
     def test_assigns_params_to_correct_bucket(self):
         """Params match the right bucket by fnmatch."""
-        from torchtitan.experiments.flex_shard.bucket_storage import (
+        from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -199,7 +246,7 @@ class TestBucketAssignment(TestCase):
 
     def test_rejects_orphan_params(self):
         """Params matching zero buckets raise ValueError."""
-        from torchtitan.experiments.flex_shard.bucket_storage import (
+        from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -210,7 +257,7 @@ class TestBucketAssignment(TestCase):
 
     def test_rejects_overlapping_params(self):
         """Params matching multiple buckets raise ValueError."""
-        from torchtitan.experiments.flex_shard.bucket_storage import (
+        from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
             _assign_params_to_buckets,
         )
 
@@ -246,7 +293,9 @@ class TestBucketPlacementValidation(TestCase):
 
     def test_rejects_missing_or_extra_placements(self):
         """Placement validation requires exact managed parameter coverage."""
-        from torchtitan.experiments.flex_shard.utils import _validate_placements
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_placements,
+        )
 
         with single_rank_cpu_mesh() as mesh:
             named_params = self._named_params()
@@ -268,43 +317,66 @@ class TestBucketPlacementValidation(TestCase):
                     mesh,
                 )
 
-    def test_rejects_non_shard_placement(self):
-        """Minimal eager validation accepts Shard placements only."""
-        from torchtitan.experiments.flex_shard.utils import _validate_placements
+    def test_rejects_non_placement_object(self):
+        """Placement validation requires Placement instances."""
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_placements,
+        )
 
         with single_rank_cpu_mesh() as mesh:
             named_params = self._named_params()
-            with self.assertRaisesRegex(TypeError, "only Shard"):
+            with self.assertRaisesRegex(TypeError, "Placement instances"):
                 _validate_placements(
                     {
-                        "a.weight": (_UnsupportedPlacement(),),
-                        "b.weight": (_UnsupportedPlacement(),),
+                        "a.weight": (object(),),
+                        "b.weight": (object(),),
                     },
                     named_params,
                     mesh,
                 )
 
-    def test_rejects_nonzero_shard_dim(self):
-        """Minimal eager validation accepts Shard(0) only."""
-        from torchtitan.experiments.flex_shard.utils import _validate_placements
+    def test_rejects_incomplete_placement_contract(self):
+        """Placement subclasses must implement the storage layout contract."""
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_placements,
+        )
 
         with single_rank_cpu_mesh() as mesh:
-            with self.assertRaisesRegex(ValueError, "only Shard\\(0\\)"):
+            named_params = self._named_params()
+            with self.assertRaisesRegex(TypeError, "storage layout contract"):
                 _validate_placements(
                     {
-                        "a.weight": (Shard(0),),
-                        "b.weight": (Shard(1),),
+                        "a.weight": (_IncompletePlacement(),),
+                        "b.weight": (_IncompletePlacement(),),
                     },
-                    self._named_params(),
+                    named_params,
                     mesh,
                 )
 
-    def test_rejects_shard_dim_out_of_range(self):
-        """Shard(0) requires a parameter dimension 0."""
-        from torchtitan.experiments.flex_shard.utils import _validate_placements
+    def test_accepts_valid_placement_subclasses(self):
+        """Core validation does not import or hard-code the example Shard."""
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_placements,
+        )
 
         with single_rank_cpu_mesh() as mesh:
-            with self.assertRaisesRegex(ValueError, "out of range"):
+            _validate_placements(
+                {
+                    "a.weight": (_TestPlacement(),),
+                    "b.weight": (_TestPlacement(),),
+                },
+                self._named_params(),
+                mesh,
+            )
+
+    def test_rejects_shard_dim_out_of_range(self):
+        """Placement layout validation is front-loaded."""
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_placements,
+        )
+
+        with single_rank_cpu_mesh() as mesh:
+            with self.assertRaisesRegex(ValueError, "invalid for parameter"):
                 _validate_placements(
                     {"scalar": (Shard(0),)},
                     [("scalar", nn.Parameter(torch.empty(())))],
@@ -313,7 +385,7 @@ class TestBucketPlacementValidation(TestCase):
 
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
-        from torchtitan.experiments.flex_shard.utils import (
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
             _validate_bucket_placements,
         )
 
@@ -532,10 +604,8 @@ class TestDistributedBuckets(FSDPTest):
     def _flex_shard(self, model, mesh, **kwargs):
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        from torchtitan.experiments.flex_shard import (
-            flex_shard,
-            per_param_placements,
-        )
+        from torchtitan.experiments.flex_shard import flex_shard
+        from torchtitan.experiments.flex_shard.example import per_param_placements
 
         kwargs.setdefault("shard_placement_fn", per_param_placements)
         kwargs.setdefault("buckets", [BucketSpec(["*"], reshard_after_forward=False)])

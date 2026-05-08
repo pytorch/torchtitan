@@ -9,13 +9,13 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
+    FlexShardModule,
     get_global_shape,
     get_placements,
     is_flex_shard_param,
+    OffloadPolicy,
 )
-from torchtitan.experiments.flex_shard.param_access import FlexShardModule
-from torchtitan.experiments.flex_shard.bucket_storage import OffloadPolicy
-from torchtitan.experiments.flex_shard.placements import Shard
+from torchtitan.experiments.flex_shard.example import Shard
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
     flex_shard_transformer_model,
