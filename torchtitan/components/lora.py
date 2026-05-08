@@ -15,6 +15,7 @@ from torch.distributed.tensor import Replicate
 from torchtitan.config import Configurable
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
 
@@ -60,7 +61,7 @@ def _get_lora_cls(parent_cls: type) -> type:
     if parent_cls in _lora_class_cache:
         return _lora_class_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
+    parent_config_cls = parent_cls.Config
 
     class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
@@ -86,68 +87,6 @@ def _get_lora_cls(parent_cls: type) -> type:
     LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
     _lora_class_cache[parent_cls] = LoRALinear
     return LoRALinear
-
-
-@dataclass(kw_only=True, slots=True)
-class LoRAConfig(Configurable.Config):
-    """Config wrapper that applies LoRA to any Linear.Config at build time.
-
-    Wraps an inner ``Linear.Config`` (which may be ``Float8Linear.Config``,
-    ``MXFP8Linear.Config``, or plain ``Linear.Config``) and builds a
-    LoRA subclass directly — one ``__init__`` that initialises both the
-    base linear and the LoRA adapters.
-
-    Delegates unknown attribute access (e.g. ``sharding_config``) to the
-    inner config so that sharding and other config-level operations work
-    transparently through the wrapper.
-    """
-
-    inner: Linear.Config
-    """The original Linear config (preserved for composition with quantization)."""
-
-    rank: int = 16
-    alpha: float = 16.0
-
-    def __getattr__(self, name: str):
-        try:
-            inner = object.__getattribute__(self, "inner")
-        except AttributeError:
-            raise AttributeError(name) from None
-        return getattr(inner, name)
-
-    def __setattr__(self, name: str, value) -> None:
-        if name in type(self).__slots__:
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self.inner, name, value)
-
-    def build(self, **kwargs):
-        inner = self.inner
-        assert inner._owner is not None
-        lora_cls = _get_lora_cls(inner._owner)
-
-        lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(inner.sharding_config)
-        config = lora_cls.Config(  # pyrefly: ignore [missing-attribute]
-            **{f.name: getattr(inner, f.name) for f in fields(inner)},
-            lora_a=Linear.Config(
-                in_features=inner.in_features,
-                out_features=self.rank,
-                bias=False,
-                sharding_config=lora_a_sharding,
-                param_init={
-                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
-                },
-            ),
-            lora_b=Linear.Config(
-                in_features=self.rank,
-                out_features=inner.out_features,
-                bias=False,
-                sharding_config=lora_b_sharding,
-                param_init={"weight": nn.init.zeros_},
-            ),
-            lora_scaling=self.alpha / self.rank,
-        )
-        return config.build()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -180,21 +119,21 @@ class FrozenConfig(Configurable.Config):
         return instance
 
 
-class LoRAConverter(Configurable):
+class LoRAConverter(ModelConfigConverter):
     """Apply LoRA adapters to Linear layers in a model.
 
-    Operates on the model config tree: walks for ``Linear.Config`` entries
-    and wraps them in ``LoRAConfig``. The base module is built first by the
-    inner config, then ``apply_lora`` dynamically wraps it — preserving
-    composition with quantization (Float8, MX, etc.).
+    Operates on the model config tree: target Linear configs are replaced
+    with ``LoRALinear.Config`` (which builds a LoRA subclass with frozen base
+    and trainable adapters). Non-target modules are wrapped with
+    ``FrozenConfig``.
 
     When ``target_modules`` is None (default), every ``Linear.Config`` is
-    wrapped.  When specified, only configs whose FQN's last segment matches
+    converted.  When specified, only configs whose FQN's last segment matches
     one of the entries are converted (e.g. ``["wq", "wv"]``).
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(ModelConfigConverter.Config):
         rank: int = 8
         """Rank of the LoRA matrices."""
 
@@ -225,48 +164,57 @@ class LoRAConverter(Configurable):
                 f"target_modules={sorted(self.target_modules)}"
             )
 
+    def _make_lora_config(self, cfg: Linear.Config):
+        """Create a LoRALinear.Config from a base Linear.Config."""
+        assert cfg._owner is not None
+        lora_cls = _get_lora_cls(cfg._owner)
+        lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(cfg.sharding_config)
+        return lora_cls.Config(
+            **{f.name: getattr(cfg, f.name) for f in fields(cfg)},
+            lora_a=Linear.Config(
+                in_features=cfg.in_features,
+                out_features=self.rank,
+                bias=False,
+                sharding_config=lora_a_sharding,
+                param_init={
+                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
+                },
+            ),
+            lora_b=Linear.Config(
+                in_features=self.rank,
+                out_features=cfg.out_features,
+                bias=False,
+                sharding_config=lora_b_sharding,
+                param_init={"weight": nn.init.zeros_},
+            ),
+            lora_scaling=self.alpha / self.rank,
+        )
+
     def convert(self, model_config) -> None:
         """Walk the model config tree for all leaf modules.
 
-        Target Linear modules are wrapped with ``LoRAConfig`` (trainable
-        adapters, frozen base weight).  Everything else (non-target linears,
-        norms, embeddings) is wrapped with ``FrozenConfig``.  All freezing
-        happens at build time — no separate freeze step needed.
+        Target Linear modules get their config replaced with
+        ``LoRALinear.Config``.  Everything else is wrapped with
+        ``FrozenConfig``.
         """
-        from torchtitan.models.common.embedding import Embedding
-        from torchtitan.models.common.rmsnorm import RMSNorm
-
         matched = set()
 
-        # Wrap all Linear.Config entries
+        # First pass: replace target Linears with LoRA, freeze non-targets
         for fqn, cfg, parent, attr in model_config.traverse(Linear.Config):
             last_segment = fqn.rsplit(".", 1)[-1]
             is_target = (
                 self.target_modules is None or last_segment in self.target_modules
             )
             if is_target:
-                wrapped = LoRAConfig(
-                    inner=cfg,
-                    rank=self.rank,
-                    alpha=self.alpha,
-                )
+                new_cfg = self._make_lora_config(cfg)
                 matched.add(last_segment)
             else:
-                wrapped = FrozenConfig(inner=cfg)
+                new_cfg = FrozenConfig(inner=cfg)
 
             if isinstance(parent, list):
-                parent[attr] = wrapped
+                parent[attr] = new_cfg
             else:
-                setattr(parent, attr, wrapped)
-
-        # Freeze non-Linear leaf modules (norms, embeddings)
-        for config_cls in (RMSNorm.Config, Embedding.Config):
-            for _fqn, cfg, parent, attr in model_config.traverse(config_cls):
-                wrapped = FrozenConfig(inner=cfg)
-                if isinstance(parent, list):
-                    parent[attr] = wrapped
-                else:
-                    setattr(parent, attr, wrapped)
+                setattr(parent, attr, new_cfg)
 
         unmatched = (self.target_modules or set()) - matched
         if unmatched:

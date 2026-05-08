@@ -27,16 +27,18 @@ def test_lora_model_builds():
     model = model_spec.model.build()
     model.init_states()
 
-    trainable = {n for n, p in model.named_parameters() if p.requires_grad}
-    frozen = {n for n, p in model.named_parameters() if not p.requires_grad}
+    lora_params = {
+        n for n, p in model.named_parameters() if "lora_a" in n or "lora_b" in n
+    }
+    frozen_linears = {n for n, p in model.named_parameters() if not p.requires_grad}
 
-    assert len(trainable) > 0, "No trainable parameters found"
-    assert len(frozen) > 0, "No frozen parameters found"
-    for name in trainable:
-        assert (
-            "lora_a" in name or "lora_b" in name
-        ), f"Trainable param '{name}' is not a LoRA adapter"
-    for name in frozen:
+    assert len(lora_params) > 0, "No LoRA parameters found"
+    assert len(frozen_linears) > 0, "No frozen parameters found"
+    for name in lora_params:
+        assert model.get_parameter(
+            name
+        ).requires_grad, f"LoRA param '{name}' should be trainable"
+    for name in frozen_linears:
         assert (
             "lora_a" not in name and "lora_b" not in name
         ), f"Frozen param '{name}' looks like a LoRA adapter"
