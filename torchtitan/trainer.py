@@ -15,6 +15,7 @@ from datetime import timedelta
 from typing import Annotated, Any, cast
 
 import spmd_types as spmd
+from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 import torch
 from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 import torch.distributed.checkpoint.stateful
