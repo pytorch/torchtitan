@@ -17,10 +17,11 @@ from torch.distributed.device_mesh import _get_device_handle
 
 from .bucket_collectives import (
     AllGatherUnshardHandle,
-    ReduceScatterGradHandle,
     begin_all_gather_unshard,
     begin_reduce_scatter_grad,
+    ReduceScatterGradHandle,
 )
+from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .param_access import (
     _BUCKET_FQN_ATTR,
     _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
@@ -31,7 +32,6 @@ from .param_access import (
     ParamModuleInfo,
 )
 from .reshard_after_forward import _reshard_after_forward_recompute
-from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .utils import _get_storage_debug_fqn, _with_fqn
 
 
@@ -606,8 +606,9 @@ def _install_batched_allgather_hooks(
     for storage in storages:
         if not _storage_requires_batched_unshard(storage):
             continue
-        if storage._reshard_after_forward and not _storage_uses_bucket_autograd_unshard(
-            storage
+        if (
+            storage._reshard_after_forward
+            and not _storage_uses_bucket_autograd_unshard(storage)
         ):
             _raise_unsupported_bucket_autograd_unshard(storage)
 

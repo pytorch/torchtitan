@@ -20,10 +20,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     Transformer,
 )
 
-from torchtitan.experiments.flex_shard import (
-    BucketSpec,
-    flex_shard,
-)
+from torchtitan.experiments.flex_shard import BucketSpec, flex_shard
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements
 
 

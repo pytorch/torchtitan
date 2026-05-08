@@ -13,35 +13,30 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .bucket_runtime import (
-    _create_eager_param_states,
-    _install_batched_allgather_hooks,
-)
-from .param_access import (
-    _attach_flex_shard_module_state,
-    _check_not_already_flex_sharded,
-    get_global_shape,
-    get_placements,
-    is_flex_shard_param,
-    _register_module_param_accessors,
-    FlexShardModule,
-    set_sharding_info,
-)
-from .reshard_after_forward import (
-    _apply_reshard_after_forward,
-)
+from .bucket_runtime import _create_eager_param_states, _install_batched_allgather_hooks
 from .bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
     BucketSpec,
     MixedPrecisionPolicy,
 )
+from .param_access import (
+    _attach_flex_shard_module_state,
+    _check_not_already_flex_sharded,
+    _register_module_param_accessors,
+    FlexShardModule,
+    get_global_shape,
+    get_placements,
+    is_flex_shard_param,
+    set_sharding_info,
+)
+from .reshard_after_forward import _apply_reshard_after_forward
 from .utils import (
     _get_device_from_mesh,
     _get_managed_named_params,
-    _validate_flex_shard_mesh,
     _validate_bucket_placements,
     _validate_eager_params,
+    _validate_flex_shard_mesh,
     _validate_placements,
 )
 
