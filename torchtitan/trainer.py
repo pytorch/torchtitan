@@ -461,17 +461,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         if config.parallelism.full_spmd_types and isinstance(self.loss_fn, ChunkedCELoss):
-            tp_axis = parallel_dims.get_spmd_axis("tp")
-            cp_axis = parallel_dims.get_spmd_axis("cp")
-            self.loss_fn.enable_spmd_types(
-                parallel_dims.spmd_dp_axes(),
-                tp_axis=tp_axis if tp_axis.size() > 1 else None,
-                tp_pg=parallel_dims.get_spmd_pg("tp"),
-                cp_axis=cp_axis if cp_axis.size() > 1 else None,
-            )
+            self.loss_fn.enable_spmd_types()
 
         if config.parallelism.full_spmd_types:
-            tp_pg = parallel_dims.get_spmd_pg("tp")
+            from torchtitan.distributed.spmd_state import spmd_state
+
+            tp_pg = spmd_state().tp_pg
             if tp_pg is not None:
                 for model in self.model_parts:
                     convert_tp_states_for_compute(model, tp_pg)
@@ -713,17 +708,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         Batch-DP axes get S(0) (batch-sharded on dim 0). CP axis gets S(1)
         (sequence-sharded on dim 1). TP axis gets R (replicated).
         """
-        dp_axes = self.parallel_dims.spmd_dp_axes()
-        cp_axis = self.parallel_dims.get_spmd_axis("cp")
-        cp_active = cp_axis.size() > 1
-        tp_axis = self.parallel_dims.get_spmd_axis("tp")
+        from torchtitan.distributed.spmd_state import spmd_state
+
+        state = spmd_state()
+        cp_axis = state.cp_axis
+        cp_active = state.cp_active
 
         # Separate batch-DP axes (dim 0) from CP axis (dim 1)
-        batch_dp_axes = [a for a in dp_axes if a is not cp_axis]
+        batch_dp_axes = [a for a in state.dp_axes if a is not cp_axis]
 
         spmd_type: dict = {}
-        if tp_axis.size() > 1:
-            spmd_type[tp_axis] = spmd.R
+        if state.tp_active:
+            spmd_type[state.tp_axis] = spmd.R
 
         # Multiple axes on the same dim (e.g. dp_replicate + dp_shard both
         # on dim 0) require V + PartitionSpec; otherwise S(dim) suffices.
