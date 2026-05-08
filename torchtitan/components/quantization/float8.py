@@ -11,10 +11,7 @@ from typing import Literal
 
 import torch
 import torch._inductor.config
-from torchtitan.components.quantization import (
-    QuantizationConverter,
-    QuantizedLinearConfig,
-)
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.module import Module
@@ -35,7 +32,7 @@ try:
         """
 
         @dataclass(kw_only=True, slots=True)
-        class Config(QuantizedLinearConfig):
+        class Config(Linear.Config):
             """Drop-in replacement for Linear.Config that builds Float8Linear."""
 
             _torchao_config: object = None
@@ -180,7 +177,7 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
     if parent_cls in _float8_experts_cache:
         return _float8_experts_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
+    parent_config_cls = parent_cls.Config
 
     class Float8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
         _is_quantized_experts = True
@@ -238,7 +235,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner
             quantized_cls = _get_float8_grouped_experts_cls(base_module_cls)
-            config_cls = quantized_cls.Config  # pyrefly: ignore[missing-attribute]
+            config_cls = quantized_cls.Config
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
             )
