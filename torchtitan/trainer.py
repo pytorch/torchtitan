@@ -472,6 +472,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 for model in self.model_parts:
                     convert_tp_states_for_compute(model, tp_pg)
 
+            # Enable loss parallel for SPMD when TP is active
+            if (
+                isinstance(self.loss_fn, ChunkedCELoss)
+                and parallel_dims.tp_enabled
+                and not config.parallelism.disable_loss_parallel
+            ):
+                self.loss_fn._loss_parallel = True
+
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)

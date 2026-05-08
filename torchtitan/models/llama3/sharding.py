@@ -47,8 +47,8 @@ def set_llama3_sharding_config(
     )
     if full_spmd_types:
         config.tok_embeddings.local_spmd = EMBED_OUT_SP if enable_sp else EMBED_OUT
-        # SPMD path always all-gathers lm_head output (loss_parallel not yet implemented)
-        config.lm_head.global_spmd = LM_HEAD_OUTPUT_REDIST
+        if not loss_parallel:
+            config.lm_head.global_spmd = LM_HEAD_OUTPUT_REDIST
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, full_spmd_types=full_spmd_types,
