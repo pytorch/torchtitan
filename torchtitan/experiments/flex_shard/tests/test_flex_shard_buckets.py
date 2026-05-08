@@ -33,6 +33,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
+    flex_shard,
     is_flex_shard_param,
     LocalStorageLayout,
     Placement,
@@ -337,6 +338,52 @@ class TestBucketPlacementValidation(TestCase):
                 buckets,
                 self._named_params({"b.weight": torch.bfloat16}),
             )
+
+    def test_rejects_mixed_placements_in_one_bucket(self):
+        """A bucket collective uses one placement layout for all params."""
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_bucket_placements,
+        )
+
+        assignments = [["a.weight", "b.weight"]]
+        placements = {
+            "a.weight": (Shard(0),),
+            "b.weight": (Shard(1),),
+        }
+        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        with self.assertRaisesRegex(ValueError, "mixed placements"):
+            _validate_bucket_placements(
+                assignments,
+                placements,
+                buckets,
+                self._named_params(),
+            )
+
+    def test_flex_shard_rejects_mixed_placements_before_materializing(self):
+        """Invalid bucket placement config should not partially shard the module."""
+
+        class TwoParamModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.a = nn.Parameter(torch.empty(2, 2))
+                self.b = nn.Parameter(torch.empty(2, 2))
+
+        def mixed_placements(named_params, mesh):
+            return {
+                "a": (Shard(0),),
+                "b": (Shard(1),),
+            }
+
+        with single_rank_cpu_mesh() as mesh:
+            model = TwoParamModule()
+            with self.assertRaisesRegex(ValueError, "mixed placements"):
+                flex_shard(
+                    model,
+                    mesh,
+                    shard_placement_fn=mixed_placements,
+                    buckets=[BucketSpec(["*"], reshard_after_forward=False)],
+                )
+            self.assertFalse(hasattr(model, "_dstorages"))
 
 
 # ---------------------------------------------------------------------------

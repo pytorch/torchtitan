@@ -258,7 +258,7 @@ def _validate_placements(
 
 def _validate_bucket_placements(
     bucket_assignments: list[list[str]],
-    _param_placements: dict[str, tuple[Placement, ...]],
+    param_placements: dict[str, tuple[Placement, ...]],
     buckets: list[Any],
     named_params: list[tuple[str, nn.Parameter]],
 ) -> None:
@@ -268,6 +268,7 @@ def _validate_bucket_placements(
         if not fqns:
             continue
         reference_dtype = param_dict[fqns[0]].dtype
+        reference_placements = param_placements[fqns[0]]
         for fqn in fqns:
             dtype = param_dict[fqn].dtype
             if dtype != reference_dtype:
@@ -278,4 +279,16 @@ def _validate_bucket_placements(
                     f"{reference_dtype} but {fqn!r} uses {dtype}. "
                     "All params in a FlexShard storage must share the same "
                     "dtype."
+                )
+            placements = param_placements[fqn]
+            if placements != reference_placements:
+                raise ValueError(
+                    f"Bucket {bucket_idx} "
+                    f"{buckets[bucket_idx].patterns} "
+                    f"has mixed placements: {fqns[0]!r} uses "
+                    f"{reference_placements!r} but {fqn!r} uses "
+                    f"{placements!r}. All params in a FlexShard bucket must "
+                    "share the same placement tuple because bucket collectives "
+                    "use one placement layout. Split parameters with different "
+                    "placements into separate buckets."
                 )

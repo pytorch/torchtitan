@@ -324,6 +324,13 @@ def begin_reduce_scatter_grad(
     rank = mesh.get_local_rank()
     pg = mesh.get_group()
     placement = infos[0].placement
+    for info in infos[1:]:
+        if info.placement != placement:
+            raise ValueError(
+                "FlexShard bucket reduce-scatter requires all parameters in a "
+                f"bucket to use the same placement, but {infos[0].fqn!r} uses "
+                f"{placement!r} and {info.fqn!r} uses {info.placement!r}."
+            )
 
     with torch.profiler.record_function(
         _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
