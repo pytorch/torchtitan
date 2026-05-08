@@ -20,7 +20,7 @@ from .utils import _get_single_placement, _set_param_on_module
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .placement_api import Placement
+    from .placement_contract import Placement
 
 
 @dataclass(frozen=True)

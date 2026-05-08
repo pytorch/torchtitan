@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 from typing_extensions import override
 
-from ..flex_shard.placement_api import Placement
+from ..flex_shard.placement_contract import Placement
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh

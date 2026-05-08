@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from .bucket_storage import DStorage
-    from .placement_api import Placement
+    from .placement_contract import Placement
 
 
 # Module attribute names for storing DStorage

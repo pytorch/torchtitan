@@ -14,7 +14,7 @@ from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from .param_access import _DSTORAGE_ATTR
-from .placement_api import Placement
+from .placement_contract import Placement
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh

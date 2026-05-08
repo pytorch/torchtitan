@@ -17,7 +17,7 @@ from .param_access import (
     is_flex_shard_param,
     set_sharding_info,
 )
-from .placement_api import LocalStorageLayout, Placement
+from .placement_contract import LocalStorageLayout, Placement
 
 __all__ = [
     "BucketSpec",
