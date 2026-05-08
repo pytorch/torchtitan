@@ -1423,6 +1423,304 @@ class TestAsyncTensorParallelPass(FSDPTest):
         self.assertTrue(any(n.target == fused for n in gm.graph.nodes))
 
 
+class TestSelectiveActivationRematPass(TestCase):
+    """Unit tests for ``selective_activation_remat_pass``."""
+
+    def test_topological_insertion_order(self):
+        """
+        When multiple independent ``must_recompute`` deps share a downstream
+        consumer, duplicates must be inserted in graph (topological) order so
+        each dup's args reference upstream dups rather than the originals.
+        Without that ordering (e.g. naive DFS or unordered set iteration), a
+        downstream dup created before its upstream dup would fall back to the
+        original ``must_recompute`` node, defeating recompute.
+
+            a = clone(inp1)        # must_recompute
+            b = clone(inp2)        # must_recompute
+            d = clone(inp3)        # must_recompute
+            c = a + b              # must_recompute
+            e = c + d              # must_recompute
+            bwd = e + e            # autograd_backward
+        """
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        inp3 = graph.placeholder("inp3")
+        a = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        b = graph.call_function(torch.ops.aten.clone.default, args=(inp2,))
+        d = graph.call_function(torch.ops.aten.clone.default, args=(inp3,))
+        c = graph.call_function(torch.ops.aten.add.Tensor, args=(a, b))
+        e = graph.call_function(torch.ops.aten.add.Tensor, args=(c, d))
+        bwd = graph.call_function(torch.ops.aten.add.Tensor, args=(e, e))
+        graph.output(bwd)
+        for n in (a, b, c, d, e):
+            n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd.meta["autograd_backward"] = True
+
+        original_names_in_order = [n.name for n in (a, b, d, c, e)]
+        e_name = e.name
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+        dups = [n for n in nodes if n.name.endswith("_recomputed")]
+        # All 5 must_recompute nodes are transitive deps of bwd.
+        self.assertEqual(len(dups), 5)
+
+        # Dup graph order matches the forward order of the originals
+        # (a, b, d, c, e).
+        self.assertEqual(
+            [n.name for n in dups],
+            [name + "_recomputed" for name in original_names_in_order],
+        )
+
+        # The backward node's must_recompute input was redirected to the dup
+        # of e; the original e (now dead) was erased. Use the Python ``bwd``
+        # reference rather than searching by ``autograd_backward`` because
+        # dups also carry that flag.
+        for inp in bwd.all_input_nodes:
+            self.assertEqual(inp.name, e_name + "_recomputed")
+        self.assertNotIn(e_name, [n.name for n in nodes])
+
+    def test_forward_consumer_keeps_original(self):
+        """When a must_recompute node has both forward and backward
+        consumers, the original stays (forward needs it) and a dup is
+        inserted for the backward consumer. The original is not erased.
+
+            a = clone(inp)              # must_recompute, used by both fwd + bwd
+            fwd_use = a + a             # forward consumer
+            bwd = a * a                 # autograd_backward consumer
+        """
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp = graph.placeholder("inp")
+        a = graph.call_function(torch.ops.aten.clone.default, args=(inp,))
+        fwd_use = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(a, a))
+        graph.output((fwd_use, bwd))
+        a.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd.meta["autograd_backward"] = True
+
+        a_name = a.name
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        names = [n.name for n in result.graph.nodes]
+        # Original kept (forward consumer still needs it) and dup inserted.
+        self.assertIn(a_name, names)
+        self.assertIn(a_name + "_recomputed", names)
+
+        # bwd's args go to the dup; fwd_use still points to the original.
+        bwd_node = next(
+            n for n in result.graph.nodes if n.target is torch.ops.aten.mul.Tensor
+        )
+        for inp_node in bwd_node.all_input_nodes:
+            self.assertEqual(inp_node.name, a_name + "_recomputed")
+        fwd_use_node = next(
+            n for n in result.graph.nodes if n.target is torch.ops.aten.add.Tensor
+        )
+        for inp_node in fwd_use_node.all_input_nodes:
+            self.assertEqual(inp_node.name, a_name)
+
+    def test_offload_reload_chain_hoisted(self):
+        """Mirrors the graph the CPU-offload pass produces: a forward
+        offload chain (``ao.offload`` -> ``ao.wait_tensor``) and a backward
+        reload chain (``ao.reload`` -> ``ao.wait_tensor``), with
+        ``F.meta["cpu_offload_reload_node"]`` pointing at the backward
+        wait_tensor. When a recomputed node references the offloaded
+        forward node F, the dup must read from the backward wait_tensor on
+        GPU, not from F's freed-GPU storage. The remat pass therefore
+        hoists the backward reload chain in front of the dup's target.
+
+            # Forward (autograd_backward=False)
+            F           = clone(inp1)
+            offload_op  = ao.offload(F)
+            fwd_wait    = ao.wait_tensor(offload_op, F)
+            N           = add(F, inp2)             # must_recompute
+
+            # Backward (autograd_backward=True), placed after bwd_use so
+            # the hoist actually has work to do:
+            bwd_use     = mul(N, N)
+            reload_op   = ao.reload(fwd_wait, "cuda")
+            bwd_wait    = ao.wait_tensor(reload_op)
+            bwd_other   = mul(bwd_wait, bwd_wait)
+        """
+        # Importing this module registers the ao::offload / ao::reload /
+        # ao::wait_tensor ops with torch.ops.
+        import torch._functorch._activation_offloading.offload_ops  # noqa: F401
+
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        f = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        offload_op = graph.call_function(torch.ops.ao.offload.default, args=(f,))
+        fwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(offload_op, f)
+        )
+        n = graph.call_function(torch.ops.aten.add.Tensor, args=(f, inp2))
+        bwd_use = graph.call_function(torch.ops.aten.mul.Tensor, args=(n, n))
+        reload_op = graph.call_function(
+            torch.ops.ao.reload.default, args=(fwd_wait, "cuda")
+        )
+        bwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(reload_op,)
+        )
+        bwd_other = graph.call_function(
+            torch.ops.aten.mul.Tensor, args=(bwd_wait, bwd_wait)
+        )
+        graph.output((bwd_use, bwd_other))
+
+        n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        f.meta["cpu_offload_reload_node"] = bwd_wait
+        bwd_use.meta["autograd_backward"] = True
+        reload_op.meta["autograd_backward"] = True
+        bwd_wait.meta["autograd_backward"] = True
+        bwd_other.meta["autograd_backward"] = True
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+
+        # Backward reload chain has been moved in front of the dup's target
+        # (bwd_use) in topological order (reload_op before bwd_wait).
+        reload_idx = nodes.index(reload_op)
+        wait_idx = nodes.index(bwd_wait)
+        bwd_use_idx = nodes.index(bwd_use)
+        self.assertLess(reload_idx, wait_idx)
+        self.assertLess(wait_idx, bwd_use_idx)
+
+        # The forward offload chain stayed in forward (no hoist needed).
+        offload_idx = nodes.index(offload_op)
+        fwd_wait_idx = nodes.index(fwd_wait)
+        self.assertLess(offload_idx, fwd_wait_idx)
+        # Forward chain is also before the (hoisted) backward chain.
+        self.assertLess(fwd_wait_idx, reload_idx)
+
+        # The dup of N references bwd_wait (via cpu_offload_reload_node
+        # redirect), not the original offloaded forward node F.
+        dup = next(d for d in nodes if d.name.endswith("_recomputed"))
+        self.assertIn(bwd_wait, dup.all_input_nodes)
+        self.assertNotIn(f, dup.all_input_nodes)
+        # The dup itself is positioned after the hoisted chain and before
+        # its target.
+        dup_idx = nodes.index(dup)
+        self.assertLess(wait_idx, dup_idx)
+        self.assertLess(dup_idx, bwd_use_idx)
+
+        # bwd_use's args were redirected to the dup.
+        for inp in bwd_use.all_input_nodes:
+            self.assertIs(inp, dup)
+
+        # bwd_other still consumes the (now hoisted) bwd_wait.
+        for inp in bwd_other.all_input_nodes:
+            self.assertIs(inp, bwd_wait)
+
+    def test_offload_reload_chain_already_in_front_not_hoisted(self):
+        """The CPU offload pass deliberately places ``ao.reload`` well before
+        its ``ao.wait_tensor`` (via ``prefetch_reloads``) so the async H2D
+        overlaps with backward compute. If the reload chain is already in
+        front of the dup that needs it, ``ensure_offload_chain_before`` must
+        leave it alone — re-hoisting collapses that prefetch gap and
+        serializes the H2D against compute.
+
+            # Forward (autograd_backward=False):
+            F           = clone(inp1)
+            offload_op  = ao.offload(F)
+            fwd_wait    = ao.wait_tensor(offload_op, F)
+            N           = add(F, inp2)              # must_recompute
+
+            # Backward (autograd_backward=True), reload chain placed
+            # EARLY — before the dup's target — exactly as
+            # ``prefetch_reloads`` would arrange it:
+            early_bwd   = mul(inp1, inp1)
+            reload_op   = ao.reload(fwd_wait, "cuda")
+            bwd_wait    = ao.wait_tensor(reload_op)
+            middle_bwd  = mul(bwd_wait, bwd_wait)   # uses reload chain too
+            bwd_use     = mul(N, N)                 # consumes N (dup target)
+        """
+        import torch._functorch._activation_offloading.offload_ops  # noqa: F401
+
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        f = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        offload_op = graph.call_function(torch.ops.ao.offload.default, args=(f,))
+        fwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(offload_op, f)
+        )
+        n = graph.call_function(torch.ops.aten.add.Tensor, args=(f, inp2))
+        early_bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(inp1, inp1))
+        reload_op = graph.call_function(
+            torch.ops.ao.reload.default, args=(fwd_wait, "cuda")
+        )
+        bwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(reload_op,)
+        )
+        middle_bwd = graph.call_function(
+            torch.ops.aten.mul.Tensor, args=(bwd_wait, bwd_wait)
+        )
+        bwd_use = graph.call_function(torch.ops.aten.mul.Tensor, args=(n, n))
+        graph.output((middle_bwd, bwd_use))
+
+        n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        f.meta["cpu_offload_reload_node"] = bwd_wait
+        early_bwd.meta["autograd_backward"] = True
+        reload_op.meta["autograd_backward"] = True
+        bwd_wait.meta["autograd_backward"] = True
+        middle_bwd.meta["autograd_backward"] = True
+        bwd_use.meta["autograd_backward"] = True
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+        early_idx = nodes.index(early_bwd)
+        reload_idx = nodes.index(reload_op)
+        wait_idx = nodes.index(bwd_wait)
+        middle_idx = nodes.index(middle_bwd)
+        bwd_use_idx = nodes.index(bwd_use)
+
+        # The reload chain stayed at its original position (between early_bwd
+        # and middle_bwd), preserving the prefetch gap. If the pass had
+        # collapsed it next to bwd_use, reload_op/bwd_wait would land after
+        # middle_bwd — which would also be a topology violation since
+        # middle_bwd consumes bwd_wait.
+        self.assertLess(early_idx, reload_idx)
+        self.assertLess(reload_idx, wait_idx)
+        self.assertLess(wait_idx, middle_idx)
+        self.assertLess(middle_idx, bwd_use_idx)
+
+        # The dup of N references bwd_wait (at its original position) and
+        # is itself inserted right before bwd_use.
+        dup = next(d for d in nodes if d.name.endswith("_recomputed"))
+        self.assertIn(bwd_wait, dup.all_input_nodes)
+        dup_idx = nodes.index(dup)
+        self.assertLess(wait_idx, dup_idx)
+        self.assertLess(dup_idx, bwd_use_idx)
+
+        # middle_bwd still consumes bwd_wait at its original location.
+        for inp in middle_bwd.all_input_nodes:
+            self.assertIs(inp, bwd_wait)
+
+
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
 

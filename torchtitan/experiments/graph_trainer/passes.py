@@ -34,6 +34,7 @@ from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
     _is_backward_node,
+    _MODULE_FQN,
     _NOT_IN_LAYERS,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
@@ -60,6 +61,9 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
+)
+from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+    selective_activation_remat_pass,
 )
 from torchtitan.tools.logging import logger
 
@@ -775,6 +779,13 @@ def apply_sac_pass(
         if _is_backward_node(node):
             continue
 
+        # Skip the post-layer epilogue (lm_head + loss). Chunked-loss
+        # regions split backward into multiple disjoint regions, and the
+        # remat pass only supports one region with must_recompute deps.
+        fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+        if fqn.startswith(("lm_head", "loss")):
+            continue
+
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
@@ -907,22 +918,6 @@ def tag_with_memory_policy_pass(
     gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
     log_activation_memory_policy(gm)
     return gm
-
-
-def selective_activation_remat_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-) -> torch.fx.GraphModule:
-    """Duplicate recompute nodes for backward use, then DCE unused forward versions.
-
-    Wraps ``remat_using_tags_for_fwd_loss_bwd_graph`` with the graph pass
-    signature ``(gm, example_inputs)``.
-    """
-    from torchtitan.experiments.graph_trainer.selective_activation_remat import (
-        remat_using_tags_for_fwd_loss_bwd_graph,
-    )
-
-    return remat_using_tags_for_fwd_loss_bwd_graph(gm)
 
 
 def full_inductor_compilation_pass(
