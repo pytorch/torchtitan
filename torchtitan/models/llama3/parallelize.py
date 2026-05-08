@@ -58,17 +58,16 @@ def parallelize_llama(
 
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic
     # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled:
+    if parallel_dims.cp_enabled and not parallelism.full_spmd_types:
         apply_cp_to_forward(
             # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
 
-    # TODO: We pass tp_mesh here because TP is the only parallelism
-    # using DTensor currently. Once we move to full DTensor (e.g.,
-    # FSDP via DTensor, CP via DTensor), pass the full SPMD mesh instead.
-    if parallel_dims.tp_enabled:
+    if parallelism.full_spmd_types:
+        model.parallelize(parallel_dims)
+    elif parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
         model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
@@ -89,8 +88,25 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    if parallelism.full_spmd_types:
+        from torch.distributed.fsdp import DataParallelMeshDims
+
+        mesh_names = []
+        if parallel_dims.dp_replicate_enabled:
+            mesh_names.append("dp_replicate")
+        mesh_names.append("dp_shard")
+        if parallel_dims.tp_enabled:
+            mesh_names.append("tp")
+        dp_mesh = parallel_dims.get_mesh(mesh_names)
+        dp_mesh_dims = DataParallelMeshDims(
+            shard="dp_shard",
+            replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+        )
+    else:
+        names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        dp_mesh = parallel_dims.get_mesh(names)
+        dp_mesh_dims = None
+
     apply_fsdp(
         model,
         dp_mesh,
@@ -99,9 +115,12 @@ def parallelize_llama(
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
-    if parallel_dims.dp_replicate_enabled:
+    if parallelism.full_spmd_types:
+        logger.info("Applied FSDP with spmd_types to the model")
+    elif parallel_dims.dp_replicate_enabled:
         logger.info("Applied HSDP to the model")
     else:
         logger.info("Applied FSDP to the model")
@@ -120,6 +139,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    dp_mesh_dims: "DataParallelMeshDims | None" = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -144,6 +164,8 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
