@@ -352,6 +352,9 @@ class BucketRuntime:
             return
         with torch.no_grad():
             self.context.wait_and_clear_reduce_scatter_states(self.debug_fqn)
+            # TODO: Thread the bucket's reduce_dtype into the non-RAF path
+            # before launching reduce-scatter. RAF uses _MixedPrecisionCast
+            # backward, but detached non-RAF leaves can arrive in param_dtype.
             result = begin_reduce_scatter_grad(
                 grads,
                 infos,

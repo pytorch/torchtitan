@@ -171,6 +171,9 @@ class EagerParamAccessState:
         # proving graph capture behavior.
         pre = self._pre_gathered
         if pre is not None:
+            # TODO: Keep this cache valid for the whole forward. Modules can
+            # legally read the same parameter more than once, and the
+            # post-forward hook already owns clearing _pre_gathered.
             self._pre_gathered = None
             if getattr(self, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
                 if self.param_dtype is not None or self.reduce_dtype is not None:
@@ -189,6 +192,9 @@ class EagerParamAccessState:
                 and self.requires_grad
                 and self._unsharded_for_reduce is None
             ):
+                # TODO: Track a reduction leaf per forward instead of only the
+                # first leaf. Multiple forwards before one backward can reuse
+                # this leaf and reduce gradients into the wrong shard.
                 self._unsharded_for_reduce = unsharded
             return unsharded
 
