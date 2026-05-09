@@ -51,10 +51,11 @@ def _dist_reduce(
     """
     if isinstance(x, DTensor):
         # ``full_tensor()`` reduces the DTensor's own mesh (Partial → reduced,
-        # Replicate → no-op). If ``mesh``'s axis is already part of the
-        # DTensor's mesh, full_tensor handles it; skip the explicit mesh
-        # all-reduce to avoid double-counting. Shard placements are
-        # unsupported — reduction target is ambiguous.
+        # Replicate → no-op); ``mesh`` then reduces the orthogonal axis. The
+        # caller is responsible for passing a 1D ``mesh`` whose ranks are
+        # rank-orthogonal to the DTensor's own mesh — overlapping axes would
+        # be reduced twice. Shard placements are unsupported — reduction
+        # target is ambiguous.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
@@ -66,17 +67,6 @@ def _dist_reduce(
                 "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
                 "to that mesh. Pass a plain tensor when using extra_pg."
             )
-        if mesh is not None and mesh.mesh_dim_names is not None:
-            dtensor_axes = set(x.device_mesh.mesh_dim_names or ())
-            (mesh_axis,) = mesh.mesh_dim_names
-            if mesh_axis in dtensor_axes:
-                logger.warning(
-                    "_dist_reduce: mesh axis %r is already covered by the "
-                    "DTensor's mesh %s; skipping the redundant reduction.",
-                    mesh_axis,
-                    sorted(dtensor_axes),
-                )
-                mesh = None
         x = x.full_tensor()
 
     if extra_pg is not None:
