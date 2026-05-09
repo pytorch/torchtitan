@@ -73,7 +73,10 @@ class BucketSpec:
         offload_policy: CPU offload policy for this bucket. TODO: implement
             and test CPU offload before allowing this in flex_shard().
         reshard_after_forward: Whether to free this bucket's unsharded
-            parameters after forward and recompute them in backward.
+            parameters after forward and recompute them in backward. This
+            defaults to True. Buckets that reshard after forward must have
+            hooks that run in both the original forward and activation
+            checkpoint recomputation.
     """
 
     patterns: list[str]

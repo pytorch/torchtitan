@@ -545,6 +545,18 @@ def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
     )
 
 
+def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
+    bucket_fqn = _get_storage_debug_fqn(storage)
+    bucket_msg = f" for bucket {bucket_fqn!r}" if bucket_fqn else ""
+    raise RuntimeError(
+        "FlexShard eager reshard_after_forward could not register a "
+        f"recomputation-safe batched all-gather hook{bucket_msg}. "
+        "Bucket hooks must run both in the original forward and in activation "
+        "checkpoint recomputation. Split the bucket to match forward execution "
+        "units, or set reshard_after_forward=False for this bucket."
+    )
+
+
 def _create_eager_param_states(
     module: nn.Module,
     storages: list[DStorage],
@@ -621,7 +633,7 @@ def _install_batched_allgather_hooks(
 
         target = bucket_runtime.hook_target_module()
         if target is None:
-            continue
+            _raise_unreplayable_reshard_hook(storage)
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
         target.register_forward_hook(bucket_runtime.post_forward_hook)
         bucket_runtime.context.buckets.append(bucket_runtime)

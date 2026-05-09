@@ -4,18 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest.mock import patch
+
 import torch
+import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
+    flex_shard,
     FlexShardModule,
     get_global_shape,
     get_placements,
     is_flex_shard_param,
     OffloadPolicy,
 )
-from torchtitan.experiments.flex_shard.example.shard import Shard
+from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cpu,
     flex_shard_transformer_model,
@@ -91,6 +95,23 @@ class TestFlexShardAPI(TestCase):
                         )
                     ],
                 )
+
+    def test_reshard_after_forward_requires_replayable_bucket_hook(self):
+        with single_rank_cpu_mesh() as mesh:
+            model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
+
+            with patch(
+                "torchtitan.experiments.flex_shard.flex_shard.bucket_runtime."
+                "_storage_uses_bucket_autograd_unshard",
+                return_value=True,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "recomputation-safe"):
+                    flex_shard(
+                        model,
+                        mesh,
+                        shard_placement_fn=per_param_placements,
+                        buckets=[BucketSpec(["*"])],
+                    )
 
 
 if __name__ == "__main__":

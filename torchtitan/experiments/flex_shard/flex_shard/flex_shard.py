@@ -164,8 +164,11 @@ def flex_shard(
             The minimal eager path expects one ``Placement`` per parameter.
             Example ``Shard(0)`` placements are available under
             ``torchtitan.experiments.flex_shard.example.shard``.
-        buckets: Required list of bucket specifications. Use
-            ``[BucketSpec(["*"])]`` for a single whole-module bucket.
+        buckets: Required list of bucket specifications. A single
+            whole-module bucket can be expressed as ``[BucketSpec(["*"])]``.
+            When ``reshard_after_forward=True``, FlexShard raises if bucket
+            hooks cannot run in both the original forward and activation
+            checkpoint recomputation.
 
     Returns:
         The module (mutated in-place). Use module.dstorages to access internals.
@@ -175,12 +178,12 @@ def flex_shard(
         >>> mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
         >>> model = Transformer(args)
         >>> model.to("cuda")
-        >>> # Single bucket:
+        >>> # Single bucket without reshard-after-forward:
         >>> flex_shard(
         ...     model,
         ...     mesh,
         ...     shard_placement_fn=per_param_placements,
-        ...     buckets=[BucketSpec(["*"])],
+        ...     buckets=[BucketSpec(["*"], reshard_after_forward=False)],
         ... )
         >>> # Explicit buckets:
         >>> flex_shard(
