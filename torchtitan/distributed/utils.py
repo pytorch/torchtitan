@@ -36,21 +36,25 @@ def _dist_reduce(
     """Perform distributed reduction on a tensor.
 
     For DTensor input, ``full_tensor()`` first collapses the DTensor's own
-    mesh (e.g. TP), then ``mesh`` reduces *additional*, orthogonal axes
-    (e.g. ``loss_mesh = batch × cp``). Only Replicate/Partial placements
-    are supported; Shard placements have ambiguous reduction semantics.
+    mesh (e.g. TP), then ``mesh`` reduces an additional axis the DTensor
+    doesn't carry (e.g. ``loss_mesh = batch × cp`` over a TP DTensor).
 
     Args:
         x (torch.Tensor): Input tensor (plain or DTensor).
         reduceOp (str): Reduce operation to perform.
-        mesh (DeviceMesh | None): Device mesh to use for reduction.
-            If None, no reduction is performed but simply convert the tensor to a float.
-        extra_pg (dist.ProcessGroup, optional): Extra process group reduced
-            before ``mesh``. Plain-tensor only — DTensor input combined with
-            ``extra_pg`` is rejected because the orthogonality contract
-            between ``extra_pg`` and the DTensor's mesh is not enforced here.
+        mesh (DeviceMesh | None): 1D device mesh to use for reduction.
+            If None, no extra reduction is performed; the tensor is just
+            converted to a float (after ``full_tensor()`` for DTensor input).
+        extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
+            Defaults to None. If provided, this all_reduce will be called for the extra
+            process group, and then the result will be all_reduced for the mesh.
     """
     if isinstance(x, DTensor):
+        # ``full_tensor()`` reduces the DTensor's own mesh (Partial → reduced,
+        # Replicate → no-op). If ``mesh``'s axis is already part of the
+        # DTensor's mesh, full_tensor handles it; skip the explicit mesh
+        # all-reduce to avoid double-counting. Shard placements are
+        # unsupported — reduction target is ambiguous.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
@@ -62,6 +66,17 @@ def _dist_reduce(
                 "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
                 "to that mesh. Pass a plain tensor when using extra_pg."
             )
+        if mesh is not None and mesh.mesh_dim_names is not None:
+            dtensor_axes = set(x.device_mesh.mesh_dim_names or ())
+            (mesh_axis,) = mesh.mesh_dim_names
+            if mesh_axis in dtensor_axes:
+                logger.warning(
+                    "_dist_reduce: mesh axis %r is already covered by the "
+                    "DTensor's mesh %s; skipping the redundant reduction.",
+                    mesh_axis,
+                    sorted(dtensor_axes),
+                )
+                mesh = None
         x = x.full_tensor()
 
     if extra_pg is not None:
