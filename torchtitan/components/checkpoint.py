@@ -467,7 +467,7 @@ class CheckpointManager(Configurable):
     ) -> Future | AsyncSaveResponse | None:
         """Save the checkpoint with dcp.
         Args:
-            state_dict (dict): The state dict to save (key transforms already applied).
+            state_dict (dict): The state dict to save.
             checkpoint_id (str): The checkpoint id to save.
             async_mode (AsyncMode): Whether the checkpoint is async.
             enable_garbage_collection (bool): Whether to enable garbage collection after save.
@@ -595,7 +595,7 @@ class CheckpointManager(Configurable):
 
     @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
-    def save(self, curr_step: int, last_step: bool = False) -> None:
+    def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
         This function will save the checkpoint for the current step. If ``last_step`` is
@@ -608,10 +608,11 @@ class CheckpointManager(Configurable):
             last_step (bool, optional): Whether this is the last step of training.
 
         Returns:
-            None
+            bool: True if a checkpoint was written (or staged, for async modes)
+            on this step.
         """
         if not self._should_save(curr_step, last_step):
-            return
+            return False
 
         begin = time.monotonic()
         logger.info("Saving the checkpoint (or staging if async is enabled).")
@@ -622,7 +623,7 @@ class CheckpointManager(Configurable):
         # freed until _async_wait()
         if last_step:
             self._save_last_step(curr_step)
-            return
+            return True
 
         self.model_wrapper.mode = StateDictMode.FULL
         states = self._flattened_model_states_sd()
@@ -658,6 +659,7 @@ class CheckpointManager(Configurable):
             "Finished saving the checkpoint (or staging if async is enabled) "
             f"in {time.monotonic() - begin:.2f} seconds."
         )
+        return True
 
     @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
@@ -851,9 +853,9 @@ class CheckpointManager(Configurable):
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Flatten model keys alongside training states.
+        """Flatten the model states into a single dictionary.
 
-        The caller must set ``self.model_wrapper.mode`` before calling.
+        Note that other states, such as optimizer states, are not flattened.
         """
         states = state_dict if state_dict is not None else self.states
         sd = {k: v for k, v in states.items() if k != MODEL}
