@@ -28,7 +28,7 @@ def test_float8_applied_by_model_registry():
     pytest.importorskip("torchao")
     config_manager = ConfigManager()
     config = config_manager.parse_args(
-        ["--module", "llama3", "--config", "llama3_debugmodel_float8_emulate"]
+        ["--module", "llama3", "--config", "llama3_debugmodel_float8_emulate_lora"]
     )
     model_config = config.model_spec.model
     assert has_quantization(model_config)

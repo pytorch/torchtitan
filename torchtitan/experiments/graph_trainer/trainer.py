@@ -4,13 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.fx.traceback import annotate_fn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _MODULE_FQN,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
@@ -23,6 +26,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
+    PASS_PIPELINE_REGISTRY,
+    POST_INIT_HOOKS,
+    PRE_TRAIN_STEP_HOOKS,
 )
 from torchtitan.trainer import Trainer
 
@@ -37,7 +43,13 @@ def make_fwd_bwd_step(loss_fn):
         model, inputs, labels, global_valid_tokens, extra_inputs, extra_kwargs
     ):
         pred = model(inputs, **extra_inputs, **extra_kwargs)
-        loss = loss_fn(pred, labels) / global_valid_tokens
+        # The loss function is not a submodule of the model, so
+        # annotate_module_fqns won't tag it. Annotate it here so that
+        # downstream passes (bucketing, SAC, kernel annotations) can
+        # attribute loss nodes in the traced graph.
+        loss = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)(
+            pred, labels, global_valid_tokens
+        )
         params = [
             p
             for _, p in model.named_parameters(remove_duplicate=False)
@@ -66,6 +78,9 @@ class GraphTrainer(Trainer):
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
+
+        # Run post-init hook for the active pass pipeline
+        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
     def forward_backward_step(
         self,
@@ -142,12 +157,12 @@ class GraphTrainer(Trainer):
         extra_inputs: dict[str, torch.Tensor],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
+        maybe_register_blockmask_pytree_node()
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-                maybe_register_blockmask_pytree_node()
                 with self.train_context():
                     self._traced_step = trace_train_step(fwd_bwd_fn)(
                         model,
@@ -159,10 +174,12 @@ class GraphTrainer(Trainer):
                     )
 
             if self.config.compile.enable_passes:
-                passes = construct_default_graph_passes(
-                    self._traced_step,
-                    self.config,
+                pipeline_fn = PASS_PIPELINE_REGISTRY.get(
+                    self.config.compile.pass_pipeline,
+                    construct_default_graph_passes,
                 )
+                passes = pipeline_fn(self._traced_step, self.config)
+
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,
                     self._traced_step.example_inputs,
@@ -189,6 +206,14 @@ class GraphTrainer(Trainer):
                 param.grad += grad
 
         return loss
+
+    def train_step(
+        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
+            self
+        )
+        super().train_step(data_iterator)
 
     def close(self) -> None:
         super().close()
