@@ -273,6 +273,9 @@ class BucketRuntime:
     def hook_target_module(self) -> nn.Module | None:
         """Return the module whose forward should trigger this bucket."""
         target = self.bucket_module()
+        # TODO: Avoid registering bucket hooks on passive containers such as
+        # ModuleList or ModuleDict. Catch-all buckets can resolve to those
+        # containers, whose hooks may never run when forward iterates children.
         if (
             self.storage._reshard_after_forward
             and target is self.storage._module
