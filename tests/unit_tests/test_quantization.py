@@ -62,7 +62,5 @@ def test_quantized_grouped_experts():
     assert float8_cls.Config._owner is float8_cls
     assert issubclass(mxfp8_cls, GptOssGroupedExperts)
     assert issubclass(float8_cls, GptOssGroupedExperts)
-    assert mxfp8_cls._is_quantized_experts
-    assert float8_cls._is_quantized_experts
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")

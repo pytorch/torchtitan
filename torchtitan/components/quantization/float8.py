@@ -180,8 +180,6 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
     class Float8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
-        _is_quantized_experts = True
-
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             pass
