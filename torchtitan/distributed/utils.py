@@ -35,35 +35,31 @@ def _dist_reduce(
 ) -> float:
     """Perform distributed reduction on a tensor.
 
+    For DTensor input, ``full_tensor()`` first collapses the DTensor's own
+    mesh (e.g. TP). The caller-supplied ``extra_pg`` and ``mesh`` are then
+    used to reduce *additional*, orthogonal axes (e.g. the CP process group
+    via ``extra_pg``, or the batch axes via ``mesh``). Only Replicate/Partial
+    placements are supported; Shard placements have ambiguous reduction
+    semantics.
+
     Args:
-        x (torch.Tensor): Input tensor.
+        x (torch.Tensor): Input tensor (plain or DTensor).
         reduceOp (str): Reduce operation to perform.
-        mesh (DeviceMesh | None): Device mesh to use for reduction.
-            If None, no reduction is performed but simply convert the tensor to a float.
-        extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
-            Defaults to None. If provided, this all_reduce will be called for the extra
-            process group, and then the result will be all_reduced for the mesh.
+        mesh (DeviceMesh | None): Device mesh to use for the final reduction.
+            If None, no mesh reduction is performed.
+        extra_pg (dist.ProcessGroup, optional): Extra process group reduced
+            after ``mesh``. Must be orthogonal to the DTensor's own mesh
+            (when ``x`` is a DTensor) and to ``mesh``.
     """
     if isinstance(x, DTensor):
-        # DTensor path: ``full_tensor()`` already performs the mesh reduction
-        # for Partial placements and is a no-op for Replicate. Skipping the
-        # subsequent mesh all-reduce is required to avoid double-counting.
-        # Shard placements are not supported — semantics are undefined since
-        # the reduction target is ambiguous.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
         )
-        if extra_pg is not None:
-            raise ValueError(
-                "_dist_reduce does not support DTensor input combined with "
-                "extra_pg: ``full_tensor()`` already reduces over the DTensor's "
-                "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
-                "to that mesh. Pass a plain tensor when using extra_pg."
-            )
-        return float(x.full_tensor().item())
 
-    # Plain tensor path.
+    if isinstance(x, DTensor):
+        x = x.full_tensor()
+
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
     if mesh is None:
@@ -249,9 +245,7 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import (  # pyrefly: ignore [missing-import]
-        enable_batch_invariant_mode as _upstream_enable,
-    )
+    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
 
     _upstream_enable()
 
@@ -417,7 +411,7 @@ def init_distributed(
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
+            import torchcomms  # noqa: F401
         except ImportError as err:
             raise ImportError(
                 "torchcomms package is required for --comm.mode=torchcomms."

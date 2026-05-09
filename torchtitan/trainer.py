@@ -763,7 +763,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             if parallel_dims.dp_cp_enabled:
                 loss = loss.detach()
-                loss_mesh = parallel_dims.get_optional_mesh("loss")
+
+                # CP is not a model DTensor mesh axis (the model is parallelized
+                # only on the TP mesh), so the loss DTensor carries no CP
+                # placement. Pass the CP process group as ``extra_pg`` so that
+                # the reduction helper folds CP into the DP/batch reduction.
+                cp_pg = (
+                    parallel_dims.get_mesh("cp").get_group()
+                    if parallel_dims.cp_enabled
+                    else None
+                )
+                batch_mesh = parallel_dims.get_optional_mesh("batch")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # loss = local_loss_sum / global_valid_tokens
@@ -776,13 +786,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # global_max_loss = max(local_avg_loss)
                 local_avg_loss = loss * global_valid_tokens / local_valid_tokens
                 global_avg_loss, global_max_loss, global_ntokens_seen = (
-                    dist_utils.dist_sum(loss, loss_mesh),
-                    dist_utils.dist_max(local_avg_loss, loss_mesh),
+                    dist_utils.dist_sum(loss, batch_mesh, extra_pg=cp_pg),
+                    dist_utils.dist_max(local_avg_loss, batch_mesh, extra_pg=cp_pg),
                     dist_utils.dist_sum(
                         torch.tensor(
                             self.ntokens_seen, dtype=torch.int64, device=self.device
                         ),
-                        loss_mesh,
+                        batch_mesh,
+                        extra_pg=cp_pg,
                     ),
                 )
             else:
