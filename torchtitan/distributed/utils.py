@@ -36,28 +36,32 @@ def _dist_reduce(
     """Perform distributed reduction on a tensor.
 
     For DTensor input, ``full_tensor()`` first collapses the DTensor's own
-    mesh (e.g. TP). The caller-supplied ``extra_pg`` and ``mesh`` are then
-    used to reduce *additional*, orthogonal axes (e.g. the CP process group
-    via ``extra_pg``, or the batch axes via ``mesh``). Only Replicate/Partial
-    placements are supported; Shard placements have ambiguous reduction
-    semantics.
+    mesh (e.g. TP), then ``mesh`` reduces *additional*, orthogonal axes
+    (e.g. ``loss_mesh = batch × cp``). Only Replicate/Partial placements
+    are supported; Shard placements have ambiguous reduction semantics.
 
     Args:
         x (torch.Tensor): Input tensor (plain or DTensor).
         reduceOp (str): Reduce operation to perform.
-        mesh (DeviceMesh | None): Device mesh to use for the final reduction.
-            If None, no mesh reduction is performed.
+        mesh (DeviceMesh | None): Device mesh to use for reduction.
+            If None, no reduction is performed but simply convert the tensor to a float.
         extra_pg (dist.ProcessGroup, optional): Extra process group reduced
-            after ``mesh``. Must be orthogonal to the DTensor's own mesh
-            (when ``x`` is a DTensor) and to ``mesh``.
+            before ``mesh``. Plain-tensor only — DTensor input combined with
+            ``extra_pg`` is rejected because the orthogonality contract
+            between ``extra_pg`` and the DTensor's mesh is not enforced here.
     """
     if isinstance(x, DTensor):
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
         )
-
-    if isinstance(x, DTensor):
+        if extra_pg is not None:
+            raise ValueError(
+                "_dist_reduce does not support DTensor input combined with "
+                "extra_pg: ``full_tensor()`` already reduces over the DTensor's "
+                "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
+                "to that mesh. Pass a plain tensor when using extra_pg."
+            )
         x = x.full_tensor()
 
     if extra_pg is not None:
