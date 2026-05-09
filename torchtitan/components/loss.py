@@ -358,8 +358,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
     Forward takes hidden_states (connected to decoder graph), the accumulated
-    gradient from chunked lm_head backward, and the loss value. Returns the
-    loss value as a differentiable tensor.
+    gradient from chunked lm_head backward, and the loss value. Returns a
+    detached loss with this Function as its grad_fn.
 
     Backward returns accumulated_grad as the gradient for hidden_states.
     Autograd then propagates this through the decoder layers automatically —
@@ -375,9 +375,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         loss: torch.Tensor,
     ) -> torch.Tensor:
         ctx.save_for_backward(accumulated_grad)
-        # Return a tensor with the correct loss value. We clone to avoid
-        # in-place issues, and the grad_fn comes from this Function.
-        return loss.detach().clone()
+        return loss.detach()
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]
