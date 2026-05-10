@@ -486,6 +486,92 @@ class TestTraceModule(unittest.TestCase):
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr, gt))
 
+    def test_kwargs_roundtrip(self):
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        scale = torch.tensor(2.0, device=self.DEVICE)
+
+        def forward(state, tokens, *, scale):
+            with torch.nn.utils.stateless._reparametrize_module(model, state):
+                return model(tokens) * scale
+
+        state = extract_module_state(model)
+        traced = minimal_fx_tracer(forward)(state, tokens, scale=scale)
+        out_ref = forward(state, tokens, scale=scale)
+        out_traced = run_traced(traced, state, tokens, scale=scale)
+        self.assertTrue(torch.equal(out_ref, out_traced))
+
+    def test_kwargs_runtime_reorder_raises(self):
+        """Runtime kwargs in different order produce a different spec; with
+        ``_validate_runtime=True``, this raises."""
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        a = torch.tensor(2.0, device=self.DEVICE)
+        b = torch.tensor(3.0, device=self.DEVICE)
+
+        def forward(state, tokens, *, a, b):
+            with torch.nn.utils.stateless._reparametrize_module(model, state):
+                return model(tokens) * a + b
+
+        state = extract_module_state(model)
+        traced = minimal_fx_tracer(forward)(state, tokens, a=a, b=b)
+        with self.assertRaisesRegex(ValueError, "input spec mismatch"):
+            run_traced(traced, state, tokens, _validate_runtime=True, b=b, a=a)
+
+    def test_kwargs_unknown_kwarg_raises(self):
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        scale = torch.tensor(2.0, device=self.DEVICE)
+
+        def forward(state, tokens, *, scale):
+            with torch.nn.utils.stateless._reparametrize_module(model, state):
+                return model(tokens) * scale
+
+        state = extract_module_state(model)
+        traced = minimal_fx_tracer(forward)(state, tokens, scale=scale)
+        with self.assertRaisesRegex(ValueError, "input spec mismatch"):
+            run_traced(traced, state, tokens, _validate_runtime=True, factor=scale)
+
+    def test_kwargs_default_omitted_bakes_constant(self):
+        """fn with a default kwarg, not passed at trace: default is baked in.
+        Runtime must also omit it (passing it would change the spec)."""
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        scale = torch.tensor(3.0, device=self.DEVICE)
+
+        def forward(state, tokens, *, scale=2.0):
+            with torch.nn.utils.stateless._reparametrize_module(model, state):
+                return model(tokens) * scale
+
+        state = extract_module_state(model)
+        traced = minimal_fx_tracer(forward)(state, tokens)
+        out_default = run_traced(traced, state, tokens)
+        out_ref = forward(state, tokens)
+        self.assertTrue(torch.equal(out_ref, out_default))
+
+        with self.assertRaisesRegex(ValueError, "input spec mismatch"):
+            run_traced(traced, state, tokens, _validate_runtime=True, scale=scale)
+
+    def test_kwargs_var_keyword_missing_key_raises(self):
+        """fn with **opts: missing a kwarg at runtime changes the kwargs spec."""
+        model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
+        tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
+        a = torch.tensor(2.0, device=self.DEVICE)
+        b = torch.tensor(5.0, device=self.DEVICE)
+
+        def forward(state, tokens, **opts):
+            with torch.nn.utils.stateless._reparametrize_module(model, state):
+                return model(tokens) * opts["a"] + opts["b"]
+
+        state = extract_module_state(model)
+        traced = minimal_fx_tracer(forward)(state, tokens, a=a, b=b)
+        out_ref = forward(state, tokens, a=a, b=b)
+        out_traced = run_traced(traced, state, tokens, a=a, b=b)
+        self.assertTrue(torch.equal(out_ref, out_traced))
+
+        with self.assertRaisesRegex(ValueError, "input spec mismatch"):
+            run_traced(traced, state, tokens, _validate_runtime=True, a=a)
+
     def test_flex_attention_block_mask_mark_unbacked(self):
         from torch._dynamo.decorators import mark_unbacked
         from torch.nn.attention.flex_attention import (
