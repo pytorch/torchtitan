@@ -4,19 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import spmd_types as spmd
 from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
-from torchtitan.protocols.sharding import (
-    GlobalSpmdConfig,
-    LocalMapConfig,
-    LocalSpmdConfig,
-    NamedPlacement,
-    ShardingConfig,
-    SpmdAnnotation,
-    SpmdRedist,
-)
+from torchtitan.protocols.sharding import LocalMapConfig, NamedPlacement, ShardingConfig
 from torchtitan.protocols.types import MeshAxisName
 
 DP_REPLICATE = MeshAxisName.DP_REPLICATE
@@ -182,34 +173,6 @@ def set_gqa_inner_attention_local_map(
     )
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-
-def rowwise_spmd_config(*, output_sp: bool) -> GlobalSpmdConfig:
-    dst_type = spmd.S(1) if output_sp else spmd.R
-    return GlobalSpmdConfig(
-        output=SpmdRedist(
-            src=SpmdAnnotation(types={TP: spmd.P}),
-            dst=SpmdAnnotation(types={TP: dst_type}),
-        ),
-    )
-
-
-def set_gqa_inner_attention_local_spmd(
-    inner_attention_cfg,
-    inputs: tuple[SpmdAnnotation, ...],
-    out: SpmdAnnotation,
-) -> None:
-    """Install a ``LocalSpmdConfig`` on an inner-attention config.
-
-    spmd_types counterpart to ``set_gqa_inner_attention_local_map``.
-    """
-    inner_attention_cfg.local_spmd = LocalSpmdConfig(
-        inputs=inputs,
-        out=out,
-    )
-
-
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,
@@ -232,7 +195,7 @@ def set_dense_ffn_sharding(
 
 
 def set_decoder_sharding_config(
-    config, *, loss_parallel: bool, enable_sp: bool,
+    config, *, loss_parallel: bool, enable_sp: bool
 ) -> None:
     """Set sharding on root-level configs only: ``tok_embeddings``, ``norm``,
     ``output``, and the root ``freqs_cis`` buffer.

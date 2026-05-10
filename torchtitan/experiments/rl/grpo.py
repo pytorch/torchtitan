@@ -236,15 +236,29 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        self.trainer = None
+        self.generator = None
         self._proc_meshes = []
 
-    async def cleanup(self):
-        """Stop all proc meshes to release GPU memory."""
-        for mesh in self._proc_meshes:
+    async def close(self):
+        """Best-effort: tear down actors, then stop proc meshes."""
+        logger.info("Closing: tearing down actors and process meshes.")
+        for actor_name, actor in (
+            ("trainer", self.trainer),
+            ("generator", self.generator),
+        ):
+            if actor is None:
+                continue
+            try:
+                await actor.close.call()
+            except Exception:
+                logger.exception("%s.close failed", actor_name)
+
+        for i, mesh in enumerate(self._proc_meshes):
             try:
                 await mesh.stop()
             except Exception:
-                pass
+                logger.exception("mesh.stop[%d] failed", i)
         self._proc_meshes = []
 
     def _get_rank_0_value(self, result, has_gpus: bool = True):
@@ -536,6 +550,12 @@ class RLTrainer(Configurable):
         logger.info(f"Pre:  {_format_validation(pre_validation)}")
 
         for step in range(num_steps):
+            # Cancellation point for Ctrl-C (KeyboardInterrupt) handling.
+            # This yields to the event loop to check for cancellation, which
+            # doesn't happen with `.get` calls.
+            # TODO: investigate replacing `.get()` with `await
+            await asyncio.sleep(0)
+
             step_start = time.perf_counter()
 
             # --- Collect data and create episodes --- #
@@ -590,11 +610,15 @@ class RLTrainer(Configurable):
 
 
 async def main():
-    """Run the distributed RL training loop using Monarch."""
     config = ConfigManager().parse_args()
     rl_trainer = RLTrainer(config)
-    await rl_trainer.setup()
-    await rl_trainer.train()
+    try:
+        await rl_trainer.setup()
+        await rl_trainer.train()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Interrupted; attempting graceful shutdown...")
+    finally:
+        await rl_trainer.close()
 
 
 if __name__ == "__main__":
