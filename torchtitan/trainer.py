@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import itertools
 import json
 import os
 import time
@@ -65,6 +66,39 @@ _INPUT_SPMD_TYPES: NamedPlacement = {
     MeshAxisName.CP: spmd.S(1),
     MeshAxisName.TP: spmd.R,
 }
+
+
+def convert_tp_states_for_compute(model: torch.nn.Module, tp_pg) -> None:
+    """Install forward pre-hooks that convert I@tp params/buffers to R@tp.
+
+    TP-replicated states are I at rest (identical, no grad contract).
+    At compute time, ``convert(I, R)`` makes them R so the typechecker
+    accepts mixing with TP-sharded activations, and inserts a backward
+    all-reduce for correct gradient reduction when SP is enabled.
+    """
+    def pre_hook(module, args):
+        for store in (module._parameters, module._buffers):
+            for name, t in store.items():
+                if t is not None and spmd.maybe_get_axis_local_type(t, tp_pg) is spmd.I:
+                    bwd = (
+                        {"op_dtype": torch.float32}
+                        if t.dtype != torch.float32
+                        else None
+                    )
+                    store[name] = spmd.convert(
+                        t, tp_pg, src=spmd.I, dst=spmd.R,
+                        backward_options=bwd,
+                    )
+
+    for module in model.modules():
+        has_states = any(
+            t is not None
+            for t in itertools.chain(
+                module._parameters.values(), module._buffers.values()
+            )
+        )
+        if has_states:
+            module.register_forward_pre_hook(pre_hook)
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -484,6 +518,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
         self.spmd_typechecking = config.parallelism.spmd_typechecking
+
+        if is_spmd_active() and parallel_dims.tp_enabled:
+            tp_pg = spmd_state().pgs["tp"]
+            for model in self.model_parts:
+                convert_tp_states_for_compute(model, tp_pg)
 
         if (
             is_spmd_active()

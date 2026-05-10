@@ -387,15 +387,32 @@ class ChunkedCELoss(BaseLoss):
 
         return total_loss, grad_accumulator.result()
 
-    def _spmd_out_types(self, h_detached: torch.Tensor) -> tuple:
-        """Build local_map out_types for (total_loss, accumulated_grad).
+    def _spmd_local_map_types(
+        self,
+        h_detached: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[tuple, tuple]:
+        """Build local_map (in_types, out_types).
 
-        total_loss: P on all DP axes (including CP) — each rank has a partial
-            loss sum from its local batch/seq tokens. R@tp when loss_parallel
-            (all-reduces ensure identical values), I@tp otherwise.
-        accumulated_grad: same types as h_detached (the input).
+        in_types (positional args: h_detached, labels):
+            h_detached: types read from the tensor.
+            labels: same sharding as h_detached (batch/seq sharded).
+
+        out_types (total_loss, accumulated_grad):
+            total_loss: P on DP axes, R@tp when loss_parallel, I@tp otherwise.
+            accumulated_grad: same types as h_detached.
         """
         state = spmd_state()
+
+        h_types = dict(spmd.get_local_type(h_detached))
+        h_spec = spmd.get_partition_spec(h_detached)
+        h_leaf = (h_types, h_spec) if h_spec else h_types
+
+        label_types = dict(spmd.get_local_type(labels))
+        label_spec = spmd.get_partition_spec(labels)
+        label_leaf = (label_types, label_spec) if label_spec else label_types
+
+        in_types = (h_leaf, label_leaf)
 
         loss_type: dict = {}
         for axis in state.dp_axes:
@@ -404,11 +421,9 @@ class ChunkedCELoss(BaseLoss):
         if tp_ax is not None:
             loss_type[tp_ax] = spmd.R if self.loss_parallel else spmd.I
 
-        grad_types = dict(spmd.get_local_type(h_detached))
-        grad_spec = spmd.get_partition_spec(h_detached)
-        grad_leaf = (grad_types, grad_spec) if grad_spec else grad_types
+        out_types = (loss_type, h_leaf)
 
-        return (loss_type, grad_leaf)
+        return in_types, out_types
 
     def __call__(
         self,
@@ -448,26 +463,30 @@ class ChunkedCELoss(BaseLoss):
                         dt_mesh, tuple(placements)
                     )
 
-        # SPMD path: all-gather S(1)@tp -> R@tp before the local_map boundary.
+        # SPMD path: all-gather S(1)@tp -> R@tp before the local_map boundary
+        # when SP is enabled (hidden_states is S(1)@tp). Skip if already R@tp.
         if is_spmd_active() and not self.loss_parallel:
             tp_ax = mesh().tp
             if tp_ax is not None:
-                bwd = (
-                    {"op_dtype": torch.float32}
-                    if hidden_states.dtype != torch.float32
-                    else None
-                )
-                hidden_states = spmd.redistribute(
-                    hidden_states, spmd_state().pgs["tp"],
-                    src=spmd.S(1), dst=spmd.R, backward_options=bwd,
-                )
+                tp_type = spmd.maybe_get_axis_local_type(hidden_states, tp_ax)
+                if tp_type is not None and tp_type is not spmd.R:
+                    bwd = (
+                        {"op_dtype": torch.float32}
+                        if hidden_states.dtype != torch.float32
+                        else None
+                    )
+                    hidden_states = spmd.redistribute(
+                        hidden_states, spmd_state().pgs["tp"],
+                        src=tp_type, dst=spmd.R, backward_options=bwd,
+                    )
 
         requires_grad = hidden_states.requires_grad
         h_detached = hidden_states.detach().requires_grad_(requires_grad)
 
         if is_spmd_active():
-            out_types = self._spmd_out_types(h_detached)
+            in_types, out_types = self._spmd_local_map_types(h_detached, labels)
             total_loss, grad_buffer = spmd.local_map(
+                in_types=in_types,
                 out_types=out_types,
             )(self.chunked_loss_and_grad)(
                 h_detached, labels,
