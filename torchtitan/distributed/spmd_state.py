@@ -65,6 +65,10 @@ class SpmdState:
                 return self.pgs.get(name)
         return None
 
+    def get_pg(self, name: str) -> ProcessGroup | None:
+        """Get ProcessGroup by axis name, or None if not active."""
+        return self.pgs.get(name)
+
 
 # ---------------------------------------------------------------------------
 # Module-level singletons
