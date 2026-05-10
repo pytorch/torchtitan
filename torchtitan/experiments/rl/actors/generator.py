@@ -140,6 +140,8 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
+<<<<<<< HEAD
+=======
         def __post_init__(self):
             # Generator only supports TP now. vLLM handles its own parallelism
             # and we only apply TP via the core parallelize function.
@@ -183,6 +185,7 @@ class VLLMGenerator(Actor, Configurable):
                     f"got disable_loss_parallel={p.disable_loss_parallel}"
                 )
 
+>>>>>>> 5601e14f8 (Enable EP+TP for MoE inference in vLLM wrapper)
     def __init__(
         self,
         config: Config,
@@ -221,6 +224,11 @@ class VLLMGenerator(Actor, Configurable):
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
+            # ``model`` is the path to the HF checkpoint directory. The
+            # config is sourced from torchtitan's ModelSpec via
+            # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
+            # read), but vLLM still uses this path to locate the
+            # tokenizer assets and the safetensors weight shards.
             model=model_path,
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by

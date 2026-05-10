@@ -61,8 +61,20 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     cfg = spec.model
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
-    layer0 = cfg.layers[0]
-    attn = layer0.attention
+    # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
+    # first layers, MoE later); scan the layer list for a representative
+    # of each component rather than relying on layer 0.
+    attn = cfg.layers[0].attention
+    ffn = None
+    for layer in cfg.layers:
+        ffn = getattr(layer, "feed_forward", None)
+        if ffn is not None:
+            break
+    moe = None
+    for layer in cfg.layers:
+        moe = getattr(layer, "moe", None)
+        if moe is not None:
+            break
 
     n_heads = attn.n_heads
     n_kv_heads = attn.n_kv_heads or n_heads
@@ -92,16 +104,13 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         "eos_token_id": 1,  # per-model files only; engine reads tokenizer/sampling tokens
     }
 
-    ffn = getattr(layer0, "feed_forward", None)
     if ffn is not None:
         # Unused: only v1/metrics/perf.py reads it (off by default). SwiGLU hidden == w1.out_features.
         hf["intermediate_size"] = ffn.w1.out_features
 
-    moe = getattr(layer0, "moe", None)
     if moe is not None:
-        hf[
-            "num_experts"
-        ] = moe.experts.num_experts  # presence required: >0 toggles MoE/EP branches
+        # Presence required: >0 toggles MoE/EP branches.
+        hf["num_experts"] = moe.experts.num_experts
         # Unused: only per-model loaders (qwen3_moe, deepseek_v2, ...) and v1/metrics/perf.py (off) read these.
         hf[
             "num_experts_per_tok"
@@ -124,12 +133,12 @@ def registry_to_vllm(
     Single entry point for vLLM integration. Must be called before creating
     a vLLM engine that uses a TorchTitan model. Registers two things:
 
-      1. ``TorchTitanVLLMModelFromSpec`` (subclass of
-         ``TorchTitanVLLMModelWrapper``) with vLLM's ``ModelRegistry`` under
-         the name ``VLLM_MODEL_NAME``. The dynamic subclass closes over
+      1. ``VLLMModelFromSpec`` (subclass of ``TorchTitanVLLMModelWrapper``)
+         with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
+         The dynamic subclass closes over
          ``model_spec``/``parallelism``/``compile_config`` and forwards them
          when vLLM constructs the model.
-      2. ``TorchTitanConfigParserForSpec`` (subclass of ``ConfigParserBase``)
+      2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_spec``.
 
@@ -148,16 +157,21 @@ def registry_to_vllm(
             wrapper's parallelize step.
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
-    from transformers import PretrainedConfig
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
-    from vllm.transformers_utils.config import register_config_parser
+
+    # Pull ``PretrainedConfig`` through vLLM's transformers re-export rather
+    # than from ``transformers`` directly. vLLM already depends on
+    # transformers internally, so this keeps torchtitan free of a direct
+    # ``transformers`` import — when vLLM eventually drops it, this path
+    # disappears with it.
+    from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
 
     logger = init_logger(__name__)
 
     # Dynamic model class capturing torchtitan config in the closure.
-    class TorchTitanVLLMModelFromSpec(TorchTitanVLLMModelWrapper):
+    class VLLMModelFromSpec(TorchTitanVLLMModelWrapper):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
                 model_spec=model_spec,
@@ -167,15 +181,15 @@ def registry_to_vllm(
                 prefix=prefix,
             )
 
-    TorchTitanVLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
-    TorchTitanVLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
-    ModelRegistry.register_model(VLLM_MODEL_NAME, TorchTitanVLLMModelFromSpec)
+    VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
+    VLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
+    ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing ModelSpec in the closure. This
     # parser only produces HF-shaped fields; torchtitan-specific config is
     # delivered through the model-class closure above.
     @register_config_parser(TORCHTITAN_CONFIG_FORMAT)
-    class TorchTitanConfigParserForSpec(ConfigParserBase):
+    class TorchTitanConfigParser(ConfigParserBase):
         def parse(
             self,
             model,
