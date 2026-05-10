@@ -41,18 +41,28 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_passes: bool = True
     """When False, skip all graph passes (both default and user-configured)."""
 
+    disable_passes: list[str] = field(default_factory=list)
+    """Pass names to selectively disable for debugging and ablation
+    studies. A pass is skipped if its name exactly matches any entry.
+    Example: --compile.disable_passes custom_codegen_pass,cudagraph_pass"""
+
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "cpu_offload_all"] = "default"
+    memory_policy: Literal["default", "eager", "budget_limited_offload"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
-        default: save all compute-intensive ops and FSDP all_gathers.
-        eager: alternate mm ops between save/recompute, matching the eager
-            AC policy in torchtitan.distributed.activation_checkpoint.
-        cpu_offload_all: offload all eligible activations to CPU.
-            Work in progress — for development and testing only.
+        default: SAC — save all compute-intensive ops and FSDP all_gathers.
+        eager: SAC alternating mm ops between save/recompute, matching the
+            eager AC policy in torchtitan.distributed.activation_checkpoint.
+        budget_limited_offload: SAC + CPU offload — apply default SAC first,
+            then offload surviving MUST_SAVE activations to CPU within
+            the cpu_offload_budget_gb budget.
     """
+
+    pass_pipeline: str = "default"
+    """Pass pipeline selection. Controls which graph pass pipeline, post-init
+    hooks, and pre-train-step hooks are activated."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
@@ -68,8 +78,17 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
 
-    enable_cudagraph: bool = True
-    """When False, skip the cudagraph pass even if the graph is compatible."""
+    cpu_offload_prefetch_n_layers: int = 1
+    """Prefetch reloads this many layers ahead in the backward graph
+    to overlap H2D transfers with compute."""
+
+    cpu_offload_defer_n_layers: int = 1
+    """Defer forward wait_tensor ops this many layers past the last consumer
+    to overlap D2H transfers with compute."""
+
+    cpu_offload_budget_gb: float = 100.0
+    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
+    Tensors are selected largest-first until the budget is exhausted."""
 
     precompile_artifact_dir: str = ""
     """
@@ -78,6 +97,20 @@ class GraphTrainerCompileConfig(CompileConfig):
     here to skip compilation. For multi-node setups use a shared filesystem
     path.
     """
+
+    enable_autoparallel: bool = False
+    """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
+    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
+
+
+def validate_autoparallel_config(
+    compile_config: GraphTrainerCompileConfig,
+) -> None:
+    if compile_config.enable_autoparallel and compile_config.mode != "aot_fx_trace":
+        raise ValueError(
+            "AutoParallel graph_trainer integration only supports "
+            "--compile.mode aot_fx_trace"
+        )
 
 
 def to_graph_trainer_config(
