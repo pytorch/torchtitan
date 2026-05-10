@@ -335,21 +335,27 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_flexattn",
             ngpu=8,
         ),
+        # TODO: Disabled due to upstream PyTorch cuDNN regression in nightly
+        # dev20260506. _scaled_dot_product_cudnn_attention fails with
+        # "mha_graph.execute ... is_good() to be true, but got false" on A10G
+        # when attention inputs are CPU-offloaded and reloaded. Re-enable once
+        # the upstream fix lands.
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
-                    "--compile.memory_policy cpu_offload_all",
+                    "--compile.memory_policy budget_limited_offload",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+cpu_offload_all",
-            "aot_fx_trace_llama3_fsdp_tp_cpu_offload_all",
+            "aot_fx_trace llama3 FSDP+TP+budget_limited_offload",
+            "aot_fx_trace_llama3_fsdp_tp_budget_limited_offload",
             ngpu=8,
             skip_rocm_test=True,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -505,6 +511,21 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_hybridep",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 FSDP+TP+HybridEP",
+            "aot_fx_trace_deepseek_v3_hybridep",
+            ngpu=4,
+        ),
     ]
 
 
@@ -580,15 +601,70 @@ def _build_async_tp_tests() -> list[OverrideDefinitions]:
     ]
 
 
+def _build_autoparallel_tests() -> list[OverrideDefinitions]:
+    """AutoParallel integration tests for default runners."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.enable_autoparallel",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "autoparallel llama3 FSDP+TP",
+            "autoparallel_llama3_fsdp_tp",
+            ngpu=4,
+        ),
+    ]
+
+
+def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
+    """AutoParallel integration tests that require H100 runners."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.enable_autoparallel",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.disable_loss_parallel",
+                ],
+            ],
+            "autoparallel deepseek_v3 EFSDP+EP",
+            "autoparallel_deepseek_v3_efsdp_ep",
+            ngpu=4,
+        ),
+    ]
+
+
 def build_graph_trainer_h100_test_list() -> list[OverrideDefinitions]:
     """DeepSeek-v3 + Qwen3 + async_tp tests (for H100 machines)."""
     return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
+
+
+def build_graph_trainer_autoparallel_test_list() -> list[OverrideDefinitions]:
+    """AutoParallel tests for default runners."""
+    return _build_autoparallel_tests()
+
+
+def build_graph_trainer_autoparallel_h100_test_list() -> list[OverrideDefinitions]:
+    """AutoParallel tests that require H100 runners."""
+    return _build_autoparallel_h100_tests()
 
 
 _TEST_SUITES_FUNCTION = {
     "graph_trainer": build_graph_trainer_test_list,
     "graph_trainer_default": build_graph_trainer_default_test_list,
     "graph_trainer_h100": build_graph_trainer_h100_test_list,
+    "graph_trainer_autoparallel": build_graph_trainer_autoparallel_test_list,
+    "graph_trainer_autoparallel_h100": build_graph_trainer_autoparallel_h100_test_list,
 }
 
 
