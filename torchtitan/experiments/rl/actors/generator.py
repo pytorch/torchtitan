@@ -140,41 +140,6 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
-        def __post_init__(self):
-            # Generator only supports TP now. vLLM handles its own parallelism
-            # and we only apply TP via the core parallelize function.
-            p = self.parallelism
-            if p.data_parallel_replicate_degree != 1:
-                raise ValueError(
-                    f"Generator does not support data parallel replication, "
-                    f"got dp_replicate={p.data_parallel_replicate_degree}"
-                )
-            if p.pipeline_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support pipeline parallelism, "
-                    f"got pp={p.pipeline_parallel_degree}"
-                )
-            if p.context_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support context parallelism, "
-                    f"got cp={p.context_parallel_degree}"
-                )
-            if p.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={p.expert_parallel_degree}"
-                )
-            if p.enable_sequence_parallel:
-                logger.warning(
-                    "Generator enable_sequence_parallel=True hurts inference "
-                    "throughput; prefer SP=False."
-                )
-            if not p.disable_loss_parallel:
-                raise ValueError(
-                    "Generator requires disable_loss_parallel=True, "
-                    f"got disable_loss_parallel={p.disable_loss_parallel}"
-                )
-
     def __init__(
         self,
         config: Config,
@@ -212,6 +177,11 @@ class VLLMGenerator(Actor, Configurable):
 
         # Build vLLM engine
         engine_kwargs = dict(
+            # ``model`` is the path to the HF checkpoint directory. The
+            # config is sourced from torchtitan's ModelSpec via
+            # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
+            # read), but vLLM still uses this path to locate the
+            # tokenizer assets and the safetensors weight shards.
             model=model_path,
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
