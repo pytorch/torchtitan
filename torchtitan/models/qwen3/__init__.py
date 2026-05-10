@@ -14,13 +14,13 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
     get_attention_config,
+    make_aux_loss_config,
     make_experts_config,
     make_ffn_config,
     make_gqa_config,
     make_moe_config,
     make_router_config,
 )
-from torchtitan.models.common.moe import BatchWiseAuxLoss
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.utils import validate_converter_order
@@ -180,7 +180,8 @@ def _build_qwen3_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
-                    aux_loss=BatchWiseAuxLoss.Config(weight=1e-3),
+                    load_balance_coeff=None,
+                    aux_loss=make_aux_loss_config(type="batch_wise", coeff=1e-3, top_k=top_k),
                 ),
             )
         )

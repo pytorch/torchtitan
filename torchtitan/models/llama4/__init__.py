@@ -22,12 +22,12 @@ from torchtitan.models.common import (
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
+    make_aux_loss_config,
     make_ffn_config,
     make_gqa_config,
     make_moe_config,
     make_router_config,
 )
-from torchtitan.models.common.moe import BatchWiseAuxLoss
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
@@ -155,7 +155,8 @@ def _build_llama4_layers(
                 router=router,
                 experts=experts,
                 shared_experts=shared_experts,
-                aux_loss=BatchWiseAuxLoss.Config(weight=1e-3),
+                load_balance_coeff=None,
+                aux_loss=make_aux_loss_config(type="batch_wise", coeff=1e-3, top_k=router.top_k),
             )
             ffn_cfg = None
         else:

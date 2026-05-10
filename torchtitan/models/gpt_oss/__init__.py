@@ -12,8 +12,11 @@ import torch.nn as nn
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
-from torchtitan.models.common.config_utils import make_token_dispatcher_config
-from torchtitan.models.common.moe import BatchWiseAuxLoss, TokenChoiceTopKRouter
+from torchtitan.models.common.config_utils import (
+    make_aux_loss_config,
+    make_token_dispatcher_config,
+)
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
@@ -159,7 +162,7 @@ def _build_gptoss_layers(
     num_experts: int,
     top_k: int,
     score_before_experts: bool,
-    load_balance_coeff: float,
+    load_balance_coeff: float | None,
     fuse_qkv: bool = False,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
@@ -204,7 +207,7 @@ def _build_gptoss_layers(
                 ),
                 top_k=top_k,
             ),
-            aux_loss=BatchWiseAuxLoss.Config(weight=1e-3),
+            aux_loss=make_aux_loss_config(type="batch_wise", coeff=1e-3, top_k=top_k),
         )
         layer_cfg = GptOssTransformerBlock.Config(
             attention=attn_cfg,
@@ -242,7 +245,7 @@ def _debugmodel(
             num_experts=8,
             top_k=4,
             score_before_experts=False,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
@@ -284,7 +287,7 @@ def _20b(
             num_experts=32,
             top_k=4,
             score_before_experts=False,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(
@@ -326,7 +329,7 @@ def _120b(
             num_experts=128,
             top_k=4,
             score_before_experts=False,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             moe_comm_backend=moe_comm_backend,
         ),
         rope=RoPE.Config(

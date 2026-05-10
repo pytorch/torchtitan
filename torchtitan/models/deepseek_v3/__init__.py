@@ -15,12 +15,13 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
     get_attention_config,
+    make_aux_loss_config,
     make_experts_config,
     make_ffn_config,
     make_moe_config,
     make_router_config,
 )
-from torchtitan.models.common.moe import MoELoadBalanceAuxLoss, SequenceWiseAuxLoss
+from torchtitan.models.common.moe import MoELoadBalanceAuxLoss
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
@@ -289,8 +290,9 @@ def _debugmodel(
         num_shared_experts=num_shared_experts,
         router_top_k=3,
         router_score_func="sigmoid",
+        router_route_norm=True,
         score_before_experts=False,
-        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
+        aux_loss=make_aux_loss_config(type="sequence_wise", coeff=1e-4, top_k=3),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -355,8 +357,9 @@ def _16b(
         num_shared_experts=num_shared_experts,
         router_top_k=6,
         router_score_func="sigmoid",
+        router_route_norm=True,
         score_before_experts=False,
-        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
+        aux_loss=make_aux_loss_config(type="sequence_wise", coeff=1e-4, top_k=6),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -422,11 +425,12 @@ def _236b(
         num_shared_experts=num_shared_experts,
         router_top_k=6,
         router_score_func="sigmoid",
+        router_route_norm=True,
         router_num_expert_groups=8,
         router_num_limited_groups=3,
         router_route_scale=16.0,
         score_before_experts=False,
-        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
+        aux_loss=make_aux_loss_config(type="sequence_wise", coeff=1e-4, top_k=6),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -497,7 +501,7 @@ def _671b(
         router_route_scale=2.5,
         router_route_norm=True,
         score_before_experts=False,
-        aux_loss=SequenceWiseAuxLoss.Config(weight=1e-4),
+        aux_loss=make_aux_loss_config(type="sequence_wise", coeff=1e-4, top_k=8),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,

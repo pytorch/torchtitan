@@ -11,7 +11,6 @@ fields set at config creation time.
 """
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Literal
 
 from torchtitan.models.common.attention import (
@@ -25,7 +24,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import (
-    BatchWiseAuxLoss,
     GroupedExperts,
     MoE,
     MoELoadBalanceAuxLoss,
@@ -152,6 +150,16 @@ def make_ffn_config(
     )
 
 
+def make_aux_loss_config(
+    *,
+    type: Literal["sequence_wise", "batch_wise"],
+    coeff: float,
+    top_k: int,
+) -> MoELoadBalanceAuxLoss.Config:
+    """Build a MoELoadBalanceAuxLoss.Config."""
+    return MoELoadBalanceAuxLoss.Config(type=type, coeff=coeff, top_k=top_k)
+
+
 def make_moe_config(
     *,
     num_experts: int = 8,
@@ -162,8 +170,6 @@ def make_moe_config(
     aux_loss: MoELoadBalanceAuxLoss.Config | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
-    if aux_loss:
-        aux_loss = replace(aux_loss, top_k=router.top_k)
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
@@ -296,10 +302,11 @@ def update_moe_aux_loss_configs(
         if moe_cfg is None:
             continue
         aux_loss = moe_cfg.aux_loss
-        if aux_loss.weight > 0:
-            if isinstance(aux_loss, BatchWiseAuxLoss.Config) and pp_enabled:
-                raise ValueError(
-                    "batch_wise MoE aux loss is incompatible with pipeline "
-                    "parallelism. Use sequence_wise instead."
-                )
-            aux_loss.global_batch_size = global_batch_size
+        if aux_loss is None:
+            continue
+        if aux_loss.type == "batch_wise" and pp_enabled:
+            raise ValueError(
+                "batch_wise MoE aux loss is incompatible with pipeline "
+                "parallelism. Use sequence_wise instead."
+            )
+        aux_loss.global_batch_size = global_batch_size
