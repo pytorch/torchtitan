@@ -233,10 +233,24 @@ def set_decoder_sharding_config(
         out_dst_shardings=dense_activation_placement(tp=activation_tp),
     )
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
+
+    # When SPMD + loss_parallel: lm_head output stays vocab-sharded,
+    # loss_parallel_cross_entropy handles distributed CE directly.
+    if is_spmd_active():
+        if loss_parallel:
+            out_src = None
+            out_dst = None
+        else:
+            out_src = dense_activation_placement(tp=spmd.S(2))
+            out_dst = dense_activation_placement(tp=loss_tp)
+    else:
+        out_src = None
+        out_dst = dense_activation_placement(tp=loss_tp)
+
     config.lm_head.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=shard.S(0))},
         in_src_shardings={"input": dense_activation_placement(tp=activation_tp)},
         in_dst_shardings={"input": dense_activation_placement(tp=shard.R())},
-        out_src_shardings=dense_activation_placement(tp=spmd.S(2)) if is_spmd_active() else None,
-        out_dst_shardings=dense_activation_placement(tp=loss_tp),
+        out_src_shardings=out_src,
+        out_dst_shardings=out_dst,
     )
