@@ -25,20 +25,12 @@ from collections.abc import Callable
 
 import torch
 from torch._inductor.compile_fx import compile_fx_inner
-from torch._inductor.fx_passes.bucketing import (
-    is_all_gather_into_tensor as is_all_gather,
-)
-from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
-from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch._logging import trace_structured
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.experiments.graph_trainer.bucketing import (
-    joint_transformer_block_bucketing_reordering_pass,
-)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
     _is_backward_node,
@@ -53,6 +45,13 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
 )
+from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    autobucketing_reordering_pass,
+    fsdp_reshard_after_fwd_pass,
+    joint_transformer_block_bucketing_reordering_pass,
+    overlap_fsdp_ag_rs_pass,
+    transformer_block_bucketing_reordering_pass,
+)
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
 )
@@ -62,14 +61,39 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
-from torchtitan.experiments.graph_trainer.reshard_after_forward import (
-    annotate_fsdp_all_gather,
-    is_wait_tensor_from_fsdp,
-)
 from torchtitan.tools.logging import logger
 
 aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
+
+
+# ---------------------------------------------------------------------------
+# Registries — keyed by string name
+# ---------------------------------------------------------------------------
+
+MEMORY_POLICY_REGISTRY: dict[str, Callable] = {}
+PASS_PIPELINE_REGISTRY: dict[str, Callable] = {}
+POST_INIT_HOOKS: dict[str, Callable] = {}
+PRE_TRAIN_STEP_HOOKS: dict[str, Callable] = {}
+
+
+def _make_registry_decorator(registry: dict):
+    """Create a decorator that registers a function into the given registry."""
+
+    def register(key: str):
+        def decorator(fn: Callable) -> Callable:
+            registry[key] = fn
+            return fn
+
+        return decorator
+
+    return register
+
+
+register_memory_policy = _make_registry_decorator(MEMORY_POLICY_REGISTRY)
+register_pass_pipeline = _make_registry_decorator(PASS_PIPELINE_REGISTRY)
+register_post_init_hook = _make_registry_decorator(POST_INIT_HOOKS)
+register_pre_train_step_hook = _make_registry_decorator(PRE_TRAIN_STEP_HOOKS)
 
 
 def normalize_view_ops_as_reshape(
@@ -165,9 +189,11 @@ def compile_time_passes(
             tag_with_memory_policy_pass,
             config=config,
         ),
-        # TODO: currently either SAC or CPU offload is used, not both at the
-        # same time. Composability between these two passes is untested.
-        apply_cpu_offload_pass,
+        functools.partial(
+            apply_cpu_offload_pass,
+            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        ),
         selective_activation_remat_pass,
         overlap_fsdp_ag_rs_pass,
         functools.partial(
@@ -236,9 +262,8 @@ def construct_default_graph_passes(
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    use_cudagraph = config.compile.enable_cudagraph and is_cudagraph_compatible(
-        traced_result.gm
-    )
+    cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
+    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
@@ -262,6 +287,32 @@ def construct_default_graph_passes(
     return passes
 
 
+def _get_pass_name(pass_fn: Callable) -> str:
+    return (
+        pass_fn.func.__name__
+        if isinstance(pass_fn, functools.partial)
+        else pass_fn.__name__
+    )
+
+
+def _filter_disabled_passes(
+    passes: list[Callable], disable_names: list[str]
+) -> list[Callable]:
+    """Remove passes whose names exactly match any entry in ``disable_names``."""
+    disable_set = set(disable_names)
+    filtered = []
+    skipped = []
+    for pass_fn in passes:
+        name = _get_pass_name(pass_fn)
+        if name in disable_set:
+            skipped.append(name)
+        else:
+            filtered.append(pass_fn)
+    if skipped:
+        logger.info(f"Disabled {len(skipped)} graph passes: {skipped}")
+    return filtered
+
+
 def apply_graph_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
@@ -281,13 +332,18 @@ def apply_graph_passes(
             and before/after graphs to tlparse for each pass.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
+    disable_patterns = (
+        compile_config.disable_passes if compile_config is not None else []
+    )
+    if disable_patterns:
+        passes = _filter_disabled_passes(passes, disable_patterns)
+    pass_names = [_get_pass_name(pass_fn) for pass_fn in passes]
+    pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
+    logger.info(f"Applying {len(passes)} graph passes:\n  {pass_list}")
+    all_passes_start = time.perf_counter()
     tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
     for pass_fn in passes:
-        pass_name = (
-            pass_fn.func.__name__
-            if isinstance(pass_fn, functools.partial)
-            else pass_fn.__name__
-        )
+        pass_name = _get_pass_name(pass_fn)
         if debug:
             tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
             before_snapshot = snapshot_graph(gm)
@@ -302,36 +358,8 @@ def apply_graph_passes(
             tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
             after_snapshot = snapshot_graph(gm)
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
-    return gm
-
-
-def autobucketing_reordering_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
-) -> torch.fx.GraphModule:
-    """
-    Apply autobucketing and reordering optimization.
-
-    This pass applies schedule_overlap_bucketing with collective_bucketing enabled
-    to optimize comm/compute overlap patterns in the graph.
-    """
-    schedule_overlap_bucketing(gm, collective_bucketing=True)
-    gm.recompile()
-    return gm
-
-
-def transformer_block_bucketing_reordering_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    fsdp_manual_buckets,
-) -> torch.fx.GraphModule:
-    """
-    Apply aten-level manual bucketing and reordering optimization.
-    """
-    manual_overlap_bucketing(
-        gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
-    )
-    gm.recompile()
+    all_passes_elapsed = time.perf_counter() - all_passes_start
+    logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
     return gm
 
 
@@ -811,6 +839,49 @@ def apply_sac_pass(
     return gm
 
 
+@register_memory_policy("default")
+def _default_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that saves all compute-intensive ops and FSDP all_gathers."""
+    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        config.parallelism.fsdp_reshard_after_forward,
+        pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    )
+    policy_fn = _make_default_memory_policy(
+        fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+    )
+    apply_sac_pass(gm, policy_fn=policy_fn)
+    return gm
+
+
+@register_memory_policy("eager")
+def _eager_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC policy that alternates mm ops between save/recompute."""
+    apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
+    return gm
+
+
+@register_memory_policy("budget_limited_offload")
+def _budget_limited_offload_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """SAC + CPU offload: apply default SAC, then offload within budget."""
+    _default_memory_policy_pass(gm, config=config)
+    tag_all_offloadable_activations(
+        gm, cpu_budget_gb=config.compile.cpu_offload_budget_gb
+    )
+    return gm
+
+
 def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -822,28 +893,18 @@ def tag_with_memory_policy_pass(
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
         eager: SAC alternating mm ops between save/recompute.
-        cpu_offload_all: tag all eligible activations for CPU offload.
+        budget_limited_offload: SAC + CPU offload within budget.
 
-    Other memory policies combining SAC and CPU offload can be added here.
+    Other memory policies combining SAC and CPU offload can be added
+    via ``register_memory_policy`` without modifying this function.
     """
     memory_policy = config.compile.memory_policy
-    if memory_policy == "default":
-        fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-            config.parallelism.fsdp_reshard_after_forward,
-            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    if memory_policy not in MEMORY_POLICY_REGISTRY:
+        raise ValueError(
+            f"Unknown memory_policy: {memory_policy!r}. "
+            f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
-        default_policy_fn = functools.partial(
-            _make_default_memory_policy,
-            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-        )
-        apply_sac_pass(gm, policy_fn=default_policy_fn())
-    elif memory_policy == "eager":
-        apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
-    elif memory_policy == "cpu_offload_all":
-        tag_all_offloadable_activations(gm)
-    else:
-        raise ValueError(f"Unknown memory_policy: {memory_policy!r}")
-
+    gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
     log_activation_memory_policy(gm)
     return gm
 
@@ -857,30 +918,11 @@ def selective_activation_remat_pass(
     Wraps ``remat_using_tags_for_fwd_loss_bwd_graph`` with the graph pass
     signature ``(gm, example_inputs)``.
     """
-    # TODO: remove this wrapper when upstream remat_using_tags_for_fwd_loss_bwd_graph
-    # accepts example_inputs (matching the graph pass signature).
-    from torch._functorch._activation_checkpointing.remat_using_tags_for_fwd_loss_bwd_graph_pass import (
+    from torchtitan.experiments.graph_trainer.selective_activation_remat import (
         remat_using_tags_for_fwd_loss_bwd_graph,
     )
 
     return remat_using_tags_for_fwd_loss_bwd_graph(gm)
-
-
-# Apply activation checkpointing on joint graph before partitioner
-def fsdp_reshard_after_fwd_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    reshard_after_forward: bool,
-) -> torch.fx.GraphModule:
-    # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
-    # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
-    #   to CheckpointPolicy.MUST_RECOMPUTE.
-    # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
-    #   to CheckpointPolicy.MUST_SAVE.
-    gm = annotate_fsdp_all_gather(gm, reshard_after_forward)
-    gm.recompile()
-    return gm
 
 
 def full_inductor_compilation_pass(
@@ -935,80 +977,6 @@ def full_inductor_compilation_pass(
         return output_code(list(args))
 
     gm.forward = _compiled_forward
-    return gm
-
-
-# Maps an FSDP group_name to an extra group_name created by this pass.
-# Each NCCL PG gets its own CUDA stream, so the extra PG is what enables
-# AG/RS overlap in backward.
-_EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
-
-
-def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
-    """Return the extra PG name for ``source_pg_name``, creating it once.
-
-    The extra PG is a new NCCL process group with the same ranks as the source
-    FSDP PG but a different communicator (and therefore a different CUDA stream).
-    """
-    import torch.distributed as dist
-
-    if source_pg_name in _EXTRA_FSDP_PG_REGISTRY:
-        return _EXTRA_FSDP_PG_REGISTRY[source_pg_name]
-
-    source_pg = dist.distributed_c10d._resolve_process_group(source_pg_name)
-    ranks = dist.get_process_group_ranks(source_pg)
-    extra_pg = dist.new_group(
-        ranks=ranks, group_desc="fsdp_extra", use_local_synchronization=True
-    )
-    _EXTRA_FSDP_PG_REGISTRY[source_pg_name] = extra_pg.group_name
-    logger.info(
-        f"Created extra FSDP PG (source: {source_pg_name}, "
-        f"extra: {extra_pg.group_name})"
-    )
-    return extra_pg.group_name
-
-
-def overlap_fsdp_ag_rs_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-) -> torch.fx.GraphModule:
-    """
-    Reassign FSDP all-gather nodes to an extra NCCL process group for
-    AG/RS overlap in backward.
-
-    Discovers the FSDP PG by inspecting the graph, creates an extra
-    NCCL PG over the same ranks (giving it a separate CUDA stream),
-    and rewrites every all-gather using that source PG to the extra PG.
-    This separates all-gathers from reduce-scatters onto different streams,
-    enabling AG/RS overlap in backward.
-
-    No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
-    bucketing passes so bucketed all-gathers inherit the new PG name.
-    """
-    source_pg_name: str | None = None
-    for node in gm.graph.nodes:
-        if is_wait_tensor_from_fsdp(node):
-            ag_node = node.args[0]
-            source_pg_name = ag_node.args[2]
-            break
-
-    if source_pg_name is None:
-        return gm
-
-    target_pg_name = _get_or_create_extra_fsdp_pg(source_pg_name)
-
-    count = 0
-    for node in gm.graph.nodes:
-        if is_all_gather(node) and node.args[2] == source_pg_name:
-            # AG args: (input_tensor, group_size, group_name)
-            node.args = (node.args[0], node.args[1], target_pg_name)
-            count += 1
-    if count > 0:
-        logger.info(
-            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
-            f"to PG {target_pg_name}"
-        )
-    gm.recompile()
     return gm
 
 
