@@ -58,14 +58,14 @@ def parallelize_llama(
 
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic
     # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled and not parallelism.full_spmd_types:
+    if parallel_dims.cp_enabled and not parallel_dims.full_spmd_types:
         apply_cp_to_forward(
             # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
 
-    if parallelism.full_spmd_types:
+    if parallel_dims.full_spmd_types:
         model.parallelize(parallel_dims)
     elif parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
@@ -88,7 +88,7 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    if parallelism.full_spmd_types:
+    if parallel_dims.full_spmd_types:
         from torch.distributed.fsdp import DataParallelMeshDims
 
         mesh_names = []
@@ -118,7 +118,7 @@ def parallelize_llama(
         dp_mesh_dims=dp_mesh_dims,
     )
 
-    if parallelism.full_spmd_types:
+    if parallel_dims.full_spmd_types:
         logger.info("Applied FSDP with spmd_types to the model")
     elif parallel_dims.dp_replicate_enabled:
         logger.info("Applied HSDP to the model")
