@@ -7,60 +7,56 @@
 """Global SPMD state for the full_spmd_types path.
 
 Populated once during ``ParallelDims.build_mesh()`` when
-``full_spmd_types=True``. Provides forward-time access to mesh axes
+``full_spmd_types=True``.  Provides forward-time access to mesh axes
 and process groups.
-
-Axis access uses the ``mesh`` singleton (always-valid axes — size-1
-axes are trivial MeshAxis, automatically dropped by spmd_types).
-PG access and derived state (dp_axes) live on ``SpmdState``.
 
 Usage::
 
     from torchtitan.distributed.spmd_state import mesh, spmd_state, is_spmd_active
 
     # Annotations — always valid, size-1 axes are no-ops
-    spmd.assert_type(x, {mesh.TP: spmd.S(0)})
+    spmd.assert_type(x, {mesh().tp: spmd.S(0)})
 
     # PGs for collectives
     state = spmd_state()
     pg = state.pgs["tp"]
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Any
 
+from spmd_types import MeshAxis
 from torch.distributed import ProcessGroup
+from torch.distributed.device_mesh import DeviceMesh
 
 
 class MeshAxes:
-    """Named collection of MeshAxis objects for every parallelism dimension.
+    """Named collection of MeshAxis objects for active parallelism dimensions.
 
-    All axes are always valid — size-1 axes are trivial ``MeshAxis.of(1, 1)``.
-    The spmd_types library drops size-1 axes automatically, so annotations
-    like ``{mesh.TP: spmd.V}`` are no-ops when TP degree is 1.
+    Only stores axes with size > 1. ``getattr(mesh(), name, None)``
+    returns ``None`` for disabled axes.
     """
 
-    def __init__(self, **axes: Any) -> None:
-        self._axes: dict[str, Any] = dict(axes)
+    def __init__(self, **axes: MeshAxis) -> None:
+        self._axes: dict[str, MeshAxis] = dict(axes)
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> MeshAxis | None:
         axes = self.__dict__.get("_axes")
-        if axes is not None and name in axes:
-            return axes[name]
-        raise AttributeError(f"MeshAxes has no axis {name!r}")
+        if axes is not None:
+            return axes.get(name)
+        return None
 
 
 @dataclass
 class SpmdState:
     """Torchtitan-specific derived SPMD state."""
 
-    dp_axes: list[Any] = field(default_factory=list)
-    all_axes: frozenset = field(default_factory=frozenset)
+    dp_axes: list[MeshAxis] = field(default_factory=list)
+    all_axes: frozenset[MeshAxis] = field(default_factory=frozenset)
     pgs: dict[str, ProcessGroup] = field(default_factory=dict)
+    axis_order: list[MeshAxis] = field(default_factory=list)
 
-    def pg_for_axis(self, ax) -> ProcessGroup | None:
+    def pg_for_axis(self, ax: MeshAxis) -> ProcessGroup | None:
         """Reverse lookup: MeshAxis → ProcessGroup."""
         if _MESH is None:
             return None
@@ -68,10 +64,6 @@ class SpmdState:
             if a is ax:
                 return self.pgs.get(name)
         return None
-
-    @property
-    def tp_pg(self) -> ProcessGroup | None:
-        return self.pgs.get("tp")
 
 
 # ---------------------------------------------------------------------------
@@ -82,21 +74,22 @@ _MESH: MeshAxes | None = None
 _STATE: SpmdState | None = None
 
 
-# Sentinel mesh for pre-init attribute access (raises clear error)
 class _UninitializedMesh:
+    """Sentinel for pre-init attribute access — raises a clear error."""
+
     def __getattr__(self, name: str) -> Any:
         raise RuntimeError(
-            f"SPMD mesh not initialized. Cannot access mesh.{name}. "
+            f"SPMD mesh not initialized. Cannot access mesh().{name}. "
             "Call init_spmd_state() during build_mesh()."
         )
 
 
-_mesh: MeshAxes | Any = _UninitializedMesh()
+_mesh_proxy: MeshAxes | Any = _UninitializedMesh()
 
 
 def mesh() -> MeshAxes:
-    """Return the global mesh singleton. Always-valid axes after init."""
-    return _mesh
+    """Return the global mesh axes. Always-valid axes after init."""
+    return _mesh_proxy
 
 
 def spmd_state() -> SpmdState:
@@ -113,12 +106,42 @@ def is_spmd_active() -> bool:
     return _STATE is not None
 
 
-def init_spmd_state(
-    mesh_axes: MeshAxes,
-    state: SpmdState,
-) -> None:
-    """Set the global SPMD mesh and state. Called once during mesh setup."""
-    global _MESH, _STATE, _mesh
+_DP_AXIS_NAMES = ("dp_replicate", "dp_shard", "cp")
+
+
+def init_spmd_state(dense_mesh: DeviceMesh) -> None:
+    """Build MeshAxes and SpmdState from the dense mesh.
+
+    Called by ``ParallelDims.build_mesh()``. Iterates dense_mesh axis names
+    (skipping ``"pp"``), builds ``MeshAxis.of(pg)`` for size>1 axes and
+    ``MeshAxis.of(1, 1)`` for size-1, derives ``dp_axes``, collects PGs.
+    """
+    global _MESH, _STATE, _mesh_proxy
+
+    assert dense_mesh.mesh_dim_names is not None
+
+    axes: dict[str, MeshAxis] = {}
+    pgs: dict[str, ProcessGroup] = {}
+
+    for i, name in enumerate(dense_mesh.mesh_dim_names):
+        if name == "pp":
+            continue
+        size = dense_mesh.size(i)
+        if size > 1:
+            pg = dense_mesh.get_group(name)
+            pg._set_group_desc(name)
+            axes[name] = MeshAxis.of(pg)
+            pgs[name] = pg
+
+    dp_axes = [axes[n] for n in _DP_AXIS_NAMES if n in axes]
+    all_axes = frozenset(axes.values())
+
+    mesh_axes = MeshAxes(**axes)
     _MESH = mesh_axes
-    _mesh = mesh_axes
-    _STATE = state
+    _mesh_proxy = mesh_axes
+    # Canonical axis ordering from the dense mesh (outer → inner).
+    # Used to resolve multi-axis-same-dim collisions in PartitionSpec.
+    axis_order = [axes[n] for n in dense_mesh.mesh_dim_names if n in axes]
+    _STATE = SpmdState(
+        dp_axes=dp_axes, all_axes=all_axes, pgs=pgs, axis_order=axis_order
+    )
