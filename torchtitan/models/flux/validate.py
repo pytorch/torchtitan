@@ -296,6 +296,14 @@ class FluxValidator(Validator):
             global_avg_loss = dist_utils.dist_mean(
                 loss, parallel_dims.get_optional_mesh("loss")
             )
+            # When TP is enabled, ``loss`` is a TP DTensor and ``dist_mean``
+            # only reduces over the DTensor's TP mesh; the CP axis of
+            # ``loss_mesh`` was dropped. Reduce over CP explicitly here.
+            if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
+                cp_mesh = parallel_dims.get_mesh("cp")
+                global_avg_loss = dist_utils.dist_mean(
+                    torch.tensor(global_avg_loss, device=loss.device), cp_mesh
+                )
         else:
             global_avg_loss = float(loss.item())
 

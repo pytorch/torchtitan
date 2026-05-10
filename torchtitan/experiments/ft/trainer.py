@@ -456,6 +456,28 @@ class FaultTolerantTrainer(Trainer):
                     ft_pg,
                 ),
             )
+
+            # When TP is enabled, ``loss`` was a TP DTensor and ``dist_*``
+            # only reduced over the DTensor's TP mesh; the CP axis of
+            # ``loss_mesh`` was dropped. Reduce over CP explicitly here.
+            if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
+                cp_mesh = parallel_dims.get_mesh("cp")
+                global_avg_loss = dist_utils.dist_sum(
+                    torch.tensor(global_avg_loss, device=self.device), cp_mesh
+                )
+                global_max_loss = dist_utils.dist_max(
+                    torch.tensor(global_max_loss, device=self.device), cp_mesh
+                )
+                global_ntokens_seen = int(
+                    dist_utils.dist_sum(
+                        torch.tensor(
+                            global_ntokens_seen,
+                            dtype=torch.int64,
+                            device=self.device,
+                        ),
+                        cp_mesh,
+                    )
+                )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen

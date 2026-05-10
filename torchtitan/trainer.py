@@ -763,12 +763,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             if parallel_dims.dp_cp_enabled:
                 loss = loss.detach()
-
-                # ``loss_mesh`` is the flattened ``batch × cp`` mesh —
-                # everything orthogonal to the model's TP DTensor mesh that
-                # contributes to the global loss. ``dist_sum`` collapses the
-                # TP axis via ``full_tensor()`` and then all-reduces over
-                # ``loss_mesh``, covering DP and CP in one pass.
                 loss_mesh = parallel_dims.get_optional_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
@@ -791,6 +785,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         loss_mesh,
                     ),
                 )
+
+                # When TP is enabled, ``loss`` was a DTensor and ``dist_*``
+                # only reduced over the DTensor's TP mesh via ``full_tensor()``;
+                # the CP axis of ``loss_mesh`` was dropped. Reduce over CP
+                # explicitly here. Without TP, ``loss`` was plain.
+                if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
+                    cp_mesh = parallel_dims.get_mesh("cp")
+                    global_avg_loss = dist_utils.dist_sum(
+                        torch.tensor(global_avg_loss, device=self.device), cp_mesh
+                    )
+                    global_max_loss = dist_utils.dist_max(
+                        torch.tensor(global_max_loss, device=self.device), cp_mesh
+                    )
+                    global_ntokens_seen = int(
+                        dist_utils.dist_sum(
+                            torch.tensor(
+                                global_ntokens_seen,
+                                dtype=torch.int64,
+                                device=self.device,
+                            ),
+                            cp_mesh,
+                        )
+                    )
             else:
                 global_avg_loss = global_max_loss = float(loss.detach().item())
                 global_ntokens_seen = self.ntokens_seen

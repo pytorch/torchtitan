@@ -35,27 +35,20 @@ def _dist_reduce(
 ) -> float:
     """Perform distributed reduction on a tensor.
 
-    For DTensor input, ``full_tensor()`` first collapses the DTensor's own
-    mesh (e.g. TP), then ``mesh`` reduces an additional axis the DTensor
-    doesn't carry (e.g. ``loss_mesh = batch × cp`` over a TP DTensor).
-
     Args:
-        x (torch.Tensor): Input tensor (plain or DTensor).
+        x (torch.Tensor): Input tensor.
         reduceOp (str): Reduce operation to perform.
-        mesh (DeviceMesh | None): 1D device mesh to use for reduction.
-            If None, no extra reduction is performed; the tensor is just
-            converted to a float (after ``full_tensor()`` for DTensor input).
+        mesh (DeviceMesh | None): Device mesh to use for reduction.
+            If None, no reduction is performed but simply convert the tensor to a float.
         extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
     """
     if isinstance(x, DTensor):
         # ``full_tensor()`` reduces the DTensor's own mesh (Partial → reduced,
-        # Replicate → no-op); ``mesh`` then reduces the orthogonal axis. The
-        # caller is responsible for passing a 1D ``mesh`` whose ranks are
-        # rank-orthogonal to the DTensor's own mesh — overlapping axes would
-        # be reduced twice. Shard placements are unsupported — reduction
-        # target is ambiguous.
+        # Replicate → no-op). The caller's ``mesh`` is *not* applied here —
+        # if a caller needs to reduce additional axes (e.g. CP), they must
+        # do so explicitly after this call.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
@@ -67,7 +60,7 @@ def _dist_reduce(
                 "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
                 "to that mesh. Pass a plain tensor when using extra_pg."
             )
-        x = x.full_tensor()
+        return float(x.full_tensor().item())
 
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
