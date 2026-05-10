@@ -451,7 +451,7 @@ def get_compiler_passes_from_config(
                 f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
         if pass_name == "transformer_block_bucketing":
-            from torchtitan.experiments.graph_trainer.passes import (
+            from torchtitan.experiments.graph_trainer.fsdp_passes import (
                 overlap_fsdp_ag_rs_pass,
             )
 
@@ -504,10 +504,12 @@ def get_joint_custom_passes_from_config(
     Returns:
         List of joint custom pass functions
     """
+    from torchtitan.experiments.graph_trainer.fsdp_passes import (
+        fsdp_reshard_after_fwd_pass,
+    )
     from torchtitan.experiments.graph_trainer.passes import (
         annotate_flex_attention_for_regional_inductor_pass,
         AVAILABLE_JOINT_PASSES,
-        fsdp_reshard_after_fwd_pass,
     )
 
     joint_custom_passes = []
@@ -528,12 +530,16 @@ def get_joint_custom_passes_from_config(
 
     joint_pass_names = getattr(compile_config, "joint_passes", [])
     for pass_name in joint_pass_names:
+        if pass_name == "cpu_offload":
+            raise ValueError(
+                "cpu_offload is not a joint pass. "
+                "Use --compile.memory_policy=budget_limited_offload in aot_fx_trace mode instead."
+            )
         if pass_name not in AVAILABLE_JOINT_PASSES:
             raise ValueError(
                 f"Unknown joint pass: {pass_name}. "
                 f"Available joint passes: {list(AVAILABLE_JOINT_PASSES.keys())}"
             )
-
         joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
 
     if joint_pass_names:
