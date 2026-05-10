@@ -7,12 +7,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
-import torch
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
+from torchtitan.distributed.spmd_state import init_spmd_state
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
@@ -204,9 +203,7 @@ class ParallelDims:
             self._meshes["dp_shard"] = dense_mesh["dp_shard"]
             if self.cp > 1:
                 # FSDP needs dp_shard*cp combined for weight sharding
-                # and gradient sync across CP ranks. Create a separate
-                # global mesh so get_mesh(["dp_replicate", "fsdp", "tp"])
-                # works for the FSDP setup in parallelize.py.
+                # and gradient sync across CP ranks.
                 fsdp_dense_mesh = unflatten_mesh(
                     self._world_mesh,
                     ("pp", "dp_replicate", "fsdp", "tp"),
@@ -217,35 +214,8 @@ class ParallelDims:
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
 
-        # Populate global SPMD state: always-valid axes + PGs.
         if self.full_spmd_types:
-            from spmd_types import MeshAxis
-            from torchtitan.distributed.spmd_state import (
-                MeshAxes, SpmdState, init_spmd_state,
-            )
-
-            axes: dict[str, Any] = {}
-            pgs: dict[str, Any] = {}
-            for name in dense_mesh.mesh_dim_names:
-                if name == "pp":
-                    continue
-                size = dense_mesh.size(dense_mesh.mesh_dim_names.index(name))
-                if size > 1:
-                    pg = dense_mesh.get_group(name)
-                    pg._set_group_desc(name)
-                    axes[name] = MeshAxis.of(pg)
-                    pgs[name] = pg
-                else:
-                    axes[name] = MeshAxis.of(1, 1)
-
-            dp_names = ("dp_replicate", "dp_shard", "cp")
-            dp_axes = [axes[n] for n in dp_names if axes[n].size() > 1]
-            all_axes = frozenset(a for a in axes.values() if a.size() > 1)
-
-            init_spmd_state(
-                MeshAxes(**axes),
-                SpmdState(dp_axes=dp_axes, all_axes=all_axes, pgs=pgs),
-            )
+            init_spmd_state(dense_mesh)
 
         # Validate mesh sizes
         self._validate_meshes()
@@ -379,18 +349,6 @@ class ParallelDims:
         if not self._meshes:
             self.build_mesh()
         return {k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1}
-
-    def tp_shard(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
-        """Shard tensor along dim across TP ranks, matching DTensor's sharding."""
-        from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
-
-        tp_mesh = self.get_mesh("tp")
-        dtensor = distribute_tensor(
-            tensor, tp_mesh, placements=[Shard(dim)]
-        )
-        return dtensor._local_tensor
-
-
 
     @property
     def world_mesh(self) -> DeviceMesh:

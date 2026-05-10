@@ -4,12 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import inspect
-import itertools
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -17,17 +18,12 @@ from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 
 import spmd_types as spmd
-from torch.distributed.tensor import Shard as DtShard
 from torchtitan.config import Configurable
+from torchtitan.distributed.spmd_state import is_spmd_active, mesh as spmd_mesh, spmd_state
 from torchtitan.protocols.sharding import (
-    GlobalSpmdConfig,
-    LocalSpmdConfig,
-    placement_to_spmd_type,
     resolve_placements,
-    resolve_spmd,
     ShardingConfig,
 )
-from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -56,14 +52,72 @@ def preserve_buffer_spmd(model: nn.Module):
             spmd.assert_type(buf, saved[fqn])
 
 
-def redistribute_per_axis(
+def _resolve_named(named):
+    """Resolve MeshAxisName → MeshAxis, dropping inactive axes."""
+    m = spmd_mesh()
+    types = {}
+    for axis_name, value in named.items():
+        if (ax := getattr(m, axis_name.value)) is None:
+            continue
+        types[ax] = value
+    return types
+
+
+def named_placement_to_spmd(named, ndim=None):
+    """Resolve NamedPlacement to {MeshAxis: spmd_type}, with optional
+    PartitionSpec normalization for ``spmd.assert_type``.
+
+    When ``ndim`` is provided and multiple active axes shard the same
+    tensor dim, S(dim) entries are converted to V and a PartitionSpec
+    is built using canonical axis ordering.
+
+    When ``ndim`` is None, returns raw types without normalization —
+    used by redistribute callers that compare per-axis types directly.
+
+    Returns ``(types, partition_spec)``.
+    """
+    types = _resolve_named(named)
+
+    if ndim is None:
+        return types, None
+
+    # Check for multi-axis-same-dim collisions
+    dim_to_axes: dict[int, list] = {}
+    for ax, t in types.items():
+        if isinstance(t, spmd.Shard):
+            dim_to_axes.setdefault(t.dim, []).append(ax)
+
+    has_collision = any(len(axes) > 1 for axes in dim_to_axes.values())
+    if not has_collision:
+        return types, None
+
+    # Build PartitionSpec using canonical axis ordering for collisions.
+    axis_order = spmd_state().axis_order
+    order_idx = {ax: i for i, ax in enumerate(axis_order)}
+
+    pspec_entries: dict[int, object] = {}
+    for dim, axes in dim_to_axes.items():
+        if len(axes) > 1:
+            sorted_axes = tuple(sorted(axes, key=lambda a: order_idx.get(a, 0)))
+            pspec_entries[dim] = sorted_axes
+            for ax in axes:
+                types[ax] = spmd.V
+        else:
+            pspec_entries[dim] = axes[0]
+            types[axes[0]] = spmd.V
+
+    spec_args = [pspec_entries.get(d) for d in range(ndim)]
+    partition_spec = spmd.PartitionSpec(*spec_args)
+
+    return types, partition_spec
+
+
+def redistribute_spmd_per_axis(
     x: torch.Tensor,
     src_types: spmd.PerMeshAxisSpmdTypes,
     dst_types: spmd.PerMeshAxisSpmdTypes,
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
-    from torchtitan.distributed.spmd_state import mesh, spmd_state
-
     state = spmd_state()
     for axis, dst_t in dst_types.items():
         src_t = src_types.get(axis)
@@ -72,58 +126,6 @@ def redistribute_per_axis(
             bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
             x = spmd.redistribute(x, pg, src=src_t, dst=dst_t, backward_options=bwd)
     return x
-
-
-def lspmd_parallelize(
-    fn: Callable,
-    config: LocalSpmdConfig,
-) -> Callable:
-    """Wrap forward with ``spmd.local_map`` for local typechecking."""
-    resolved_out = config.out.resolve()
-    resolved_in = (
-        tuple(a.resolve() for a in config.inputs)
-        if config.inputs is not None else spmd.Infer
-    )
-
-    @spmd.local_map(in_types=resolved_in, out_types=resolved_out)
-    def body(*args, **kwargs):
-        return fn(*args, **kwargs)
-
-    return body
-
-
-def gspmd_parallelize(
-    fn: Callable,
-    config: GlobalSpmdConfig,
-) -> Callable:
-    """Build a forward wrapper that redistributes inputs and/or outputs."""
-    resolved_inputs = None
-    if config.inputs is not None:
-        resolved_inputs = tuple(
-            r.resolve() if r is not None else None
-            for r in config.inputs
-        )
-
-    resolved_output = (
-        config.output.resolve() if config.output is not None else None
-    )
-
-    def wrapper(*args, **kwargs):
-        if resolved_inputs is not None:
-            args = list(args)
-            for i, redist in enumerate(resolved_inputs):
-                if redist is not None and isinstance(args[i], torch.Tensor):
-                    args[i] = redistribute_per_axis(args[i], *redist)
-            args = tuple(args)
-
-        outputs = fn(*args, **kwargs)
-
-        if resolved_output is not None and isinstance(outputs, torch.Tensor):
-            outputs = redistribute_per_axis(outputs, *resolved_output)
-
-        return outputs
-
-    return wrapper
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -145,16 +147,12 @@ class Module(nn.Module, Configurable):
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
-    _local_spmd: LocalSpmdConfig | None = None
-    _global_spmd: GlobalSpmdConfig | None = None
     _pos_arg_list: list[str] | None = None
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         param_init: dict | None = None
         sharding_config: ShardingConfig | None = None
-        local_spmd: LocalSpmdConfig | None = None
-        global_spmd: GlobalSpmdConfig | None = None
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -165,10 +163,6 @@ class Module(nn.Module, Configurable):
                 instance._param_init = self.param_init
             if self.sharding_config is not None:
                 instance._sharding_config = self.sharding_config
-            if self.local_spmd is not None:
-                instance._local_spmd = self.local_spmd
-            if self.global_spmd is not None:
-                instance._global_spmd = self.global_spmd
             return instance
 
     def init_states(
@@ -286,16 +280,24 @@ class Module(nn.Module, Configurable):
         return self._pos_arg_list
 
     # ------------------------------------------------------------------
-    # parallelize: 3 steps — shard states, wrap local boundary, wrap fwd
+    # parallelize: distribute states, wrap local boundary, wrap forward
     # ------------------------------------------------------------------
 
     def parallelize(
-        self, mesh_or_parallel_dims: "DeviceMesh | ParallelDims"
+        self, mesh_or_parallel_dims: DeviceMesh | ParallelDims
     ) -> None:
         """Parallelize this module and all Module children recursively.
 
         Accepts either a ``DeviceMesh`` (DTensor path) or ``ParallelDims``
-        (spmd_types path, when ``full_spmd_types=True``).
+        (SPMD path, when ``full_spmd_types=True``).
+
+        For each module with a ``sharding_config``:
+
+        1. Distribute params and buffers per ``state_shardings``.
+        2. Wrap ``self.forward`` with local_map boundary + redistribution.
+
+        fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
+        CP (applied before ``parallelize``) is captured inside ``local_map``.
         """
         # Recurse children first
         queue = list(self.children())
@@ -307,172 +309,190 @@ class Module(nn.Module, Configurable):
                 # Look through non-Module wrappers, e.g., CheckpointWrapper
                 queue.extend(child.children())
 
-        if self._sharding_config is None and self._local_spmd is None and self._global_spmd is None:
+        sharding_config = self._sharding_config
+        if sharding_config is None:
             return
 
-        from torchtitan.distributed.parallel_dims import ParallelDims
-
-        if isinstance(mesh_or_parallel_dims, ParallelDims):
-            if not mesh_or_parallel_dims.full_spmd_types:
-                raise ValueError(
-                    "ParallelDims passed to parallelize() but full_spmd_types "
-                    "is False. Pass a DeviceMesh for the DTensor path."
-                )
-            self._parallelize_spmd(mesh_or_parallel_dims)
-        else:
-            self._parallelize_dtensor(mesh_or_parallel_dims)
-
-    # ----- DTensor path -----
-
-    def _parallelize_dtensor(self, mesh: DeviceMesh) -> None:
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        assert mesh.mesh_dim_names is not None
-        mesh_axis_names = mesh.mesh_dim_names
-
-        # Shard states
+        # Step 1: Distribute parameters and buffers
         for name, param in self.named_parameters(recurse=False):
             if name not in sharding_config.state_shardings:
                 continue
-            placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_axis_names
-            )
-            self.register_parameter(
+            self.distribute_state(
                 name,
-                nn.Parameter(distribute_tensor(param, mesh, list(placements))),
+                param,
+                sharding_config.state_shardings[name],
+                mesh_or_parallel_dims,
+                is_param=True,
             )
 
         for name, buffer in self.named_buffers(recurse=False):
             if name not in sharding_config.state_shardings or buffer is None:
                 continue
-            placements = resolve_placements(
-                sharding_config.state_shardings[name], mesh_axis_names
-            )
-            persistent = name not in self._non_persistent_buffers_set
-            self.register_buffer(
+            self.distribute_state(
                 name,
-                distribute_tensor(buffer, mesh, list(placements)),
-                persistent=persistent,
+                buffer,
+                sharding_config.state_shardings[name],
+                mesh_or_parallel_dims,
+                is_param=False,
             )
 
-        # Cache positional arg names of the original forward so _shard_inputs
-        # can read them from the cache instead of calling inspect every forward.
+        # Cache positional arg names before wrapping forward
         self._cache_pos_arg_names()
 
-        # Local boundary
+        # Step 2: Wrap forward with local_map boundary
         fn = self.forward
         if sharding_config.local_map is not None:
-            # Resolve each NamedPlacement to a positional tuple for the
-            # current mesh.
-            lm = sharding_config.local_map
-            in_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.in_placements
-            )
-            out_placements = tuple(
-                resolve_placements(p, mesh_axis_names) for p in lm.out_placements
-            )
-            in_grad_placements = tuple(
-                resolve_placements(p, mesh_axis_names)
-                for p in lm.in_grad_placements
-            )
-            fn = local_map(
-                fn,
-                in_placements=in_placements,
-                out_placements=out_placements,
-                in_grad_placements=in_grad_placements,
-                device_mesh=mesh,
+            fn = self.local_map(
+                fn, sharding_config.local_map, mesh_or_parallel_dims
             )
 
+        # Step 3: Wrap forward with input/output redistribution
         def with_redistribution(*args, **kwargs):
-            args, kwargs = self._shard_inputs(mesh, args, kwargs)
+            args, kwargs = self._shard_inputs(mesh_or_parallel_dims, args, kwargs)
             outputs = fn(*args, **kwargs)
-            return self._shard_outputs(mesh, outputs)
+            return self._shard_outputs(mesh_or_parallel_dims, outputs)
 
         self.forward = with_redistribution
 
-    # ----- spmd_types path -----
-
-    def _parallelize_spmd(self, parallel_dims: "ParallelDims") -> None:
-        sharding_config = self._sharding_config
-        if sharding_config is not None:
-            self._annotate_states_spmd(sharding_config, parallel_dims)
-
-        self._cache_pos_arg_names()
-
-        if self._local_spmd is not None:
-            self.forward = lspmd_parallelize(self.forward, self._local_spmd)
-        if self._global_spmd is not None:
-            self.forward = gspmd_parallelize(self.forward, self._global_spmd)
-
-    def _annotate_states_spmd(
+    def distribute_state(
         self,
-        sharding_config: ShardingConfig,
-        parallel_dims: "ParallelDims",
+        name: str,
+        tensor: torch.Tensor,
+        named_placement: dict,
+        mesh_or_pd: DeviceMesh | ParallelDims,
+        *,
+        is_param: bool,
     ) -> None:
-        """Annotate params and buffers with SPMD types, slicing TP-sharded params."""
-        from torchtitan.distributed.spmd_state import mesh, spmd_state
+        """Distribute a single parameter or buffer.
 
-        tp_pg = spmd_state().tp_pg
-        dp_axes_set = set(spmd_state().dp_axes)
+        DTensor values → ``distribute_tensor``.
+        SPMD values → physical TP shard (if applicable) + ``spmd.assert_type``.
+        """
+        if is_spmd_active():
+            self.distribute_state_spmd(name, tensor, named_placement, is_param=is_param)
+        else:
+            mesh = (
+                mesh_or_pd
+                if isinstance(mesh_or_pd, DeviceMesh)
+                else mesh_or_pd.world_mesh
+            )
+            assert mesh.mesh_dim_names is not None
+            placements = resolve_placements(named_placement, mesh.mesh_dim_names)
+            distributed = distribute_tensor(tensor, mesh, list(placements))
+            if is_param:
+                self.register_parameter(name, nn.Parameter(distributed))
+            else:
+                persistent = name not in self._non_persistent_buffers_set
+                self.register_buffer(name, distributed, persistent=persistent)
 
-        for name, tensor in itertools.chain(
-            self.named_parameters(recurse=False),
-            self.named_buffers(recurse=False),
-        ):
-            if tensor is None or name not in sharding_config.state_shardings:
-                continue
-            named_p = sharding_config.state_shardings[name]
+    def distribute_state_spmd(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        named_placement: dict,
+        *,
+        is_param: bool,
+    ) -> None:
+        """SPMD path: physically shard where needed, then annotate."""
+        m = spmd_mesh()
+        state = spmd_state()
 
-            # Physical TP weight slicing (params only)
-            if tp_pg is not None and isinstance(tensor, nn.Parameter):
-                for axis_name, placement in named_p.items():
-                    if axis_name.value == "tp" and isinstance(placement, DtShard):
-                        tensor = nn.Parameter(
-                            parallel_dims.tp_shard(tensor, placement.dim)
-                        )
-                        self.register_parameter(name, tensor)
-                        break
-
-            resolved = resolve_spmd(named_p)
-            if resolved:
-                resolved = {
-                    a: (spmd.R if t is spmd.I and a in dp_axes_set else t)
-                    for a, t in resolved.items()
-                }
-                spmd.assert_type(tensor, resolved)
-
-        # Vocab-parallel embedding
-        from torchtitan.models.common.embedding import Embedding
-
-        if tp_pg is not None and isinstance(self, Embedding):
-            tp_placement = sharding_config.state_shardings.get(
-                "weight", {}
-            ).get(MeshAxisName.TP)
-            if isinstance(tp_placement, DtShard):
-                out_dst = sharding_config.out_dst_shardings or {}
-                tp_out_placement = out_dst.get(MeshAxisName.TP)
-                tp_out_type = (
-                    placement_to_spmd_type(tp_out_placement, is_compute=True)
-                    if tp_out_placement is not None
-                    else spmd.R
+        # shard states if needed
+        for axis_name, value in named_placement.items():
+            spmd_t = value[0] if isinstance(value, tuple) else value
+            if spmd_t is spmd.P:
+                raise ValueError(
+                    f"Partial is not valid for state {name!r} "
+                    f"on axis {axis_name.value!r}."
                 )
-                self._setup_tp(tp_out_type)
+            if (ax := getattr(m, axis_name.value)) is None:
+                continue
+            if isinstance(spmd_t, spmd.Shard):
+                pg = state.pg_for_axis(ax)
+                assert pg is not None
+                tensor = spmd.shard(tensor, pg, src=spmd.I, dst=spmd_t)
 
-    # ----- DTensor input/output helpers (unchanged from main) -----
+        # register state
+        if is_param:
+            self.register_parameter(name, nn.Parameter(tensor))
+        else:
+            persistent = name not in self._non_persistent_buffers_set
+            self.register_buffer(name, tensor, persistent=persistent)
+
+        # annotate the registered param/buffer (not the input tensor)
+        registered = self._parameters[name] if is_param else self._buffers[name]
+        types, partition_spec = named_placement_to_spmd(
+            named_placement, ndim=registered.ndim
+        )
+        if types:
+            spmd.assert_type(registered, types, partition_spec=partition_spec)
+
+    def local_map(
+        self,
+        fn: Callable,
+        local_map_config: Any,
+        mesh_or_pd: DeviceMesh | ParallelDims,
+    ) -> Callable:
+        """Wrap forward with local_map (DTensor) or spmd.local_map (SPMD).
+
+        Duck-types on placement values in the config to dispatch.
+        """
+        if is_spmd_active():
+            return self.local_map_spmd(fn, local_map_config)
+        else:
+            mesh = (
+                mesh_or_pd
+                if isinstance(mesh_or_pd, DeviceMesh)
+                else mesh_or_pd.world_mesh
+            )
+            return self.local_map_dtensor(fn, local_map_config, mesh)
+
+    def local_map_dtensor(
+        self, fn: Callable, lm: Any, mesh: DeviceMesh
+    ) -> Callable:
+        assert mesh.mesh_dim_names is not None
+        mesh_axis_names = mesh.mesh_dim_names
+        in_placements = tuple(
+            resolve_placements(p, mesh_axis_names) for p in lm.in_placements
+        )
+        out_placements = tuple(
+            resolve_placements(p, mesh_axis_names) for p in lm.out_placements
+        )
+        in_grad_placements = tuple(
+            resolve_placements(p, mesh_axis_names) for p in lm.in_grad_placements
+        ) if lm.in_grad_placements is not None else in_placements
+        return local_map(
+            fn,
+            in_placements=in_placements,
+            out_placements=out_placements,
+            in_grad_placements=in_grad_placements,
+            device_mesh=mesh,
+        )
+
+    def local_map_spmd(self, fn: Callable, lm: Any) -> Callable:
+        assert lm.in_placements is not None, (
+            "SPMD local_map requires explicit in_placements"
+        )
+        resolved_in = tuple(
+            named_placement_to_spmd(p) for p in lm.in_placements
+        )
+        resolved_out = tuple(
+            named_placement_to_spmd(p) for p in lm.out_placements
+        )
+
+        @spmd.local_map(in_types=resolved_in, out_types=resolved_out)
+        def body(*args, **kwargs):
+            return fn(*args, **kwargs)
+
+        return body
 
     def _shard_inputs(
         self,
-        mesh: DeviceMesh,
+        mesh_or_pd: DeviceMesh | ParallelDims,
         args: tuple,
         kwargs: dict,
     ) -> tuple[tuple, dict]:
-        """Redistribute inputs to desired placements.
-
-        Two-step process per input:
-        1. If plain tensor, wrap as DTensor using ``in_src_shardings``
-           (declares the source placement of the incoming tensor).
-        2. If DTensor placements != ``in_dst_shardings``, redistribute.
-        """
+        """Redistribute inputs to desired placements."""
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
@@ -490,55 +510,109 @@ class Module(nn.Module, Configurable):
         new_kwargs = dict(zip(pos_arg_names, args))
         new_kwargs.update(kwargs)
 
-        assert mesh.mesh_dim_names is not None
-        mesh_axis_names = mesh.mesh_dim_names
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
 
-        for name, value in new_kwargs.items():
+        if is_spmd_active():
+            self._shard_inputs_spmd(new_kwargs, in_src_shardings, in_dst_shardings)
+        else:
+            mesh = (
+                mesh_or_pd
+                if isinstance(mesh_or_pd, DeviceMesh)
+                else mesh_or_pd.world_mesh
+            )
+            self._shard_inputs_dtensor(new_kwargs, in_src_shardings, in_dst_shardings, mesh)
+
+        new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
+        return new_args, new_kwargs
+
+    def _shard_inputs_dtensor(
+        self,
+        kwargs: dict,
+        in_src_shardings: dict,
+        in_dst_shardings: dict,
+        mesh: DeviceMesh,
+    ) -> None:
+        assert mesh.mesh_dim_names is not None
+        mesh_axis_names = mesh.mesh_dim_names
+
+        for name, value in kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
 
-            # Step 1: Annotate plain tensor as DTensor using in_src_shardings.
+            # Step 1: Annotate plain tensor as DTensor
             if not isinstance(value, DTensor) and name in in_src_shardings:
                 layout = resolve_placements(in_src_shardings[name], mesh_axis_names)
                 value = DTensor.from_local(value, mesh, layout, run_check=False)
 
-            # Step 2: Redistribute to desired placement if needed.
+            # Step 2: Redistribute to desired placement
             if name in in_dst_shardings and isinstance(value, DTensor):
                 desired = resolve_placements(in_dst_shardings[name], mesh_axis_names)
                 if value.placements != desired:
                     value = value.redistribute(placements=desired, async_op=True)
 
-            new_kwargs[name] = value
+            kwargs[name] = value
 
-        new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
-        return new_args, new_kwargs
+    def _shard_inputs_spmd(
+        self,
+        kwargs: dict,
+        in_src_shardings: dict,
+        in_dst_shardings: dict,
+    ) -> None:
+        for name, value in kwargs.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            if name in in_src_shardings and name in in_dst_shardings:
+                src_types, _ = named_placement_to_spmd(in_src_shardings[name])
+                dst_types, _ = named_placement_to_spmd(in_dst_shardings[name])
+                value = redistribute_spmd_per_axis(value, src_types, dst_types)
+            kwargs[name] = value
 
     def _shard_outputs(
         self,
-        mesh: DeviceMesh,
-        outputs: torch.Tensor,
-    ) -> torch.Tensor:
-        """Redistribute output to desired placement.
-
-        TODO: Currently only handles a single DTensor output. Extend to
-        support nested outputs (tuples, dicts) when models with
-        multi-tensor forward returns (e.g., Flux, MoE) adopt
-        config-based sharding. out_dst_shardings would also need to become
-        a nested structure.
-        """
+        mesh_or_pd: DeviceMesh | ParallelDims,
+        outputs: Any,
+    ) -> Any:
+        """Redistribute output to desired placement."""
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
         if sharding_config.out_dst_shardings is None:
             return outputs
+
+        if is_spmd_active():
+            return self._shard_outputs_spmd(outputs)
+        else:
+            mesh = (
+                mesh_or_pd
+                if isinstance(mesh_or_pd, DeviceMesh)
+                else mesh_or_pd.world_mesh
+            )
+            return self._shard_outputs_dtensor(outputs, mesh)
+
+    def _shard_outputs_dtensor(
+        self, outputs: Any, mesh: DeviceMesh
+    ) -> Any:
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
         assert mesh.mesh_dim_names is not None
         desired = resolve_placements(
             sharding_config.out_dst_shardings, mesh.mesh_dim_names
         )
         if isinstance(outputs, DTensor) and outputs.placements != desired:
             outputs = outputs.redistribute(placements=desired, async_op=True)
+        return outputs
+
+    def _shard_outputs_spmd(self, outputs: Any) -> Any:
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        if isinstance(outputs, torch.Tensor):
+            out_src, out_dst = sharding_config.out_src_shardings, sharding_config.out_dst_shardings
+            if out_src is None:
+                out_src = out_dst
+            src_types, _ = named_placement_to_spmd(out_src)
+            dst_types, _ = named_placement_to_spmd(out_dst)
+            outputs = redistribute_spmd_per_axis(outputs, src_types, dst_types)
         return outputs
 
     @classmethod
@@ -565,10 +639,10 @@ class Module(nn.Module, Configurable):
         if nn_module_cls in _created_classes:
             return _created_classes[nn_module_cls]
 
-        attrs: dict = {}
+        attrs: dict[str, Any] = {}
         if hasattr(nn_module_cls, "reset_parameters"):
 
-            def _init_self_parameters(self: "Module") -> None:
+            def _init_self_parameters(self: Any) -> None:
                 self.reset_parameters()
 
             attrs["_init_self_parameters"] = _init_self_parameters
@@ -597,5 +671,3 @@ class Sequential(nn.Sequential, Module):
     """Module-protocol-compatible version of ``nn.Sequential``."""
 
     pass
-
-

@@ -25,8 +25,11 @@ from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
-from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.experiments.graph_trainer.common_utils import (
+    maybe_register_blockmask_pytree_node,
+)
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
@@ -116,6 +119,24 @@ class BitwiseDeterministicBase(unittest.TestCase):
         FlexAttention.inductor_configs = self._orig_inductor_configs
         FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
+    def _get_extra_kwargs(self, model: nn.Module) -> dict[str, object]:
+        """Build extra_kwargs matching what post_dataloading_process produces.
+
+        For FlexAttention models, this generates the BlockMask attention
+        masks. For SDPA models, returns an empty dict.
+        """
+        from torchtitan.models.common.attention import FlexAttention as FlexAttnModule
+        from torchtitan.models.common.decoder import Decoder
+
+        if not isinstance(self.model_config, Decoder.Config):
+            return {}
+        layer = self.model_config.layers[0]
+        inner_attention = getattr(layer.attention, "inner_attention", None)
+        if not isinstance(inner_attention, FlexAttnModule.Config):
+            return {}
+        attention_masks = model.get_attention_masks(self.positions)
+        return {"attention_masks": attention_masks}
+
     def _run_steps(
         self,
         model: nn.Module,
@@ -179,14 +200,18 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)
-        loss_fn = cross_entropy_loss
+        loss_fn = CrossEntropyLoss.Config().build()
         fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
 
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
         )
         extra_inputs: dict[str, torch.Tensor] = {}
-        extra_kwargs: dict[str, torch.Tensor] = {"positions": self.positions}
+        extra_kwargs: dict[str, object] = {
+            "positions": self.positions,
+            **self._get_extra_kwargs(model),
+        }
+        maybe_register_blockmask_pytree_node()
 
         # Step 1: Trace the graph
         traced_result = trace_train_step(fwd_bwd_fn)(
@@ -207,6 +232,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
                     memory_policy="default",
                     inductor_compilation="regional",
                     numerics_changing_optim=False,
+                    cpu_offload_prefetch_n_layers=1,
+                    cpu_offload_defer_n_layers=1,
+                    cpu_offload_budget_gb=100.0,
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
@@ -235,7 +263,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 compile=SimpleNamespace(
                     precompile_artifact_dir="precompiled",
                     inductor_compilation="regional",
-                    enable_cudagraph=True,
+                    disable_passes=[],
                 ),
             )
             passes = construct_default_graph_passes(loaded_result, load_config)
@@ -445,8 +473,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: numerics mismatch between precompile and trace with FlexAttention
-    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -503,10 +529,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             """16c5442f06bc283431e48c4bcd2498fa3c849351815668b72ce1c76095f22277""",
         )
 
-    # TODO: OOMs during flex_attention compilation on A100 GPUs.
+    # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
     # Revisit when GraphTrainer addresses peak memory during compilation.
     @unittest.skipUnless(
-        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on A100"
+        has_cuda_capability(9, 0),
+        "flex_attention compilation exceeds resource limits on pre-Hopper GPUs",
     )
     def test_aot_fx_trace_vs_eager(self):
         """aot_fx_trace with passes and eager produce bitwise identical results."""
@@ -514,8 +541,11 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: numerics mismatch between precompile and trace with FlexAttention
-    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
+    # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0),
+        "flex_attention compilation exceeds resource limits on pre-Hopper GPUs",
+    )
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -523,9 +553,10 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
-    # TODO: OOMs during flex_attention compilation on A100 GPUs.
+    # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
     @unittest.skipUnless(
-        has_cuda_capability(9, 0), "OOMs during flex_attention compilation on A100"
+        has_cuda_capability(9, 0),
+        "flex_attention compilation exceeds resource limits on pre-Hopper GPUs",
     )
     def test_numerics_changing_optim_run_to_run(self):
         """Two runs with numerics_changing_optim produce bitwise identical results."""
@@ -640,8 +671,6 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: numerics mismatch between precompile and trace with FlexAttention
-    @unittest.skip("FlexAttention precompile numerics mismatch — under investigation")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)

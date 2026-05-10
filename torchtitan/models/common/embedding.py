@@ -12,6 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.spmd_state import spmd_state
 from torchtitan.protocols.module import Module
 
 __all__ = ["Embedding"]
@@ -21,42 +22,51 @@ class Embedding(nn.Embedding, Module):
     """Configurable nn.Embedding with optional vocab-parallel TP support.
 
     Without TP, forward is standard ``F.embedding``.
-    With TP, forward uses masked-partial: each TP rank looks up its local
-    slice of the vocab table, masks out-of-range tokens, and reduces
-    across TP ranks.
+    With TP (weight is vocab-sharded via ``distribute_state_spmd``), forward
+    uses masked-partial: each TP rank looks up its local slice of the vocab
+    table, masks out-of-range tokens, and reduces across TP ranks via
+    ``spmd.redistribute(P → _tp_out_type)``.
 
-    TP state is set by ``_setup_tp`` at parallelize time. The forward
-    should be wrapped with ``LocalSpmdConfig`` so that SPMD type
-    annotations are handled at the boundary.
+    ``_tp_out_type`` is set during ``parallelize()`` from the ``local_map``
+    ``out_placements`` on the ``ShardingConfig``: ``R`` without SP,
+    ``S(1)`` with SP (reduce-scatter into sequence-parallel layout).
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_embeddings: int
         embedding_dim: int
+        tp_out_type: spmd.PerMeshAxisSpmdType | None = None
 
     def __init__(self, config: Config):
         super().__init__(config.num_embeddings, config.embedding_dim)
-        
-        
-        self._tp_out_type = None
-
-    def _setup_tp(self, tp_out_type) -> None:
-        """Configure TP vocab-parallel state. Called at parallelize time."""
-        self._tp_out_type = tp_out_type
+        self.tp_out_type = config.tp_out_type
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight = self.weight
+
+        tp_pg = spmd_state().get_pg("tp")
+        if tp_pg is None:
+            return F.embedding(
+                input,
+                weight,
+                self.padding_idx,
+                self.max_norm,
+                self.norm_type,
+                self.scale_grad_by_freq,
+                self.sparse,
+            )
+
+        # Vocab-parallel: each rank has weight[vocab_start:vocab_end].
         chunk_size = weight.shape[0]
-        from torchtitan.distributed.spmd_state import spmd_state
-        tp_pg = spmd_state().tp_pg
-        offset = dist.get_rank(tp_pg) * chunk_size if tp_pg is not None else 0
+        offset = dist.get_rank(tp_pg) * chunk_size
         mask = (input >= offset) & (input < offset + chunk_size)
         local_input = (input - offset).clamp(0, chunk_size - 1)
         out = F.embedding(local_input, weight)
         out = out * mask.unsqueeze(-1).to(out.dtype)
-        if tp_pg is not None:
-            out = spmd.redistribute(
-                out, tp_pg, src=spmd.P, dst=self._tp_out_type
-            )
+        bwd = {"op_dtype": torch.float32} if out.dtype != torch.float32 else None
+        out = spmd.redistribute(
+            out, tp_pg, src=spmd.P, dst=self.tp_out_type,
+            backward_options=bwd,
+        )
         return out

@@ -57,7 +57,7 @@ def parallelize_llama(
         """
 
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-    # runs inside the local_map/local_spmd boundary on local tensors.
+    # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
             # pyrefly: ignore [missing-attribute]
@@ -65,7 +65,7 @@ def parallelize_llama(
             parallel_dims.get_mesh("cp"),
         )
 
-    if parallelism.full_spmd_types:
+    if parallel_dims.full_spmd_types:
         model.parallelize(parallel_dims)
     elif parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
@@ -88,7 +88,7 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    if parallelism.full_spmd_types:
+    if parallel_dims.full_spmd_types:
         from torch.distributed.fsdp import DataParallelMeshDims
 
         # CP ranks share weights → FSDP must shard across dp_shard*cp.
@@ -121,7 +121,7 @@ def parallelize_llama(
         dp_mesh_dims=dp_mesh_dims,
     )
 
-    if parallelism.full_spmd_types:
+    if parallel_dims.full_spmd_types:
         logger.info("Applied FSDP with spmd_types to the model")
     elif parallel_dims.dp_replicate_enabled:
         logger.info("Applied HSDP to the model")
