@@ -127,18 +127,18 @@ class TorchTitanVLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # PP and CP are not supported on this inference path
-        if parallelism.pipeline_parallel_degree != 1:
-            raise ValueError(
-                "torchtitan pipeline_parallel_degree must be 1 for the "
-                "vLLM wrapper, got "
-                f"{parallelism.pipeline_parallel_degree}"
-            )
-        if parallelism.context_parallel_degree != 1:
-            raise ValueError(
-                "torchtitan context_parallel_degree must be 1 for the "
-                f"vLLM wrapper, got {parallelism.context_parallel_degree}"
-            )
+        # PP and CP are not supported on this inference path. User-facing
+        # validation lives in Generator.Config.__post_init__; these are
+        # internal invariants — by the time we get here, parallelism has
+        # already been validated.
+        assert parallelism.pipeline_parallel_degree == 1, (
+            "vLLM wrapper requires pipeline_parallel_degree=1, "
+            f"got {parallelism.pipeline_parallel_degree}"
+        )
+        assert parallelism.context_parallel_degree == 1, (
+            "vLLM wrapper requires context_parallel_degree=1, "
+            f"got {parallelism.context_parallel_degree}"
+        )
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
