@@ -140,52 +140,6 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
-<<<<<<< HEAD
-=======
-        def __post_init__(self):
-            # Generator only supports TP now. vLLM handles its own parallelism
-            # and we only apply TP via the core parallelize function.
-            p = self.parallelism
-            if p.data_parallel_replicate_degree != 1:
-                raise ValueError(
-                    f"Generator does not support data parallel replication, "
-                    f"got dp_replicate={p.data_parallel_replicate_degree}"
-                )
-            if p.pipeline_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support pipeline parallelism, "
-                    f"got pp={p.pipeline_parallel_degree}"
-                )
-            if p.context_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support context parallelism, "
-                    f"got cp={p.context_parallel_degree}"
-                )
-            # vLLM ties EP to TP (enable_expert_parallel=True reuses the TP
-            # group as the EP group), so the only valid values are EP=1
-            # (disabled) or EP=TP.
-            if (
-                p.expert_parallel_degree != 1
-                and p.expert_parallel_degree != p.tensor_parallel_degree
-            ):
-                raise ValueError(
-                    f"Generator requires expert_parallel_degree to be 1 or "
-                    f"equal to tensor_parallel_degree (vLLM reuses the TP "
-                    f"group for EP), got ep={p.expert_parallel_degree}, "
-                    f"tp={p.tensor_parallel_degree}"
-                )
-            if p.enable_sequence_parallel:
-                logger.warning(
-                    "Generator enable_sequence_parallel=True hurts inference "
-                    "throughput; prefer SP=False."
-                )
-            if not p.disable_loss_parallel:
-                raise ValueError(
-                    "Generator requires disable_loss_parallel=True, "
-                    f"got disable_loss_parallel={p.disable_loss_parallel}"
-                )
-
->>>>>>> 5601e14f8 (Enable EP+TP for MoE inference in vLLM wrapper)
     def __init__(
         self,
         config: Config,
