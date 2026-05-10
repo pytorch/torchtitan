@@ -9,25 +9,25 @@ import json
 import os
 import time
 from collections.abc import Iterable, Iterator
-from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import contextlib
+
 import spmd_types as spmd
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 import torch
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
+from torchtitan.protocols.module import named_placement_to_spmd, preserve_buffer_spmd
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.protocols.module import preserve_buffer_spmd
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
@@ -53,8 +53,18 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
+from torchtitan.protocols.sharding import NamedPlacement
+from torchtitan.protocols.types import MeshAxisName
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
+
+# Input annotation for SPMD path: (batch, seq) — DP on batch, CP on seq.
+_INPUT_SPMD_TYPES: NamedPlacement = {
+    MeshAxisName.DP_REPLICATE: spmd.S(0),
+    MeshAxisName.DP_SHARD: spmd.S(0),
+    MeshAxisName.CP: spmd.S(1),
+    MeshAxisName.TP: spmd.R,
+}
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -388,10 +398,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                preserve_buffer_types = (
-                    preserve_buffer_spmd(model) if is_spmd_active() else nullcontext()
-                )
-                with preserve_buffer_types:
+                ctx = preserve_buffer_spmd(model) if is_spmd_active() else contextlib.nullcontext()
+                with ctx:
                     model.to_empty(device=init_device)
                     with torch.no_grad():
                         # TODO: Change this back to init_weights once
@@ -425,7 +433,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.model_parts[
                     0
                 ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
-
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -476,8 +483,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             and not is_spmd_active()
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
-
-
+        self.spmd_typechecking = config.parallelism.spmd_typechecking
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -642,43 +648,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if is_spmd_active():
-            inputs, labels = self._annotate_inputs_spmd_types(
-                inputs, labels, extra_kwargs.get("positions"),
-            )
-
         return inputs, labels, extra_inputs, extra_kwargs
-
-    # ------------------------------------------------------------------
-    # spmd_types helpers
-    # ------------------------------------------------------------------
-
-    def _annotate_inputs_spmd_types(
-        self,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Annotate inputs, labels, and positions with spmd_types.
-
-        DP axes get S(0) (batch-sharded).
-        """
-        from torchtitan.distributed.spmd_state import spmd_state
-
-        dp_axes = spmd_state().dp_axes
-
-        if len(dp_axes) <= 1:
-            spmd_type = {dp_axes[0]: spmd.S(0)} if dp_axes else {}
-            if spmd_type:
-                for t in (inputs, labels, positions):
-                    spmd.assert_type(t, spmd_type)
-        else:
-            spmd_type = {axis: spmd.V for axis in dp_axes}
-            for t in (inputs, labels, positions):
-                spec = spmd.PartitionSpec(tuple(dp_axes), *([None] * (t.ndim - 1)))
-                spmd.assert_type(t, spmd_type, spec)
-
-        return inputs, labels
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
@@ -738,8 +708,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 else contextlib.nullcontext()
             )
             typechecker = (
-                spmd.typecheck(local=False)
-                if is_spmd_active()
+                spmd.typecheck(local=(self.spmd_typechecking == "local"))
+                if is_spmd_active() and self.spmd_typechecking is not None
                 else contextlib.nullcontext()
             )
             with self.train_context(), current_mesh:
@@ -751,6 +721,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
+
+    def _annotate_inputs_spmd(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+    ) -> None:
+        """Annotate inputs and labels with spmd types."""
+        for v in input_dict.values():
+            if isinstance(v, torch.Tensor):
+                types, pspec = named_placement_to_spmd(_INPUT_SPMD_TYPES, ndim=v.ndim)
+                if types:
+                    spmd.assert_type(v, types, partition_spec=pspec)
+        types, pspec = named_placement_to_spmd(_INPUT_SPMD_TYPES, ndim=labels.ndim)
+        if types:
+            spmd.assert_type(labels, types, partition_spec=pspec)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -783,7 +768,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = local_valid_tokens.float()
 
         if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
-
             all_axes = spmd_state().all_axes
             if all_axes:
                 spmd.assert_type(global_valid_tokens, {a: spmd.I for a in all_axes})
@@ -796,6 +780,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if isinstance(v, torch.Tensor):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
+
+            if is_spmd_active():
+                self._annotate_inputs_spmd(input_dict, labels)
 
             loss = self.forward_backward_step(
                 input_dict=input_dict,

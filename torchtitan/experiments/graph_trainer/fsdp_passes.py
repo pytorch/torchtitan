@@ -4,6 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+FSDP-specific compiler passes for graph_trainer.
+
+These passes operate on graphs containing SimpleFSDP all-gather/reduce-scatter
+collectives.  They are no-ops when the graph contains no FSDP collectives.
+"""
+
 from __future__ import annotations
 
 import heapq
@@ -14,16 +21,212 @@ from typing import Any
 import torch
 import torch.fx as fx
 from torch._dynamo.graph_deduplication import _stable_topological_sort
-from torch._inductor.fx_passes.bucketing import BucketMode
-from torch._inductor.fx_passes.overlap_manual_scheduling import ManualOverlapScheduler
-from torch._inductor.fx_passes.overlap_scheduling import is_compute_node
+from torch._inductor.fx_passes.bucketing import (
+    BucketMode,
+    is_all_gather_into_tensor as is_all_gather,
+    is_wait_tensor,
+)
+from torch._inductor.fx_passes.overlap_manual_scheduling import (
+    manual_overlap_bucketing,
+    ManualOverlapScheduler,
+)
+from torch._inductor.fx_passes.overlap_scheduling import (
+    is_compute_node,
+    schedule_overlap_bucketing,
+)
 from torch.utils._ordered_set import OrderedSet
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _is_recomputed_node,
     _MODULE_FQN,
 )
+from torchtitan.tools.logging import logger
+
+
+def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
+    """
+    Returns True if the node is a wait_tensor node that is the result of an all_gather
+    that can be arbitrarily prefetched, i.e., if all its recursive inputs are
+    single-input operators that leads to a graph input.
+    """
+    if is_wait_tensor(node) and is_all_gather(node.args[0]):
+        n: torch.fx.Node = node.all_input_nodes[0]
+        while len(n.all_input_nodes) == 1:
+            if n.all_input_nodes[0].op == "placeholder":
+                return True
+            n = n.all_input_nodes[0]
+    return False
+
+
+def annotate_fsdp_all_gather(
+    gm: torch.fx.GraphModule, reshard_after_forward: bool
+) -> None:
+    """
+    Force recompute all_gather nodes from SimpleFSDP in the graph.
+    This pass should be added in torch._inductor.config.joint_custom_post_pass
+    """
+    graph = gm.graph
+
+    def force_recompute_node(node):
+        if reshard_after_forward:
+            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        else:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        # ac_graph_id is used in the partitioner to decide
+        # if two nodes which have AC applied come from a different
+        # AC regions. This is needed because nodes in the boundary
+        # of two AC regions are marked as MUST_SAVE. In our case
+        # we just add a large value of ac_graph_id so that
+        # all nodes we tag for recomputation do indeed get recomputed
+        # and are not influenced by other nodes in the graph with
+        # nearby ac_graph_id values
+        node.meta["ac_graph_id"] = 100000
+
+    # Make all-gather nodes (and related nodes) recomputable, to circumvent
+    # https://github.com/pytorch/pytorch/issues/136433
+    for node in graph.nodes:
+        if is_wait_tensor_from_fsdp(node):
+            ag_node = node.args[0]
+            force_recompute_node(ag_node)  # all_gather
+            force_recompute_node(node)  # wait_tensor
+            # Force-recompute slice that comes after wait
+            for user in node.users:
+                if (
+                    user.op == "call_function"
+                    and user.target == torch.ops.aten.slice.Tensor
+                ):
+                    force_recompute_node(user)
+            # Force-recompute potential dtype casts from all_gather
+            if (
+                ag_node.all_input_nodes[0].op == "call_function"
+                and ag_node.args[0].target
+                == torch.ops.prims.convert_element_type.default
+            ):
+                force_recompute_node(ag_node.all_input_nodes[0])
+
+    return gm
+
+
+def fsdp_reshard_after_fwd_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    reshard_after_forward: bool,
+) -> torch.fx.GraphModule:
+    # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
+    # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
+    #   to CheckpointPolicy.MUST_RECOMPUTE.
+    # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
+    #   to CheckpointPolicy.MUST_SAVE.
+    gm = annotate_fsdp_all_gather(gm, reshard_after_forward)
+    gm.recompile()
+    return gm
+
+
+# Maps an FSDP group_name to an extra group_name created by this pass.
+# Each NCCL PG gets its own CUDA stream, so the extra PG is what enables
+# AG/RS overlap in backward.
+_EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
+
+
+def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
+    """Return the extra PG name for ``source_pg_name``, creating it once.
+
+    The extra PG is a new NCCL process group with the same ranks as the source
+    FSDP PG but a different communicator (and therefore a different CUDA stream).
+    """
+    import torch.distributed as dist
+
+    if source_pg_name in _EXTRA_FSDP_PG_REGISTRY:
+        return _EXTRA_FSDP_PG_REGISTRY[source_pg_name]
+
+    source_pg = dist.distributed_c10d._resolve_process_group(source_pg_name)
+    ranks = dist.get_process_group_ranks(source_pg)
+    extra_pg = dist.new_group(
+        ranks=ranks, group_desc="fsdp_extra", use_local_synchronization=True
+    )
+    _EXTRA_FSDP_PG_REGISTRY[source_pg_name] = extra_pg.group_name
+    logger.info(
+        f"Created extra FSDP PG (source: {source_pg_name}, "
+        f"extra: {extra_pg.group_name})"
+    )
+    return extra_pg.group_name
+
+
+def overlap_fsdp_ag_rs_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """
+    Reassign FSDP all-gather nodes to an extra NCCL process group for
+    AG/RS overlap in backward.
+
+    Discovers the FSDP PG by inspecting the graph, creates an extra
+    NCCL PG over the same ranks (giving it a separate CUDA stream),
+    and rewrites every all-gather using that source PG to the extra PG.
+    This separates all-gathers from reduce-scatters onto different streams,
+    enabling AG/RS overlap in backward.
+
+    No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
+    bucketing passes so bucketed all-gathers inherit the new PG name.
+    """
+    source_pg_name: str | None = None
+    for node in gm.graph.nodes:
+        if is_wait_tensor_from_fsdp(node):
+            ag_node = node.args[0]
+            source_pg_name = ag_node.args[2]
+            break
+
+    if source_pg_name is None:
+        return gm
+
+    target_pg_name = _get_or_create_extra_fsdp_pg(source_pg_name)
+
+    count = 0
+    for node in gm.graph.nodes:
+        if is_all_gather(node) and node.args[2] == source_pg_name:
+            # AG args: (input_tensor, group_size, group_name)
+            node.args = (node.args[0], node.args[1], target_pg_name)
+            count += 1
+    if count > 0:
+        logger.info(
+            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
+            f"to PG {target_pg_name}"
+        )
+    gm.recompile()
+    return gm
+
+
+def autobucketing_reordering_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple | None = None
+) -> torch.fx.GraphModule:
+    """
+    Apply autobucketing and reordering optimization.
+
+    This pass applies schedule_overlap_bucketing with collective_bucketing enabled
+    to optimize comm/compute overlap patterns in the graph.
+    """
+    schedule_overlap_bucketing(gm, collective_bucketing=True)
+    gm.recompile()
+    return gm
+
+
+def transformer_block_bucketing_reordering_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    fsdp_manual_buckets,
+) -> torch.fx.GraphModule:
+    """
+    Apply aten-level manual bucketing and reordering optimization.
+    """
+    manual_overlap_bucketing(
+        gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+    )
+    gm.recompile()
+    return gm
 
 
 class JointManualOverlapScheduler(ManualOverlapScheduler):

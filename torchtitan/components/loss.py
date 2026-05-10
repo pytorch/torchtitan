@@ -9,11 +9,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
-import torch
 import spmd_types as spmd
+import torch
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 from torchtitan.tools.logging import logger
 
@@ -334,6 +333,7 @@ class ChunkedCELoss(BaseLoss):
                 )
 
             logits = lm_head(h_chunk)
+
             chunk_loss = self.fn(logits, label_chunk)
             if global_valid_tokens is not None:
                 chunk_loss = chunk_loss / global_valid_tokens
@@ -384,7 +384,6 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         loss: torch.Tensor,
     ) -> torch.Tensor:
         """Output has the same type as ``loss`` (3rd arg)."""
-
         result = _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, loss
         )
@@ -416,7 +415,6 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # but expressed as a return value so autograd handles the traversal
         # in a single pass (no "backward through graph twice" error).
         return accumulated_grad, None, None
-
 
 
 spmd.register_autograd_function(_DecoderOutputGradientBackProp)
