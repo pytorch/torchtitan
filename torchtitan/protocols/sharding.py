@@ -43,6 +43,16 @@ def R() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
     return spmd.R if is_spmd_active() else Replicate()
 
 
+def Inv() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
+    """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent).
+
+    Use for params that are identical across ranks with no grad reduction
+    contract (e.g. TP-replicated params). ``convert_tp_states_for_compute``
+    converts ``I→R`` at forward time where needed.
+    """
+    return spmd.I if is_spmd_active() else Replicate()
+
+
 def P() -> spmd.PerMeshAxisLocalSpmdType | Partial:
     """Partial. Returns ``spmd.P`` or ``Partial()``."""
     return spmd.P if is_spmd_active() else Partial()
@@ -65,11 +75,17 @@ class LocalMapConfig:
         out_placements: Per-output NamedPlacements.
         in_grad_placements: Per-input-gradient NamedPlacements.
             Ignored for SPMD path (no backward typechecking).
+        in_ndims: Per-input tensor ndim hints for SPMD PartitionSpec
+            resolution. Required when multiple axes shard the same dim
+            (e.g. HSDP). ``None`` means no hints (ok when no collisions).
+        out_ndims: Per-output tensor ndim hints.
     """
 
     in_placements: tuple[NamedPlacement, ...]
     out_placements: tuple[NamedPlacement, ...]
     in_grad_placements: tuple[NamedPlacement, ...] | None = None
+    in_ndims: tuple[int, ...] | None = None
+    out_ndims: tuple[int, ...] | None = None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}

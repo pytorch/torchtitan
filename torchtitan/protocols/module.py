@@ -52,29 +52,34 @@ def preserve_buffer_spmd(model: nn.Module):
             spmd.assert_type(buf, saved[fqn])
 
 
-def named_placement_to_spmd(named, ndim=None):
-    """Resolve NamedPlacement with spmd values to {MeshAxis: spmd_type}.
-
-    Returns ``(types, partition_spec)`` where ``partition_spec`` is ``None``
-    for the common case and a ``spmd.PartitionSpec`` for multi-axis-same-dim.
-
-    When multiple active axes shard the same tensor dim (e.g. HSDP:
-    dp_replicate and dp_shard both S(0)), the canonical axis ordering
-    from ``SpmdState.axis_order`` is used to build a PartitionSpec.
-    Those axes become ``V`` in the types dict. If only one axis per dim,
-    ``S(dim)`` is kept as-is and no PartitionSpec is needed.
-
-    Args:
-        named: NamedPlacement dict mapping MeshAxisName to spmd types.
-        ndim: Tensor ndim, required when multi-axis-same-dim collisions
-            occur (needed to pad the PartitionSpec to the right length).
-    """
+def _resolve_named(named):
+    """Resolve MeshAxisName → MeshAxis, dropping inactive axes."""
     m = spmd_mesh()
     types = {}
     for axis_name, value in named.items():
         if (ax := getattr(m, axis_name.value)) is None:
             continue
         types[ax] = value
+    return types
+
+
+def named_placement_to_spmd(named, ndim=None):
+    """Resolve NamedPlacement to {MeshAxis: spmd_type}, with optional
+    PartitionSpec normalization for ``spmd.assert_type``.
+
+    When ``ndim`` is provided and multiple active axes shard the same
+    tensor dim, S(dim) entries are converted to V and a PartitionSpec
+    is built using canonical axis ordering.
+
+    When ``ndim`` is None, returns raw types without normalization —
+    used by redistribute callers that compare per-axis types directly.
+
+    Returns ``(types, partition_spec)``.
+    """
+    types = _resolve_named(named)
+
+    if ndim is None:
+        return types, None
 
     # Check for multi-axis-same-dim collisions
     dim_to_axes: dict[int, list] = {}
@@ -85,11 +90,6 @@ def named_placement_to_spmd(named, ndim=None):
     has_collision = any(len(axes) > 1 for axes in dim_to_axes.values())
     if not has_collision:
         return types, None
-
-    assert ndim is not None, (
-        "Multiple active axes shard the same tensor dim. "
-        "Pass ndim= to build a correctly-sized PartitionSpec."
-    )
 
     # Build PartitionSpec using canonical axis ordering for collisions.
     axis_order = spmd_state().axis_order
@@ -563,8 +563,8 @@ class Module(nn.Module, Configurable):
             if not isinstance(value, torch.Tensor):
                 continue
             if name in in_src_shardings and name in in_dst_shardings:
-                src_types, _ = named_placement_to_spmd(in_src_shardings[name], ndim=value.ndim)
-                dst_types, _ = named_placement_to_spmd(in_dst_shardings[name], ndim=value.ndim)
+                src_types, _ = named_placement_to_spmd(in_src_shardings[name])
+                dst_types, _ = named_placement_to_spmd(in_dst_shardings[name])
                 value = redistribute_spmd_per_axis(value, src_types, dst_types)
             kwargs[name] = value
 
@@ -610,8 +610,8 @@ class Module(nn.Module, Configurable):
             out_src, out_dst = sharding_config.out_src_shardings, sharding_config.out_dst_shardings
             if out_src is None:
                 out_src = out_dst
-            src_types, _ = named_placement_to_spmd(out_src, ndim=outputs.ndim)
-            dst_types, _ = named_placement_to_spmd(out_dst, ndim=outputs.ndim)
+            src_types, _ = named_placement_to_spmd(out_src)
+            dst_types, _ = named_placement_to_spmd(out_dst)
             outputs = redistribute_spmd_per_axis(outputs, src_types, dst_types)
         return outputs
 
