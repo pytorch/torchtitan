@@ -84,7 +84,7 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=shard.S(1)),
-            "bias": dense_param_placement(tp=shard.R()),
+            "bias": dense_param_placement(tp=shard.Inv()),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P) if is_spmd_active() else None,
         out_dst_shardings=dense_activation_placement(tp=out_tp),
@@ -101,7 +101,7 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     composes with DTensor activations (otherwise plain Tensor + DTensor
     would mix inside the op).
     """
-    state = {"weight": dense_param_placement(tp=shard.R())}
+    state = {"weight": dense_param_placement(tp=shard.Inv())}
     if not enable_sp:
         return ShardingConfig(state_shardings=state)
     sp_placement = dense_activation_placement(tp=shard.S(1))
@@ -149,11 +149,11 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": dense_activation_placement(tp=attn_x),
-            "rope_cache": dense_param_placement(tp=shard.R()),
+            "rope_cache": dense_param_placement(tp=shard.Inv()),
         },
         in_dst_shardings={
             "x": dense_activation_placement(tp=shard.R()),
-            "rope_cache": dense_param_placement(tp=shard.R()),
+            "rope_cache": dense_param_placement(tp=shard.Inv()),
         },
     )
     set_qkv_linear_sharding(attention_cfg.qkv_linear)
@@ -224,7 +224,7 @@ def set_decoder_sharding_config(
 
     # freqs_cis buffer on the decoder root: Replicate on all axes.
     config.sharding_config = ShardingConfig(
-        state_shardings={"freqs_cis": dense_param_placement(tp=shard.R())},
+        state_shardings={"freqs_cis": dense_param_placement(tp=shard.Inv())},
     )
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=shard.S(0))},
