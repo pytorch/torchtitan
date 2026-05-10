@@ -12,7 +12,6 @@ import torch.nn as nn
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_aux_loss_config,
     make_experts_config,
     make_ffn_config,
     make_gqa_config,
@@ -196,10 +195,10 @@ def _build_qwen3_vl_moe_layers(
 ) -> list[TransformerBlock.Config]:
     """
     Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits.
-    
-    Aux loss ref:
-    - load_balancing_func (batch-wise): https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_vl_moe/modeling_qwen3_vl_moe.py
-    - https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_vl_moe/configuration_qwen3_vl_moe.py
+
+    Aux loss ref (batch-wise):
+    - modeling: huggingface/transformers models/qwen3_vl_moe/modeling_qwen3_vl_moe.py
+    - config: huggingface/transformers models/qwen3_vl_moe/configuration_qwen3_vl_moe.py
     """
     inner_attention, mask_type = get_attention_config(attn_backend)
     layers = []
@@ -241,7 +240,8 @@ def _build_qwen3_vl_moe_layers(
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
                     load_balance_coeff=None,
-                    aux_loss=make_aux_loss_config(type="batch_wise", coeff=1e-3, top_k=top_k),
+                    aux_loss_type="batch_wise",
+                    aux_loss_coeff=1e-3,
                 ),
             )
         )

@@ -22,7 +22,6 @@ from torchtitan.models.common import (
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_experts_config,
-    make_aux_loss_config,
     make_ffn_config,
     make_gqa_config,
     make_moe_config,
@@ -156,7 +155,8 @@ def _build_llama4_layers(
                 experts=experts,
                 shared_experts=shared_experts,
                 load_balance_coeff=None,
-                aux_loss=make_aux_loss_config(type="batch_wise", coeff=1e-3, top_k=router.top_k),
+                aux_loss_type="batch_wise",
+                aux_loss_coeff=1e-3,
             )
             ffn_cfg = None
         else:

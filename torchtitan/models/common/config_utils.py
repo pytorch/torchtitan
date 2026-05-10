@@ -167,9 +167,21 @@ def make_moe_config(
     experts: GroupedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
-    aux_loss: MoELoadBalanceAuxLoss.Config | None = None,
+    aux_loss_type: str | None = None,
+    aux_loss_coeff: float | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    aux_loss = None
+    if aux_loss_type is not None:
+        assert (
+            aux_loss_coeff is not None
+        ), "aux_loss_coeff required when aux_loss_type is set"
+        aux_loss = make_aux_loss_config(
+            type=aux_loss_type,  # pyrefly: ignore [bad-argument-type]
+            coeff=aux_loss_coeff,
+            top_k=router.top_k,
+        )
+
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,

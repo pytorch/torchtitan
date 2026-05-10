@@ -388,18 +388,21 @@ class _AuxLossAutograd(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         grad_top_scores: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, None, None, None, None, None, None]:
-        scores, selected_experts_indices = ctx.saved_tensors
-        if ctx.loss_type == "sequence_wise":
+        (
+            scores,
+            selected_experts_indices,
+        ) = ctx.saved_tensors  # pyrefly: ignore [missing-attribute]
+        if ctx.loss_type == "sequence_wise":  # pyrefly: ignore [missing-attribute]
             loss_fn = _AuxLossAutograd._sequence_wise_loss
         else:
             loss_fn = _AuxLossAutograd._batch_wise_loss
         aux_grad = torch.func.grad(loss_fn)(
             scores,
             selected_experts_indices,
-            ctx.bs,
-            ctx.slen,
-            ctx.top_k,
-            ctx.aux_loss_coeff,
+            ctx.bs,  # pyrefly: ignore [missing-attribute]
+            ctx.slen,  # pyrefly: ignore [missing-attribute]
+            ctx.top_k,  # pyrefly: ignore [missing-attribute]
+            ctx.aux_loss_coeff,  # pyrefly: ignore [missing-attribute]
         )
         return grad_top_scores, aux_grad, None, None, None, None, None, None
 
