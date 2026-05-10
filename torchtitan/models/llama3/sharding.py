@@ -6,8 +6,6 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement, Replicate, Shard
-
 from torchtitan.models.common.decoder_sharding import (
     norm_config,
     set_decoder_sharding_config,
@@ -15,6 +13,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
 )
+from torchtitan.protocols import sharding as shard
 
 if TYPE_CHECKING:
     from torchtitan.models.llama3.model import Llama3Model, Llama3TransformerBlock
@@ -59,7 +58,8 @@ def _set_llama3_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+
+    attn_x_placement = shard.S(1) if enable_sp else shard.R()
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
