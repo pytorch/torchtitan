@@ -159,7 +159,8 @@ class PolicyTrainer(Actor, Configurable):
             training_steps=config.training.steps,
         )
 
-        # Build CheckpointManager and load initial weights (HF or no-op)
+        # Always build CheckpointManager; enable is a field on the config.
+        # When enable=False (CI/debug), load() is a no-op and random init stands.
         self.checkpointer = config.checkpoint.build(
             dataloader=None,
             model_parts=self.model_parts,
@@ -169,7 +170,13 @@ class PolicyTrainer(Actor, Configurable):
             sd_adapter=self.sd_adapter,
             base_folder=config.dump_folder,
         )
-        self.checkpointer.load()
+        if self.checkpointer.enable:
+            self.checkpointer.load()
+        else:
+            logger.warning(
+                "Checkpoint disabled — using random-initialized weights. "
+                "Set checkpoint.enable=True to load from a checkpoint."
+            )
 
         self.policy_version = 0
         self.generator: Any | None = None
