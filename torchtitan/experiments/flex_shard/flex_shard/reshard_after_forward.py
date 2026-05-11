@@ -6,13 +6,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
 import torch
 import torch.nn as nn
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from .bucket_storage import DStorage
 from .utils import (
@@ -28,15 +27,39 @@ _reshard_after_forward_recompute: ContextVar[bool] = ContextVar(
 )
 
 
-@contextmanager
-def _mark_recompute(ctx: Any) -> Generator[None, None, None]:
-    """Mark execution as FlexShard reshard-after-forward recomputation."""
-    token = _reshard_after_forward_recompute.set(True)
-    try:
-        with ctx:
-            yield
-    finally:
-        _reshard_after_forward_recompute.reset(token)
+@torch.compiler.assume_constant_result
+def _is_reshard_after_forward_recompute() -> bool:
+    """Return whether execution is in FlexShard RAF recomputation."""
+    return _reshard_after_forward_recompute.get()
+
+
+class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
+    """TorchDispatchMode wrapper that marks RAF checkpoint recomputation."""
+
+    @classmethod
+    def ignore_compile_internals(cls) -> bool:
+        return True
+
+    def __init__(self, mode: TorchDispatchMode) -> None:
+        super().__init__()
+        self.mode = mode
+        self._token: Any | None = None
+
+    def __enter__(self) -> _MarkRecomputeTorchDispatchMode:
+        self._token = _reshard_after_forward_recompute.set(True)
+        return super().__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            token = self._token
+            self._token = None
+            if token is not None:
+                _reshard_after_forward_recompute.reset(token)
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        return self.mode.__torch_dispatch__(func, types, args, kwargs)
 
 
 # These produce the unsharded param tensors that we want freed per-layer.
@@ -87,7 +110,7 @@ def _compose_with_ac_policy(ac_context_fn):
 
             ctx.policy_fn = merged_policy
         forward_ctx, recompute_ctx = contexts
-        return forward_ctx, _mark_recompute(recompute_ctx)
+        return forward_ctx, _MarkRecomputeTorchDispatchMode(recompute_ctx)
 
     return merged_context_fn
 
@@ -98,7 +121,7 @@ def _reshard_only_context_fn():
     forward_ctx, recompute_ctx = create_selective_checkpoint_contexts(
         _reshard_after_forward_policy
     )
-    return forward_ctx, _mark_recompute(recompute_ctx)
+    return forward_ctx, _MarkRecomputeTorchDispatchMode(recompute_ctx)
 
 
 def _wrap_module(child: nn.Module) -> nn.Module:

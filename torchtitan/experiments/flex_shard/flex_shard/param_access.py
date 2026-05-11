@@ -65,23 +65,6 @@ def is_flex_shard_param(tensor: torch.Tensor) -> bool:
     return hasattr(tensor, _PLACEMENTS_ATTR)
 
 
-def _is_graph_capture_active() -> bool:
-    """Return whether unsupported graph capture is active."""
-    if torch.compiler.is_compiling():
-        return True
-    try:
-        return torch._guards.TracingContext.try_get() is not None
-    except AttributeError:
-        return False
-
-
-def _raise_graph_capture_unsupported() -> None:
-    raise ValueError(
-        "FlexShard currently supports eager execution only; torch.compile and "
-        "graph capture are not supported yet."
-    )
-
-
 def _raise_missing_eager_batched_unshard(param_state: Any) -> None:
     param_fqn = getattr(param_state, _PARAM_FQN_ATTR, "<unknown>")
     bucket_fqn = getattr(param_state, _BUCKET_FQN_ATTR, None)
@@ -153,7 +136,7 @@ class ParamModuleInfo:
 
 @dataclass
 class EagerParamAccessState:
-    """Mutable state for eager-only FlexShard parameter access."""
+    """Mutable state for FlexShard parameter access."""
 
     requires_grad: bool = True
     param_dtype: torch.dtype | None = None
@@ -165,10 +148,7 @@ class EagerParamAccessState:
     def consume_pre_gathered_param(self) -> torch.Tensor:
         """Return the hook-provided full param or raise for unsupported access."""
         # In eager mode, _pre_gathered is set by the batched all-gather
-        # pre-forward hook. This PR intentionally has no per-parameter
-        # all-gather fallback. TODO: later compile support should add a
-        # separate graph-safe parametrization or graph path, with tests
-        # proving graph capture behavior.
+        # pre-forward hook.
         pre = self._pre_gathered
         if pre is not None:
             # TODO: Keep this cache valid for the whole forward. Clearing it
@@ -199,8 +179,6 @@ class EagerParamAccessState:
                 self._unsharded_for_reduce = unsharded
             return unsharded
 
-        if _is_graph_capture_active():
-            _raise_graph_capture_unsupported()
         _raise_missing_eager_batched_unshard(self)
 
 

@@ -112,6 +112,22 @@ class ReduceScatterGradHandle:
 
 
 @dataclass
+class SyncAllGatherResult(AllGatherUnshardHandle):
+    """Already-finished all-gather result used during graph capture."""
+
+    full_params: list[torch.Tensor]
+
+    def finish(self) -> list[torch.Tensor]:
+        return self.full_params
+
+    def wait(self) -> None:
+        return
+
+    def release_buffers(self) -> None:
+        return
+
+
+@dataclass
 class AsyncAllGatherResult(AllGatherUnshardHandle):
     """State needed to finish an async all-gather launched on a side stream."""
 
@@ -126,33 +142,15 @@ class AsyncAllGatherResult(AllGatherUnshardHandle):
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
-        ws = self.mesh.size()
-        device = self.gathered[0].device
         with torch.profiler.record_function(
             _with_fqn("FlexShard::all_gather_copy_out", self.debug_fqn)
         ):
-            results: list[torch.Tensor] = []
-            for i, info in enumerate(self.infos):
-                placement = info.placement
-                per_rank_shards: list[torch.Tensor] = []
-                for r in range(ws):
-                    numel = placement.compute_local_numel(info.global_shape, r, ws)
-                    shape = placement.compute_local_shape(info.global_shape, r, ws)
-                    if numel > 0:
-                        offset = self.per_rank_param_offsets[r][i]
-                        per_rank_shards.append(
-                            self.gathered[r][offset : offset + numel].view(shape)
-                        )
-                    else:
-                        per_rank_shards.append(
-                            torch.empty(shape, dtype=info.dtype, device=device)
-                        )
-                results.append(
-                    placement.assemble_from_shards(
-                        per_rank_shards, info.global_shape, info.dtype
-                    )
-                )
-                del per_rank_shards
+            results = _assemble_full_params(
+                self.gathered,
+                self.infos,
+                self.mesh,
+                self.per_rank_param_offsets,
+            )
             self.release_buffers()
             return results
 
@@ -192,6 +190,39 @@ class AsyncAllGatherResult(AllGatherUnshardHandle):
             handoff.release()
 
 
+def _assemble_full_params(
+    gathered: list[torch.Tensor],
+    infos: list[ParamInfo],
+    mesh: DeviceMesh,
+    per_rank_param_offsets: list[list[int]],
+) -> list[torch.Tensor]:
+    ws = mesh.size()
+    device = gathered[0].device
+    results: list[torch.Tensor] = []
+    for i, info in enumerate(infos):
+        placement = info.placement
+        per_rank_shards: list[torch.Tensor] = []
+        for r in range(ws):
+            numel = placement.compute_local_numel(info.global_shape, r, ws)
+            shape = placement.compute_local_shape(info.global_shape, r, ws)
+            if numel > 0:
+                offset = per_rank_param_offsets[r][i]
+                per_rank_shards.append(
+                    gathered[r][offset : offset + numel].view(shape)
+                )
+            else:
+                per_rank_shards.append(
+                    torch.empty(shape, dtype=info.dtype, device=device)
+                )
+        results.append(
+            placement.assemble_from_shards(
+                per_rank_shards, info.global_shape, info.dtype
+            )
+        )
+        del per_rank_shards
+    return results
+
+
 def begin_all_gather_unshard(
     tensors: list[torch.Tensor],
     infos: list[ParamInfo],
@@ -226,6 +257,20 @@ def begin_all_gather_unshard(
             torch.empty(per_rank_sizes[r], dtype=dtype, device=device)
             for r in range(ws)
         ]
+
+    if torch.compiler.is_compiling():
+        dist.all_gather(gathered, send_buf, group=pg)
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::all_gather_copy_out", debug_fqn)
+        ):
+            return SyncAllGatherResult(
+                _assemble_full_params(
+                    gathered,
+                    infos,
+                    mesh,
+                    per_rank_param_offsets,
+                )
+            )
 
     copy_in_done = device_handle.Event()
     copy_in_done.record(device_handle.current_stream(device))
@@ -312,6 +357,30 @@ class AsyncReduceScatterResult(ReduceScatterGradHandle):
         self.event.record(stream)
 
 
+@dataclass
+class SyncReduceScatterResult(ReduceScatterGradHandle):
+    """Already-finished reduce-scatter result used during graph capture."""
+
+    sharded_grads: list[torch.Tensor]
+
+    def finish(self) -> list[torch.Tensor]:
+        return self.sharded_grads
+
+    def wait(self) -> None:
+        return
+
+    def release_buffers(self, release_sharded_grads: bool) -> None:
+        if release_sharded_grads:
+            self.sharded_grads.clear()
+
+    def record_sharded_grads(
+        self,
+        sharded_grads: list[torch.Tensor],
+        stream: torch.Stream,
+    ) -> None:
+        self.sharded_grads = sharded_grads
+
+
 def begin_reduce_scatter_grad(
     tensors: list[torch.Tensor],
     infos: list[ParamInfo],
@@ -344,6 +413,27 @@ def begin_reduce_scatter_grad(
 
     device = send_buf.device
     device_handle = _get_device_handle(device.type)
+
+    if torch.compiler.is_compiling():
+        recv_buf = torch.empty(
+            send_buf.numel() // ws,
+            dtype=send_buf.dtype,
+            device=device,
+        )
+        dist.reduce_scatter_tensor(
+            output=recv_buf,
+            input=send_buf,
+            op=dist.ReduceOp.AVG,
+            group=pg,
+        )
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::reduce_scatter_copy_out", debug_fqn)
+        ):
+            sharded_grads = placement.unpack_reduced_grad(
+                recv_buf, infos, layout, rank, ws
+            )
+        return SyncReduceScatterResult(sharded_grads)
+
     copy_in_done = device_handle.Event()
     copy_in_done.record(device_handle.current_stream(device))
 

@@ -31,7 +31,7 @@ from .param_access import (
     EagerParamAccessState,
     ParamModuleInfo,
 )
-from .reshard_after_forward import _reshard_after_forward_recompute
+from .reshard_after_forward import _is_reshard_after_forward_recompute
 from .utils import _get_storage_debug_fqn, _with_fqn
 
 
@@ -131,7 +131,7 @@ class BucketCommContext:
 
 @dataclass
 class BucketAllGatherRuntime:
-    """Runtime metadata passed to RAF bucket autograd."""
+    """Runtime metadata passed to bucket autograd all-gather."""
 
     bucket: BucketRuntime
     prefetched_result: AllGatherUnshardHandle | None
@@ -312,7 +312,7 @@ class BucketRuntime:
         if self.context.pending is not None:
             return
         prefetch_order = self.context.buckets
-        if _reshard_after_forward_recompute.get():
+        if _is_reshard_after_forward_recompute():
             prefetch_order = prefetch_order[::-1]
         for idx, bucket in enumerate(prefetch_order):
             if bucket is self:
@@ -326,7 +326,7 @@ class BucketRuntime:
         self.context.pending = PendingAllGather(
             bucket=next_bucket,
             result=next_bucket.begin_unshard(),
-            recompute=_reshard_after_forward_recompute.get(),
+            recompute=_is_reshard_after_forward_recompute(),
         )
 
     def take_pending(self) -> AllGatherUnshardHandle | None:
@@ -336,7 +336,7 @@ class BucketRuntime:
             return None
         if (
             pending.bucket is self
-            and pending.recompute == _reshard_after_forward_recompute.get()
+            and pending.recompute == _is_reshard_after_forward_recompute()
         ):
             self.context.pending = None
             return pending.result
@@ -377,6 +377,26 @@ class BucketRuntime:
             self.context.reduce_scatter_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_scatter_wait()
 
+    def reduce_grads_to_shards(
+        self,
+        grads: list[torch.Tensor],
+        infos: list[ParamInfo],
+    ) -> list[torch.Tensor]:
+        """Reduce full-parameter grads and return local sharded grads."""
+        if not grads:
+            return []
+        with torch.no_grad():
+            result = begin_reduce_scatter_grad(
+                grads,
+                infos,
+                self.storage._mesh,
+                self.context.reduce_scatter_stream,
+                debug_fqn=self.debug_fqn,
+            )
+            sharded_grads = result.finish()
+            result.release_buffers(release_sharded_grads=False)
+            return sharded_grads
+
     def _reduce_collected_grads(self) -> None:
         grads: list[torch.Tensor] = []
         infos: list[ParamInfo] = []
@@ -391,8 +411,6 @@ class BucketRuntime:
         self.reduce_grads(grads, infos, param_refs)
 
     def pre_forward_hook(self, mod, args) -> None:
-        if torch.compiler.is_compiling():
-            return
         local_shards = self._local_shards(use_autograd=self.use_autograd_unshard)
         if self.use_autograd_unshard:
             prefetched_result = self.take_pending()
@@ -421,8 +439,6 @@ class BucketRuntime:
             param_state._pre_gathered = full_param
 
     def post_forward_hook(self, mod, args, output) -> None:
-        if torch.compiler.is_compiling():
-            return
         for _, param_state, _ in self.entries:
             param_state._pre_gathered = None
         if self.use_autograd_unshard:
@@ -454,7 +470,7 @@ class BucketRuntime:
 
 
 class _BucketAllGather(torch.autograd.Function):
-    """Autograd boundary for RAF bucket all-gather.
+    """Autograd boundary for bucket all-gather.
 
     Forward consumes a raw all-gather result, either prefetched by the previous
     bucket or launched on demand. Backward packs full-parameter gradients and
@@ -469,6 +485,7 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         ctx.runtime = runtime
         ctx.num_inputs = len(local_shards)
+        ctx.local_shard_dtypes = tuple(shard.dtype for shard in local_shards)
 
         result = runtime.prefetched_result
         runtime.prefetched_result = None
@@ -490,27 +507,32 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[Any, ...]:
         runtime: BucketAllGatherRuntime = ctx.runtime
         bucket = runtime.bucket
+        input_grads: list[torch.Tensor | None] = [None] * ctx.num_inputs
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
-        valid_param_refs: list[ParamModuleInfo] = []
-        for grad, info, param_ref in zip(
-            full_param_grads,
-            bucket.infos,
-            bucket.param_refs,
-            strict=True,
+        valid_indices: list[int] = []
+        for idx, (grad, info) in enumerate(
+            zip(full_param_grads, bucket.infos, strict=True)
         ):
             if grad is None:
                 continue
+            valid_indices.append(idx)
             grads.append(grad.contiguous())
             valid_infos.append(info)
-            valid_param_refs.append(param_ref)
 
         if grads:
-            bucket.reduce_grads(grads, valid_infos, valid_param_refs)
+            sharded_grads = bucket.reduce_grads_to_shards(grads, valid_infos)
+            for input_idx, sharded_grad in zip(
+                valid_indices,
+                sharded_grads,
+                strict=True,
+            ):
+                input_dtype = ctx.local_shard_dtypes[input_idx]
+                if sharded_grad.dtype != input_dtype:
+                    sharded_grad = sharded_grad.to(input_dtype)
+                input_grads[input_idx] = sharded_grad
 
-        # Gradients are accumulated into the original sharded parameters above
-        # so the autograd input grads can stay empty and avoid blocking here.
-        return (None, *([None] * ctx.num_inputs))
+        return (None, *input_grads)
 
 
 def _storage_requires_batched_unshard(storage: DStorage) -> bool:
@@ -519,9 +541,7 @@ def _storage_requires_batched_unshard(storage: DStorage) -> bool:
 
 
 def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
-    """Return whether RAF should use the custom bucket autograd path."""
-    if not storage._reshard_after_forward:
-        return False
+    """Return whether this bucket should use the custom autograd path."""
     if not storage._param_infos:
         return False
     return _get_bucket_autograd_unshard_unsupported_reason(storage) is None
@@ -530,7 +550,7 @@ def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
 def _get_bucket_autograd_unshard_unsupported_reason(
     storage: DStorage,
 ) -> str | None:
-    """Return why a RAF bucket cannot use the custom autograd path."""
+    """Return why a bucket cannot use the custom autograd path."""
     infos = list(storage._param_infos.values())
     if not infos:
         return None
@@ -618,8 +638,8 @@ def _install_batched_allgather_hooks(
     _pre_gathered on each parameter access state so the property getter can
     return the hook-provided tensor.
 
-    Skipped under graph capture. FlexShard currently supports eager execution
-    only, so parameter access will raise before collectives are emitted.
+    CUDA buckets use the custom autograd bucket path in both eager and compile
+    so Dynamo traces the same bucket pre-hook and parameter access logic.
     """
     for storage in storages:
         if not _storage_requires_batched_unshard(storage):
