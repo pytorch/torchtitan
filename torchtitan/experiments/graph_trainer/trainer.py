@@ -14,6 +14,7 @@ from torch.fx.traceback import annotate_fn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
+    log_timer,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
@@ -163,7 +164,7 @@ class GraphTrainer(Trainer):
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(self.loss_fn)
-                with self.train_context():
+                with self.train_context(), log_timer("trace_train_step"):
                     self._traced_step = trace_train_step(fwd_bwd_fn)(
                         model,
                         inputs,

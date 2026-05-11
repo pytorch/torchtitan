@@ -9,9 +9,11 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
@@ -545,12 +547,13 @@ flux_configs = {
 
 def model_registry(
     flavor: str,
-    quantization: list[QuantizationConverter.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = flux_configs[flavor]()
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
     return ModelSpec(
         name="flux",
         flavor=flavor,

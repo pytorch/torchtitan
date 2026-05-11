@@ -9,8 +9,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.quantization import QuantizationConverter
-
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -23,6 +21,9 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
+from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Qwen3VLModel
@@ -574,15 +575,16 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
-    quantization: list[QuantizationConverter.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_vl_configs[flavor](**kwargs)
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
     return ModelSpec(
         name="qwen3_vl",
         flavor=flavor,
