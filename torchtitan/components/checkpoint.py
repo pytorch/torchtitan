@@ -559,7 +559,7 @@ class CheckpointManager(Configurable):
         state_dict: dict[str, Any],
         checkpoint_id: str,
         from_hf: bool,
-        from_quantized: bool,
+        from_quantized: bool = False,
     ) -> None:
         """Load the checkpoint with dcp.
         Args:
@@ -567,6 +567,8 @@ class CheckpointManager(Configurable):
             checkpoint_id (str): The checkpoint id to load.
             from_hf (bool): Whether to load from HuggingFace checkpoint with
                 its own model definition and safetensors format.
+            from_quantized (bool): Whether the HF checkpoint has quantized
+                state dict keys. Only used when ``from_hf`` is True.
         """
 
         if from_hf:
@@ -716,7 +718,6 @@ class CheckpointManager(Configurable):
                 states,
                 checkpoint_id=checkpoint_id,
                 from_hf=False,
-                from_quantized=False,
             )
 
         GarbageCollection.collect("GC collection for checkpoint loading.")
@@ -740,7 +741,6 @@ class CheckpointManager(Configurable):
             StateDictMode.BASE if self.initial_load_frozen else StateDictMode.FULL
         )
         from_hf = self.initial_load_in_hf
-        from_quantized = self.initial_load_in_hf_quantized
 
         if from_hf:
             if self.initial_load_path:
@@ -777,7 +777,7 @@ class CheckpointManager(Configurable):
                 sd,
                 checkpoint_id=checkpoint_id,
                 from_hf=True,
-                from_quantized=from_quantized,
+                from_quantized=self.initial_load_in_hf_quantized,
             )
             return True
 
@@ -798,7 +798,6 @@ class CheckpointManager(Configurable):
                 sd,
                 checkpoint_id=checkpoint_id,
                 from_hf=False,
-                from_quantized=False,
             )
             return True
 

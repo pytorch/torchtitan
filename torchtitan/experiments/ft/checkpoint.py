@@ -214,7 +214,6 @@ class FTCheckpointManager(CheckpointManager):
             self.ft_states,
             checkpoint_id=checkpoint_id,
             from_hf=False,
-            from_quantized=False,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(

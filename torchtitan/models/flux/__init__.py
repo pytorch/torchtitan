@@ -550,10 +550,13 @@ def model_registry(
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = flux_configs[flavor]()
+    built_converters = []
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            converter = c.build()
+            converter.convert(config)
+            built_converters.append(converter)
     return ModelSpec(
         name="flux",
         flavor=flavor,
@@ -562,4 +565,5 @@ def model_registry(
         pipelining_fn=None,
         post_optimizer_build_fn=None,
         state_dict_adapter=FluxStateDictAdapter,
+        converters=built_converters or None,
     )

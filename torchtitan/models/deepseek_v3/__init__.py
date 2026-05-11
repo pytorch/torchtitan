@@ -542,10 +542,13 @@ def model_registry(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
+    built_converters = []
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            converter = c.build()
+            converter.convert(config)
+            built_converters.append(converter)
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,
@@ -554,4 +557,5 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
+        converters=built_converters or None,
     )

@@ -82,15 +82,14 @@ class BaseModel(Module):
         Called once by the trainer after model build.
         """
         self._sd_adapter = sd_adapter
-        self._adapter_to_hf_fns = None
+        fns = []
         for converter in converters or []:
             build_fn = getattr(converter, "build_external_transforms", None)
             if build_fn is not None:
                 ct = build_fn(sd_adapter)
                 if ct is not None and "to_external" in ct:
-                    if self._adapter_to_hf_fns is None:
-                        self._adapter_to_hf_fns = []
-                    self._adapter_to_hf_fns.append(ct["to_external"])
+                    fns.append(ct["to_external"])
+        self._adapter_to_hf_fns = fns or None
 
     def to_hf(self, sd: dict[str, Any]) -> dict[str, Any]:
         """Convert native base model keys to HF format."""
