@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, TYPE_CHECKING
@@ -20,6 +21,16 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from .bucket_storage import ParamInfo
+
+
+def _record_comm_if_eager(
+    label: str,
+    fqn: str | None,
+) -> AbstractContextManager[Any]:
+    """Return a c10d profiler range in eager and a no-op during compile."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return dist.record_comm(_with_fqn(label, fqn))
 
 
 class StreamHandoff:
@@ -227,7 +238,7 @@ def _run_all_gather(
     pg,
     debug_fqn: str | None,
 ) -> None:
-    with dist.record_comm(_with_fqn("FlexShard::all_gather", debug_fqn)):
+    with _record_comm_if_eager("FlexShard::all_gather", debug_fqn):
         dist.all_gather(gathered, send_buf, group=pg)
 
 
@@ -358,7 +369,7 @@ def _run_reduce_scatter(
         dtype=send_buf.dtype,
         device=send_buf.device,
     )
-    with dist.record_comm(_with_fqn("FlexShard::reduce_scatter", debug_fqn)):
+    with _record_comm_if_eager("FlexShard::reduce_scatter", debug_fqn):
         dist.reduce_scatter_tensor(
             output=recv_buf,
             input=send_buf,
