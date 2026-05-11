@@ -26,16 +26,20 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
+from torchtitan.experiments.graph_trainer.cudagraph import (
+    insert_kernel_annotations_pass,
+)
 from torchtitan.experiments.graph_trainer.fsdp_passes import overlap_fsdp_ag_rs_pass
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     trace_train_step,
 )
-from torchtitan.experiments.graph_trainer.passes import (
+from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
     apply_sac_pass,
-    insert_kernel_annotations_pass,
+)
+from torchtitan.experiments.graph_trainer.passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
