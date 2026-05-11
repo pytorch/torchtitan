@@ -24,7 +24,7 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import Linear
-from .moe import MoE
+from .moe import MoE, MoELoadBalanceAuxLoss
 from .rmsnorm import RMSNorm
 from .rope import (
     apply_rotary_emb_complex,
@@ -48,6 +48,7 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "GQAttention",
     "Linear",
+    "MoELoadBalanceAuxLoss",
     "MoE",
     "QKVLinear",
     "RMSNorm",
