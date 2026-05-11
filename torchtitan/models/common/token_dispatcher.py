@@ -355,7 +355,11 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
         """
         device = num_tokens_per_expert_group.device
-        total = num_tokens_per_expert_group.sum()
+        # output_size must be host-known. num_tokens_per_expert_group.sum()
+        # is a CUDA scalar, but this unpadded all-to-all path keeps one
+        # routed_input row per received routed token assignment, so its shape
+        # equals the number of routed tokens.
+        total = routed_input.shape[0]
 
         # [R, E] matrix of token counts per (rank, expert)
         t_mat = num_tokens_per_expert_group.view(ep_size, num_local_experts)
@@ -372,7 +376,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # For each output position, find its input position:
         #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
         seg_ids = torch.arange(segment_lens.shape[0], device=device).repeat_interleave(
-            segment_lens
+            segment_lens, output_size=total
         )
         output_starts = segment_lens.cumsum(0) - segment_lens
         permuted_indices = (
