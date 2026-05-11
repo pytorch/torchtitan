@@ -315,12 +315,20 @@ class BucketRuntime:
         result.wait()
         result.release_buffers()
 
+    def in_reshard_after_forward_recompute(self) -> bool:
+        """Return whether this bucket is in reshard-after-forward recompute."""
+        return (
+            self.storage._reshard_after_forward
+            and _is_reshard_after_forward_recompute(id(self.storage))
+        )
+
     def prefetch_next(self) -> None:
         """Start the next bucket's all-gather if no prefetch is in flight."""
         if self.context.pending is not None:
             return
         prefetch_order = self.context.buckets
-        if _is_reshard_after_forward_recompute():
+        is_recompute = self.in_reshard_after_forward_recompute()
+        if is_recompute:
             prefetch_order = prefetch_order[::-1]
         for idx, bucket in enumerate(prefetch_order):
             if bucket is self:
@@ -334,7 +342,7 @@ class BucketRuntime:
         self.context.pending = PendingAllGather(
             bucket=next_bucket,
             result=next_bucket.begin_unshard(),
-            recompute=_is_reshard_after_forward_recompute(),
+            recompute=is_recompute,
         )
 
     def take_pending(self) -> AllGatherUnshardHandle | None:
@@ -344,7 +352,7 @@ class BucketRuntime:
             return None
         if (
             pending.bucket is self
-            and pending.recompute == _is_reshard_after_forward_recompute()
+            and pending.recompute == self.in_reshard_after_forward_recompute()
         ):
             self.context.pending = None
             return pending.result
