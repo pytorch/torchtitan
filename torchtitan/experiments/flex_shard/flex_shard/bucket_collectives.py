@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import _get_device_handle
 
-from .utils import _with_fqn
+from .utils import _record_function_if_eager, _with_fqn
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -126,8 +126,8 @@ class AsyncAllGatherResult(AllGatherUnshardHandle):
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_out", self.debug_fqn)
+        with _record_function_if_eager(
+            "FlexShard::all_gather_copy_out", self.debug_fqn
         ):
             results = _assemble_full_params(
                 self.gathered,
