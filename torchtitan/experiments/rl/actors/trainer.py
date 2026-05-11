@@ -170,11 +170,10 @@ class PolicyTrainer(Actor, Configurable):
             sd_adapter=self.sd_adapter,
             base_folder=config.dump_folder,
         )
-        if self.checkpointer.enable:
-            self.checkpointer.load()
-        else:
+        self.checkpointer.load()
+        if not self.checkpointer.enable:
             logger.warning(
-                "Checkpoint disabled — using random-initialized weights. "
+                "Checkpoint disabled, skip weight loading and use random-initialized weights. "
                 "Set checkpoint.enable=True to load from a checkpoint."
             )
 

@@ -17,10 +17,6 @@ import torch
 import torch._dynamo
 import torch.distributed as dist
 from torch.distributed._tensor import DTensor, Replicate
-from torch.distributed.checkpoint.state_dict import (
-    set_model_state_dict,
-    StateDictOptions,
-)
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
@@ -238,6 +234,9 @@ class VLLMModelWrapper(Module):
 
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
+        self._hf_checkpoint_path = (
+            checkpoint_config.initial_load_path or vllm_config.model_config.model
+        )
         self._maybe_initial_load_weights()
 
     def _extend_rope_cache(
@@ -372,22 +371,6 @@ class VLLMModelWrapper(Module):
 
         return logits
 
-    def load_weights_from_state_dict(self, state_dict):
-        """
-        Load model weights from a state dict.
-
-        Expects DTensor-wrapped tensors matching the model's placements.
-        The caller is responsible for reconstructing DTensors from plain
-        local tensors before calling this method.
-        """
-        set_model_state_dict(
-            model=self.model,
-            model_state_dict=state_dict,
-            options=StateDictOptions(strict=False),
-        )
-
-        return state_dict.keys()
-
     def _maybe_initial_load_weights(self) -> None:
         """Load initial HF weights via CheckpointManager.
 
@@ -404,7 +387,7 @@ class VLLMModelWrapper(Module):
         if self.state_dict_adapter is not None:
             sd_adapter = self.state_dict_adapter(
                 model_config=self.config,
-                hf_assets_path=cfg.initial_load_path,
+                hf_assets_path=self._hf_checkpoint_path,
             )
 
         # Model-only CheckpointManager: initial_load_model_only=True (default)
