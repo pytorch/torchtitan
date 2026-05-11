@@ -126,33 +126,15 @@ class AsyncAllGatherResult(AllGatherUnshardHandle):
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
-        ws = self.mesh.size()
-        device = self.gathered[0].device
         with torch.profiler.record_function(
             _with_fqn("FlexShard::all_gather_copy_out", self.debug_fqn)
         ):
-            results: list[torch.Tensor] = []
-            for i, info in enumerate(self.infos):
-                placement = info.placement
-                per_rank_shards: list[torch.Tensor] = []
-                for r in range(ws):
-                    numel = placement.compute_local_numel(info.global_shape, r, ws)
-                    shape = placement.compute_local_shape(info.global_shape, r, ws)
-                    if numel > 0:
-                        offset = self.per_rank_param_offsets[r][i]
-                        per_rank_shards.append(
-                            self.gathered[r][offset : offset + numel].view(shape)
-                        )
-                    else:
-                        per_rank_shards.append(
-                            torch.empty(shape, dtype=info.dtype, device=device)
-                        )
-                results.append(
-                    placement.assemble_from_shards(
-                        per_rank_shards, info.global_shape, info.dtype
-                    )
-                )
-                del per_rank_shards
+            results = _assemble_full_params(
+                self.gathered,
+                self.infos,
+                self.mesh,
+                self.per_rank_param_offsets,
+            )
             self.release_buffers()
             return results
 
@@ -190,6 +172,39 @@ class AsyncAllGatherResult(AllGatherUnshardHandle):
             )
         for handoff in handoffs:
             handoff.release()
+
+
+def _assemble_full_params(
+    gathered: list[torch.Tensor],
+    infos: list[ParamInfo],
+    mesh: DeviceMesh,
+    per_rank_param_offsets: list[list[int]],
+) -> list[torch.Tensor]:
+    ws = mesh.size()
+    device = gathered[0].device
+    results: list[torch.Tensor] = []
+    for i, info in enumerate(infos):
+        placement = info.placement
+        per_rank_shards: list[torch.Tensor] = []
+        for r in range(ws):
+            numel = placement.compute_local_numel(info.global_shape, r, ws)
+            shape = placement.compute_local_shape(info.global_shape, r, ws)
+            if numel > 0:
+                offset = per_rank_param_offsets[r][i]
+                per_rank_shards.append(
+                    gathered[r][offset : offset + numel].view(shape)
+                )
+            else:
+                per_rank_shards.append(
+                    torch.empty(shape, dtype=info.dtype, device=device)
+                )
+        results.append(
+            placement.assemble_from_shards(
+                per_rank_shards, info.global_shape, info.dtype
+            )
+        )
+        del per_rank_shards
+    return results
 
 
 def begin_all_gather_unshard(
