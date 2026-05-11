@@ -221,9 +221,7 @@ def begin_all_gather_unshard(
     device = tensors[0].device
     device_handle = _get_device_handle(device.type)
 
-    with torch.profiler.record_function(
-        _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
-    ):
+    with _record_function_if_eager("FlexShard::all_gather_copy_in", debug_fqn):
         send_buf = torch.cat([t.reshape(-1) for t in tensors])
 
         per_rank_sizes: list[int] = []
@@ -347,9 +345,7 @@ def begin_reduce_scatter_grad(
                 f"{placement!r} and {info.fqn!r} uses {info.placement!r}."
             )
 
-    with torch.profiler.record_function(
-        _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
-    ):
+    with _record_function_if_eager("FlexShard::reduce_scatter_copy_in", debug_fqn):
         send_buf, layout = placement.pack_reduce_grad(tensors, infos, ws)
         if send_buf.numel() % ws != 0:
             raise AssertionError(
@@ -378,8 +374,8 @@ def begin_reduce_scatter_grad(
                 op=dist.ReduceOp.AVG,
                 group=pg,
             )
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::reduce_scatter_copy_out", debug_fqn)
+        with _record_function_if_eager(
+            "FlexShard::reduce_scatter_copy_out", debug_fqn
         ):
             sharded_grads = placement.unpack_reduced_grad(
                 recv_buf, infos, layout, rank, ws
