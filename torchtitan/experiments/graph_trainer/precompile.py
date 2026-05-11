@@ -335,7 +335,7 @@ class PrecompiledFxTraceArtifact:
         """
         from torch.fx._graph_pickler import GraphPickler, Options
 
-        from torchtitan.experiments.graph_trainer.passes import (
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
             _node_metadata_key_filter_distributed,
         )
 
