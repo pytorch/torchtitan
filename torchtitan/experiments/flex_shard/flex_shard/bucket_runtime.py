@@ -497,6 +497,7 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         ctx.runtime = runtime
         ctx.num_inputs = len(local_shards)
+        ctx.local_shard_dtypes = tuple(shard.dtype for shard in local_shards)
 
         result = runtime.prefetched_result
         runtime.prefetched_result = None
@@ -518,27 +519,32 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[Any, ...]:
         runtime: BucketAllGatherRuntime = ctx.runtime
         bucket = runtime.bucket
+        input_grads: list[torch.Tensor | None] = [None] * ctx.num_inputs
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
-        valid_param_refs: list[ParamModuleInfo] = []
-        for grad, info, param_ref in zip(
-            full_param_grads,
-            bucket.infos,
-            bucket.param_refs,
-            strict=True,
+        valid_indices: list[int] = []
+        for idx, (grad, info) in enumerate(
+            zip(full_param_grads, bucket.infos, strict=True)
         ):
             if grad is None:
                 continue
+            valid_indices.append(idx)
             grads.append(grad.contiguous())
             valid_infos.append(info)
-            valid_param_refs.append(param_ref)
 
         if grads:
-            bucket.reduce_grads(grads, valid_infos, valid_param_refs)
+            sharded_grads = bucket.reduce_grads_to_shards(grads, valid_infos)
+            for input_idx, sharded_grad in zip(
+                valid_indices,
+                sharded_grads,
+                strict=True,
+            ):
+                input_dtype = ctx.local_shard_dtypes[input_idx]
+                if sharded_grad.dtype != input_dtype:
+                    sharded_grad = sharded_grad.to(input_dtype)
+                input_grads[input_idx] = sharded_grad
 
-        # Gradients are accumulated into the original sharded parameters above
-        # so the autograd input grads can stay empty and avoid blocking here.
-        return (None, *([None] * ctx.num_inputs))
+        return (None, *input_grads)
 
 
 def _storage_requires_batched_unshard(storage: DStorage) -> bool:
