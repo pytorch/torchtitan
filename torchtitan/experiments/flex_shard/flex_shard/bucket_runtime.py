@@ -32,7 +32,7 @@ from .param_access import (
     ParamModuleInfo,
 )
 from .reshard_after_forward import _is_reshard_after_forward_recompute
-from .utils import _get_storage_debug_fqn, _with_fqn
+from .utils import _get_storage_debug_fqn, _record_function_if_eager
 
 
 logger = logging.getLogger(__name__)
@@ -118,17 +118,7 @@ class BucketCommContext:
         """Wait for prior reduce-scatter states and release their buffers."""
         if not self.reduce_scatter_states:
             return
-        if torch.compiler.is_compiling():
-            for pending in self.reduce_scatter_states:
-                pending.result.wait()
-                pending.result.release_buffers(
-                    release_sharded_grads=True,
-                )
-            self.reduce_scatter_states.clear()
-            return
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::post_backward_rs_wait", debug_fqn)
-        ):
+        with _record_function_if_eager("FlexShard::post_backward_rs_wait", debug_fqn):
             for pending in self.reduce_scatter_states:
                 pending.result.wait()
                 pending.result.release_buffers(
