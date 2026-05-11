@@ -15,21 +15,7 @@
 
 from dataclasses import dataclass
 
-from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.model import ModelConfigConverter
-
-
-@dataclass(kw_only=True, slots=True)
-class QuantizedLinearConfig(Linear.Config):
-    """Base config for all quantized Linear variants."""
-
-    pass
-
-
-class _QuantizedGroupedExpertsConfig:
-    """Marker base for dynamically created quantized GroupedExperts configs."""
-
-    pass
 
 
 class QuantizationConverter(ModelConfigConverter):
@@ -65,6 +51,4 @@ __all__ = [
     "MXFP8Linear",
     "MXFP8LinearConverter",
     "QuantizationConverter",
-    "QuantizedLinearConfig",
-    "_QuantizedGroupedExpertsConfig",
 ]
