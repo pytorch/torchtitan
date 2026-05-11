@@ -12,7 +12,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from autoparallel.api import AutoParallel
-from autoparallel.input_validation import _check_forward_args, _compute_expected_inputs
+from autoparallel.input_validation import _compute_expected_inputs
 from autoparallel.module_construction import make_parallel_module
 from torch._functorch._aot_autograd.fx_utils import get_plain_input_and_grad_nodes
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
@@ -126,7 +126,6 @@ class AutoParallelGraph(AutoParallel):
             flat_args, _ = torch.utils._pytree.tree_flatten(args)
             if len(flat_args) != len(expected_inputs):
                 flat_args, _ = torch.utils._pytree.tree_flatten((args, kwargs))
-            _check_forward_args(flat_args, expected_inputs)
             params = [
                 _local_tensor_with_autograd(
                     _get_raw_module_tensor(self, fqn, is_buffer=False)
