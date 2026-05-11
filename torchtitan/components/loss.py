@@ -345,10 +345,25 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        # Return a differentiable loss via _DecoderOutputGradientBackProp. When
-        # .backward() is called (by the trainer or PP schedule), autograd
-        # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
-        # as the gradient for hidden_states, propagating through the decoder.
+        return self._gradient_backprop(
+            hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
+        )
+
+    @staticmethod
+    def _gradient_backprop(
+        hidden_states: torch.Tensor,
+        accumulated_grad: torch.Tensor,
+        total_loss: torch.Tensor,
+        lm_head: nn.Module,
+        fsdp_enabled: bool,
+    ) -> torch.Tensor:
+        """Return a differentiable loss via _DecoderOutputGradientBackProp.
+        When ``.backward()`` is called (by the trainer or PP schedule),
+        autograd calls ``_DecoderOutputGradientBackProp.backward`` which
+        returns ``accumulated_grad`` as the gradient for ``hidden_states``,
+        propagating through the decoder. Subclasses override to swap in a
+        different autograd Function.
+        """
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
         )
@@ -387,4 +402,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
         # but expressed as a return value so autograd handles the traversal
         # in a single pass (no "backward through graph twice" error).
+        # Note: this is not safe if downstream accidentally runs tensor ops after
+        # the loss returns, which would produce a non-trivial grad_output that we need
+        # to properly handle. The complicated part is that grad_output might not be
+        # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None
