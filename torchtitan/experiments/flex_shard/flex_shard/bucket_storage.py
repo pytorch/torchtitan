@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from .placement_contract import Placement
+    from .reshard_after_forward import _ReshardAfterForwardRecomputeState
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,9 @@ class DStorage:
         self._total_bytes = total_bytes
         self._module = module
         self._reshard_after_forward = reshard_after_forward
+        self._reshard_after_forward_recompute_state: (
+            _ReshardAfterForwardRecomputeState | None
+        ) = None
 
     @classmethod
     def from_bucket(
