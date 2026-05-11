@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 )
 from torchtitan.tools.logging import logger
 
+
 @contextmanager
 def log_timer(label: str):
     start = time.perf_counter()
