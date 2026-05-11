@@ -140,6 +140,43 @@ class VLLMGenerator(Actor, Configurable):
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
+        def __post_init__(self):
+            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
+            # we only apply TP via the core parallelize function.
+            p = self.parallelism
+            if p.data_parallel_replicate_degree != 1:
+                raise ValueError(
+                    f"Generator does not support data parallel replication, "
+                    f"got dp_replicate={p.data_parallel_replicate_degree}"
+                )
+            if p.pipeline_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support pipeline parallelism, "
+                    f"got pp={p.pipeline_parallel_degree}"
+                )
+            if p.context_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support context parallelism, "
+                    f"got cp={p.context_parallel_degree}"
+                )
+            if p.expert_parallel_degree > 1:
+                raise ValueError(
+                    f"Generator does not support expert parallelism, "
+                    f"got ep={p.expert_parallel_degree}"
+                )
+            if p.enable_sequence_parallel:
+                raise ValueError(
+                    "Generator does not support sequence parallelism: "
+                    "spmd_types erasure mode requires sequence length to be "
+                    "evenly divisible by TP, which doesn't hold for inference "
+                    "(uneven batches). Set enable_sequence_parallel=False."
+                )
+            if not p.disable_loss_parallel:
+                raise ValueError(
+                    "Generator requires disable_loss_parallel=True, "
+                    f"got disable_loss_parallel={p.disable_loss_parallel}"
+                )
+
     def __init__(
         self,
         config: Config,
@@ -243,7 +280,7 @@ class VLLMGenerator(Actor, Configurable):
 
     def _get_model(self):
         """Access the model from the vLLM engine.
-        Returns a TorchTitanVLLMModelWrapper instance.
+        Returns a VLLMModelWrapper instance.
         """
         return self._engine.model_executor.driver_worker.get_model()
 
