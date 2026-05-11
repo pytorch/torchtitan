@@ -8,11 +8,7 @@ from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
 from typing import Literal
 
-from torchtitan.components.quantization import (
-    _QuantizedGroupedExpertsConfig,
-    QuantizationConverter,
-    QuantizedLinearConfig,
-)
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.tools.logging import logger
@@ -25,7 +21,7 @@ class MXFP8Linear(Linear):
     """Linear that applies MXFP8 quantization in its constructor."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(QuantizedLinearConfig):
+    class Config(Linear.Config):
         """Drop-in replacement for Linear.Config that builds MXFP8Linear."""
 
         _recipe_name: str = "mxfp8_rceil"
@@ -104,6 +100,47 @@ class MXFP8LinearConverter(QuantizationConverter):
         )
 
 
+_mxfp8_experts_cache: dict[type, type] = {}
+
+
+def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
+    """Get or create an MXFP8-quantized subclass of *parent_cls*.
+
+    Works for any ``GroupedExperts`` subclass (e.g. gpt-oss variants).
+    The returned class has a proper ``_owner`` set by ``__init_subclass__``.
+    """
+    if parent_cls in _mxfp8_experts_cache:
+        return _mxfp8_experts_cache[parent_cls]
+
+    parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
+
+    class MXFP8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            recipe_name: str = "mxfp8_rceil"
+
+        def __init__(self, config: Config):
+            super().__init__(config)
+            from torchao.prototype.moe_training.config import (
+                MXFP8TrainingOpConfig,
+                MXFP8TrainingRecipe,
+            )
+            from torchao.quantization.quant_api import quantize_
+
+            recipe = MXFP8TrainingRecipe(config.recipe_name)
+            mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
+            quantize_(
+                self,
+                config=mxfp8_op_config,
+                filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
+            )
+
+    MXFP8GroupedExperts.__name__ = f"MXFP8{parent_cls.__name__}"
+    MXFP8GroupedExperts.__qualname__ = f"MXFP8{parent_cls.__name__}"
+    _mxfp8_experts_cache[parent_cls] = MXFP8GroupedExperts
+    return MXFP8GroupedExperts
+
+
 class MXFP8GroupedExpertsConverter(QuantizationConverter):
     """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
 
@@ -138,46 +175,14 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             )
 
     def convert(self, model_config) -> None:
-        from torchao.prototype.moe_training.config import (
-            MXFP8TrainingOpConfig,
-            MXFP8TrainingRecipe,
-        )
-        from torchao.quantization.quant_api import quantize_
-
-        recipe_name = self.config.recipe_name
-
-        _converted_config_cache: dict[type, type] = {}
-
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(config, self.PAD_MULTIPLE)
-
-            base_cls = type(config)
-            if base_cls not in _converted_config_cache:
-
-                @dataclass(kw_only=True, slots=True)
-                class MXFP8GroupedExpertsConfig(
-                    base_cls, _QuantizedGroupedExpertsConfig
-                ):
-                    def build(self, **kwargs):
-                        instance = base_cls.build(self, **kwargs)
-                        recipe = MXFP8TrainingRecipe(recipe_name)
-                        mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-                        # torchao's quantize_ defaults filter_fn to _is_linear,
-                        # which skips GroupedExperts. Pass a filter that matches
-                        # the built GroupedExperts instance so its nn.Parameters
-                        # (w1/w2/w3) get swapped to MXFP8 wrapper subclasses.
-                        quantize_(
-                            instance,
-                            config=mxfp8_op_config,
-                            filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
-                        )
-                        return instance
-
-                _converted_config_cache[base_cls] = MXFP8GroupedExpertsConfig
-
-            ConfigCls = _converted_config_cache[base_cls]
-            new_config = ConfigCls(
-                **{f.name: getattr(config, f.name) for f in fields(config)}
+            base_module_cls = type(config)._owner
+            quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
+            config_cls = quantized_cls.Config  # type: ignore[attr-defined]
+            new_config = config_cls(
+                **{f.name: getattr(config, f.name) for f in fields(config)},
+                recipe_name=self.config.recipe_name,
             )
             if isinstance(parent, list):
                 parent[attr] = new_config
