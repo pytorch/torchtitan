@@ -16,7 +16,6 @@ import dataclasses
 import torch
 import torch._dynamo
 import torch.distributed as dist
-import torch.distributed.checkpoint as dcp
 from torch.distributed._tensor import DTensor, Replicate
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
@@ -237,11 +236,9 @@ class VLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Store checkpoint config for deferred HF loading in load_weights().
+        # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
-        self._hf_checkpoint_path = (
-            checkpoint_config.initial_load_path or vllm_config.model_config.model
-        )
+        self._maybe_initial_load_weights()
 
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int
@@ -391,44 +388,43 @@ class VLLMModelWrapper(Module):
 
         return state_dict.keys()
 
-    def load_weights(self, weights_iter):
-        """vLLM required API — load model weights.
+    def _maybe_initial_load_weights(self) -> None:
+        """Load initial HF weights via CheckpointManager.
 
-        When ``checkpoint_config`` enables HF loading, weights are loaded
-        from the HF checkpoint via DCP + state_dict_adapter. Otherwise
-        (RL loop), this is a no-op — weights arrive via TorchStore.
-
-        Returns the names of all model parameters so vLLM's safety check passes.
+        Controlled by ``self._checkpoint_config``:
+        - ``enable=True`` and ``initial_load_in_hf=True``: load from HF
+          via CheckpointManager (standalone inference path).
+        - ``enable=False``: skip (RL loop — weights arrive via TorchStore).
         """
         cfg = self._checkpoint_config
-        if (
-            cfg.enable
-            and cfg.initial_load_in_hf
-            and self.state_dict_adapter is not None
-        ):
-            adapter = self.state_dict_adapter(
+        if not cfg.enable:
+            return
+
+        sd_adapter = None
+        if self.state_dict_adapter is not None:
+            sd_adapter = self.state_dict_adapter(
                 model_config=self.config,
-                hf_assets_path=None,
+                hf_assets_path=cfg.initial_load_path,
             )
-            storage_reader = adapter.get_hf_storage_reader(self._hf_checkpoint_path)
-            hf_state_dict = adapter.to_hf(self.model.state_dict())
-            dcp.load(hf_state_dict, storage_reader=storage_reader)
-            torchtitan_state_dict = adapter.from_hf(hf_state_dict)
 
-            model_state_dict = dict(self.model.state_dict())
-            for name, tensor in torchtitan_state_dict.items():
-                if (
-                    name in model_state_dict
-                    and isinstance(model_state_dict[name], DTensor)
-                    and not isinstance(tensor, DTensor)
-                ):
-                    target = model_state_dict[name]
-                    torchtitan_state_dict[name] = DTensor.from_local(
-                        tensor.to(target.device_mesh.device_type),
-                        device_mesh=target.device_mesh,
-                        placements=[Replicate()],
-                    )
+        # Model-only CheckpointManager: initial_load_model_only=True (default)
+        # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
+        # are never accessed.
+        checkpointer = cfg.build(
+            dataloader=None,
+            model_parts=[self.model],
+            optimizers=None,
+            lr_schedulers=None,
+            states={},
+            sd_adapter=sd_adapter,
+        )
+        checkpointer.load()
 
-            self.load_weights_from_state_dict(torchtitan_state_dict)
+    def load_weights(self, weights_iter):
+        """vLLM required API.
 
+        No-op: weights are loaded during ``_initial_load_weights`` (standalone)
+        or via TorchStore (RL loop). Returns all parameter names so vLLM's
+        safety check passes.
+        """
         return {"model." + n for n, _ in self.model.named_parameters()}
