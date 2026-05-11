@@ -36,24 +36,11 @@ from torchtitan.experiments.graph_trainer.cpu_offload import (
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
 )
+from torchtitan.experiments.graph_trainer.registry import (
+    MEMORY_POLICY_REGISTRY,
+    register_memory_policy,
+)
 from torchtitan.tools.logging import logger
-
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-MEMORY_POLICY_REGISTRY: dict[str, Callable] = {}
-
-
-def register_memory_policy(key: str):
-    """Decorator that registers a memory policy function."""
-
-    def decorator(fn: Callable) -> Callable:
-        MEMORY_POLICY_REGISTRY[key] = fn
-        return fn
-
-    return decorator
 
 
 def _make_default_memory_policy(

@@ -72,33 +72,6 @@ aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
 
 
-# ---------------------------------------------------------------------------
-# Registries — keyed by string name
-# ---------------------------------------------------------------------------
-
-PASS_PIPELINE_REGISTRY: dict[str, Callable] = {}
-POST_INIT_HOOKS: dict[str, Callable] = {}
-PRE_TRAIN_STEP_HOOKS: dict[str, Callable] = {}
-
-
-def _make_registry_decorator(registry: dict):
-    """Create a decorator that registers a function into the given registry."""
-
-    def register(key: str):
-        def decorator(fn: Callable) -> Callable:
-            registry[key] = fn
-            return fn
-
-        return decorator
-
-    return register
-
-
-register_pass_pipeline = _make_registry_decorator(PASS_PIPELINE_REGISTRY)
-register_post_init_hook = _make_registry_decorator(POST_INIT_HOOKS)
-register_pre_train_step_hook = _make_registry_decorator(PRE_TRAIN_STEP_HOOKS)
-
-
 def normalize_view_ops_as_reshape(
     gm: torch.fx.GraphModule,
     example_inputs=None,
