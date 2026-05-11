@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -26,6 +27,16 @@ def _with_fqn(label: str, fqn: str | None) -> str:
     if fqn:
         return f"{label} ({fqn})"
     return label
+
+
+def _record_function_if_eager(
+    label: str,
+    fqn: str | None,
+) -> AbstractContextManager[Any]:
+    """Return a profiler range in eager and a no-op context during compile."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return torch.profiler.record_function(_with_fqn(label, fqn))
 
 
 def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
