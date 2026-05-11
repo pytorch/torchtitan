@@ -177,6 +177,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # so the rank is a SymInt under CooR precompile.
         self.sp_size: int = 1
         self.sp_rank: int | torch.SymInt = -1
+        # Use the non-autograd all-to-all variant. Set to True for inference
+        # paths (e.g. vLLM under torch.inference_mode), where the autograd
+        # functional ops don't dispatch correctly without an active autograd
+        # context. Read at trace time, so it's a Python bool — not a runtime
+        # call to is_inference_mode_enabled() (which Dynamo cannot trace).
+        self.use_inference_a2a: bool = False
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
@@ -308,8 +314,15 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_splits_list = input_splits.tolist()
             output_splits_list = output_splits.tolist()
 
-        # All-to-all dispatch tokens to EP ranks
-        routed_input = all_to_all_single_autograd(
+        # All-to-all dispatch tokens to EP ranks.
+        # Use the non-autograd version under inference (vLLM), since
+        # _c10d_functional_autograd ops don't dispatch correctly without
+        # an active autograd context. Gated by a Python bool so the choice
+        # is stable at trace time.
+        a2a_fn = (
+            all_to_all_single if self.use_inference_a2a else all_to_all_single_autograd
+        )
+        routed_input = a2a_fn(
             routed_input,
             output_splits_list,
             input_splits_list,
@@ -431,7 +444,10 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         )
         # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
-        routed_output = all_to_all_single_autograd(
+        a2a_fn = (
+            all_to_all_single if self.use_inference_a2a else all_to_all_single_autograd
+        )
+        routed_output = a2a_fn(
             routed_output,
             metadata.input_splits,
             metadata.output_splits,

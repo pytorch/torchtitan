@@ -127,10 +127,7 @@ class VLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # PP and CP are not supported on this inference path. User-facing
-        # validation lives in Generator.Config.__post_init__; these are
-        # internal invariants — by the time we get here, parallelism has
-        # already been validated.
+        # PP and CP are not supported on this inference path.
         assert parallelism.pipeline_parallel_degree == 1, (
             "vLLM wrapper requires pipeline_parallel_degree=1, "
             f"got {parallelism.pipeline_parallel_degree}"
@@ -199,8 +196,13 @@ class VLLMModelWrapper(Module):
             )
         )
 
-        # TODO: Check if it's possible to apply meta init
-        self.model = self.config.build()
+        # Build model on meta device to avoid allocating full model on every
+        # GPU. This is critical for large MoE models where replicating all
+        # experts would OOM. After parallelization (which sets up EP/TP
+        # sharding on meta tensors), to_empty() allocates only the local
+        # shards on the actual device.
+        with torch.device("meta"):
+            self.model = self.config.build()
 
         # RoPE config from model for cache extension
         self.rope_config = self.config.rope
@@ -224,6 +226,24 @@ class VLLMModelWrapper(Module):
             dump_folder="",
             skip_dp=True,
         )
+
+        # vLLM runs under torch.inference_mode(); the autograd functional
+        # collectives don't dispatch correctly there. Flip MoE token
+        # dispatchers to the non-autograd a2a path. Read at trace time.
+        from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+
+        for layer in self.model.layers.values():
+            moe = getattr(layer, "moe", None)
+            if moe is None:
+                continue
+            dispatcher = getattr(moe.experts, "token_dispatcher", None)
+            if isinstance(dispatcher, AllToAllTokenDispatcher):
+                dispatcher.use_inference_a2a = True
+
+        # Materialize model on GPU — only allocates local shards (not full
+        # model) thanks to EP/TP DTensor sharding applied above.
+        device_type = vllm_config.device_config.device.type
+        self.model.to_empty(device=device_type)
 
         # Pre-extend RoPE cache to cover vLLM's max model length (profiling
         # may use up to 2x max_seq_len, so use max_model_len which already
@@ -364,9 +384,10 @@ class VLLMModelWrapper(Module):
 
         logits = self.model.lm_head(hidden_states)
 
-        # Full DTensor path returns logits as DTensor; vLLM expects plain tensors.
+        # vLLM's sampling expects full plain tensors. full_tensor() handles both
+        # Replicate (no-op) and Shard(-1) (all-gather) lm_head output placements.
         if isinstance(logits, DTensor):
-            logits = logits.to_local()
+            logits = logits.full_tensor()
 
         return logits
 
@@ -404,6 +425,25 @@ class VLLMModelWrapper(Module):
 
         # Load HF state dict using DCP
         hf_state_dict = adapter.to_hf(self.model.state_dict())
+
+        # TODO: remove the ``expert_bias`` exemption after #3000 lands and the
+        # affected models switch to aux-loss-based LB (load_balance_coeff=None).
+        # Until then, HF MoE checkpoints don't carry ``expert_bias``, so ignore
+        # it; any other missing key still raises.
+        hf_keys_in_checkpoint = set(
+            storage_reader.read_metadata().state_dict_metadata.keys()
+        )
+        missing = set(hf_state_dict.keys()) - hf_keys_in_checkpoint
+        unexpected_missing = {k for k in missing if not k.endswith(".expert_bias")}
+        if unexpected_missing:
+            raise ValueError(
+                f"HF checkpoint at {checkpoint_path} is missing keys "
+                f"required by the model: {sorted(unexpected_missing)}"
+            )
+        hf_state_dict = {
+            k: v for k, v in hf_state_dict.items() if k in hf_keys_in_checkpoint
+        }
+
         dcp.load(hf_state_dict, storage_reader=storage_reader)
 
         # Convert HF state dict to TorchTitan format
