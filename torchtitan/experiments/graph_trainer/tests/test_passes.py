@@ -39,6 +39,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
+    selective_activation_remat_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
@@ -357,6 +358,25 @@ class TestApplySACPass(TestCase):
         for node, (target, policy) in zip(nodes, expected):
             self.assertEqual(node.target, target)
             self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
+
+    def test_remat_uses_autograd_backward_without_phase_annotation(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fwd.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+        bwd.meta["autograd_backward"] = True
+
+        gm = selective_activation_remat_pass(gm)
+
+        recomputed_nodes = [
+            node for node in gm.graph.nodes if node.name == "add_tensor_recomputed"
+        ]
+        self.assertEqual(len(recomputed_nodes), 1)
+        self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
 
 
 class TestBucketingPrefetchOrder(FSDPTest):
