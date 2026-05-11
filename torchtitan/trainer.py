@@ -712,6 +712,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels
         )
 
+        if is_spmd_active():
+            self._annotate_inputs_spmd(
+                inputs, labels, extra_inputs, extra_kwargs
+            )
+
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             loss_kwargs = {"global_valid_tokens": global_valid_tokens}
@@ -756,7 +761,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
             typechecker = (
                 spmd.typecheck(local=(self.spmd_typechecking == "local"))
-                if is_spmd_active() and self.spmd_typechecking is not None
+                if is_spmd_active() and self.spmd_typechecking in ("local", "global")
                 else contextlib.nullcontext()
             )
             with self.train_context(), current_mesh:
@@ -771,18 +776,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def _annotate_inputs_spmd(
         self,
-        input_dict: dict[str, torch.Tensor],
+        inputs: torch.Tensor,
         labels: torch.Tensor,
+        extra_inputs: dict[str, torch.Tensor],
+        extra_kwargs: dict[str, Any],
     ) -> None:
-        """Annotate inputs and labels with spmd types."""
-        for v in input_dict.values():
-            if isinstance(v, torch.Tensor):
-                types, pspec = named_placement_to_spmd(_INPUT_SPMD_TYPES, ndim=v.ndim)
-                if types:
-                    spmd.assert_type(v, types, partition_spec=pspec)
-        types, pspec = named_placement_to_spmd(_INPUT_SPMD_TYPES, ndim=labels.ndim)
-        if types:
-            spmd.assert_type(labels, types, partition_spec=pspec)
+        """Annotate all forward inputs with spmd types.
+
+        Called after ``post_dataloading_process`` so that tensors created
+        there (e.g. positions) are also annotated.
+        """
+        for t in (inputs, labels):
+            types, pspec = named_placement_to_spmd(_INPUT_SPMD_TYPES, ndim=t.ndim)
+            if types:
+                spmd.assert_type(t, types, partition_spec=pspec)
+        for d in (extra_inputs, extra_kwargs):
+            for v in d.values():
+                if isinstance(v, torch.Tensor):
+                    types, pspec = named_placement_to_spmd(_INPUT_SPMD_TYPES, ndim=v.ndim)
+                    if types:
+                        spmd.assert_type(v, types, partition_spec=pspec)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -827,9 +840,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if isinstance(v, torch.Tensor):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
-
-            if is_spmd_active():
-                self._annotate_inputs_spmd(input_dict, labels)
 
             loss = self.forward_backward_step(
                 input_dict=input_dict,
