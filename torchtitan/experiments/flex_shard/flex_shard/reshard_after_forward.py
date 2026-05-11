@@ -29,12 +29,12 @@ _reshard_after_forward_recompute: ContextVar[bool] = ContextVar(
 
 @torch.compiler.assume_constant_result
 def _is_reshard_after_forward_recompute() -> bool:
-    """Return whether execution is in FlexShard RAF recomputation."""
+    """Return whether execution is in FlexShard reshard-after-forward recompute."""
     return _reshard_after_forward_recompute.get()
 
 
 class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
-    """TorchDispatchMode wrapper that marks RAF checkpoint recomputation."""
+    """TorchDispatchMode wrapper that marks reshard-after-forward recompute."""
 
     @classmethod
     def ignore_compile_internals(cls) -> bool:

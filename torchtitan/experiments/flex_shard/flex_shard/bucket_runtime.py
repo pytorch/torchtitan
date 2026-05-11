@@ -355,9 +355,10 @@ class BucketRuntime:
             return
         with torch.no_grad():
             self.context.wait_and_clear_reduce_scatter_states(self.debug_fqn)
-            # TODO: Thread the bucket's reduce_dtype into the non-RAF path
-            # before launching reduce-scatter. RAF uses _MixedPrecisionCast
-            # backward, but detached non-RAF leaves can arrive in param_dtype.
+            # TODO: Thread the bucket's reduce_dtype into the non-reshard-after-forward
+            # path before launching reduce-scatter. Reshard-after-forward uses
+            # _MixedPrecisionCast backward, but detached non-reshard-after-forward
+            # leaves can arrive in param_dtype.
             result = begin_reduce_scatter_grad(
                 grads,
                 infos,
@@ -567,7 +568,7 @@ def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
         "FlexShard eager reshard_after_forward requires placement support "
         f"for the custom autograd bucket path{bucket_msg}; "
         f"{reason}. Use reshard_after_forward=False for this bucket or add "
-        "support for this placement before using eager RAF."
+        "support for this placement before using eager reshard-after-forward."
     )
 
 
