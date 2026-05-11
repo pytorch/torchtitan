@@ -16,6 +16,11 @@ To register TorchTitan models with vLLM:
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
+        checkpoint_config=CheckpointManager.Config(
+            enable=True,
+            initial_load_in_hf=True,
+            initial_load_path="/path/to/hf/checkpoint",
+        ),
     )
 
     # RL loop (skip HF loading, weights from TorchStore):

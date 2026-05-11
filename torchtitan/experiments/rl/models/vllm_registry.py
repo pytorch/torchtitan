@@ -165,9 +165,7 @@ def registry_to_vllm(
             ``enable=False`` to skip HF loading (RL loop).
     """
     if checkpoint_config is None:
-        checkpoint_config = CheckpointManager.Config(
-            enable=True, initial_load_in_hf=True
-        )
+        checkpoint_config = CheckpointManager.Config()
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry

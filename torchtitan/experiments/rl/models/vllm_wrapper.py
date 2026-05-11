@@ -234,9 +234,6 @@ class VLLMModelWrapper(Module):
 
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
-        self._hf_checkpoint_path = (
-            checkpoint_config.initial_load_path or vllm_config.model_config.model
-        )
         self._maybe_initial_load_weights()
 
     def _extend_rope_cache(
@@ -387,7 +384,7 @@ class VLLMModelWrapper(Module):
         if self.state_dict_adapter is not None:
             sd_adapter = self.state_dict_adapter(
                 model_config=self.config,
-                hf_assets_path=self._hf_checkpoint_path,
+                hf_assets_path=cfg.initial_load_path,
             )
 
         # Model-only CheckpointManager: initial_load_model_only=True (default)

@@ -449,6 +449,7 @@ class TestBitwiseParity(unittest.TestCase):
             checkpoint_config=CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
+                initial_load_path=config.hf_assets_path,
             ),
         )
 
