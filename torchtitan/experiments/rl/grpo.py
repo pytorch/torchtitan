@@ -37,9 +37,12 @@ import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.config.configs import CompileConfig
-from torchtitan.config.manager import ConfigManager
+from torchtitan.config import (
+    CompileConfig,
+    ConfigManager,
+    Configurable,
+    ParallelismConfig,
+)
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.types import (

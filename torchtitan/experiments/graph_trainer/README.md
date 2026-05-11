@@ -2,7 +2,6 @@
 
 [![integration and numerics tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer.yaml?query=branch%3Amain) [![GraphTrainer H100 8 GPU Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_graph_trainer_h100.yaml?query=branch%3Amain)
 
-
 This experiment demonstrates graph-based distributed training in torchtitan through toolkit-style usage of PyTorch's compiler technologies. The goal is to give users explicit control over the compiler stack in terms of performance, numerics, and debuggability during large-scale distributed training. See the [Manifesto](MANIFESTO.md) for the motivation and design philosophy behind GraphTrainer.
 
 **Key features:**
@@ -84,6 +83,47 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 # Disable all graph passes (for debugging)
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.no-enable_passes
 ```
+
+### Experimental AutoParallel Sharding
+
+GraphTrainer can use AutoParallel to solve SPMD placement for supported models,
+then trace and compile the placed model through the regular `aot_fx_trace`
+flow. Enable it with `--compile.enable_autoparallel`; `--compile.mode
+aot_fx_trace` is required.
+
+Llama 3 debug model:
+
+```bash
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel ./run_train.sh \
+  --compile.mode aot_fx_trace \
+  --compile.enable_autoparallel \
+  --parallelism.data_parallel_shard_degree 2 \
+  --parallelism.tensor_parallel_degree 2
+```
+
+DeepSeek V3 debug model:
+
+```bash
+MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel_ep ./run_train.sh \
+  --compile.mode aot_fx_trace \
+  --compile.enable_autoparallel \
+  --parallelism.data_parallel_shard_degree 4 \
+  --parallelism.expert_parallel_degree 2 \
+  --parallelism.disable_loss_parallel
+```
+
+AutoParallel is only responsible for producing the placed model. After that,
+GraphTrainer captures the full train step with `minimal_fx_tracer` and applies
+the normal `aot_fx_trace` pipeline: the configured memory policy, selective
+activation remat, CPU offload, bucketing and overlap passes, regional or full
+Inductor compilation, CUDA graph compatibility checks, and any other enabled
+GraphTrainer passes. This keeps AutoParallel placement composable with the same
+compiler options used by manually parallelized GraphTrainer models.
+
+AutoParallel can choose different sharding, collective schedules, and operator
+lowerings from the manual parallelization path. This can change numerics, so
+AutoParallel numerics tests check tight agreement with the eager baseline rather
+than requiring bitwise-identical losses.
 
 ### Pre-compile (Compile-on-One-Rank)
 
