@@ -386,6 +386,26 @@ class BucketRuntime:
             self.context.reduce_scatter_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_scatter_wait()
 
+    def reduce_grads_to_shards(
+        self,
+        grads: list[torch.Tensor],
+        infos: list[ParamInfo],
+    ) -> list[torch.Tensor]:
+        """Reduce full-parameter grads and return local sharded grads."""
+        if not grads:
+            return []
+        with torch.no_grad():
+            result = begin_reduce_scatter_grad(
+                grads,
+                infos,
+                self.storage._mesh,
+                self.context.reduce_scatter_stream,
+                debug_fqn=self.debug_fqn,
+            )
+            sharded_grads = result.finish()
+            result.release_buffers(release_sharded_grads=False)
+            return sharded_grads
+
     def _reduce_collected_grads(self) -> None:
         grads: list[torch.Tensor] = []
         infos: list[ParamInfo] = []
