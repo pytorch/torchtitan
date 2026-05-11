@@ -98,6 +98,20 @@ class GraphTrainerCompileConfig(CompileConfig):
     path.
     """
 
+    enable_autoparallel: bool = False
+    """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
+    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
+
+
+def validate_autoparallel_config(
+    compile_config: GraphTrainerCompileConfig,
+) -> None:
+    if compile_config.enable_autoparallel and compile_config.mode != "aot_fx_trace":
+        raise ValueError(
+            "AutoParallel graph_trainer integration only supports "
+            "--compile.mode aot_fx_trace"
+        )
+
 
 def to_graph_trainer_config(
     base_config: Trainer.Config,

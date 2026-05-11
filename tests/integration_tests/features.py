@@ -577,11 +577,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module llama3 --config llama3_debugmodel_float8_emulate",
+                    "--module llama3 --config llama3_debugmodel_float8_emulate_lora",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
                 ],
             ],
-            "Float8 emulation test",
-            "float8_emulation",
+            "Float8 emulate + LoRA training test",
+            "float8_emulate_lora",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
