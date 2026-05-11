@@ -235,11 +235,8 @@ def begin_all_gather_unshard(
     pg = mesh.get_group()
     dtype = tensors[0].dtype
     device = tensors[0].device
-    device_handle = _get_device_handle(device.type)
 
-    with torch.profiler.record_function(
-        _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
-    ):
+    if torch.compiler.is_compiling():
         send_buf = torch.cat([t.reshape(-1) for t in tensors])
 
         per_rank_sizes: list[int] = []
@@ -257,20 +254,37 @@ def begin_all_gather_unshard(
             torch.empty(per_rank_sizes[r], dtype=dtype, device=device)
             for r in range(ws)
         ]
-
-    if torch.compiler.is_compiling():
         dist.all_gather(gathered, send_buf, group=pg)
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::all_gather_copy_out", debug_fqn)
-        ):
-            return SyncAllGatherResult(
-                _assemble_full_params(
-                    gathered,
-                    infos,
-                    mesh,
-                    per_rank_param_offsets,
-                )
+        return SyncAllGatherResult(
+            _assemble_full_params(
+                gathered,
+                infos,
+                mesh,
+                per_rank_param_offsets,
             )
+        )
+
+    device_handle = _get_device_handle(device.type)
+    with torch.profiler.record_function(
+        _with_fqn("FlexShard::all_gather_copy_in", debug_fqn)
+    ):
+        send_buf = torch.cat([t.reshape(-1) for t in tensors])
+
+        per_rank_sizes = []
+        per_rank_param_offsets = []
+        for r in range(ws):
+            offset = 0
+            offsets_r = []
+            for info in infos:
+                offsets_r.append(offset)
+                offset += info.placement.compute_local_numel(info.global_shape, r, ws)
+            per_rank_sizes.append(offset)
+            per_rank_param_offsets.append(offsets_r)
+
+        gathered = [
+            torch.empty(per_rank_sizes[r], dtype=dtype, device=device)
+            for r in range(ws)
+        ]
 
     copy_in_done = device_handle.Event()
     copy_in_done.record(device_handle.current_stream(device))
@@ -401,18 +415,25 @@ def begin_reduce_scatter_grad(
                 f"{placement!r} and {info.fqn!r} uses {info.placement!r}."
             )
 
-    with torch.profiler.record_function(
-        _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
-    ):
+    if torch.compiler.is_compiling():
         send_buf, layout = placement.pack_reduce_grad(tensors, infos, ws)
         if send_buf.numel() % ws != 0:
             raise AssertionError(
                 f"Packed reduce-scatter buffer has {send_buf.numel()} elements, "
                 f"which is not divisible by world size {ws}."
             )
+    else:
+        with torch.profiler.record_function(
+            _with_fqn("FlexShard::reduce_scatter_copy_in", debug_fqn)
+        ):
+            send_buf, layout = placement.pack_reduce_grad(tensors, infos, ws)
+            if send_buf.numel() % ws != 0:
+                raise AssertionError(
+                    f"Packed reduce-scatter buffer has {send_buf.numel()} elements, "
+                    f"which is not divisible by world size {ws}."
+                )
 
     device = send_buf.device
-    device_handle = _get_device_handle(device.type)
 
     if torch.compiler.is_compiling():
         recv_buf = torch.empty(
@@ -426,14 +447,10 @@ def begin_reduce_scatter_grad(
             op=dist.ReduceOp.AVG,
             group=pg,
         )
-        with torch.profiler.record_function(
-            _with_fqn("FlexShard::reduce_scatter_copy_out", debug_fqn)
-        ):
-            sharded_grads = placement.unpack_reduced_grad(
-                recv_buf, infos, layout, rank, ws
-            )
+        sharded_grads = placement.unpack_reduced_grad(recv_buf, infos, layout, rank, ws)
         return SyncReduceScatterResult(sharded_grads)
 
+    device_handle = _get_device_handle(device.type)
     copy_in_done = device_handle.Event()
     copy_in_done.record(device_handle.current_stream(device))
 

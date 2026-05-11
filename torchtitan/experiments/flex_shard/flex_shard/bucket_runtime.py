@@ -118,6 +118,14 @@ class BucketCommContext:
         """Wait for prior reduce-scatter states and release their buffers."""
         if not self.reduce_scatter_states:
             return
+        if torch.compiler.is_compiling():
+            for pending in self.reduce_scatter_states:
+                pending.result.wait()
+                pending.result.release_buffers(
+                    release_sharded_grads=True,
+                )
+            self.reduce_scatter_states.clear()
+            return
         with torch.profiler.record_function(
             _with_fqn("FlexShard::post_backward_rs_wait", debug_fqn)
         ):
