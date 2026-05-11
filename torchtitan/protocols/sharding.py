@@ -7,7 +7,7 @@
 """Sharding types for config-based parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize()``.  All placements use
+and read by ``Module.parallelize(mesh)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
 self-documenting and support multi-dimensional meshes.
 
@@ -30,9 +30,6 @@ from torchtitan.protocols.types import MeshAxisName
 NamedPlacement = dict[MeshAxisName, Placement | spmd.PerMeshAxisSpmdType]
 
 
-# Dual-mode placement helpers — return spmd_types when SPMD is active,
-
-
 def S(dim: int) -> spmd.Shard | Shard:
     """Shard on ``dim``. Returns ``spmd.S(dim)`` or ``Shard(dim)``."""
     return spmd.S(dim) if is_spmd_active() else Shard(dim)
@@ -45,10 +42,6 @@ def R() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
 
 def Inv() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
     """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent).
-
-    Use for params that are identical across ranks with no grad reduction
-    contract (e.g. TP-replicated params). ``convert_tp_states_for_compute``
-    converts ``I→R`` at forward time where needed.
     """
     return spmd.I if is_spmd_active() else Replicate()
 
@@ -100,9 +93,15 @@ class ShardingConfig:
     objects or ``spmd_types`` types — ``parallelize()`` duck-types on
     them to dispatch the right path.
 
+    Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
+    orthogonal.
+
     Redistribution is expressed as a (source, destination) pair: src declares
     what the tensor's placement is entering the boundary, dst declares the
-    desired placement after redistribution.
+    desired placement after redistribution. For DTensor, the src is usually
+    implicit in the tensor's ``placements``; declaring it explicitly keeps
+    the contract uniform with future erased-type systems that require both
+    sides of every redistribute.
 
     Attributes:
         state_shardings: Parameter/buffer placements.
