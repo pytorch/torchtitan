@@ -65,16 +65,18 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     # first layers, MoE later); scan the layer list for a representative
     # of each component rather than relying on layer 0.
     attn = cfg.layers[0].attention
-    ffn = None
-    for layer in cfg.layers:
-        ffn = getattr(layer, "feed_forward", None)
-        if ffn is not None:
-            break
-    moe = None
-    for layer in cfg.layers:
-        moe = getattr(layer, "moe", None)
-        if moe is not None:
-            break
+    ffn = next(
+        (
+            ff
+            for layer in cfg.layers
+            if (ff := getattr(layer, "feed_forward", None)) is not None
+        ),
+        None,
+    )
+    moe = next(
+        (m for layer in cfg.layers if (m := getattr(layer, "moe", None)) is not None),
+        None,
+    )
 
     n_heads = attn.n_heads
     n_kv_heads = attn.n_kv_heads or n_heads
@@ -133,7 +135,7 @@ def registry_to_vllm(
     Single entry point for vLLM integration. Must be called before creating
     a vLLM engine that uses a TorchTitan model. Registers two things:
 
-      1. ``VLLMModelFromSpec`` (subclass of ``TorchTitanVLLMModelWrapper``)
+      1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
          ``model_spec``/``parallelism``/``compile_config`` and forwards them
@@ -156,7 +158,7 @@ def registry_to_vllm(
         compile_config: torch.compile config applied per-layer by the
             wrapper's parallelize step.
     """
-    from torchtitan.experiments.rl.models.vllm_wrapper import TorchTitanVLLMModelWrapper
+    from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
 
@@ -171,7 +173,7 @@ def registry_to_vllm(
     logger = init_logger(__name__)
 
     # Dynamic model class capturing torchtitan config in the closure.
-    class VLLMModelFromSpec(TorchTitanVLLMModelWrapper):
+    class VLLMModelFromSpec(VLLMModelWrapper):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
                 model_spec=model_spec,

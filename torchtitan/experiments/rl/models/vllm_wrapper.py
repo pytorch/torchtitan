@@ -95,7 +95,7 @@ _codegen._node_ref = _patched_node_ref
         "positions": 0,
     }
 )
-class TorchTitanVLLMModelWrapper(Module):
+class VLLMModelWrapper(Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
     required interface required by vLLM Engine.
@@ -351,7 +351,7 @@ class TorchTitanVLLMModelWrapper(Module):
         Compute logits from hidden states."""
 
         # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
-        # at the end of TorchTitanVLLMModelWrapper.forward().
+        # at the end of VLLMModelWrapper.forward().
         # We need to wrap the input from vLLM engine back to DTensor with Replicate() placement.
         if self.parallel_dims.tp_enabled:
             hidden_states = DTensor.from_local(

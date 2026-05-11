@@ -237,41 +237,6 @@ class RLTrainer(Configurable):
                         "and has not been validated for determinism."
                     )
 
-            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
-            # we only apply TP via the core parallelize function.
-            if self.generator.parallelism.data_parallel_replicate_degree != 1:
-                raise ValueError(
-                    f"Generator does not support data parallel replication, "
-                    f"got dp_replicate={self.generator.parallelism.data_parallel_replicate_degree}"
-                )
-            if self.generator.parallelism.pipeline_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support pipeline parallelism, "
-                    f"got pp={self.generator.parallelism.pipeline_parallel_degree}"
-                )
-            if self.generator.parallelism.context_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support context parallelism, "
-                    f"got cp={self.generator.parallelism.context_parallel_degree}"
-                )
-            if self.generator.parallelism.expert_parallel_degree > 1:
-                raise ValueError(
-                    f"Generator does not support expert parallelism, "
-                    f"got ep={self.generator.parallelism.expert_parallel_degree}"
-                )
-            if self.generator.parallelism.enable_sequence_parallel:
-                raise ValueError(
-                    "Generator does not support sequence parallelism: "
-                    "spmd_types erasure mode requires sequence length to be "
-                    "evenly divisible by TP, which doesn't hold for inference "
-                    "(uneven batches). Set enable_sequence_parallel=False."
-                )
-            if not self.generator.parallelism.disable_loss_parallel:
-                raise ValueError(
-                    "Generator requires disable_loss_parallel=True, "
-                    f"got disable_loss_parallel={self.generator.parallelism.disable_loss_parallel}"
-                )
-
     def __init__(self, config: Config):
         self.config = config
         self._proc_meshes = []
