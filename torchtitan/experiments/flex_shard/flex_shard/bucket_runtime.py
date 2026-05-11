@@ -131,7 +131,7 @@ class BucketCommContext:
 
 @dataclass
 class BucketAllGatherRuntime:
-    """Runtime metadata passed to RAF bucket autograd."""
+    """Runtime metadata passed to reshard-after-forward bucket autograd."""
 
     bucket: BucketRuntime
     prefetched_result: AllGatherUnshardHandle | None
@@ -355,9 +355,10 @@ class BucketRuntime:
             return
         with torch.no_grad():
             self.context.wait_and_clear_reduce_scatter_states(self.debug_fqn)
-            # TODO: Thread the bucket's reduce_dtype into the non-RAF path
-            # before launching reduce-scatter. RAF uses _MixedPrecisionCast
-            # backward, but detached non-RAF leaves can arrive in param_dtype.
+            # TODO: Thread the bucket's reduce_dtype into the non-reshard-after-forward
+            # path before launching reduce-scatter. Reshard-after-forward uses
+            # _MixedPrecisionCast backward, but detached non-reshard-after-forward
+            # leaves can arrive in param_dtype.
             result = begin_reduce_scatter_grad(
                 grads,
                 infos,
@@ -454,7 +455,7 @@ class BucketRuntime:
 
 
 class _BucketAllGather(torch.autograd.Function):
-    """Autograd boundary for RAF bucket all-gather.
+    """Autograd boundary for reshard-after-forward bucket all-gather.
 
     Forward consumes a raw all-gather result, either prefetched by the previous
     bucket or launched on demand. Backward packs full-parameter gradients and
@@ -519,7 +520,7 @@ def _storage_requires_batched_unshard(storage: DStorage) -> bool:
 
 
 def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
-    """Return whether RAF should use the custom bucket autograd path."""
+    """Return whether reshard-after-forward should use the custom bucket autograd path."""
     if not storage._reshard_after_forward:
         return False
     if not storage._param_infos:
@@ -530,7 +531,7 @@ def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
 def _get_bucket_autograd_unshard_unsupported_reason(
     storage: DStorage,
 ) -> str | None:
-    """Return why a RAF bucket cannot use the custom autograd path."""
+    """Return why a reshard-after-forward bucket cannot use the custom autograd path."""
     infos = list(storage._param_infos.values())
     if not infos:
         return None
@@ -547,7 +548,7 @@ def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
         "FlexShard eager reshard_after_forward requires placement support "
         f"for the custom autograd bucket path{bucket_msg}; "
         f"{reason}. Use reshard_after_forward=False for this bucket or add "
-        "support for this placement before using eager RAF."
+        "support for this placement before using eager reshard-after-forward."
     )
 
 
