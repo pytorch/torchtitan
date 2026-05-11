@@ -23,6 +23,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -120,6 +121,7 @@ class VLLMModelWrapper(Module):
         model_spec: ModelSpec,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig,
+        checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
@@ -235,8 +237,14 @@ class VLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Initial load model weights from HuggingFace checkpoint path.
-        self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
+        # Load initial weights from HuggingFace checkpoint if configured.
+        # In the RL loop, weights come from TorchStore instead, so loading
+        # is skipped (checkpoint_config.enable=False or initial_load_in_hf=False).
+        if checkpoint_config.enable and checkpoint_config.initial_load_in_hf:
+            checkpoint_path = (
+                checkpoint_config.initial_load_path or vllm_config.model_config.model
+            )
+            self._initial_load_weights(checkpoint_path=checkpoint_path)
 
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int

@@ -11,6 +11,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl --config <function_name>``.
 """
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -51,6 +52,10 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
             ),
             loss=GRPOLoss.Config(),
         ),
@@ -98,6 +103,10 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+            ),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -144,6 +153,10 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
                 disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
             ),
             loss=GRPOLoss.Config(),
         ),
@@ -241,6 +254,10 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
             ),
             debug=batch_invariant_config,
             loss=GRPOLoss.Config(),
