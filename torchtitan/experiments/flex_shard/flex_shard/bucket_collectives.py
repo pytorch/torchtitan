@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -126,17 +126,15 @@ class AsyncAllGatherResult(AllGatherUnshardHandle):
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
-        with _record_function_if_eager(
-            "FlexShard::all_gather_copy_out", self.debug_fqn
-        ):
-            results = _assemble_full_params(
-                self.gathered,
-                self.infos,
-                self.mesh,
-                self.per_rank_param_offsets,
-            )
-            self.release_buffers()
-            return results
+        results = _finish_all_gather(
+            self.gathered,
+            self.infos,
+            self.mesh,
+            self.per_rank_param_offsets,
+            self.debug_fqn,
+        )
+        self.release_buffers()
+        return results
 
     def wait(self) -> None:
         if self.gathered:
@@ -207,6 +205,32 @@ def _assemble_full_params(
     return results
 
 
+def _finish_all_gather(
+    gathered: list[torch.Tensor],
+    infos: list[ParamInfo],
+    mesh: DeviceMesh,
+    per_rank_param_offsets: list[list[int]],
+    debug_fqn: str | None,
+) -> list[torch.Tensor]:
+    with _record_function_if_eager("FlexShard::all_gather_copy_out", debug_fqn):
+        return _assemble_full_params(
+            gathered,
+            infos,
+            mesh,
+            per_rank_param_offsets,
+        )
+
+
+def _run_all_gather(
+    gathered: list[torch.Tensor],
+    send_buf: torch.Tensor,
+    pg,
+    debug_fqn: str | None,
+) -> None:
+    with dist.record_comm(_with_fqn("FlexShard::all_gather", debug_fqn)):
+        dist.all_gather(gathered, send_buf, group=pg)
+
+
 def begin_all_gather_unshard(
     tensors: list[torch.Tensor],
     infos: list[ParamInfo],
@@ -244,9 +268,7 @@ def begin_all_gather_unshard(
     copy_in_done.record(device_handle.current_stream(device))
     with device_handle.stream(all_gather_stream):
         all_gather_stream.wait_event(copy_in_done)
-        label = _with_fqn("FlexShard::all_gather", debug_fqn)
-        with dist.record_comm(label):
-            dist.all_gather(gathered, send_buf, group=pg)
+        _run_all_gather(gathered, send_buf, pg, debug_fqn)
         event = device_handle.Event()
         event.record(all_gather_stream)
     return AsyncAllGatherResult(
@@ -325,6 +347,46 @@ class AsyncReduceScatterResult(ReduceScatterGradHandle):
         self.event.record(stream)
 
 
+def _run_reduce_scatter(
+    send_buf: torch.Tensor,
+    world_size: int,
+    pg,
+    debug_fqn: str | None,
+) -> torch.Tensor:
+    recv_buf = torch.empty(
+        send_buf.numel() // world_size,
+        dtype=send_buf.dtype,
+        device=send_buf.device,
+    )
+    with dist.record_comm(_with_fqn("FlexShard::reduce_scatter", debug_fqn)):
+        dist.reduce_scatter_tensor(
+            output=recv_buf,
+            input=send_buf,
+            op=dist.ReduceOp.AVG,
+            group=pg,
+        )
+    return recv_buf
+
+
+def _finish_reduce_scatter(
+    placement: Any,
+    recv_buf: torch.Tensor,
+    infos: list[ParamInfo],
+    layout: Any,
+    rank: int,
+    world_size: int,
+    debug_fqn: str | None,
+) -> list[torch.Tensor]:
+    with _record_function_if_eager("FlexShard::reduce_scatter_copy_out", debug_fqn):
+        return placement.unpack_reduced_grad(
+            recv_buf,
+            infos,
+            layout,
+            rank,
+            world_size,
+        )
+
+
 def begin_reduce_scatter_grad(
     tensors: list[torch.Tensor],
     infos: list[ParamInfo],
@@ -361,25 +423,16 @@ def begin_reduce_scatter_grad(
     recv_buf: torch.Tensor
     with device_handle.stream(reduce_scatter_stream):
         reduce_scatter_stream.wait_event(copy_in_done)
-        recv_buf = torch.empty(
-            send_buf.numel() // ws,
-            dtype=send_buf.dtype,
-            device=device,
+        recv_buf = _run_reduce_scatter(send_buf, ws, pg, debug_fqn)
+        sharded_grads = _finish_reduce_scatter(
+            placement,
+            recv_buf,
+            infos,
+            layout,
+            rank,
+            ws,
+            debug_fqn,
         )
-        label = _with_fqn("FlexShard::reduce_scatter", debug_fqn)
-        with dist.record_comm(label):
-            dist.reduce_scatter_tensor(
-                output=recv_buf,
-                input=send_buf,
-                op=dist.ReduceOp.AVG,
-                group=pg,
-            )
-        with _record_function_if_eager(
-            "FlexShard::reduce_scatter_copy_out", debug_fqn
-        ):
-            sharded_grads = placement.unpack_reduced_grad(
-                recv_buf, infos, layout, rank, ws
-            )
         event = device_handle.Event()
         event.record(reduce_scatter_stream)
     return AsyncReduceScatterResult(
