@@ -21,6 +21,7 @@ import spmd_types as spmd
 from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_state import is_spmd_active, mesh as spmd_mesh, spmd_state
 from torchtitan.protocols.sharding import (
+    LocalMapConfig,
     resolve_placements,
     ShardingConfig,
 )
@@ -29,18 +30,15 @@ if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
 
 
-# ---------------------------------------------------------------------------
-# spmd_types helpers
-# ---------------------------------------------------------------------------
-
-
 @contextmanager
 def preserve_buffer_spmd(model: nn.Module):
-    """Save and restore buffer SPMD type annotations.
+    """
+    Init time:
+    1. shard & apply spmd_types annotations on meta tensor state.
+    2. apply FSDP, which saves-restores spmd_types on parameters.
+    3. Initialize weights w/ ``to_empty()`` + ``init_weights()``, which loses annotations.
 
-    Use around ``to_empty()`` + ``init_weights()`` to restore buffer
-    annotations lost when meta tensors are replaced with real ones.
-    Params are handled by FSDP's ``_restore_spmd_types`` at compute time.
+    FSDP restores annotations for params; use this around 3. for buffer spmd_types.
     """
     saved = {}
     for fqn, buf in model.named_buffers():
@@ -64,15 +62,16 @@ def _resolve_named(named):
 
 
 def named_placement_to_spmd(named, ndim=None):
-    """Resolve NamedPlacement to {MeshAxis: spmd_type}, with optional
-    PartitionSpec normalization for ``spmd.assert_type``.
+    """
+    Resolve NamedPlacement to {MeshAxis: spmd_type},
+    with optional S(*)->V+PartitionSpec normalization for ``spmd.assert_type`` usage.
+
+    When ``ndim`` is None, returns raw types without normalization —
+    used by redistribute callers that compare per-axis types directly.
 
     When ``ndim`` is provided and multiple active axes shard the same
     tensor dim, S(dim) entries are converted to V and a PartitionSpec
     is built using canonical axis ordering.
-
-    When ``ndim`` is None, returns raw types without normalization —
-    used by redistribute callers that compare per-axis types directly.
 
     Returns ``(types, partition_spec)``.
     """
@@ -123,8 +122,9 @@ def redistribute_spmd_per_axis(
         src_t = src_types.get(axis)
         if src_t is not None and src_t != dst_t:
             pg = state.pg_for_axis(axis)
-            bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
-            x = spmd.redistribute(x, pg, src=src_t, dst=dst_t, backward_options=bwd)
+            # bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
+            # x = spmd.redistribute(x, pg, src=src_t, dst=dst_t, backward_options=bwd)
+            x = spmd.redistribute(x, pg, src=src_t, dst=dst_t)
     return x
 
 
@@ -397,20 +397,35 @@ class Module(nn.Module, Configurable):
         m = spmd_mesh()
         state = spmd_state()
 
-        # shard states if needed
+        # Validate and collect shards. Values must be raw per-axis types.
+        shard_dims: dict[int, str] = {}
         for axis_name, value in named_placement.items():
-            spmd_t = value[0] if isinstance(value, tuple) else value
-            if spmd_t is spmd.P:
+            assert isinstance(
+                value, (spmd.Shard, spmd.PerMeshAxisLocalSpmdType)
+            ), (
+                f"Expected per-axis spmd type for state {name!r} on axis "
+                f"{axis_name.value!r}, got {type(value).__name__}: {value!r}"
+            )
+            if value is spmd.P:
                 raise ValueError(
                     f"Partial is not valid for state {name!r} "
                     f"on axis {axis_name.value!r}."
                 )
+            if isinstance(value, spmd.Shard):
+                assert value.dim not in shard_dims, (
+                    f"State {name!r}: axes {shard_dims[value.dim]!r} and "
+                    f"{axis_name.value!r} both shard dim {value.dim}. "
+                    f"Multi-axis sharding of a single state dim is not yet supported."
+                )
+                shard_dims[value.dim] = axis_name.value
+
+        for axis_name, value in named_placement.items():
             if (ax := getattr(m, axis_name.value)) is None:
                 continue
-            if isinstance(spmd_t, spmd.Shard):
+            if isinstance(value, spmd.Shard):
                 pg = state.pg_for_axis(ax)
                 assert pg is not None
-                tensor = spmd.shard(tensor, pg, src=spmd.I, dst=spmd_t)
+                tensor = spmd.shard(tensor, pg, src=spmd.I, dst=value)
 
         # register state
         if is_param:
@@ -430,7 +445,7 @@ class Module(nn.Module, Configurable):
     def local_map(
         self,
         fn: Callable,
-        local_map_config: Any,
+        local_map_config: LocalMapConfig,
         mesh_or_pd: DeviceMesh | ParallelDims,
     ) -> Callable:
         """Wrap forward with local_map (DTensor) or spmd.local_map (SPMD).
@@ -448,7 +463,7 @@ class Module(nn.Module, Configurable):
             return self.local_map_dtensor(fn, local_map_config, mesh)
 
     def local_map_dtensor(
-        self, fn: Callable, lm: Any, mesh: DeviceMesh
+        self, fn: Callable, lm: LocalMapConfig, mesh: DeviceMesh
     ) -> Callable:
         assert mesh.mesh_dim_names is not None
         mesh_axis_names = mesh.mesh_dim_names
@@ -469,16 +484,19 @@ class Module(nn.Module, Configurable):
             device_mesh=mesh,
         )
 
-    def local_map_spmd(self, fn: Callable, lm: Any) -> Callable:
+    def local_map_spmd(self, fn: Callable, lm: LocalMapConfig) -> Callable:
         assert lm.in_placements is not None, (
             "SPMD local_map requires explicit in_placements"
         )
+        in_ndims = lm.in_ndims or (None,) * len(lm.in_placements)
         resolved_in = tuple(
-            named_placement_to_spmd(p) for p in lm.in_placements
+            None if p is None else named_placement_to_spmd(p, ndim=nd)
+            for p, nd in zip(lm.in_placements, in_ndims)
         )
-        resolved_out = tuple(
-            named_placement_to_spmd(p) for p in lm.out_placements
-        )
+        assert len(lm.out_placements) == 1, "spmd.local_map accepts 1 output"
+        outp = lm.out_placements[0]
+        out_nd = lm.out_ndims[0] if lm.out_ndims else None
+        resolved_out = None if outp is None else named_placement_to_spmd(outp, ndim=out_nd)
 
         @spmd.local_map(in_types=resolved_in, out_types=resolved_out)
         def body(*args, **kwargs):

@@ -308,14 +308,6 @@ class ChunkedCELoss(BaseLoss):
 
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
 
-        # spmd_types: chunk_loss is P on DP axes. Reinterpret total_loss
-        # from R to P so P + P = P accumulates without per-chunk all-reduces.
-        if is_spmd_active():
-            for axis in spmd_state().dp_axes:
-                total_loss = spmd.reinterpret(
-                    total_loss, axis, src=spmd.R, dst=spmd.P, expert_mode=True
-                )
-
         # Disable FSDP reshard on lm_head to keep weight unsharded across
         # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
         # grad sync into a single reduce-scatter at the last chunk by
@@ -337,6 +329,16 @@ class ChunkedCELoss(BaseLoss):
             chunk_loss = self.fn(logits, label_chunk)
             if global_valid_tokens is not None:
                 chunk_loss = chunk_loss / global_valid_tokens
+
+            if i == 0 and is_spmd_active() and spmd.is_type_checking():
+                # spmd_types: chunk_loss is P on DP axes (or V if local-typechecking).
+                # Reinterpret total_loss from R so addition stays in P/V.
+                for axis in spmd_state().dp_axes:
+                    dst_type = spmd.get_local_type(chunk_loss)[axis]
+                    total_loss = spmd.reinterpret(
+                        total_loss, axis, src=spmd.R, dst=dst_type, expert_mode=True
+                    )
+
             total_loss = total_loss + chunk_loss.detach()
 
             if requires_grad:
