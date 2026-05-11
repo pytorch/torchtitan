@@ -462,7 +462,7 @@ class VLLMModelWrapper(Module):
                 torchtitan_state_dict[name] = DTensor.from_local(
                     tensor.to(device_mesh.device_type),
                     device_mesh=device_mesh,
-                    placements=[Replicate()],
+                    placements=[Replicate()] * device_mesh.ndim,
                 )
 
         return self.load_weights_from_state_dict(torchtitan_state_dict)
