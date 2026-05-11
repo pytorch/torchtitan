@@ -51,9 +51,9 @@ def extract_response_logprobs(
     return result
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LogprobVerificationOutput:
-    """Holds the outputs of `verify_logprob_identity`."""
+    """Local generator/trainer logprob comparison metrics."""
 
     logprob_diff_sum: torch.Tensor
     logprob_diff_max: torch.Tensor
@@ -61,63 +61,46 @@ class LogprobVerificationOutput:
 
 
 def verify_logprob_identity(
-    vllm_token_log_probs: list[list[float]],
-    batch_token_log_probs: list[torch.Tensor],
+    generator_token_logprobs: list[list[float]],
+    trainer_token_logprobs: list[torch.Tensor],
     *,
     device: torch.device,
 ) -> LogprobVerificationOutput:
-    """Generator/trainer logprob drift metrics.
+    """Compare generator and trainer response-token logprobs.
 
-    Args:
-        vllm_token_log_probs: Per-token log probs from vLLM (generator)
-        batch_token_log_probs: Per-token log probs computed by the trainer model
-
-    Returns:
-        A `LogprobVerificationOutput` instance
+    Raises:
+        ValueError: If sample counts or per-sample token counts differ.
     """
-    # sanity check
-    if len(vllm_token_log_probs) != len(batch_token_log_probs):
+    if len(generator_token_logprobs) != len(trainer_token_logprobs):
         raise ValueError(
-            f"verify_logprob_identity: sample count mismatch - "
-            f"vllm={len(vllm_token_log_probs)}, "
-            f"trainer={len(batch_token_log_probs)}"
+            "verify_logprob_identity sample count mismatch: "
+            f"generator={len(generator_token_logprobs)}, "
+            f"trainer={len(trainer_token_logprobs)}"
         )
 
-    if not vllm_token_log_probs:
-        zero = torch.zeros((), dtype=torch.float32, device=device)
-        return LogprobVerificationOutput(
-            logprob_diff_sum=zero,
-            logprob_diff_max=zero,
-            num_tokens_different=zero,
+    generator_tensors: list[torch.Tensor] = []
+    trainer_tensors: list[torch.Tensor] = []
+    for sample_idx, (generator_values, trainer_values) in enumerate(
+        zip(generator_token_logprobs, trainer_token_logprobs, strict=True)
+    ):
+        if len(generator_values) != trainer_values.numel():
+            raise ValueError(
+                "verify_logprob_identity token count mismatch for sample "
+                f"{sample_idx}: generator={len(generator_values)}, "
+                f"trainer={trainer_values.numel()}"
+            )
+        generator_tensors.append(
+            torch.tensor(generator_values, dtype=torch.float32, device=device)
+        )
+        trainer_tensors.append(
+            trainer_values.detach().to(device=device, dtype=torch.float32)
         )
 
-    # Make everything a tensor
-    vllm_flat = torch.tensor(
-        [lp for sample in vllm_token_log_probs for lp in sample],
-        dtype=torch.float32,
-    )
-    titan_flat = torch.cat([t.detach().cpu().float() for t in batch_token_log_probs])
-
-    # sanity check
-    if vllm_flat.numel() != titan_flat.numel():
-        raise ValueError(
-            f"verify_logprob_identity: total token count mismatch - "
-            f"vllm={vllm_flat.numel()}, trainer={titan_flat.numel()}"
-        )
-    if vllm_flat.numel() == 0:
-        zero = torch.zeros((), dtype=torch.float32, device=device)
-        return LogprobVerificationOutput(
-            logprob_diff_sum=zero,
-            logprob_diff_max=zero,
-            num_tokens_different=zero,
-        )
-
-    # Compute the logprob difference
-    diff = titan_flat - vllm_flat
+    generator_flat = torch.cat(generator_tensors)
+    trainer_flat = torch.cat(trainer_tensors)
+    diff = trainer_flat - generator_flat
     return LogprobVerificationOutput(
-        logprob_diff_sum=diff.sum().to(device),
-        logprob_diff_max=diff.abs().max().to(device),
-        num_tokens_different=(vllm_flat != titan_flat)
-        .sum()
-        .to(device=device, dtype=torch.float32),
+        logprob_diff_sum=diff.sum(),
+        logprob_diff_max=diff.abs().max(),
+        num_tokens_different=(generator_flat != trainer_flat).sum().to(torch.float32),
     )

@@ -10,7 +10,8 @@ Public surface - import as::
 
     from torchtitan.experiments.rl.observability import metrics as m
 
-and use ``m.Mean``, ``m.MetricLogger``, ``m.aggregate_metrics``, etc.
+and use m.Mean, m.MetricLogger, etc. Aggregation is on the logger:
+m.MetricLogger.aggregate_metrics(records).
 """
 
 from .metric_logger import (
@@ -19,17 +20,7 @@ from .metric_logger import (
     MetricLogger,
     WandbMetricLogger,
 )
-from .metric_types import (
-    aggregate_metrics,
-    Max,
-    Mean,
-    Metric,
-    MetricReduction,
-    Min,
-    NoReduce,
-    Stats,
-    Std,
-)
+from .types import Max, Mean, Metric, MetricValue, Min, NoReduce, Std, Sum, SummaryStats
 
 
 # Convenience alias matching torchtitan's pretraining `MetricsProcessor.Config`
@@ -43,13 +34,13 @@ __all__ = [
     "Metric",
     "MetricBackend",
     "MetricLogger",
-    "MetricReduction",
     "MetricsConfig",
+    "MetricValue",
     "Min",
     "NoReduce",
-    "Stats",
     "Std",
+    "Sum",
+    "SummaryStats",
     "WandbMetricLogger",
-    "aggregate_metrics",
     "log_to_console",
 ]

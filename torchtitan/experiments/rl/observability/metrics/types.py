@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Typed metric reductions and the aggregator. Check README.md for details."""
+"""Typed metric value classes and the keyed Metric envelope. See README.md."""
 
 from __future__ import annotations
 
 import math
-from collections import defaultdict
-from collections.abc import Iterable, Sequence
+
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
 
@@ -19,34 +19,36 @@ __all__ = [
     "Max",
     "Mean",
     "Metric",
-    "MetricReduction",
+    "MetricValue",
     "Min",
     "NoReduce",
-    "Stats",
     "Std",
-    "aggregate_metrics",
+    "Sum",
+    "SummaryStats",
 ]
 
 
-# ---------------------------------------------------------------------------
-# Reductions
-# ---------------------------------------------------------------------------
+class MetricValue(Protocol):
+    """Value object that defines how a Metric is reduced.
 
+    Subclasses provide output_suffix, from_list, and reduce.
+    MetricLogger.aggregate_metrics groups records by (key, type) and
+    calls reduce on each group; the resulting output_suffix becomes
+    "<key>/<output_suffix>" in the flat dict sent to backends.
 
-class MetricReduction(Protocol):
-    """Protocol every reduction class implements.
-
-    - `from_list(values)` builds a reduction from many raw observations.
-    - `reduce(metrics)` combines same-typed records and returns
-      `{output_suffix: float}`.
-    - `output_suffix` is the per-key sub-name the aggregator joins to the metric
-      name. E.g. a metric "reward" can add a "mean" suffix to their key output
-      if they so choose.
-
-    Provides a default `__repr__` so subclasses inherit pretty printing for free.
+    Example:
+        records = [
+            Metric("reward", Mean.from_list([1.0, 3.0])),  # total=4, count=2
+            Metric("reward", Mean(6.0, count=2)),          # total=6, count=2
+            Metric("reward", Max.from_list([1.0, 4.0])),
+        ]
+        # MetricLogger.aggregate_metrics(records) emits:
+        # {"reward/mean": 2.5, "reward/max": 4.0}
     """
 
     output_suffix: ClassVar[str]
+    """Suffix appended to the metric key when emitted (e.g. 'mean').
+    Empty string emits the key unchanged (used by NoReduce)."""
 
     def __repr__(self) -> str:
         kvs = ", ".join(f"{k}={v!r}" for k, v in self.__dict__.items())
@@ -54,33 +56,55 @@ class MetricReduction(Protocol):
 
     @classmethod
     def from_list(cls, values: Sequence[Any]):
+        """Build one MetricValue from a list of raw observations.
+
+        Args:
+            values: Numeric observations to fold into running stats.
+
+        Returns:
+            A new MetricValue carrying the running totals.
+        """
         ...
 
     @classmethod
     def reduce(cls, metrics: Sequence[object]) -> dict[str, float]:
+        """Reduce same-typed MetricValues into output sub-keys.
+
+        Args:
+            metrics: Records sharing the same key + same MetricValue subclass.
+
+        Returns:
+            {output_suffix: float}. Most subclasses return one entry under
+            cls.output_suffix; SummaryStats returns multiple sub-keys.
+        """
         ...
 
 
 @dataclass
 class Metric:
-    """A single metric record.
+    """A keyed metric record: a name plus a MetricValue payload.
 
     Args:
-        key: Canonical metric name. ``/``-separated for nesting.
-        reduction: Typed reduction payload.
+        key: Hierarchical metric name (e.g. "loss/total",
+            "rollout/response_length"). Records that share both key
+            and type(value) are combined; same key + different value
+            types stay separate (e.g. Mean vs Max).
+        value: How the record reduces. See MetricValue subclasses
+            (Mean, Max, Min, Sum, Std, SummaryStats,
+            NoReduce).
+
+    Example:
+        Metric("loss/total", NoReduce(0.42))
+        Metric("rollout/response_length", Max.from_list([12, 18, 9]))
     """
 
     key: str
-    reduction: MetricReduction
+    value: MetricValue
 
 
-class Mean(MetricReduction):
-    """Weighted mean.
-
-    ``Mean(value)`` records one observation. ``Mean(value, count=N)``
-    records a pre-aggregated ``(sum, count)`` pair. ``Mean.from_list(values)``
-    records many. Combining records is ``sum(value) / sum(count)``.
-    """
+class Mean(MetricValue):
+    """Weighted mean. Mean(value) records one observation; Mean(value,
+    count=N) records a pre-aggregated (sum, count) pair."""
 
     output_suffix: ClassVar[str] = "mean"
 
@@ -102,7 +126,7 @@ class Mean(MetricReduction):
         return {cls.output_suffix: total_value / total_count}
 
 
-class Max(MetricReduction):
+class Max(MetricValue):
     """Maximum of observed values. Empty observations return NaN."""
 
     output_suffix: ClassVar[str] = "max"
@@ -119,12 +143,15 @@ class Max(MetricReduction):
 
     @classmethod
     def reduce(cls, metrics: Sequence[Max]) -> dict[str, float]:
-        if not metrics:
+        # Filter NaN records (e.g. an actor that observed nothing) so they
+        # don't erase real maxes via Python's NaN comparison semantics.
+        finite = [record.value for record in metrics if not math.isnan(record.value)]
+        if not finite:
             return {cls.output_suffix: float("nan")}
-        return {cls.output_suffix: max(record.value for record in metrics)}
+        return {cls.output_suffix: max(finite)}
 
 
-class Min(MetricReduction):
+class Min(MetricValue):
     """Minimum of observed values. Empty observations return NaN."""
 
     output_suffix: ClassVar[str] = "min"
@@ -141,87 +168,122 @@ class Min(MetricReduction):
 
     @classmethod
     def reduce(cls, metrics: Sequence[Min]) -> dict[str, float]:
-        if not metrics:
+        finite = [record.value for record in metrics if not math.isnan(record.value)]
+        if not finite:
             return {cls.output_suffix: float("nan")}
-        return {cls.output_suffix: min(record.value for record in metrics)}
+        return {cls.output_suffix: min(finite)}
 
 
-class Std(MetricReduction):
-    """Population standard deviation (``ddof=0``).
+class Sum(MetricValue):
+    """Sum of observed values."""
 
-    Public constructors:
-    - ``Std(value)`` - one observation.
-    - ``Std.from_list(values)`` - many observations.
+    output_suffix: ClassVar[str] = "sum"
 
-    Combining records equals (within FP tolerance) the std of the
-    concatenation.
+    def __init__(self, value):
+        self.value = float(value)
+
+    @classmethod
+    def from_list(cls, values: Sequence[Any]) -> Sum:
+        return cls(sum(float(value) for value in values))
+
+    @classmethod
+    def reduce(cls, metrics: Sequence[Sum]) -> dict[str, float]:
+        return {cls.output_suffix: sum(record.value for record in metrics)}
+
+
+class Std(MetricValue):
+    """Population standard deviation (ddof=0).
+
+    Args:
+        value: A single observation, or the running total when paired
+            with count and sum_squares.
+        count: Pre-aggregated observation count. Required iff
+            sum_squares is given.
+        sum_squares: Pre-aggregated sum of v*v. Required iff count
+            is given.
+
+    Example:
+        Std(5.0)                                          # one obs
+        Std(10.0, count=4, sum_squares=30.0)              # pre-aggregated
+        Std.from_list([1.0, 2.0, 3.0, 4.0])               # many obs
     """
 
     output_suffix: ClassVar[str] = "std"
 
-    def __init__(self, value):
+    def __init__(
+        self,
+        value,
+        *,
+        count: float | None = None,
+        sum_squares: float | None = None,
+    ):
+        if (count is None) != (sum_squares is None):
+            raise ValueError(
+                "Std pre-aggregated input requires both count and sum_squares"
+            )
         coerced_value = float(value)
-        self.value = coerced_value
-        self.count = 1.0
-        self.sum_squares = coerced_value * coerced_value
+        if count is None:
+            self.total = coerced_value
+            self.count = 1.0
+            self.sum_squares = coerced_value * coerced_value
+        else:
+            self.total = coerced_value
+            self.count = float(count)
+            self.sum_squares = float(sum_squares)
 
     @classmethod
     def from_list(cls, values: Sequence[Any]) -> Std:
         coerced = [float(v) for v in values]
-        instance = cls.__new__(cls)
-        instance.value = sum(coerced)
-        instance.count = len(coerced)
-        instance.sum_squares = sum(observation * observation for observation in coerced)
-        return instance
+        return cls(
+            sum(coerced),
+            count=len(coerced),
+            sum_squares=sum(v * v for v in coerced),
+        )
 
     @classmethod
     def reduce(cls, metrics: Sequence[Std]) -> dict[str, float]:
         total_count = sum(record.count for record in metrics)
         if total_count == 0:
             return {cls.output_suffix: float("nan")}
-        total_value = sum(record.value for record in metrics)
+        total = sum(record.total for record in metrics)
         total_sum_squares = sum(record.sum_squares for record in metrics)
-        mean_value = total_value / total_count
+        mean_value = total / total_count
         # Clamp tiny negatives that arise from floating-point rounding.
         variance = max(0.0, total_sum_squares / total_count - mean_value * mean_value)
         return {cls.output_suffix: math.sqrt(variance)}
 
 
-class Stats(MetricReduction):
-    """Population summary stats.
+class SummaryStats(MetricValue):
+    """Population summary statistics: max, mean, min, std, and sum.
 
-    Emits 5 sub-keys with a leading-underscore prefix so they never
-    collide with ``Mean``/``Max``/``Min``/``Std`` under the same metric
-    key: ``_max``, ``_mean``, ``_min``, ``_std``, ``_sum``. Output keys
-    read like ``reward/_mean``, ``reward/_max``, ...
-
-    Public constructors:
-    - ``Stats(value)`` - one observation.
-    - ``Stats.from_list(values)`` - many observations.
+    Emits five sub-keys (_max, _mean, _min, _std, _sum)
+    with a leading-underscore prefix so the outputs never collide with
+    standalone Mean/Max/Min/Std/Sum records under the
+    same key.
     """
 
     output_suffix: ClassVar[str] = ""
 
     def __init__(self, value):
         coerced_value = float(value)
-        self.value = coerced_value
+        self.total = coerced_value
         self.count = 1.0
         self.sum_squares = coerced_value * coerced_value
         self.min_value = coerced_value
         self.max_value = coerced_value
 
     @classmethod
-    def from_list(cls, values: Sequence[Any]) -> Stats:
+    def from_list(cls, values: Sequence[Any]) -> SummaryStats:
         coerced = [float(v) for v in values]
         instance = cls.__new__(cls)
         if not coerced:
-            instance.value = 0.0
+            instance.total = 0.0
             instance.count = 0.0
             instance.sum_squares = 0.0
             instance.min_value = float("inf")
             instance.max_value = float("-inf")
         else:
-            instance.value = sum(coerced)
+            instance.total = sum(coerced)
             instance.count = len(coerced)
             instance.sum_squares = sum(
                 observation * observation for observation in coerced
@@ -231,9 +293,9 @@ class Stats(MetricReduction):
         return instance
 
     @classmethod
-    def reduce(cls, metrics: Sequence[Stats]) -> dict[str, float]:
+    def reduce(cls, metrics: Sequence[SummaryStats]) -> dict[str, float]:
         total_count = 0.0
-        total_value = 0.0
+        total = 0.0
         total_sum_squares = 0.0
         min_value = float("inf")
         max_value = float("-inf")
@@ -241,7 +303,7 @@ class Stats(MetricReduction):
             if record.count == 0:
                 continue
             total_count += record.count
-            total_value += record.value
+            total += record.total
             total_sum_squares += record.sum_squares
             min_value = min(record.min_value, min_value)
             max_value = max(record.max_value, max_value)
@@ -255,24 +317,19 @@ class Stats(MetricReduction):
                 "_sum": 0.0,
             }
 
-        mean_value = total_value / total_count
+        mean_value = total / total_count
         variance = max(0.0, total_sum_squares / total_count - mean_value * mean_value)
         return {
             "_max": max_value,
             "_mean": mean_value,
             "_min": min_value,
             "_std": math.sqrt(variance),
-            "_sum": total_value,
+            "_sum": total,
         }
 
 
-class NoReduce(MetricReduction):
-    """Already-reduced value; logged unchanged.
-
-    Use to wrap values reduced upstream of this module (e.g. scalars
-    returned by an actor that already ran ``dist.all_reduce``). Empty
-    suffix so ``Metric("loss", NoReduce(0.5))`` logs as ``loss``.
-    """
+class NoReduce(MetricValue):
+    """Already-reduced value; logged unchanged."""
 
     output_suffix: ClassVar[str] = ""
 
@@ -294,38 +351,3 @@ class NoReduce(MetricReduction):
                 f"NoReduce expects exactly one entry per key; got {len(metrics)}."
             )
         return {cls.output_suffix: metrics[0].value}
-
-
-def aggregate_metrics(metrics: Iterable[Metric]) -> dict[str, float]:
-    """Group ``Metric`` records by ``(key, reduction type)`` and reduce.
-
-    Each reduction's ``reduce`` returns ``{output_suffix: value}``; the
-    aggregator joins ``f"{key}/{output_suffix}" if output_suffix else key``.
-    NaN entries are filtered out so empty inputs simply do not appear in
-    the output.
-
-    Raises:
-        ValueError: If two reductions write the same output key.
-    """
-    # Group by {(key, reduction type): [reductions]}.
-    groups: dict[tuple[str, type], list[MetricReduction]] = defaultdict(list)
-    for record in metrics:
-        groups[(record.key, type(record.reduction))].append(record.reduction)
-
-    output: dict[str, float] = {}
-    for (key, reduction_cls), reductions in groups.items():
-        # Reduce returns {output_suffix: value}, e.g. {"max": 1.67}.
-        # Multi-output reductions emit several entries (e.g. Stats).
-        reduced_outputs = reduction_cls.reduce(reductions)
-        for output_suffix, value in reduced_outputs.items():
-            # NaN entries are filtered out.
-            if isinstance(value, float) and math.isnan(value):
-                continue
-            output_key = f"{key}/{output_suffix}" if output_suffix else key
-            if output_key in output:
-                raise ValueError(
-                    f"Duplicate aggregated metric key {output_key!r}. "
-                    "Two reductions expanded to the same output name."
-                )
-            output[output_key] = value
-    return output

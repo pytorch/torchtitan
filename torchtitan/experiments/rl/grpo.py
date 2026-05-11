@@ -37,16 +37,12 @@ import torch
 import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
-
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.loss.types import (
-    LossOutput,
-    sequence_scalar_token_weighted_sum,
-)
+from torchtitan.experiments.rl.loss.types import LossOutput
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import (
     Completion,
@@ -58,6 +54,33 @@ from torchtitan.experiments.rl.types import (
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+
+def masked_mean(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    loss_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Compute masked mean: sum(values * mask) / divisor.
+
+    Can be specially useful in distributed settings, where loss_scale is the global
+    number of tokens / grad_avg_group_size. This ensures that normalization
+    takes into account all tokens in the batch, not just the local ones.
+
+    Args:
+        values (torch.Tensor): Per-token values (B, S).
+        mask (torch.Tensor): Valid token mask (B, S).
+        loss_scale (torch.Tensor | None): If provided, use as divisor instead of mask.sum().
+
+    Returns:
+        torch.Tensor: Scalar mean.
+    """
+    masked_sum = (values * mask).sum()
+    if loss_scale is not None:
+        divisor = loss_scale.clamp(min=1.0)
+    else:
+        divisor = mask.sum().clamp(min=1.0)
+    return masked_sum / divisor
 
 
 class GRPOLoss(Configurable):
@@ -79,40 +102,46 @@ class GRPOLoss(Configurable):
         self,
         policy_logprobs: list[torch.Tensor],
         advantages: torch.Tensor,
+        num_global_valid_tokens: torch.Tensor,
     ) -> LossOutput:
         response_lens = torch.tensor(
-            [policy_lps.numel() for policy_lps in policy_logprobs],
+            [sample_logprobs.numel() for sample_logprobs in policy_logprobs],
             device=advantages.device,
             dtype=advantages.dtype,
         )
 
-        per_sample_mean_lps = torch.stack(
-            [policy_lps.mean() for policy_lps in policy_logprobs]
+        per_sample_mean_logprobs = torch.stack(
+            [sample_logprobs.mean() for sample_logprobs in policy_logprobs]
         )
-        ratio = torch.exp(per_sample_mean_lps)
+        ratio = torch.exp(per_sample_mean_logprobs)
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
+        # pg = policy gradient.
         sample_pg_losses = -torch.min(ratio * advantages, clipped_ratio * advantages)
-        pg_loss = sample_pg_losses.mean()
+
+        # Each rank publishes its share of the global token-weighted mean;
+        # the reducer SUM-reduces shares to reconstruct the global value.
+        token_weighted_pg_sum = _token_weighted_sum(
+            sample_pg_losses, num_tokens_by_sample=response_lens
+        )
+        pg_loss = token_weighted_pg_sum / num_global_valid_tokens
 
         with torch.no_grad():
             clipped_frac = (torch.abs(ratio - clipped_ratio) > 1e-6).to(ratio.dtype)
-            token_mean_metric_sums = {
-                "loss/total": sequence_scalar_token_weighted_sum(
-                    sample_pg_losses, response_lens
-                ),
-                "loss/ratio/mean": sequence_scalar_token_weighted_sum(
-                    ratio, response_lens
-                ),
-                "loss/ratio/clipped_frac": sequence_scalar_token_weighted_sum(
-                    clipped_frac, response_lens
-                ),
+            metrics = {
+                "loss/total": pg_loss.detach(),
+                "loss/ratio/mean": _token_weighted_sum(
+                    ratio, num_tokens_by_sample=response_lens
+                )
+                / num_global_valid_tokens,
+                "loss/ratio/clipped_frac": _token_weighted_sum(
+                    clipped_frac, num_tokens_by_sample=response_lens
+                )
+                / num_global_valid_tokens,
             }
-            num_local_valid_tokens = response_lens.sum().detach()
 
         return LossOutput(
             loss=pg_loss,
-            token_mean_metric_sums=token_mean_metric_sums,
-            num_local_valid_tokens=num_local_valid_tokens,
+            metrics=metrics,
         )
 
 
@@ -121,8 +150,8 @@ class Provisioner:
 
     In non-colocated mode, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
-    call to ``allocate(n)`` reserves the next *n* GPUs and returns a
-    bootstrap callable that sets ``CUDA_VISIBLE_DEVICES`` before CUDA
+    call to `allocate(n)` reserves the next *n* GPUs and returns a
+    bootstrap callable that sets `CUDA_VISIBLE_DEVICES` before CUDA
     initializes in the spawned process, ensuring each mesh only sees its
     own devices.
     """
@@ -164,30 +193,38 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 
 
-# Default console keys per context. Override with
-# `--metrics.train-console-allow-list=.*` or
-# `--metrics.validation-console-allow-list=.*` to print all console keys.
-_RL_TRAIN_HEADLINE_METRIC_PATTERNS = [
-    r"^loss/total$",
-    r"^loss/ratio/clipped_frac$",
-    r"^reward/_mean$",
-    r"^reward/_max$",
-    r"^reward/zero_std_frac$",
-    r"^rollout/response_length/max$",
-    r"^train/grad_norm/mean$",
-    r"^train/lr$",
-    r"^perf/tokens_per_second$",
-    r"^timing/step$",
-]
-_RL_VALIDATION_HEADLINE_METRIC_PATTERNS = [
-    r"^validation/reward/_mean$",
-    r"^validation/reward/_max$",
-    r"^validation/response_length/mean$",
-]
+def _default_metrics_config() -> m.MetricsConfig:
+    """Build the default MetricsConfig for RL training.
+
+    Sets the train/validation console allow-lists to a curated, headline
+    subset of the metrics RL emits. Backend toggles (W&B, TensorBoard)
+    keep their dataclass defaults (off); the user enables them explicitly.
+    """
+    return m.MetricsConfig(
+        # Default metric keys printed to console; W&B receives all metrics.
+        # Patterns are passed to re.search; bare strings act as substrings.
+        console_log_keys_train=[
+            "loss/total",
+            "loss/ratio/clipped_frac",
+            "reward/_mean",
+            "reward/_max",
+            "reward/zero_std_frac",
+            "rollout/response_length/max",
+            "train/grad_norm/mean",
+            "train/lr",
+            "perf/tokens_per_second",
+            "timing/step",
+        ],
+        console_log_keys_validation=[
+            "validation/reward/_mean",
+            "validation/reward/_max",
+            "validation/response_length/mean",
+        ],
+    )
 
 
 def _population_std(values: list[float]) -> float:
-    """Population standard deviation (``ddof=0``); empty input returns NaN."""
+    """Population standard deviation; empty input returns NaN."""
     if not values:
         return float("nan")
     mean = sum(values) / len(values)
@@ -199,7 +236,7 @@ def _build_reward_metrics(
     prefix: str,
     reward_dicts: list[dict[str, float]],
 ) -> list[m.Metric]:
-    """One ``Mean`` metric per observed reward component.
+    """One `Mean` metric per observed reward component.
 
     Components missing from a step are not zero-filled - the Mean is over
     the steps where the component appears.
@@ -237,8 +274,8 @@ class RLTrainer(Configurable):
         num_prompts_per_step: int = 5
         """Number of distinct prompts (= GRPO groups) drawn per training step.
 
-        The total episodes per step is ``num_prompts_per_step * group_size``,
-        where ``group_size`` is ``generator.sampling.n`` (completions per prompt).
+        The total episodes per step is `num_prompts_per_step` * `group_size`,
+        where `group_size` is `generator.sampling.n` (completions per prompt).
         """
 
         num_validation_samples: int = 20
@@ -264,14 +301,7 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
-        metrics: m.MetricsConfig = field(
-            default_factory=lambda: m.MetricsConfig(
-                train_console_allow_list=list(_RL_TRAIN_HEADLINE_METRIC_PATTERNS),
-                validation_console_allow_list=list(
-                    _RL_VALIDATION_HEADLINE_METRIC_PATTERNS
-                ),
-            )
-        )
+        metrics: m.MetricsConfig = field(default_factory=_default_metrics_config)
 
         def __post_init__(self):
             if self.trainer.debug.batch_invariant:
@@ -521,8 +551,7 @@ class RLTrainer(Configurable):
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
 
-        self.metric_logger = m.MetricLogger.build(
-            config.metrics,
+        self.metric_logger = config.metrics.build(
             log_dir=config.dump_folder,
             config_dict=config.to_dict(),
         )
@@ -598,23 +627,38 @@ class RLTrainer(Configurable):
                     )
                 )
 
-        num_groups = len(group_stds)
+        num_groups = len(groups)
         zero_std_frac = (
             sum(1 for s in group_stds if s == 0.0) / num_groups if num_groups else 0.0
         )
         episode_metrics: list[m.Metric] = [
             m.Metric(
                 "reward",
-                m.Stats.from_list([ep.reward for ep in episodes]),
+                m.SummaryStats.from_list([ep.reward for ep in episodes]),
             ),
             m.Metric(
                 "advantage",
-                m.Stats.from_list([ep.advantage for ep in episodes]),
+                m.SummaryStats.from_list([ep.advantage for ep in episodes]),
             ),
             m.Metric("reward/group_std", m.Mean.from_list(group_stds)),
             m.Metric("reward/group_std", m.Max.from_list(group_stds)),
             m.Metric("reward/zero_std_frac", m.NoReduce(zero_std_frac)),
         ]
+
+        # Per-rollout policy versions. We log max/min in case episodes come
+        # from multiple rollout versions.
+        policy_versions = [episode.policy_version for episode in episodes]
+        if policy_versions:
+            episode_metrics.extend(
+                [
+                    m.Metric(
+                        "rollout/policy_version", m.Min.from_list(policy_versions)
+                    ),
+                    m.Metric(
+                        "rollout/policy_version", m.Max.from_list(policy_versions)
+                    ),
+                ]
+            )
         return episodes, episode_metrics
 
     async def validate(self) -> list[m.Metric]:
@@ -645,7 +689,10 @@ class RLTrainer(Configurable):
             _log_samples(completions)
 
         validation_metrics: list[m.Metric] = [
-            m.Metric("validation/reward", m.Stats.from_list([s.reward for s in steps])),
+            m.Metric(
+                "validation/reward",
+                m.SummaryStats.from_list([s.reward for s in steps]),
+            ),
             m.Metric(
                 "validation/response_length",
                 m.Mean.from_list([len(c.token_ids) for c in completions]),
@@ -663,12 +710,13 @@ class RLTrainer(Configurable):
         num_groups = self.config.num_prompts_per_step
         logger.info(f"Pre-training validation; then {num_steps} steps of RL training")
 
-        pre_metrics = await self.validate()
+        # collect validation metrics before training
+        # so we can compare before/after
+        validation_metrics = await self.validate()
         self.metric_logger.log(
             step=0,
-            metrics=pre_metrics,
-            console_allow_list=self.config.metrics.validation_console_allow_list,
-            console_prefix="validate ",
+            metrics=validation_metrics,
+            is_validation=True,
         )
 
         for step in range(num_steps):
@@ -694,16 +742,14 @@ class RLTrainer(Configurable):
             fwd_metrics = self._get_rank_0_value(
                 self.trainer.forward_backward.call(batches).get()
             )
-            optim_metrics = self._get_rank_0_value(self.trainer.optim_step.call().get())
+            optim_output = self._get_rank_0_value(self.trainer.optim_step.call().get())
             train_s = time.perf_counter() - train_start
 
             # --- weight sync ---
             push_start = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
             weight_sync_push_s = time.perf_counter() - push_start
-            self.generator.pull_model_state_dict.call(
-                optim_metrics["train/policy_version/mean"]
-            ).get()
+            self.generator.pull_model_state_dict.call(optim_output.policy_version).get()
             weight_sync_total_s = time.perf_counter() - push_start
 
             # --- divergence check before any logging ---
@@ -720,7 +766,7 @@ class RLTrainer(Configurable):
             # Actor metrics are already globally reduced; NoReduce passes them through.
             step_metrics += [m.Metric(k, m.NoReduce(v)) for k, v in fwd_metrics.items()]
             step_metrics += [
-                m.Metric(k, m.NoReduce(v)) for k, v in optim_metrics.items()
+                m.Metric(k, m.NoReduce(v)) for k, v in optim_output.metrics.items()
             ]
             step_metrics += rollout_metrics
             step_metrics += episode_metrics
@@ -736,18 +782,13 @@ class RLTrainer(Configurable):
                 m.Metric("perf/tokens_per_second", m.NoReduce(total_tokens / step_s))
             )
 
-            self.metric_logger.log(
-                step=step,
-                metrics=step_metrics,
-                console_allow_list=self.config.metrics.train_console_allow_list,
-            )
+            self.metric_logger.log(step=step, metrics=step_metrics, is_validation=False)
 
-        post_metrics = await self.validate()
+        validation_metrics = await self.validate()
         self.metric_logger.log(
             step=num_steps,
-            metrics=post_metrics,
-            console_allow_list=self.config.metrics.validation_console_allow_list,
-            console_prefix="validate ",
+            metrics=validation_metrics,
+            is_validation=True,
         )
 
 

@@ -8,19 +8,26 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from torchtitan.components.metrics import BaseLogger as MetricBackend, WandBLogger
+from torchtitan.components.metrics import (
+    BaseLogger as MetricBackend,
+    TensorBoardLogger,
+    WandBLogger,
+)
 from torchtitan.config import Configurable
+from torchtitan.tools.console_format import fmt_metric_value
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, NoColor
 
-from .metric_types import aggregate_metrics, Metric
+from .types import Metric, MetricValue
 
 
 __all__ = [
@@ -36,13 +43,13 @@ WandbMetricLogger = WandBLogger
 
 
 # ---------------------------------------------------------------------------
-# Console rendering (stateless utility, called inside `MetricLogger.log`).
+# Console rendering (stateless utility, called inside MetricLogger.log).
 # ---------------------------------------------------------------------------
 
 
-# Color cycle for the console output. Skip ``black`` (invisible on dark
-# terminals) and ``white`` (low-contrast on light terminals); ``red`` is
-# reserved for the ``step:`` prefix.
+# Color cycle for the console output. Skip `black` (invisible on dark
+# terminals) and `white` (low-contrast on light terminals); `red` is
+# reserved for the leading "{prefix} | Step:" rendering.
 _COLOR_CYCLE = [
     name
     for name in vars(Color)
@@ -59,10 +66,9 @@ def _filter_allow_list(
     metrics: dict[str, Any],
     allow_list: Sequence[str] | None,
 ) -> list[str]:
-    """Expand ``allow_list`` patterns against ``metrics`` keys.
+    """Expand allow_list patterns against metrics keys.
 
-    Pattern order is preserved; within a pattern, keys sort alphabetically.
-    ``None`` returns every key in alphabetical order; ``[]`` returns ``[]``.
+    None returns every key in alphabetical order; [] returns [].
     """
     if allow_list is None:
         return sorted(metrics)
@@ -79,62 +85,31 @@ def _filter_allow_list(
     return seen
 
 
-def _fmt_value(value: Any) -> str:
-    """Format a value for console display.
-
-    Examples:
-
-        _fmt_value(3.67060)   -> '3.67'
-        _fmt_value(0.00123)   -> '0.0012'
-        _fmt_value(1234.5)    -> '1234.5'
-        _fmt_value(2e-6)      -> '2.0e-06'
-        _fmt_value(True)      -> 'True'
-    """
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return str(value)
-    if value == 0:
-        return "0"
-    if isinstance(value, int) or abs(value) >= 100:
-        return f"{value:.1f}"
-
-    frac = abs(value) - int(abs(value))
-    if frac == 0:
-        return f"{value:.1f}"
-
-    # Walk decimal digits until we've seen two non-zero ones, capped at 5.
-    n_decimals, n_nonzero = 0, 0
-    temp = frac
-    while n_decimals < 5 and n_nonzero < 2:
-        n_decimals += 1
-        temp *= 10
-        if int(temp) % 10 != 0 or n_nonzero > 0:
-            n_nonzero += 1
-    if n_nonzero == 0:
-        return f"{value:.1e}"
-    return f"{value:.{max(n_decimals, 2)}f}"
-
-
 def log_to_console(
     step: int,
     metrics: dict[str, Any],
     *,
     allow_list: Sequence[str] | None,
-    prefix: str = "",
+    console_prefix: str = "Train",
 ) -> None:
-    """Print one console line for ``metrics`` filtered by ``allow_list``.
+    """Print one console metric line.
 
-    For example, ``log_to_console(1, {"reward/mean": 3.67, "my_loss/mean: 0.00123"},
-    allow_list=["loss"])`` prints ``step: 1 loss: 0.0012``.
-
-    Column order matches ``allow_list`` pattern order. ``None`` prints
-    all keys alphabetically; ``[]`` prints nothing. Missing keys are
-    skipped.
+    Example:
+        log_to_console(
+            step=5,
+            metrics={"loss/total": 0.42, "reward/_mean": 1.25},
+            allow_list=["loss"],
+            console_prefix="Train",
+        )
+        # Logs: Train | Step:  5  loss/total: 0.42
 
     Args:
         step: Step number to display.
         metrics: Reduced metrics dict.
-        allow_list: Regex patterns; matching keys print in pattern order.
-        prefix: Optional label before "step:" (e.g. "validate ").
+        allow_list: Regex search patterns. None prints all keys; [] prints
+            nothing; a list prints matching keys in pattern order.
+        console_prefix: Text rendered before the step, e.g. "Train" or
+            "Validation".
     """
     keys = _filter_allow_list(metrics, allow_list)
     if not keys:
@@ -142,16 +117,14 @@ def log_to_console(
 
     # `isatty` detects if the output is a terminal. If it is, we can use colors.
     color = Color() if sys.stdout.isatty() else NoColor()
-    parts = [f"{color.red}{prefix}step: {step:2}"]
+    parts = [f"{color.red}{console_prefix} | Step: {step:2}"]
     for i, key in enumerate(keys):
         color_name = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
         tone = getattr(color, color_name)
-        parts.append(f"{tone}{key}: {_fmt_value(metrics[key])}")
+        parts.append(f"{tone}{key}: {fmt_metric_value(metrics[key])}")
     parts.append(color.reset)
     # Single log call so the timestamp prefix only appears once per step.
-    # Leading separator visually splits this line from any non-metric log
-    # spam above; trailing separator is implicit (next step's leading
-    # separator divides them).
+    # Leading separator visually splits this line from other logs.
     logger.info("%s\n%s", _CONSOLE_SEPARATOR, "  ".join(parts))
 
 
@@ -160,70 +133,143 @@ def log_to_console(
 # ---------------------------------------------------------------------------
 
 
-class MetricLogger:
-    """Aggregates Metric records and dispatches to metrc logging backends (e.g. WandB)
-    + console logging.
+class MetricLogger(Configurable):
+    """Aggregates Metric records and dispatches to backends and console.
 
     Args:
-        backends: Sequence of MetricBackend instances. Each implements
-            log(metrics, step) and close().
+        config: MetricLogger.Config with backend toggles and the
+            train/validation console allow lists.
+        log_dir: Filesystem directory required when enable_wandb or
+            enable_tensorboard is true; backends write under it.
+        job_config_dict: Job config logged to wandb to reproduce the run. It is **not**
+            a config dict to initialize wandb.
+        backends: Optional pre-built backends (e.g. a custom JSONL writer)
+            appended in addition to whatever the config-driven backends
+            produce.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Config block typically nested as ``RLTrainer.Config.metrics``."""
+        """Metric logger configuration."""
 
-        log_freq: int = 1
-        """Reserved for future cadence control. Values other than 1 currently
-        warn; RL still logs every step."""
+        console_log_keys_train: list[str] | None = None
+        """Regex search patterns selecting console keys for train log lines.
+        None prints every key; [] prints nothing. Backends always
+        receive every reduced metric regardless of this filter."""
 
-        train_console_allow_list: list[str] | None = None
-        """Regex patterns selecting console keys for **training** steps.
-        ``None`` = print all keys (alphabetical). ``[]`` = silent."""
-
-        validation_console_allow_list: list[str] | None = None
-        """Regex patterns selecting console keys for **validation** steps.
-        ``None`` = print all keys (alphabetical). ``[]`` = silent."""
+        console_log_keys_validation: list[str] | None = None
+        """Same as console_log_keys_train but used when
+        MetricLogger.log is called with is_validation=True."""
 
         enable_wandb: bool = False
         """Log metrics to Weights & Biases."""
 
-        def build(
-            self,
-            *,
-            log_dir: str | None = None,
-            config_dict: dict[str, Any] | None = None,
-        ) -> MetricLogger:
-            return MetricLogger.build(self, log_dir=log_dir, config_dict=config_dict)
+        enable_tensorboard: bool = False
+        """Log metrics to TensorBoard. Writes under log_dir."""
 
-    def __init__(self, backends: Sequence[MetricBackend]) -> None:
-        self._backends = list(backends)
+        wandb_project: str = "titan_rl"
+        """W&B project name. Written to WANDB_PROJECT env var via
+        setdefault, so a user-set env var takes precedence."""
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        log_dir: str | None = None,
+        config_dict: dict[str, Any] | None = None,
+        backends: Sequence[MetricBackend] | None = None,
+    ) -> None:
+        self.config = config
+        self._backends: list[MetricBackend] = list(backends or [])
+        if (config.enable_wandb or config.enable_tensorboard) and log_dir is None:
+            raise ValueError(
+                "log_dir is required when enable_wandb or enable_tensorboard is True"
+            )
+        if config.enable_wandb:
+            os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
+            self._backends.append(
+                WandbMetricLogger(log_dir=log_dir, config_dict=config_dict)
+            )
+        if config.enable_tensorboard:
+            self._backends.append(TensorBoardLogger(log_dir=log_dir))
+
+    @classmethod
+    def _aggregate_metrics(cls, metrics: Iterable[Metric]) -> dict[str, float]:
+        """Reduces a list of `Metric` records into a single float per metric key.
+
+        Args:
+            metrics: Records to aggregate.
+
+        Returns:
+            Flat {key: float} dict ready for backend dispatch.
+
+        Example:
+            records = [
+                Metric("reward", Mean.from_list([0.0, 1.0])),
+                Metric("reward", Mean(2)),
+                Metric("reward", Max.from_list([0.0, 1.0])),
+                Metric("reward", Max(3)),
+            ]
+            MetricLogger._aggregate_metrics(records)
+            # {"reward/mean": 3.0, "reward/max": 3.0}
+        """
+        groupped_metrics: dict[tuple[str, type], list[MetricValue]] = defaultdict(list)
+        for record in metrics:
+            groupped_metrics[(record.key, type(record.value))].append(record.value)
+
+        reduced_metrics: dict[str, float] = {}
+        for (key, value_cls), values in groupped_metrics.items():
+            reduced_outputs = value_cls.reduce(values)
+            # A reduction can emit multiple outputs (e.g. SummaryStats).
+            for output_suffix, value in reduced_outputs.items():
+                if isinstance(value, float) and math.isnan(value):
+                    continue
+                output_key = f"{key}/{output_suffix}" if output_suffix else key
+                if output_key in reduced_metrics:
+                    raise ValueError(
+                        f"Duplicate aggregated metric key {output_key!r}. "
+                        "Two reductions expanded to the same output name."
+                    )
+                reduced_metrics[output_key] = value
+        return reduced_metrics
 
     def log(
         self,
         step: int,
         metrics: Iterable[Metric],
         *,
-        console_allow_list: Sequence[str] | None = None,
-        console_prefix: str = "",
+        is_validation: bool = False,
     ) -> None:
-        """Reduce metrics once, print the console line, dispatch to backends.
+        """Reduce metrics, prints to console, dispatch to backends.
+
+        Console output is filtered by `config.console_log_keys_train` (or
+        ..._validation when is_validation=True). Backends always
+        receive every reduced key regardless of the filter.
 
         Args:
-            step: Step number.
-            metrics: Iterable of Metric records.
-            console_allow_list: Patterns selecting which metrics should be
-                logged to console. None prints all keys alphabetically; []
-                suppresses the console line; a regex list prints matching
-                keys in pattern order. Same contract as `log_to_console`.
-            console_prefix: Optional label before "step:" (e.g. "validate ").
+            step: Step number to display and pass to backends.
+            metrics: Records to aggregate and emit.
+            is_validation: When True, use console_log_keys_validation
+                and render the prefix "Validation | Step: ...".
+
+        Example:
+            metric_logger.log(step=step, metrics=train_metrics)
+            metric_logger.log(
+                step=step, metrics=validation_metrics, is_validation=True,
+            )
         """
-        reduced = aggregate_metrics(metrics)
+        reduced = self._aggregate_metrics(metrics)
+        if is_validation:
+            allow_list = self.config.console_log_keys_validation
+            console_prefix = "Validation"
+        else:
+            allow_list = self.config.console_log_keys_train
+            console_prefix = "Train"
         log_to_console(
             step=step,
             metrics=reduced,
-            allow_list=console_allow_list,
-            prefix=console_prefix,
+            allow_list=allow_list,
+            console_prefix=console_prefix,
         )
         for backend in self._backends:
             try:
@@ -243,40 +289,3 @@ class MetricLogger:
                 logger.exception(
                     "metric backend %s failed to close", type(backend).__name__
                 )
-
-    @classmethod
-    def build(
-        cls,
-        config: "MetricLogger.Config",
-        *,
-        log_dir: str | None = None,
-        config_dict: dict[str, Any] | None = None,
-    ) -> MetricLogger:
-        """Build a MetricLogger with backends from config.
-
-        Args:
-            config: Metrics config (typically from RLTrainer.Config).
-            log_dir: Directory passed to wandb.init(dir=...). Required
-                when config.enable_wandb=True.
-            config_dict: Hyperparameter snapshot for wandb.init(config=...).
-                Typically the full job config dict so the W&B UI shows
-                every CLI flag that produced this run. Optional.
-        """
-        if config.log_freq != 1:
-            logger.warning(
-                "MetricLogger.Config.log_freq=%d is reserved; RL still logs every step.",
-                config.log_freq,
-            )
-
-        backends: list[MetricBackend] = []
-        if config.enable_wandb:
-            if log_dir is None:
-                raise ValueError(
-                    "log_dir is required when MetricLogger.Config.enable_wandb=True"
-                )
-            # Default the W&B project to ``titan_rl`` so RL runs don't land
-            # in the generic torchtitan project. ``setdefault`` keeps any
-            # existing ``WANDB_PROJECT`` env var the user already set.
-            os.environ.setdefault("WANDB_PROJECT", "titan_rl")
-            backends.append(WandbMetricLogger(log_dir=log_dir, config_dict=config_dict))
-        return cls(backends)

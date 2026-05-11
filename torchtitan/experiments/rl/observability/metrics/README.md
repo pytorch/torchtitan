@@ -1,114 +1,108 @@
 # TorchTitan RL Metrics
 
-Actors and the controller emit `Metric(key, reduction)` entries at the callsite; the controller aggregates per step and forwards the resulting `dict[str, float]` to every backend.
+Actors and the controller emit typed `Metric(key, value)` records. Reduction is done lazily, at the MetricLogger.log call. The logger reduces those records once per step and sends the flat `dict[str, float]` to console and backend loggers.
+
+```text
+loss / trainer / controller
+        |
+        v
+list[Metric(key, MetricValue)]
+        |
+        v
+MetricLogger.log(step, metrics) -> MetricLogger._aggregate_metrics(...)
+        |
+        v
+console + W&B / TensorBoard backends
+```
 
 ## Usage
 
 ```python
-import time
-
-from torchtitan.tools.logging import logger
 from torchtitan.experiments.rl.observability import metrics as m
 
-self.metric_logger = m.MetricLogger.build(
-    config.metrics,
+metric_logger = config.metrics.build(
     log_dir=config.dump_folder,
     config_dict=config.to_dict(),
 )
 
-def calculate_rewards(self, myinputs)
+metrics = []
 
-    rewards = []
-    metrics = []
-    for myinput in myinputs:
-        ...
-        rewards.append(myreward)
+# Same key with two value types.
+# Their final names are `key/max` and `key/mean`.
+for response_length in [12, 18]:
+    metrics += [
+        m.Metric("rollout/response_length", m.Max(response_length)),
+        m.Metric("rollout/response_length", m.Mean(response_length))
+    ]
 
-    # add reward metrics using `.from_list`
-    metrics.append(m.Metric("rollout/reward", m.Mean.from_list(rewards)))
-    metrics.append(m.Metric("rollout/reward", m.Max.from_list(rewards)))
+# `from_list` is preferred when observations are already in a list,
+# e.g. the example above.
+metrics.append(m.Metric("reward", m.SummaryStats.from_list([0.0, 0.5, 1.0])))
 
-    return rewards, metrics
+# Already-reduced scalars from an actor pass through with NoReduce.
+metrics.append(m.Metric("loss/total", m.NoReduce(0.42)))
 
-for step in range(num_steps):
-    metrics = []
-
-    ...
-
-    rewards, metrics_rewards = calculate_rewards(myinputs)
-
-
-    # add Mean episode length. Prefer `.from_list` single entry over adding N entries.
-    for episode in episodes:
-        metrics.append(m.Metric("rollout/episode_length", m.Mean(episode.length)))
-
-    # train metrics are already aggregated in the trainer. Use `m.NoReduce` to pass them through.
-    already_reduced_metrics: dict[str, float] = TrainerActor.step.call(batch)
-    metrics += [m.Metric(k, m.NoReduce(v)) for k, v in already_reduced_metrics.items()]
-
-    start = time.perf_counter()
-    self.metric_logger.log(step, metrics)
-    logger.info("metric logging took %.2f ms", (time.perf_counter() - start) * 1000)
-
-self.metric_logger.close()
+# Log the metrics at step 7.
+metric_logger.log(step=7, metrics=metrics, is_validation=False)
 ```
 
-## API at a glance
+## Metric values
 
-```
-Metric(key, reduction)
-    │
-    reduction is one of:
-    │
-    ├── Mean(value, count=1.0)   ──►  key/mean
-    ├── Max(value)               ──►  key/max
-    ├── Min(value)               ──►  key/min
-    ├── Std(value)               ──►  key/std
-    ├── Stats(value)             ──►  key/_{max,mean,min,std,sum}
-    └── NoReduce(value)          ──►  key
+| Constructor                                                    | Output keys                                          |
+| -------------------------------------------------------------- | ---------------------------------------------------- |
+| `m.Mean(value)` / `m.Mean.from_list(values)`                   | `key/mean`                                           |
+| `m.Max(value)` / `m.Max.from_list(values)`                     | `key/max`                                            |
+| `m.Min(value)` / `m.Min.from_list(values)`                     | `key/min`                                            |
+| `m.Sum(value)` / `m.Sum.from_list(values)`                     | `key/sum`                                            |
+| `m.Std(value)` / `m.Std.from_list(values)`                     | `key/std`                                            |
+| `m.SummaryStats(value)` / `m.SummaryStats.from_list(values)`   | `key/_max`, `key/_mean`, `key/_min`, `key/_std`, `key/_sum` |
+| `m.NoReduce(value)`                                            | `key`                                                |
 
-Each reduction also has `Reduction.from_list(values)` for many observations.
+`SummaryStats` uses leading underscores so its outputs do not collide with
+standalone `Mean`/`Max`/`Min`/`Std`/`Sum` records under the same key.
 
-aggregate_metrics(records)  ──►  dict[str, float]
-    groups by (key, reduction type), filters NaN entries,
-    raises on duplicate output keys.
+## Console output
 
-MetricLogger(backends).log(
-    step, records,
-    *,
-    console_allow_list=None,   # None = all, [] = silent, list[regex] = filtered
-    console_prefix="",         # e.g. "validate " for the validation line
+`MetricLogger.log(...)` reads the configured allow list:
+
+```python
+m.MetricsConfig(
+    console_log_keys_train=["loss", "grad_norm"],
+    console_log_keys_validation=["loss"],
 )
-    │
-    ├── log_to_console(...)                    ── stdout (in-process)
-    ├── WandbMetricLogger(...)                 ── wandb.log(metrics, step)
-    └── (your custom MetricBackend subclass)
+
+metric_logger.log(step=step, metrics=train_metrics)
+# prints "Train | Step:  N | loss:  0.42 | grad_norm:  0.01
+
+metric_logger.log(step=step, metrics=val_metrics, is_validation=True)
+# prints "Validation | Step:  N | loss:  0.42"
 ```
 
-## Custom backends
+## Backends
 
-Any class implementing `log(metrics, step)` and `close()` is a backend. Inherit `MetricBackend` for clarity:
+`MetricsConfig.enable_wandb` and `MetricsConfig.enable_tensorboard` add
+the corresponding backend at build time. Both require `log_dir` to be
+passed to `MetricsConfig.build(...)`.
+
+For ad-hoc backends (a custom JSONL writer, a metrics-tagging proxy,
+etc.), pass them through the constructor:
 
 ```python
 import json
 
-from torchtitan.experiments.rl.observability.metrics import MetricBackend
-
-class JsonlMetricBackend(MetricBackend):
+class JsonlBackend(m.MetricBackend):
     def __init__(self, path):
-        self._fh = open(path, "a")
+        self._log_file = open(path, "a")
 
     def log(self, metrics, step):
-        self._fh.write(json.dumps({"step": step, **metrics}) + "\n")
-        self._fh.flush()
+        self._log_file.write(json.dumps({"step": step, **metrics}) + "\n")
+        self._log_file.flush()
 
     def close(self):
-        self._fh.close()
+        self._log_file.close()
+
+metric_logger = m.MetricLogger(
+    m.MetricsConfig(),
+    backends=[JsonlBackend("metrics.jsonl")],
+)
 ```
-
-## Non-goals
-
-- Multi-axis metrics (`step_axis`/`step_value`).
-- Per-rollout structured logging (a `RolloutLogger` is a planned follow-up).
-- Cross-actor distributed reduction. `NoReduce` assumes the trainer already all-reduced upstream.
-- TensorBoard integration in the RL path.
