@@ -31,7 +31,6 @@ from .param_access import (
     EagerParamAccessState,
     ParamModuleInfo,
 )
-from .reshard_after_forward import _is_reshard_after_forward_recompute
 from .utils import _get_storage_debug_fqn, _record_function_if_eager
 
 
@@ -307,9 +306,11 @@ class BucketRuntime:
 
     def in_reshard_after_forward_recompute(self) -> bool:
         """Return whether this bucket is in reshard-after-forward recompute."""
+        recompute_state = self.storage._reshard_after_forward_recompute_state
         return (
             self.storage._reshard_after_forward
-            and _is_reshard_after_forward_recompute(id(self.storage))
+            and recompute_state is not None
+            and recompute_state.is_recomputing(id(self.storage))
         )
 
     def prefetch_next(self) -> None:

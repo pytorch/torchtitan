@@ -21,16 +21,26 @@ from .utils import (
 )
 
 
-_reshard_after_forward_recompute_bucket_ids: ContextVar[frozenset[int]] = ContextVar(
-    "_reshard_after_forward_recompute_bucket_ids",
-    default=frozenset(),
-)
+class _ReshardAfterForwardRecomputeState:
+    """Per-flex_shard dynamic state for reshard-after-forward recompute."""
 
+    def __init__(self) -> None:
+        self._bucket_ids: ContextVar[frozenset[int]] = ContextVar(
+            "_flex_shard_reshard_after_forward_recompute_bucket_ids",
+            default=frozenset(),
+        )
 
-@torch.compiler.assume_constant_result
-def _is_reshard_after_forward_recompute(bucket_id: int) -> bool:
-    """Return whether this bucket is in reshard-after-forward recompute."""
-    return bucket_id in _reshard_after_forward_recompute_bucket_ids.get()
+    @torch.compiler.assume_constant_result
+    def is_recomputing(self, bucket_id: int) -> bool:
+        """Return whether this bucket is in reshard-after-forward recompute."""
+        return bucket_id in self._bucket_ids.get()
+
+    def enter_recompute(self, recompute_bucket_ids: frozenset[int]) -> Any:
+        active_bucket_ids = self._bucket_ids.get()
+        return self._bucket_ids.set(active_bucket_ids | recompute_bucket_ids)
+
+    def exit_recompute(self, token: Any) -> None:
+        self._bucket_ids.reset(token)
 
 
 class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
@@ -43,18 +53,17 @@ class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
     def __init__(
         self,
         mode: TorchDispatchMode,
+        recompute_state: _ReshardAfterForwardRecomputeState,
         recompute_bucket_ids: frozenset[int],
     ) -> None:
         super().__init__()
         self.mode = mode
+        self.recompute_state = recompute_state
         self.recompute_bucket_ids = recompute_bucket_ids
         self._token: Any | None = None
 
     def __enter__(self) -> _MarkRecomputeTorchDispatchMode:
-        active_bucket_ids = _reshard_after_forward_recompute_bucket_ids.get()
-        self._token = _reshard_after_forward_recompute_bucket_ids.set(
-            active_bucket_ids | self.recompute_bucket_ids
-        )
+        self._token = self.recompute_state.enter_recompute(self.recompute_bucket_ids)
         return super().__enter__()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -64,7 +73,7 @@ class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
             token = self._token
             self._token = None
             if token is not None:
-                _reshard_after_forward_recompute_bucket_ids.reset(token)
+                self.recompute_state.exit_recompute(token)
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         return self.mode.__torch_dispatch__(func, types, args, kwargs)
@@ -96,6 +105,7 @@ def _reshard_after_forward_policy(ctx, func, *args, **kwargs):
 
 def _compose_with_ac_policy(
     ac_context_fn,
+    recompute_state: _ReshardAfterForwardRecomputeState,
     recompute_bucket_ids: frozenset[int],
 ):
     """Compose FlexShard reshard policy with an existing AC context_fn.
@@ -123,13 +133,17 @@ def _compose_with_ac_policy(
         forward_ctx, recompute_ctx = contexts
         return forward_ctx, _MarkRecomputeTorchDispatchMode(
             recompute_ctx,
+            recompute_state,
             recompute_bucket_ids,
         )
 
     return merged_context_fn
 
 
-def _make_reshard_only_context_fn(recompute_bucket_ids: frozenset[int]):
+def _make_reshard_only_context_fn(
+    recompute_state: _ReshardAfterForwardRecomputeState,
+    recompute_bucket_ids: frozenset[int],
+):
     def reshard_only_context_fn():
         from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
@@ -138,6 +152,7 @@ def _make_reshard_only_context_fn(recompute_bucket_ids: frozenset[int]):
         )
         return forward_ctx, _MarkRecomputeTorchDispatchMode(
             recompute_ctx,
+            recompute_state,
             recompute_bucket_ids,
         )
 
@@ -146,6 +161,7 @@ def _make_reshard_only_context_fn(recompute_bucket_ids: frozenset[int]):
 
 def _wrap_module(
     child: nn.Module,
+    recompute_state: _ReshardAfterForwardRecomputeState,
     recompute_bucket_ids: frozenset[int],
 ) -> nn.Module:
     """Wrap a module to implement reshard-after-forward via activation recompute.
@@ -167,16 +183,26 @@ def _wrap_module(
         ac_context_fn = ac_kwargs.pop("context_fn", None)
         if ac_context_fn is not None:
             # Selective AC — merge with reshard policy
-            merged_fn = _compose_with_ac_policy(ac_context_fn, recompute_bucket_ids)
+            merged_fn = _compose_with_ac_policy(
+                ac_context_fn,
+                recompute_state,
+                recompute_bucket_ids,
+            )
         else:
             # Full AC — add reshard policy via selective context
-            merged_fn = _make_reshard_only_context_fn(recompute_bucket_ids)
+            merged_fn = _make_reshard_only_context_fn(
+                recompute_state,
+                recompute_bucket_ids,
+            )
         return checkpoint_wrapper(inner, context_fn=merged_fn, **ac_kwargs)
 
     # No AC — reshard-only wrapping
     return checkpoint_wrapper(
         child,
-        context_fn=_make_reshard_only_context_fn(recompute_bucket_ids),
+        context_fn=_make_reshard_only_context_fn(
+            recompute_state,
+            recompute_bucket_ids,
+        ),
     )
 
 
@@ -260,9 +286,11 @@ def _apply_reshard_after_forward(
     wrapper (FlexShard collectives → MUST_RECOMPUTE, AC compute ops →
     MUST_SAVE, everything else → PREFER_RECOMPUTE).
     """
+    recompute_state = _ReshardAfterForwardRecomputeState()
     bucket_ids_by_path: dict[str, set[int]] = {}
     child_paths = [name for name, _ in module.named_children()]
     for storage in reshard_storages:
+        storage._reshard_after_forward_recompute_state = recompute_state
         storage_paths = _get_module_paths_to_wrap(storage)
         if not storage_paths:
             storage_paths = child_paths
@@ -274,5 +302,9 @@ def _apply_reshard_after_forward(
         _set_module_by_path(
             module,
             path,
-            _wrap_module(child, frozenset(bucket_ids_by_path[path])),
+            _wrap_module(
+                child,
+                recompute_state,
+                frozenset(bucket_ids_by_path[path]),
+            ),
         )
