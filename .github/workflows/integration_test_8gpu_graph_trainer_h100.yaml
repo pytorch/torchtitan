@@ -55,6 +55,7 @@ jobs:
         python -m pip install --force-reinstall --pre \
           torch --index-url https://download.pytorch.org/whl/nightly/cu130
         python -m pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+        python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
@@ -80,9 +81,11 @@ jobs:
         # NVLS according to several CI runs.
         # DeepEP needs CUDA_HOME specified to JIT kernels.
         CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.integration_tests --test_suite graph_trainer_autoparallel_h100 --gpu_arch_type cuda $RUNNER_TEMP/artifacts-to-be-uploaded/autoparallel --ngpu 4
 
         # Run the MoE numerics tests
         NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerNumerics -v -k "moe"
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestGraphTrainerAutoParallelNumerics::test_deepseek_v3_aot_fx_trace_autoparallel_vs_eager -v
 
         # Run precompile integration tests (DSv3 with EP; Llama3 runs in default workflow)
         NCCL_NVLS_ENABLE=0 python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests $RUNNER_TEMP/artifacts-to-be-uploaded/precompile --ngpu 8 --test_name aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep

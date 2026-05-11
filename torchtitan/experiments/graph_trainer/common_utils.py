@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import time
 from collections.abc import Callable
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -19,6 +21,15 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     MixedPrecisionPolicy,
 )
 from torchtitan.tools.logging import logger
+
+
+@contextmanager
+def log_timer(label: str):
+    start = time.perf_counter()
+    yield
+    elapsed_s = time.perf_counter() - start
+    logger.info("%s took %.3fs", label, elapsed_s)
+
 
 _MODULE_FQN = "module_fqn"
 _NOT_IN_LAYERS = -1
