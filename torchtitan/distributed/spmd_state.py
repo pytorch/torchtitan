@@ -19,11 +19,10 @@ Usage::
 
     # PGs for collectives
     state = spmd_state()
-    pg = state.pgs["tp"]
+    pg = state.get_pg("tp")
 """
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from spmd_types import MeshAxis
 from torch.distributed import ProcessGroup
@@ -70,30 +69,18 @@ class SpmdState:
         return self.pgs.get(name)
 
 
-# ---------------------------------------------------------------------------
-# Module-level singletons
-# ---------------------------------------------------------------------------
-
 _MESH: MeshAxes | None = None
 _STATE: SpmdState | None = None
-
-
-class _UninitializedMesh:
-    """Sentinel for pre-init attribute access — raises a clear error."""
-
-    def __getattr__(self, name: str) -> Any:
-        raise RuntimeError(
-            f"SPMD mesh not initialized. Cannot access mesh().{name}. "
-            "Call init_spmd_state() during build_mesh()."
-        )
-
-
-_mesh_proxy: MeshAxes | Any = _UninitializedMesh()
+_DP_AXIS_NAMES = ("dp_replicate", "dp_shard", "cp")
 
 
 def mesh() -> MeshAxes:
-    """Return the global mesh axes. Always-valid axes after init."""
-    return _mesh_proxy
+    """Return the global mesh axes. Must be called after init."""
+    assert _MESH is not None, (
+        "SPMD mesh not initialized. "
+        "Call init_spmd_state() during build_mesh()."
+    )
+    return _MESH
 
 
 def spmd_state() -> SpmdState:
@@ -110,9 +97,6 @@ def is_spmd_active() -> bool:
     return _STATE is not None
 
 
-_DP_AXIS_NAMES = ("dp_replicate", "dp_shard", "cp")
-
-
 def init_spmd_state(dense_mesh: DeviceMesh) -> None:
     """Build MeshAxes and SpmdState from the dense mesh.
 
@@ -120,7 +104,7 @@ def init_spmd_state(dense_mesh: DeviceMesh) -> None:
     (skipping ``"pp"``), builds ``MeshAxis.of(pg)`` for size>1 axes and
     ``MeshAxis.of(1, 1)`` for size-1, derives ``dp_axes``, collects PGs.
     """
-    global _MESH, _STATE, _mesh_proxy
+    global _MESH, _STATE
 
     assert dense_mesh.mesh_dim_names is not None
 
@@ -128,8 +112,6 @@ def init_spmd_state(dense_mesh: DeviceMesh) -> None:
     pgs: dict[str, ProcessGroup] = {}
 
     for i, name in enumerate(dense_mesh.mesh_dim_names):
-        if name == "pp":
-            continue
         size = dense_mesh.size(i)
         if size > 1:
             pg = dense_mesh.get_group(name)
@@ -142,7 +124,7 @@ def init_spmd_state(dense_mesh: DeviceMesh) -> None:
 
     mesh_axes = MeshAxes(**axes)
     _MESH = mesh_axes
-    _mesh_proxy = mesh_axes
+
     # Canonical axis ordering from the dense mesh (outer → inner).
     # Used to resolve multi-axis-same-dim collisions in PartitionSpec.
     axis_order = [axes[n] for n in dense_mesh.mesh_dim_names if n in axes]
