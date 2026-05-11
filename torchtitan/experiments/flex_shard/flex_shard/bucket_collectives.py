@@ -419,12 +419,7 @@ def begin_reduce_scatter_grad(
             op=dist.ReduceOp.AVG,
             group=pg,
         )
-        with _record_function_if_eager(
-            "FlexShard::reduce_scatter_copy_out", debug_fqn
-        ):
-            sharded_grads = placement.unpack_reduced_grad(
-                recv_buf, infos, layout, rank, ws
-            )
+        sharded_grads = placement.unpack_reduced_grad(recv_buf, infos, layout, rank, ws)
         return SyncReduceScatterResult(sharded_grads)
 
     device_handle = _get_device_handle(device.type)
