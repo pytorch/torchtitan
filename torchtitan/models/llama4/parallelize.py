@@ -71,7 +71,7 @@ def parallelize_llama(
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
         apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
+            # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
         )
@@ -265,8 +265,12 @@ def apply_fsdp(
                 )
 
                 assert edp_mesh is not None
-                edp_mesh_info = FSDPMeshInfo(mesh=edp_mesh, shard_mesh_dim=0)
-                dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
+                edp_mesh_info = FSDPMeshInfo(
+                    mesh=edp_mesh, shard_mesh_dim=0
+                )  # edp mesh is also 2D, [replicated, efsdp]
+                dp_mesh_info = FSDPMeshInfo(
+                    mesh=dp_mesh, shard_mesh_dim=0
+                )  # dp mesh is 2D, [replicate, shard]
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
@@ -279,7 +283,7 @@ def apply_fsdp(
                         return ShardPlacementResult(
                             placement=_expert_placement, mesh_info=_edp_mesh_info
                         )
-                    else:
+                    else:  # moe.router / moe.shared_experts, apply dense dp shard
                         return ShardPlacementResult(
                             placement=Shard(0), mesh_info=_dp_mesh_info
                         )
