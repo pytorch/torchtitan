@@ -237,14 +237,11 @@ class VLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Load initial weights from HuggingFace checkpoint if configured.
-        # In the RL loop, weights come from TorchStore instead, so loading
-        # is skipped (checkpoint_config.enable=False or initial_load_in_hf=False).
-        if checkpoint_config.enable and checkpoint_config.initial_load_in_hf:
-            checkpoint_path = (
-                checkpoint_config.initial_load_path or vllm_config.model_config.model
-            )
-            self._initial_load_weights(checkpoint_path=checkpoint_path)
+        # Store checkpoint config for deferred HF loading in load_weights().
+        self._checkpoint_config = checkpoint_config
+        self._hf_checkpoint_path = (
+            checkpoint_config.initial_load_path or vllm_config.model_config.model
+        )
 
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int
@@ -394,69 +391,44 @@ class VLLMModelWrapper(Module):
 
         return state_dict.keys()
 
-    def _initial_load_weights(self, checkpoint_path):
-        """
-        Helper function to load torchtitan model weights from HF checkpoint when initialize this model.
-
-        Args:
-            checkpoint_path: Path to the HuggingFace checkpoint directory
-        """
-        # Create adapter instance
-        adapter = self.state_dict_adapter(
-            model_config=self.config,
-            hf_assets_path=None,
-        )
-
-        # Get HF storage reader from adapter
-        storage_reader = adapter.get_hf_storage_reader(checkpoint_path)
-
-        # Load HF state dict using DCP
-        hf_state_dict = adapter.to_hf(self.model.state_dict())
-        dcp.load(hf_state_dict, storage_reader=storage_reader)
-
-        # Convert HF state dict to TorchTitan format
-        torchtitan_state_dict = adapter.from_hf(hf_state_dict)
-
-        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
-
-        # Convert to DTensor if target is DTensor (when the target model is sharded)
-        # This only happens when initial loading from HF full state dict
-        for name, tensor in torchtitan_state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                device_mesh = target_dtensor.device_mesh
-                torchtitan_state_dict[name] = DTensor.from_local(
-                    tensor.to(device_mesh.device_type),
-                    device_mesh=device_mesh,
-                    placements=[Replicate()],
-                )
-
-        return self.load_weights_from_state_dict(torchtitan_state_dict)
-
     def load_weights(self, weights_iter):
+        """vLLM required API — load model weights.
+
+        When ``checkpoint_config`` enables HF loading, weights are loaded
+        from the HF checkpoint via DCP + state_dict_adapter. Otherwise
+        (RL loop), this is a no-op — weights arrive via TorchStore.
+
+        Returns the names of all model parameters so vLLM's safety check passes.
         """
-        vLLM required API.
+        cfg = self._checkpoint_config
+        if (
+            cfg.enable
+            and cfg.initial_load_in_hf
+            and self.state_dict_adapter is not None
+        ):
+            adapter = self.state_dict_adapter(
+                model_config=self.config,
+                hf_assets_path=None,
+            )
+            storage_reader = adapter.get_hf_storage_reader(self._hf_checkpoint_path)
+            hf_state_dict = adapter.to_hf(self.model.state_dict())
+            dcp.load(hf_state_dict, storage_reader=storage_reader)
+            torchtitan_state_dict = adapter.from_hf(hf_state_dict)
 
-        This is a no-op method since model weights are already loaded during initialization.
-        Returns the names of all parameters that have been loaded so vLLM's safety check passes.
+            model_state_dict = dict(self.model.state_dict())
+            for name, tensor in torchtitan_state_dict.items():
+                if (
+                    name in model_state_dict
+                    and isinstance(model_state_dict[name], DTensor)
+                    and not isinstance(tensor, DTensor)
+                ):
+                    target = model_state_dict[name]
+                    torchtitan_state_dict[name] = DTensor.from_local(
+                        tensor.to(target.device_mesh.device_type),
+                        device_mesh=target.device_mesh,
+                        placements=[Replicate()],
+                    )
 
-        Args:
-            weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
+            self.load_weights_from_state_dict(torchtitan_state_dict)
 
-        Returns:
-            Set of loaded parameter names
-        """
-
-        loaded_param_names = set()
-        for name, _ in self.model.named_parameters():
-            loaded_param_names.add("model." + name)
-
-        logger.info(
-            f"Weights already loaded during model initialization. \
-            Returning {len(loaded_param_names)} loaded parameter names to satisfy vLLM safety check."
-        )
-
-        # Return the names of all loaded parameters so vLLM knows they were handled
-        return loaded_param_names
+        return {"model." + n for n, _ in self.model.named_parameters()}

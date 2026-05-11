@@ -56,6 +56,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             checkpoint=CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
             ),
             loss=GRPOLoss.Config(),
         ),
@@ -67,6 +69,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,
@@ -106,6 +109,8 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             checkpoint=CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
             ),
             loss=GRPOLoss.Config(),
         ),
@@ -118,6 +123,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,
@@ -157,6 +163,8 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
             checkpoint=CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
             ),
             loss=GRPOLoss.Config(),
         ),
@@ -168,6 +176,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,
@@ -203,6 +212,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -212,6 +222,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=1.0,
@@ -258,6 +269,8 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             checkpoint=CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
             ),
             debug=batch_invariant_config,
             loss=GRPOLoss.Config(),
@@ -270,6 +283,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,

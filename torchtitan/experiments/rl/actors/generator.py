@@ -146,9 +146,10 @@ class VLLMGenerator(Actor, Configurable):
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
-        """Checkpoint config controlling initial HF weight loading.
-        When ``enable=False`` (default), the generator skips HF loading
-        and expects weights from TorchStore in the RL loop."""
+        """Controls whether the vLLM wrapper loads initial HF weights.
+        In the RL loop this should stay disabled (default ``enable=False``)
+        because weights arrive from TorchStore. For standalone inference,
+        set ``enable=True`` and ``initial_load_in_hf=True``."""
 
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
