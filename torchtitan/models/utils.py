@@ -16,6 +16,28 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from torchtitan.tools.logging import logger
 
 
+def validate_converter_order(converters: list) -> None:
+    """Validate that quantization/QAT converters precede LoRA.
+
+    Raises ``ValueError`` if a quantization converter appears after a LoRA
+    converter in the list.
+    """
+    from torchtitan.components.lora import LoRAConverter
+    from torchtitan.components.quantization import QuantizationConverter
+
+    _BEFORE_LORA = (QuantizationConverter.Config,)
+
+    seen_lora = False
+    for converter in converters:
+        if isinstance(converter, LoRAConverter.Config):
+            seen_lora = True
+        elif seen_lora and isinstance(converter, _BEFORE_LORA):
+            raise ValueError(
+                f"{type(converter).__name__} must be applied before "
+                f"LoRAConverter. Reorder the converters list."
+            )
+
+
 class MoEStateDictAdapter(StateDictAdapter):
     """
     StateDictAdapter for MoE models.
@@ -407,6 +429,8 @@ def get_dense_model_nparams_and_flops(
             nparams: Total number of model parameters.
             num_flops_per_token: Estimated number of floating point operations per token.
     """
+    # model.parameters() de-duplicates shared parameters, so tied input/output
+    # embeddings are counted once.
     nparams = sum(p.numel() for p in model.parameters())
     nparams_embedding = sum(
         sum(p.numel() for p in m.parameters())
@@ -422,13 +446,13 @@ def get_dense_model_nparams_and_flops(
     #    but recomputation should not be counted in calculating MFU           (+0)
     # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
     # 4. we follow the convention and do not account for sparsity in causal attention
+    # With tied embeddings, PyTorch's parameter iterator already counts the
+    # shared input/output parameter once. That parameter still participates in
+    # the lm_head matmul, so do not subtract it for either size or FLOPs.
+    nparams_for_matmul = nparams if enable_weight_tying else nparams - nparams_embedding
     num_flops_per_token = (
-        6 * (nparams - nparams_embedding) + 6 * n_layers * n_heads * head_dims * seq_len
+        6 * nparams_for_matmul + 6 * n_layers * n_heads * head_dims * seq_len
     )
-
-    # If weight tying is enabled, subtract embedding parameters from total count
-    if enable_weight_tying:
-        nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
 
@@ -493,16 +517,16 @@ def get_moe_model_nparams_and_flops(
         f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
     )
 
+    # With tied embeddings, PyTorch's parameter iterator already counts the
+    # shared input/output parameter once. That parameter still participates in
+    # the lm_head matmul, so do not subtract it for either size or FLOPs.
+    if getattr(model_config, "enable_weight_tying", False):
+        nparams_for_matmul = nparams_dense + nparams_sparse_active
+    else:
+        nparams_for_matmul = nparams_dense - nparams_embedding + nparams_sparse_active
     num_flops_per_token = (
-        6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
+        6 * nparams_for_matmul
         + 6 * len(model_config.layers) * n_heads * head_dims * seq_len
     )
-
-    # If weight tying is enabled, subtract embedding parameters from total count
-    if (
-        hasattr(model_config, "enable_weight_tying")
-        and model_config.enable_weight_tying
-    ):
-        nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
