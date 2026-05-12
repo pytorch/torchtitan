@@ -34,6 +34,7 @@ def enable_fsdp_symm_mem(model: nn.Module) -> None:
             # Potential hiccup: TorchTitan also supports float8 FSDP all-gather
             # via torchao. That path customizes FSDP communication behavior, so
             # this combination may need extra validation when both are enabled.
+            module.set_force_sum_reduction_for_comms(True)
             module.set_symm_mem_for_comm()
 
 
