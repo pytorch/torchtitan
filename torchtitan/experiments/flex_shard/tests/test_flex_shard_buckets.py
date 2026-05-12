@@ -519,17 +519,21 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
                 self.assertEqual(param, local_view)
                 self.assertTrue(is_flex_shard_param(param))
 
-    def test_materialized_params_use_placement_owned_storage_view(self):
+    def test_materialized_params_match_placement_local_shards(self):
         mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
-        _args, model = make_transformer_model()
-        named_params = [
-            ("tok_embeddings.weight", model.tok_embeddings.weight),
-            ("pos_embeddings.weight", model.pos_embeddings.weight),
-        ]
+
+        class TinyModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.a = nn.Parameter(torch.arange(3, dtype=torch.float32).view(1, 3))
+                self.b = nn.Parameter(torch.arange(6, dtype=torch.float32).view(3, 2))
+
+        model = TinyModule()
+        named_params = list(model.named_parameters())
         padding_nbytes = 16
         placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
         buckets = [BucketSpec(["*"], reshard_after_forward=False)]
-        assignments = [["tok_embeddings.weight", "pos_embeddings.weight"]]
+        assignments = [[fqn for fqn, _ in named_params]]
 
         storages, _ = _materialize_bucket_storages(
             model,
@@ -551,6 +555,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
                 self.rank,
                 self.world_size,
             )
+            self.assertEqual(info.local_shape, expected.shape)
             self.assertEqual(
                 info.storage_nbytes,
                 expected.numel() * expected.dtype.itemsize + padding_nbytes,
