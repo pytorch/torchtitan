@@ -312,6 +312,12 @@ class BucketRuntime:
         # TODO: Avoid registering bucket hooks on passive containers such as
         # ModuleList or ModuleDict. Catch-all buckets can resolve to those
         # containers, whose hooks may never run when forward iterates children.
+        # Reshard-after-forward needs the bucket hook to rerun during activation
+        # checkpoint recompute. For example, a bucket like
+        # ["embed.*", "layers.1.*", "output.*"] resolves to the root module. If
+        # "layers.1" is checkpoint-wrapped, backward recompute calls only the
+        # layer, not the root module's __call__, so a root hook would not
+        # re-all-gather the layer params after post-forward resharding.
         if (
             self.storage._reshard_after_forward
             and target is self.storage._module
@@ -584,11 +590,6 @@ class _BucketAllGather(torch.autograd.Function):
         return (None, *input_grads)
 
 
-def _storage_requires_batched_unshard(storage: DStorage) -> bool:
-    """Return whether parameter access must use hook-provided tensors."""
-    return bool(storage._param_infos)
-
-
 def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
     """Return whether reshard-after-forward should use the custom bucket autograd path."""
     if not storage._reshard_after_forward:
@@ -688,13 +689,10 @@ def _install_batched_allgather_hooks(
     all-gather unshard call (one collective per bucket), then sets
     _pre_gathered on each parameter access state so the property getter can
     return the hook-provided tensor.
-
-    Skipped under graph capture. FlexShard currently supports eager execution
-    only, so parameter access will raise before collectives are emitted.
     """
     for storage in storages:
-        if not _storage_requires_batched_unshard(storage):
-            continue
+        if not storage._param_infos:
+            raise AssertionError("Expected FlexShard bucket storage to own parameters.")
         if (
             storage._reshard_after_forward
             and not _storage_uses_bucket_autograd_unshard(storage)

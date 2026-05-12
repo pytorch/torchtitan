@@ -165,10 +165,7 @@ class EagerParamAccessState:
     def consume_pre_gathered_param(self) -> torch.Tensor:
         """Return the hook-provided full param or raise for unsupported access."""
         # In eager mode, _pre_gathered is set by the batched all-gather
-        # pre-forward hook. This PR intentionally has no per-parameter
-        # all-gather fallback. TODO: later compile support should add a
-        # separate graph-safe parametrization or graph path, with tests
-        # proving graph capture behavior.
+        # pre-forward hook so parameter reads preserve bucketed collectives.
         pre = self._pre_gathered
         if pre is not None:
             # TODO: Keep this cache valid for the whole forward. Clearing it
