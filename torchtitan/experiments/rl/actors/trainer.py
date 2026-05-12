@@ -159,6 +159,8 @@ class PolicyTrainer(Actor, Configurable):
             training_steps=config.training.steps,
         )
 
+        self.policy_version = 0
+
         # Always build CheckpointManager; enable is a field on the config.
         # When enable=False (CI/debug), load() is a no-op and random init stands.
         self.checkpointer = config.checkpoint.build(
@@ -166,7 +168,7 @@ class PolicyTrainer(Actor, Configurable):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            states={},
+            states={"train_state": self},
             sd_adapter=self.sd_adapter,
             base_folder=config.dump_folder,
         )
@@ -177,7 +179,6 @@ class PolicyTrainer(Actor, Configurable):
                 "Set checkpoint.enable=True to load from a checkpoint."
             )
 
-        self.policy_version = 0
         self.generator: Any | None = None
 
         # Data parallelism: mesh is available after _build_model triggers build_mesh
@@ -193,6 +194,12 @@ class PolicyTrainer(Actor, Configurable):
         logger.debug(
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"policy_version": self.policy_version}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.policy_version = state_dict["policy_version"]
 
     @endpoint
     async def close(self) -> None:
