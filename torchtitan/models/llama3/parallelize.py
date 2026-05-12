@@ -75,9 +75,7 @@ def parallelize_llama(
         if parallel_dims.tp_enabled:
             model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(
-            parallelism, compile_config, parallel_dims.get_mesh("tp")
-        )
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
