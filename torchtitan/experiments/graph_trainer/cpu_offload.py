@@ -406,10 +406,23 @@ def apply_cpu_offload_pass(
             )
             offload_node.meta["val"] = val.to(torch.device("cpu"))
 
+        # Find the last forward consumer of this node's storage (including
+        # through views) so the wait_tensor encodes the dependency directly.
+        chain_nodes, _ = _get_storage_chain(node)
+        last_consumer = node
+        last_consumer_pos = node_to_index[node]
+        for c in chain_nodes:
+            if c.target in _AO_OPS:
+                continue
+            c_pos = node_to_index.get(c)
+            if c_pos is not None and c_pos > last_consumer_pos:
+                last_consumer = c
+                last_consumer_pos = c_pos
+
         with gm.graph.inserting_after(offload_node):
             wait_offload_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(offload_node, node),
+                args=(offload_node, node, last_consumer),
             )
             wait_offload_node.meta["val"] = offload_node.meta["val"]
 
@@ -534,18 +547,12 @@ def defer_offload_waits(
 
     deferred = 0
     for node, wait_node in wait_offload_map.items():
-        consumer_idx = node_to_region_idx.get(node)
+        # The dep arg on wait_tensor encodes the last forward consumer
+        # of the offloaded node's storage (set during insertion).
+        dep = wait_node.args[2] if len(wait_node.args) > 2 else node
+        consumer_idx = node_to_region_idx.get(dep)
         if consumer_idx is None:
             continue
-
-        # If storage chain extends to a later region (cross-layer views),
-        # use the latest consumer region.
-        chain_nodes, _ = _get_storage_chain(node)
-        real_consumers = {n for n in chain_nodes if n.target not in _AO_OPS}
-        for c in real_consumers:
-            idx = node_to_region_idx.get(c)
-            if idx is not None:
-                consumer_idx = max(consumer_idx, idx)
 
         # Defer N regions past the consumer.
         target_idx = min(consumer_idx + n_layers, len(fwd_anchors) - 1)
