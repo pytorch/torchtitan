@@ -42,11 +42,8 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     snapshot_graph,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
-    autobucketing_reordering_pass,
-    fsdp_reshard_after_fwd_pass,
     joint_transformer_block_bucketing_reordering_pass,
     overlap_fsdp_ag_rs_pass,
-    transformer_block_bucketing_reordering_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -55,7 +52,6 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
-    tag_sac_policy,
     tag_with_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
@@ -380,20 +376,3 @@ def tlparse_log_graph_pass(
     )
 
     return gm
-
-
-# Registry mapping pass names to pass functions (for AOT mode fwd/bwd passes)
-AVAILABLE_COMPILER_PASSES = {
-    "auto_bucketing": autobucketing_reordering_pass,
-    "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
-    "regional_inductor": regional_inductor_pass,
-    "custom_codegen": custom_codegen_pass,
-    "cudagraph": cudagraph_pass,
-    "full_inductor_compilation": full_inductor_compilation_pass,
-}
-
-# Registry for joint custom passes (applied before partitioning, AOT mode only)
-AVAILABLE_JOINT_PASSES = {
-    "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "apply_sac": tag_sac_policy,
-}
