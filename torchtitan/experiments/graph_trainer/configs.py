@@ -17,12 +17,11 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
+    mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
         jit: standard torch.compile() with custom backend (deprecated)
-        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -31,12 +30,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
     Compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
-    In AOT mode: applied to the partitioned forward/backward graphs
     """
-
-    joint_passes: list[str] = field(default_factory=list)
-    """Joint graph pass names to apply on the joint forward-backward
-    graph before partitioning. Only used in AOT mode."""
 
     enable_passes: bool = True
     """When False, skip all graph passes (both default and user-configured)."""
