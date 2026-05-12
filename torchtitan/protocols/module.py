@@ -373,21 +373,16 @@ class Module(nn.Module, Configurable):
 
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
+        in_grad_shardings = sharding_config.local_input_grad_placements or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
-<<<<<<< Updated upstream
-            mesh = resolve_shared_mesh(
-                [src_named_placements, dst_named_placements],
-                parallel_dims,
-=======
             grad_named_placements = in_grad_shardings.get(name)
             mesh = parallel_dims.resolve_shared_mesh(
                 [src_named_placements, dst_named_placements, grad_named_placements]
->>>>>>> Stashed changes
             )
             if mesh is None:
                 continue
@@ -397,11 +392,15 @@ class Module(nn.Module, Configurable):
 
             if not isinstance(value, DTensor) and src_named_placements is not None:
                 layout = resolve_placements(src_named_placements, mesh)
+                grad_placements: tuple | None = None
+                if grad_named_placements is not None:
+                    grad_placements = resolve_placements(grad_named_placements, mesh)
                 value = DTensor.from_local(
                     value,
                     mesh,
                     layout,
                     run_check=False,
+                    grad_placements=grad_placements,
                 )
 
             if dst_named_placements is not None and isinstance(value, DTensor):
@@ -427,14 +426,10 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         out_named_placements = sharding_config.out_dst_shardings
-<<<<<<< Updated upstream
-        mesh = resolve_shared_mesh([out_named_placements], parallel_dims)
-=======
         out_grad_named_placements = sharding_config.local_output_grad_placements
         mesh = parallel_dims.resolve_shared_mesh(
             [out_named_placements, out_grad_named_placements]
         )
->>>>>>> Stashed changes
         if mesh is None:
             return outputs
 
@@ -443,6 +438,14 @@ class Module(nn.Module, Configurable):
             if isinstance(outputs, DTensor) and outputs.placements != desired:
                 outputs = outputs.redistribute(placements=desired, async_op=True)
 
+        # Unwrap DTensor output to local tensor with the declared backward
+        # gradient placement. Mirrors NoParallel(local_output_grad_placements
+        # =...): the module returns a local tensor; in backward, the
+        # upstream local d_output is wrapped back as a DTensor with the
+        # declared placement (e.g. Partial to skip a downstream all-reduce).
+        if out_grad_named_placements is not None and isinstance(outputs, DTensor):
+            grad_placements = resolve_placements(out_grad_named_placements, mesh)
+            outputs = outputs.to_local(grad_placements=grad_placements)
         return outputs
 
     @classmethod
@@ -450,7 +453,13 @@ class Module(nn.Module, Configurable):
         """Create a ``Module``-protocol-compatible version of *nn_module_cls*.
 
         The returned class inherits from ``(nn_module_cls, Module)`` and has the
-        same constructor signature as *nn_module_cls*.
+        same constructor signature as *nn_module_cls*. It also has an
+        auto-generated ``Config`` subclass of ``Module.Config``; ``build``
+        constructs the underlying ``nn_module_cls`` and applies
+        ``sharding_config`` / ``param_init`` to the resulting instance --
+        so call sites that need declarative sharding can use the
+        Config-based path while call sites that don't can keep direct
+        construction.
 
         * If *nn_module_cls* defines ``reset_parameters``, the injected
           ``_init_self_parameters`` delegates to it.
@@ -462,14 +471,43 @@ class Module(nn.Module, Configurable):
 
         Usage::
 
-            Conv2d = Module.from_nn_module(nn.Conv2d)
             LayerNorm = Module.from_nn_module(nn.LayerNorm)
-            # Then use Conv2d / LayerNorm exactly like nn.Conv2d / nn.LayerNorm
+            # Direct construction (no declarative sharding):
+            norm = LayerNorm(dim, eps)
+            # Config-based construction (with declarative sharding):
+            norm = LayerNorm.Config(
+                sharding_config=norm_config(enable_sp=False),
+            ).build(normalized_shape=dim, eps=eps)
         """
         if nn_module_cls in _created_classes:
             return _created_classes[nn_module_cls]
 
-        attrs: dict[str, Any] = {}
+        name = f"Module({nn_module_cls.__name__})"
+
+        # Empty Config subclass; its only purpose is to give each
+        # ``new_cls`` an independent ``_owner`` slot via Configurable's
+        # ``__init_subclass__``. ``build`` is inherited from
+        # ``Module.Config.build``.
+        @dataclass(kw_only=True, slots=True)
+        class _AutoConfig(Module.Config):
+            pass
+
+        _AutoConfig.__name__ = "Config"
+        _AutoConfig.__qualname__ = f"{name}.Config"
+        _AutoConfig.__module__ = __name__
+
+        # ``Configurable.Config.build`` calls ``self._owner(config=...)``;
+        # nn modules don't accept ``config=``, so absorb it here and
+        # forward the rest to the underlying ``__init__``.
+        def _wrapped_init(
+            self: Any, *args: Any, config: Any = None, **kwargs: Any
+        ) -> None:
+            nn_module_cls.__init__(self, *args, **kwargs)
+
+        attrs: dict[str, Any] = {
+            "Config": _AutoConfig,
+            "__init__": _wrapped_init,
+        }
         if hasattr(nn_module_cls, "reset_parameters"):
 
             def _init_self_parameters(self: Any) -> None:
@@ -477,10 +515,10 @@ class Module(nn.Module, Configurable):
 
             attrs["_init_self_parameters"] = _init_self_parameters
 
-        name = f"Module({nn_module_cls.__name__})"
         new_cls = type(name, (nn_module_cls, Module), attrs)
         new_cls.__module__ = __name__
         new_cls.__qualname__ = name
+
         _created_classes[nn_module_cls] = new_cls
         return new_cls
 
