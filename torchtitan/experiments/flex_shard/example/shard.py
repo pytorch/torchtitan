@@ -74,8 +74,10 @@ class Shard(Placement):
         world_size: int,
     ) -> torch.Tensor:
         chunks = list(torch.chunk(param, world_size, dim=self.dim))
+        empty_shape = list(param.shape)
+        empty_shape[self.dim] = 0
         while len(chunks) < world_size:
-            chunks.append(chunks[0].new_empty(0))
+            chunks.append(param.new_empty(empty_shape))
         return chunks[rank].contiguous()
 
     @override
