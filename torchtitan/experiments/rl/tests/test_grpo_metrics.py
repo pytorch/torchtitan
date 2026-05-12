@@ -308,28 +308,15 @@ class TestBuildEpisodes:
 # ---------------------------------------------------------------------------
 
 
-def _rl_config() -> RLTrainer.Config:
-    """Build an RLTrainer.Config that passes the generator's post_init checks.
-
-    `VLLMGenerator.Config.__post_init__` rejects `enable_sequence_parallel=True`
-    and `disable_loss_parallel=False`; we override both explicitly here.
-    """
-    from torchtitan.config.configs import ParallelismConfig
-    from torchtitan.experiments.rl.actors.generator import VLLMGenerator
-
-    return RLTrainer.Config(
-        generator=VLLMGenerator.Config(
-            parallelism=ParallelismConfig(
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-        ),
-    )
-
-
 class TestRLTrainerConfigWiring:
+    """Use the canonical `rl_grpo_qwen3_0_6b` registry config so the test
+    matches a real production config and stays insulated from any future
+    tightening of VLLMGenerator/PolicyTrainer field validators."""
+
     def test_metrics_default_uses_factory(self) -> None:
-        cfg = _rl_config()
+        from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
+
+        cfg = rl_grpo_qwen3_0_6b()
         baseline = m.MetricsProcessor.Config()
         assert cfg.metrics.console_log_keys_train == baseline.console_log_keys_train
         assert (
@@ -339,16 +326,20 @@ class TestRLTrainerConfigWiring:
 
     def test_metrics_defaults_are_independent_copies(self) -> None:
         """Mutating one Config's allow lists must not bleed into other instances."""
-        cfg = _rl_config()
+        from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
+
+        cfg = rl_grpo_qwen3_0_6b()
         cfg.metrics.console_log_keys_train.append("X")
         cfg.metrics.console_log_keys_validation.append("Y")
         # A fresh Config still has the pristine defaults.
-        fresh = _rl_config()
+        fresh = rl_grpo_qwen3_0_6b()
         assert "X" not in fresh.metrics.console_log_keys_train
         assert "Y" not in fresh.metrics.console_log_keys_validation
 
     def test_metrics_default_wandb_disabled(self) -> None:
-        cfg = _rl_config()
+        from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b
+
+        cfg = rl_grpo_qwen3_0_6b()
         assert cfg.metrics.enable_wandb is False
         assert cfg.metrics.enable_tensorboard is False
 
