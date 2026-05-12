@@ -75,8 +75,6 @@ def export_joint(
     )
     with coor_ctx:
         with (
-            # TODO Investigate error on MOE model with use_grouped_mm=False.
-            # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
             torch._dynamo.config.patch(fake_tensor_cache_enabled=False),
             torch.fx.traceback.preserve_node_meta(),
         ):
@@ -533,7 +531,7 @@ def get_joint_custom_passes_from_config(
         if pass_name == "cpu_offload":
             raise ValueError(
                 "cpu_offload is not a joint pass. "
-                "Use --compile.memory_policy=budget_limited_offload in aot_fx_trace mode instead."
+                "Use --compile.memory_policy=sac_and_offload in aot_fx_trace mode instead."
             )
         if pass_name not in AVAILABLE_JOINT_PASSES:
             raise ValueError(
