@@ -6,13 +6,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
 
 __all__ = ["ParallelDims"]
@@ -79,11 +84,6 @@ class ParallelDims:
         if name == "fsdp":
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
-            return True
-        if name == "grad_norm":
-            # Always-present so clip_grad_norm_ can fetch the 1D flat
-            # ``dp_shard * cp * tp`` mesh uniformly across modes (no-op at
-            # degree 1).
             return True
         if name == "dp_shard" and self.full_dtensor:
             # Under full_dtensor ``dp_shard`` is the DP storage axis (no
@@ -187,15 +187,15 @@ class ParallelDims:
             # together: activations carry a ``cp`` dimension, so parameters
             # need a ``cp`` axis as well. ``fully_shard`` folds ``dp_shard``
             # and ``cp`` internally at initialization time.
-            spmd_dense_axes = ["dp_replicate", "dp_shard", "cp", "tp"]
+            candidate_spmd_dense_axes = ["dp_replicate", "dp_shard", "cp", "tp"]
             full_dense_mesh = unflatten_mesh(
                 self._world_mesh,
-                tuple(["pp"] + spmd_dense_axes),
+                tuple(["pp"] + candidate_spmd_dense_axes),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
             )
         else:
             # Legacy path folds ``dp_shard`` and ``cp`` into ``fsdp``.
-            spmd_dense_axes = ["dp_replicate", "fsdp", "tp"]
+            candidate_spmd_dense_axes = ["dp_replicate", "fsdp", "tp"]
             full_dense_mesh = unflatten_mesh(
                 self._world_mesh,
                 ("pp", "dp_replicate", "fsdp", "tp"),
@@ -208,12 +208,7 @@ class ParallelDims:
             (self.pp, self.dp_replicate, efsdp, self.ep),
         )
 
-        # 1D flat mesh of ``dp_shard * cp * tp`` ranks (excludes
-        # ``dp_replicate``: HSDP grads are Replicate on that axis, so each
-        # replica group independently computes the same answer in
-        # parallel). Layout is uniform between legacy and full_dtensor.
-        # ``clip_grad_norm_`` issues a single all_reduce on this group;
-        # TP-replicate over-count is compensated via local-tensor scaling.
+        # Used by clip_grad_norm_
         grad_norm_parent = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "grad_norm"),
@@ -245,10 +240,13 @@ class ParallelDims:
 
         self._validate_meshes()
 
-        spmd_dense_mesh = self.get_activated_mesh(spmd_dense_axes)
-        spmd_sparse_mesh = self.get_activated_mesh(["dp_replicate", "efsdp", "ep"])
+        candidate_spmd_sparse_axes = ["dp_replicate", "efsdp", "ep"]
+        activated_spmd_dense_mesh = self.get_activated_mesh(candidate_spmd_dense_axes)
+        activated_spmd_sparse_mesh = self.get_activated_mesh(candidate_spmd_sparse_axes)
         self._spmd_meshes = [
-            m for m in (spmd_dense_mesh, spmd_sparse_mesh) if m is not None
+            m
+            for m in (activated_spmd_dense_mesh, activated_spmd_sparse_mesh)
+            if m is not None
         ]
 
         logger.info(
@@ -392,6 +390,64 @@ class ParallelDims:
             and self.get_optional_mesh(axis) is not None
         ]
         return self.get_optional_mesh(axes) if axes else None
+
+    def resolve_mesh(self, axes: Iterable[MeshAxisName | str]) -> DeviceMesh | None:
+        """Resolve the device mesh for a set of mesh axis names.
+
+        Given the axes, query ``parallel_dims`` for the corresponding SPMD
+        mesh (dense or sparse).
+
+        ``axes`` is always a superset of the resolved mesh's axes: we always
+        specify every axis. Under full_dtensor the resolved mesh contains
+        every activated axis; under non-full_dtensor only ``tp`` and ``ep``
+        are kept (DP/CP stay out-of-band).
+
+        Returns ``None`` when no axis is enabled under non-``full_dtensor``.
+        Raises ``ValueError`` under ``full_dtensor`` if the resolved mesh is
+        not one of ``parallel_dims.spmd_meshes()``.
+        """
+        axes_list = list(axes)
+        if not self.full_dtensor:
+            in_band = ("tp", "ep")
+            axes_list = [axis for axis in axes_list if axis in in_band]
+        mesh = self.get_activated_mesh(axes_list)
+        if mesh is None:
+            return None
+        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+        if self.full_dtensor and mesh not in self.spmd_meshes():
+            raise ValueError(
+                f"Resolved mesh {list(mesh.mesh_dim_names)} does not match any "
+                f"SPMD mesh. Valid meshes: "
+                f"{[list(m.mesh_dim_names or ()) for m in self.spmd_meshes()]}."
+            )
+        return mesh
+
+    def resolve_shared_mesh(
+        self, placements: Iterable["NamedPlacement | None"]
+    ) -> DeviceMesh | None:
+        """Resolve the mesh shared by a list of NamedPlacements.
+
+        All non-``None`` entries must reference the same axis keys (placement
+        values may differ -- "redistribute on the same mesh" is exactly the
+        case of same axes, different placements). ``None`` entries are
+        skipped (e.g. LocalMapConfig non-tensor args, optional in/dst/grad
+        placements).
+
+        Returns ``None`` when every entry is ``None`` or when ``resolve_mesh``
+        filters every axis out (legacy non-``full_dtensor`` path); callers
+        should treat this as a no-op for the corresponding boundary.
+        """
+        non_none = [p for p in placements if p is not None]
+        if not non_none:
+            return None
+        axes = non_none[0].keys()
+        for p in non_none[1:]:
+            assert p.keys() == axes, (
+                f"Inconsistent mesh axes within a boundary: "
+                f"{sorted(k.value for k in axes)} vs "
+                f"{sorted(k.value for k in p.keys())}"
+            )
+        return self.resolve_mesh(axes)
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.

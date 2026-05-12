@@ -526,11 +526,17 @@ def clip_grad_norm_(
     # with local data pre-scaled by ``(1/replicate_factor)**(1/p)`` for any
     # Replicate axis on the grad. ``dp_replicate`` is not in the mesh, so it
     # needs no scaling -- one all_reduce regardless of sharding.
-    spmd_mesh = parallel_dims.get_mesh("grad_norm")
+    grad_norm_mesh = parallel_dims.get_optional_mesh("grad_norm")
     flatten_grads: list[torch.Tensor] = []
     for g in grads:
         if not isinstance(g, DTensor):
             flatten_grads.append(g)
+            continue
+
+        if grad_norm_mesh is None:
+            # Only dp_replicate is enabled; every rank holds the full grad,
+            # compute the norm on the local tensor and skip the reduce.
+            flatten_grads.append(g.to_local())
             continue
 
         axis_names = g.device_mesh.mesh_dim_names or ()
@@ -545,7 +551,7 @@ def clip_grad_norm_(
         if replicate_factor != 1 and not math.isinf(norm_type):
             g_local = g_local * (1.0 / replicate_factor) ** (1.0 / norm_type)
         flatten_grads.append(
-            DTensor.from_local(g_local, spmd_mesh, [Shard(0)], run_check=False)
+            DTensor.from_local(g_local, grad_norm_mesh, [Shard(0)], run_check=False)
         )
 
     total_norm = torch.nn.utils.get_total_norm(
