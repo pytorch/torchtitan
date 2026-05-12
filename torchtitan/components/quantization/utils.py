@@ -70,17 +70,29 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
-    from torchtitan.components.quantization import (
-        _QuantizedGroupedExpertsConfig,
-        QuantizedLinearConfig,
+    from torchtitan.components.quantization.float8 import (
+        _float8_experts_cache,
+        Float8Linear,
     )
+    from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
 
-    has_quant_linear = any(
-        isinstance(config, QuantizedLinearConfig)
-        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
+    has_quant_linear = (
+        any(
+            isinstance(config, (Float8Linear.Config, MXFP8Linear.Config))
+            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
+        )
+        if Float8Linear is not None
+        else any(
+            isinstance(config, MXFP8Linear.Config)
+            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
+        )
     )
-    has_quant_moe = any(
-        isinstance(config, _QuantizedGroupedExpertsConfig)
+    quant_experts_types = tuple(
+        cls.Config  # type: ignore[attr-defined]
+        for cls in (*_float8_experts_cache.values(), *_mxfp8_experts_cache.values())
+    )
+    has_quant_moe = bool(quant_experts_types) and any(
+        isinstance(config, quant_experts_types)
         for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
     )
     return has_quant_linear or has_quant_moe

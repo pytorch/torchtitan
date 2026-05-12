@@ -28,7 +28,6 @@ from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
 
 
 class Attention(BaseAttention):
@@ -200,17 +199,6 @@ class GptOssModel(Decoder):
 
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    if (
-                        layer_cfg.moe.experts.use_grouped_mm
-                        and not has_cuda_capability(9, 0)
-                    ):
-                        logger.warning(
-                            "Failed to use grouped mm, which is only supported on SM90 or later",
-                        )
-                        layer_cfg.moe.experts.use_grouped_mm = False
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:

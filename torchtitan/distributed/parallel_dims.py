@@ -80,6 +80,11 @@ class ParallelDims:
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
             return True
+        if name == "grad_norm":
+            # Always-present so clip_grad_norm_ can fetch the 1D flat
+            # ``dp_shard * cp * tp`` mesh uniformly across modes (no-op at
+            # degree 1).
+            return True
         if name == "dp_shard" and self.full_dtensor:
             # Under full_dtensor ``dp_shard`` is the DP storage axis (no
             # flattened ``fsdp``); keep alive at size 1 so ``fully_shard``
@@ -114,6 +119,10 @@ class ParallelDims:
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
             efsdp:   FSDP in the EP region.
+            grad_norm: 1D ``dp_shard * cp * tp`` mesh used by clip_grad_norm_.
+                     Excludes ``dp_replicate`` since HSDP grads are Replicate
+                     on that axis (each replica group computes the same
+                     answer in parallel).
 
         Note: Most dimensions above are created by unflattening the world mesh, except for loss,
         which is created by flattening the batch and cp dimensions.
@@ -122,6 +131,7 @@ class ParallelDims:
             ["pp", "batch", "cp", "tp"]  # dataloading_mesh
             ["pp", "dp_replicate", "fsdp", "tp"]  # dense_mesh
             ["pp", "dp_replicate", "efsdp", "ep"]  # sparse_mesh
+            ["pp", "dp_replicate", "grad_norm"]
 
         Note: DeviceMesh currently recreates the process group for each dimension.
         It should share the process group for the same dim group to avoid unnecessary
@@ -198,6 +208,18 @@ class ParallelDims:
             (self.pp, self.dp_replicate, efsdp, self.ep),
         )
 
+        # 1D flat mesh of ``dp_shard * cp * tp`` ranks (excludes
+        # ``dp_replicate``: HSDP grads are Replicate on that axis, so each
+        # replica group independently computes the same answer in
+        # parallel). Layout is uniform between legacy and full_dtensor.
+        # ``clip_grad_norm_`` issues a single all_reduce on this group;
+        # TP-replicate over-count is compensated via local-tensor scaling.
+        grad_norm_parent = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "dp_replicate", "grad_norm"),
+            (self.pp, self.dp_replicate, fsdp * self.tp),
+        )
+
         self._global_meshes = {
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
@@ -209,6 +231,7 @@ class ParallelDims:
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
+            "grad_norm": grad_norm_parent["grad_norm"],
             "dp_replicate": full_dense_mesh["dp_replicate"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
@@ -222,8 +245,8 @@ class ParallelDims:
 
         self._validate_meshes()
 
-        spmd_dense_mesh = self.get_enabled_mesh(spmd_dense_axes)
-        spmd_sparse_mesh = self.get_enabled_mesh(["dp_replicate", "efsdp", "ep"])
+        spmd_dense_mesh = self.get_activated_mesh(spmd_dense_axes)
+        spmd_sparse_mesh = self.get_activated_mesh(["dp_replicate", "efsdp", "ep"])
         self._spmd_meshes = [
             m for m in (spmd_dense_mesh, spmd_sparse_mesh) if m is not None
         ]
@@ -241,6 +264,7 @@ class ParallelDims:
             "pp": self.pp,
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
+            "grad_norm": self.dp_shard * self.cp * self.tp,
             "dp_replicate": self.dp_replicate,
             "cp": self.cp,
             "tp": self.tp,
@@ -351,7 +375,7 @@ class ParallelDims:
             self.build_mesh()
         return self._spmd_meshes
 
-    def get_enabled_mesh(self, axes: list[str]) -> DeviceMesh | None:
+    def get_activated_mesh(self, axes: list[str]) -> DeviceMesh | None:
         """Submesh of ``axes`` filtered to those actually enabled in this run.
 
         Returns a mesh containing the axes in ``axes`` that are enabled. If
