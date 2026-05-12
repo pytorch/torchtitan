@@ -38,7 +38,6 @@ from torchtitan.experiments.rl.actors.utils import (
     LogprobVerificationOutput,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.loss.types import LossOutput
 from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.protocols.model_spec import ModelSpec
@@ -299,15 +298,15 @@ class PolicyTrainer(Actor, Configurable):
         loss_mesh = self.parallel_dims.get_optional_mesh("loss")
 
         out: dict[str, float] = {}
-        for values_by_key, dtype, op in [
-            (sum_reduced_metrics, torch.float64, c10d.ReduceOp.SUM),
-            (max_reduced_metrics, torch.float32, c10d.ReduceOp.MAX),
+        for values_by_key, op in [
+            (sum_reduced_metrics, c10d.ReduceOp.SUM),
+            (max_reduced_metrics, c10d.ReduceOp.MAX),
         ]:
             if not values_by_key:
                 continue
             keys = list(values_by_key)
             stacked = torch.stack(
-                [values_by_key[key].detach().to(dtype) for key in keys]
+                [values_by_key[key].detach().to(torch.float32) for key in keys]
             )
             if loss_mesh is not None:
                 stacked = funcol.all_reduce(stacked, reduceOp=op.name, group=loss_mesh)
@@ -331,7 +330,14 @@ class PolicyTrainer(Actor, Configurable):
             f"step {self.policy_version}"
         )
 
-        assert len(self.model_parts) == 1
+        # RL does not support pipeline parallelism yet, so the trainer
+        # owns one model part.
+        if len(self.model_parts) != 1:
+            raise ValueError(
+                f"PolicyTrainer expects exactly one model part, got "
+                f"{len(self.model_parts)} (pipeline parallelism is not yet "
+                "supported in RL)."
+            )
         model = self.model_parts[0]
 
         local_batch = train_data[self.dp_rank]
@@ -370,30 +376,28 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        loss_output: LossOutput = self.loss_fn(
+        loss_output = self.loss_fn(
             policy_logprobs=policy_logprobs,
             advantages=advantages,
             num_global_valid_tokens=num_global_valid_tokens,
         )
 
-        verification: LogprobVerificationOutput = verify_logprob_identity(
-            local_batch.token_logprobs,
-            policy_logprobs,
-            device=device,
-        )
-
         self.optimizers.zero_grad()
         loss_output.loss.backward()
 
-        # Assemble per-rank metric for global reduction (already normalized)
+        # Metrics for bitwise verification of policy logprobs.
+        verification: LogprobVerificationOutput = verify_logprob_identity(
+            local_batch.token_logprobs,
+            policy_logprobs,
+            num_global_valid_tokens=num_global_valid_tokens,
+            device=device,
+        )
+
+        # Per-rank pre-normalized metrics, so SUM-reducing reconstructs the global.
         sum_reduced_metrics = {
             **loss_output.metrics,
-            "bit_wise/logprob_diff/mean": (
-                verification.logprob_diff_sum / num_global_valid_tokens
-            ),
-            "bit_wise/ratio_tokens_different/mean": (
-                verification.num_tokens_different / num_global_valid_tokens
-            ),
+            "bit_wise/logprob_diff/mean": verification.logprob_diff_mean,
+            "bit_wise/ratio_tokens_different/mean": verification.ratio_tokens_different,
         }
         max_reduced_metrics = {
             "bit_wise/logprob_diff/max": verification.logprob_diff_max,
@@ -445,9 +449,7 @@ class PolicyTrainer(Actor, Configurable):
         return OptimStepOutput(
             policy_version=self.policy_version,
             metrics={
-                "train/grad_norm/mean": (
-                    grad_norm.item() if hasattr(grad_norm, "item") else float(grad_norm)
-                ),
+                "train/grad_norm/mean": float(grad_norm.item()),
                 "train/lr": current_lr,
                 "train/policy_version": float(self.policy_version),
             },

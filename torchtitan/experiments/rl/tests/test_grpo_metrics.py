@@ -23,12 +23,10 @@ import torch
 from torchtitan.experiments.rl.grpo import (
     _build_reward_metrics,
     _population_std,
-    _RL_TRAIN_HEADLINE_METRIC_PATTERNS,
-    _RL_VALIDATION_HEADLINE_METRIC_PATTERNS,
     GRPOLoss,
+    LossOutput,
     RLTrainer,
 )
-from torchtitan.experiments.rl.loss.types import LossOutput
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion, Step, Trajectory
 
@@ -74,14 +72,14 @@ class TestBuildRewardMetrics:
             "reward/component/format",
         }
         for entry in metrics:
-            assert isinstance(entry.reduction, m.Mean)
+            assert isinstance(entry.value, m.Mean)
 
     def test_components_observed_in_some_steps_only(self) -> None:
         # `format` only appears in step #2 — it should average over that
         # one step (no zero-fill).
         reward_dicts = [{"correctness": 1.0}, {"format": 0.5}]
         metrics = _build_reward_metrics("reward/component", reward_dicts)
-        agg = m.aggregate_metrics(metrics)
+        agg = m.MetricLogger._aggregate_metrics(metrics)
         assert agg["reward/component/correctness/mean"] == 1.0
         assert agg["reward/component/format/mean"] == 0.5
 
@@ -105,9 +103,11 @@ def _completion(
     prompt_len: int,
     response_len: int,
     finish_reason: str | None = "stop",
+    *,
+    policy_version: int = 0,
 ) -> Completion:
     return Completion(
-        policy_version=0,
+        policy_version=policy_version,
         prompt_idx=prompt_idx,
         prompt_token_ids=list(range(prompt_len)),
         text="x" * response_len,
@@ -118,7 +118,7 @@ def _completion(
 
 
 class _FakeEnv:
-    """Minimal env stub: ``step(text)`` returns a preset reward dict."""
+    """Minimal env stub: step(text) returns a preset reward dict."""
 
     def __init__(self, rewards: dict[str, float]):
         self.prompt = "p"
@@ -161,7 +161,7 @@ class TestCollectRollouts:
             num_groups=2, step=0
         )
         assert len(trajectories) == len(completions)
-        agg = m.aggregate_metrics(rollout_metrics)
+        agg = m.MetricLogger._aggregate_metrics(rollout_metrics)
         # Length keys: Mean+Max for prompt/response, Max-only for total.
         assert "rollout/response_length/mean" in agg
         assert "rollout/response_length/max" in agg
@@ -169,13 +169,13 @@ class TestCollectRollouts:
         assert "rollout/prompt_length/max" in agg
         assert "rollout/total_length/max" in agg
         # Reward-component keys derived from env step output (now under
-        # the top-level ``reward/`` namespace).
+        # the top-level reward/ namespace).
         assert "reward/component/correctness/mean" in agg
         assert "reward/component/format/mean" in agg
 
     def test_truncation_rate(self) -> None:
-        """``rollout/truncation_rate`` averages
-        ``finish_reason == 'length'`` over completions."""
+        """rollout/truncation_rate averages
+        finish_reason == 'length' over completions."""
         controller = RLTrainer.__new__(RLTrainer)
         completions = [
             _completion(0, 4, 10, finish_reason="length"),
@@ -191,13 +191,13 @@ class TestCollectRollouts:
         controller._get_rank_0_value = lambda value, has_gpus=True: completions
 
         _, rollout_metrics = controller._collect_rollouts(num_groups=2, step=0)
-        agg = m.aggregate_metrics(rollout_metrics)
+        agg = m.MetricLogger._aggregate_metrics(rollout_metrics)
         # 3 of 4 completions hit max_tokens.
         assert agg["rollout/truncation_rate/mean"] == pytest.approx(0.75)
 
     def test_total_length_uses_per_episode_max(self) -> None:
-        """``rollout/total_length/max`` must be ``max(prompt+response per
-        episode)``, **not** ``max(prompt) + max(response)`` — the latter
+        """rollout/total_length/max must be max(prompt+response per
+        episode), **not** max(prompt) + max(response) — the latter
         may combine two different episodes."""
         controller = RLTrainer.__new__(RLTrainer)
 
@@ -215,7 +215,7 @@ class TestCollectRollouts:
         controller._get_rank_0_value = lambda value, has_gpus=True: completions
 
         _, rollout_metrics = controller._collect_rollouts(num_groups=3, step=0)
-        agg = m.aggregate_metrics(rollout_metrics)
+        agg = m.MetricLogger._aggregate_metrics(rollout_metrics)
         per_side_max_sum = max(c.prompt_token_ids[-1] + 1 for c in completions) + max(
             c.token_ids[-1] + 1 for c in completions
         )  # = 10 + 10 = 20
@@ -227,9 +227,16 @@ class TestCollectRollouts:
 
 
 def _trajectory(
-    sample_idx: int, prompt_len: int, response_len: int, reward: float
+    sample_idx: int,
+    prompt_len: int,
+    response_len: int,
+    reward: float,
+    *,
+    policy_version: int = 0,
 ) -> Trajectory:
-    completion = _completion(sample_idx, prompt_len, response_len)
+    completion = _completion(
+        sample_idx, prompt_len, response_len, policy_version=policy_version
+    )
     return Trajectory(
         sample_idx=sample_idx,
         transitions=[(completion, _step({"r": reward}))],
@@ -246,8 +253,8 @@ class TestBuildEpisodes:
         ]
         episodes, episode_metrics = RLTrainer._build_episodes(trajectories)
         assert len(episodes) == 4
-        agg = m.aggregate_metrics(episode_metrics)
-        # Stats expansion (5 sub-keys each, top-level reward/advantage).
+        agg = m.MetricLogger._aggregate_metrics(episode_metrics)
+        # SummaryStats expansion (5 sub-keys each, top-level reward/advantage).
         for prefix in ("reward", "advantage"):
             for sub in ("max", "mean", "min", "std", "sum"):
                 assert f"{prefix}/_{sub}" in agg
@@ -255,10 +262,36 @@ class TestBuildEpisodes:
         assert "reward/group_std/mean" in agg
         assert "reward/group_std/max" in agg
         assert "reward/zero_std_frac" in agg
-        # num_prompts/num_episodes were dropped — make sure they don't
+        # Per-rollout policy version distribution (min/max only).
+        assert "rollout/policy_version/mean" not in agg
+        assert "rollout/policy_version/min" in agg
+        assert "rollout/policy_version/max" in agg
+        # num_prompts/num_episodes were dropped: make sure they don't
         # creep back in.
         assert "rollout/num_prompts" not in agg
         assert "rollout/num_episodes" not in agg
+
+    def test_policy_version_metrics_single_version(self) -> None:
+        """When all rollouts came from the same policy version, min == max."""
+        single_version = [
+            _trajectory(0, 4, 5, reward=1.0, policy_version=5),
+            _trajectory(1, 4, 5, reward=0.5, policy_version=5),
+        ]
+        _, em = RLTrainer._build_episodes(single_version)
+        agg = m.MetricLogger._aggregate_metrics(em)
+        assert agg["rollout/policy_version/min"] == 5.0
+        assert agg["rollout/policy_version/max"] == 5.0
+
+    def test_policy_version_metrics_mixed_versions(self) -> None:
+        """Mixed rollout versions emit min and max."""
+        mixed_versions = [
+            _trajectory(0, 4, 5, reward=1.0, policy_version=2),
+            _trajectory(1, 4, 5, reward=0.5, policy_version=4),
+        ]
+        _, em = RLTrainer._build_episodes(mixed_versions)
+        agg = m.MetricLogger._aggregate_metrics(em)
+        assert agg["rollout/policy_version/min"] == 2.0
+        assert agg["rollout/policy_version/max"] == 4.0
 
     def test_degenerate_group_fraction(self) -> None:
         # Two groups: both constant => fraction == 1.0.
@@ -269,7 +302,7 @@ class TestBuildEpisodes:
             _trajectory(1, 4, 5, reward=0.5),
         ]
         _, em = RLTrainer._build_episodes(all_constant)
-        agg = m.aggregate_metrics(em)
+        agg = m.MetricLogger._aggregate_metrics(em)
         assert agg["reward/zero_std_frac"] == 1.0
 
         # Mixed: one group constant (degenerate), one group varied.
@@ -280,7 +313,7 @@ class TestBuildEpisodes:
             _trajectory(1, 4, 5, reward=1.0),
         ]
         _, em = RLTrainer._build_episodes(mixed)
-        agg = m.aggregate_metrics(em)
+        agg = m.MetricLogger._aggregate_metrics(em)
         assert agg["reward/zero_std_frac"] == 0.5
 
         # Both groups have variance => 0.0.
@@ -291,7 +324,7 @@ class TestBuildEpisodes:
             _trajectory(1, 4, 5, reward=1.5),
         ]
         _, em = RLTrainer._build_episodes(none_constant)
-        agg = m.aggregate_metrics(em)
+        agg = m.MetricLogger._aggregate_metrics(em)
         assert agg["reward/zero_std_frac"] == 0.0
 
 
@@ -301,32 +334,29 @@ class TestBuildEpisodes:
 
 
 class TestRLTrainerConfigWiring:
-    def test_metrics_default_uses_headline_patterns(self) -> None:
+    def test_metrics_default_uses_factory(self) -> None:
         cfg = RLTrainer.Config()
+        baseline = m.MetricsConfig()
+        assert cfg.metrics.console_log_keys_train == baseline.console_log_keys_train
         assert (
-            cfg.metrics.train_console_allow_list == _RL_TRAIN_HEADLINE_METRIC_PATTERNS
-        )
-        assert (
-            cfg.metrics.validation_console_allow_list
-            == _RL_VALIDATION_HEADLINE_METRIC_PATTERNS
+            cfg.metrics.console_log_keys_validation
+            == baseline.console_log_keys_validation
         )
 
     def test_metrics_defaults_are_independent_copies(self) -> None:
-        """Mutating one Config's allow lists must not bleed into other
-        instances or into the module constants."""
+        """Mutating one Config's allow lists must not bleed into other instances."""
         cfg = RLTrainer.Config()
-        cfg.metrics.train_console_allow_list.append("X")
-        cfg.metrics.validation_console_allow_list.append("Y")
-        assert "X" not in _RL_TRAIN_HEADLINE_METRIC_PATTERNS
-        assert "Y" not in _RL_VALIDATION_HEADLINE_METRIC_PATTERNS
-        # And a fresh Config still has the pristine defaults.
+        cfg.metrics.console_log_keys_train.append("X")
+        cfg.metrics.console_log_keys_validation.append("Y")
+        # A fresh Config still has the pristine defaults.
         fresh = RLTrainer.Config()
-        assert "X" not in fresh.metrics.train_console_allow_list
-        assert "Y" not in fresh.metrics.validation_console_allow_list
+        assert "X" not in fresh.metrics.console_log_keys_train
+        assert "Y" not in fresh.metrics.console_log_keys_validation
 
     def test_metrics_default_wandb_disabled(self) -> None:
         cfg = RLTrainer.Config()
         assert cfg.metrics.enable_wandb is False
+        assert cfg.metrics.enable_tensorboard is False
 
 
 # ---------------------------------------------------------------------------
@@ -335,45 +365,82 @@ class TestRLTrainerConfigWiring:
 
 
 class TestGRPOLossBridge:
-    def test_returns_loss_output_with_token_weighted_sums(self) -> None:
+    def test_loss_keeps_gradient(self) -> None:
+        """`loss` must remain differentiable so `.backward()` works.
+        Regression test for `_token_weighted_mean` accidentally detaching."""
         loss_fn = GRPOLoss(GRPOLoss.Config(clip_eps=0.2))
-        # Two samples with unequal response lengths so the token-weighted
-        # bridge differs from naive sample averaging.
+        policy_logprobs = [
+            torch.zeros(2, requires_grad=True),
+            torch.zeros(8, requires_grad=True),
+        ]
+
+        out = loss_fn(
+            policy_logprobs=policy_logprobs,
+            advantages=torch.tensor([1.0, -1.0]),
+            num_global_valid_tokens=torch.tensor(10.0),
+        )
+
+        assert out.loss.requires_grad
+        assert out.loss.grad_fn is not None
+        out.loss.backward()
+        assert all(sample.grad is not None for sample in policy_logprobs)
+
+    def test_returns_loss_output_with_pre_normalized_metrics(self) -> None:
+        loss_fn = GRPOLoss(GRPOLoss.Config(clip_eps=0.2))
+        # Two samples with unequal response lengths.
         policy_logprobs = [
             torch.zeros(2, requires_grad=True),
             torch.zeros(8, requires_grad=True),
         ]
         advantages = torch.tensor([1.0, -1.0])
+        # Single-rank case: global == local valid tokens.
+        num_global_valid_tokens = torch.tensor(10.0)
 
-        out = loss_fn(policy_logprobs=policy_logprobs, advantages=advantages)
+        out = loss_fn(
+            policy_logprobs=policy_logprobs,
+            advantages=advantages,
+            num_global_valid_tokens=num_global_valid_tokens,
+        )
         assert isinstance(out, LossOutput)
-        assert out.num_local_valid_tokens.item() == 10.0
         for key in ("loss/total", "loss/ratio/mean", "loss/ratio/clipped_frac"):
-            assert key in out.token_mean_metric_sums
-        # `loss/pg` is no longer emitted — it was a duplicate of `loss/total`.
-        assert "loss/pg" not in out.token_mean_metric_sums
+            assert key in out.metrics
 
-    def test_loss_total_diverges_from_loss_item_under_unequal_lengths(self) -> None:
-        """Bridged ``loss/total`` is token-weighted across samples, so
-        under unequal response lengths it differs from ``loss.item()``
-        (an unweighted sample mean). Pin the divergence."""
+    def test_loss_is_token_weighted_sum_over_global_tokens(self) -> None:
+        """loss = sum_i(sample_loss_i * num_tokens_i) / num_global_valid_tokens.
+
+        Under unequal response lengths this differs from a naive sample mean.
+        """
         loss_fn = GRPOLoss(GRPOLoss.Config(clip_eps=0.2))
         policy_logprobs = [
             torch.full((2,), 0.1, requires_grad=True),
             torch.full((8,), 0.0, requires_grad=True),
         ]
         advantages = torch.tensor([1.0, -1.0])
+        num_global_valid_tokens = torch.tensor(10.0)
 
-        out = loss_fn(policy_logprobs=policy_logprobs, advantages=advantages)
-        token_weighted_loss_total = (
-            out.token_mean_metric_sums["loss/total"].item()
-            / out.num_local_valid_tokens.item()
+        out = loss_fn(
+            policy_logprobs=policy_logprobs,
+            advantages=advantages,
+            num_global_valid_tokens=num_global_valid_tokens,
         )
-        assert not math.isclose(
-            token_weighted_loss_total,
+        # loss/total metric is the same value as out.loss (both pre-normalized).
+        assert math.isclose(
+            out.metrics["loss/total"].item(),
             out.loss.item(),
-            rel_tol=1e-4,
-            abs_tol=1e-6,
+            rel_tol=1e-6,
+        )
+
+        # And it is NOT equal to the unweighted sample mean of policy gradient
+        # losses, which is what the prior implementation used.
+        per_sample_mean_logprobs = torch.stack(
+            [sample_logprobs.mean() for sample_logprobs in policy_logprobs]
+        )
+        ratio = torch.exp(per_sample_mean_logprobs)
+        clipped_ratio = torch.clamp(ratio, 1 - 0.2, 1 + 0.2)
+        sample_pg_losses = -torch.min(ratio * advantages, clipped_ratio * advantages)
+        unweighted_sample_mean = float(sample_pg_losses.mean().item())
+        assert not math.isclose(
+            out.loss.item(), unweighted_sample_mean, rel_tol=1e-4, abs_tol=1e-6
         )
 
 
@@ -398,78 +465,41 @@ def _stub_trainer_for_reducers(dp_size: int):
     return inst
 
 
-def _zero_verification(
-    device: torch.device | None = None,
-) -> "LogprobVerificationOutput":
-    from torchtitan.experiments.rl.actors.utils import LogprobVerificationOutput
-
-    device = device or torch.device("cpu")
-    zero = torch.zeros((), dtype=torch.float32, device=device)
-    return LogprobVerificationOutput(
-        logprob_diff_sum=zero,
-        logprob_diff_max=zero,
-        num_tokens_different=zero,
-    )
-
-
 class TestReducerFastPaths:
     def test_single_dp_identical(self) -> None:
-        from torchtitan.experiments.rl.actors.utils import LogprobVerificationOutput
-
+        # Pre-normalized values pass through SUM-reduce unchanged on a single
+        # rank (no mesh -> no all-reduce -> values are exactly what we passed).
         trainer = _stub_trainer_for_reducers(dp_size=1)
         out = trainer.reduce_forward_backward_metrics(
-            loss_metric_sums={"loss/total": torch.tensor(12.0)},
-            verification=LogprobVerificationOutput(
-                logprob_diff_sum=torch.tensor(0.004),  # 0.001 mean * 4 tokens
-                logprob_diff_max=torch.tensor(0.005),
-                num_tokens_different=torch.tensor(0.0),
-            ),
-            num_local_valid_tokens=torch.tensor(4.0),
+            sum_reduced_metrics={
+                "loss/total": torch.tensor(3.0),
+                "bit_wise/logprob_diff/mean": torch.tensor(0.001),
+                "bit_wise/ratio_tokens_different/mean": torch.tensor(0.0),
+            },
+            max_reduced_metrics={"bit_wise/logprob_diff/max": torch.tensor(0.005)},
         )
-        # 4 valid tokens, numerator 12.0 -> mean 3.0
         assert out["loss/total"] == pytest.approx(3.0)
-        # diff_sum 0.004 / 4 tokens -> 0.001
         assert out["bit_wise/logprob_diff/mean"] == pytest.approx(0.001)
         assert out["bit_wise/logprob_diff/max"] == pytest.approx(0.005)
         assert out["bit_wise/ratio_tokens_different/mean"] == 0.0
 
-    def test_single_dp_one_token_differs(self) -> None:
-        from torchtitan.experiments.rl.actors.utils import LogprobVerificationOutput
+    def test_unbiased_sum_reduction_across_ranks(self) -> None:
+        """Two ranks contribute pre-normalized shares; SUM-reducing
+        reconstructs the global value.
 
-        trainer = _stub_trainer_for_reducers(dp_size=1)
-        out = trainer.reduce_forward_backward_metrics(
-            loss_metric_sums={},
-            verification=LogprobVerificationOutput(
-                logprob_diff_sum=torch.tensor(0.0),
-                logprob_diff_max=torch.tensor(0.0),
-                num_tokens_different=torch.tensor(1.0),
-            ),
-            num_local_valid_tokens=torch.tensor(4.0),
-        )
-        # 1 of 4 tokens differs -> ratio 0.25
-        assert out["bit_wise/ratio_tokens_different/mean"] == pytest.approx(0.25)
-
-    def test_unbiased_reduction_under_unequal_tokens(self) -> None:
-        """Two ranks with unequal token counts: token-weighted mean must
-        equal `Σ numerator / Σ denominator`, not the mean-of-means.
-
-        Rank 0: numerator=10, tokens=5  (local mean 2.0)
-        Rank 1: numerator=30, tokens=10 (local mean 3.0)
-        mean-of-means = 2.5; correct = 40/15 = 2.6667
+        Rank 0 shares: loss/total=10/15 (token-weighted local share).
+        Rank 1 shares: loss/total=30/15.
+        SUM-reduce: 40/15 = 2.667 (the global token-weighted mean).
         """
         trainer = _stub_trainer_for_reducers(dp_size=2)
         trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
 
-        # Real per-rank shapes: SUM pack is
-        #   [loss/total, logprob_diff_sum, num_tokens_different, denom]
-        rank0 = torch.tensor([10.0, 0.0, 0.0, 5.0], dtype=torch.float64)
-        rank1 = torch.tensor([30.0, 0.0, 0.0, 10.0], dtype=torch.float64)
+        rank0_share = torch.tensor([10.0 / 15.0], dtype=torch.float32)
+        rank1_share = torch.tensor([30.0 / 15.0], dtype=torch.float32)
 
         def fake_all_reduce(t, *, reduceOp, group):
-            # Identify the SUM pack by length-4 shape; everything else is
-            # the MAX pack and we don't combine here.
-            if t.numel() == rank0.numel():
-                return rank0 + rank1
+            if t.numel() == 1 and t.dtype == torch.float32:
+                return rank0_share + rank1_share
             return t
 
         with patch(
@@ -477,30 +507,135 @@ class TestReducerFastPaths:
             side_effect=fake_all_reduce,
         ):
             out = trainer.reduce_forward_backward_metrics(
-                loss_metric_sums={"loss/total": torch.tensor(10.0)},
-                verification=_zero_verification(),
-                num_local_valid_tokens=torch.tensor(5.0),
+                sum_reduced_metrics={"loss/total": rank0_share[0]},
+                max_reduced_metrics={"bit_wise/logprob_diff/max": torch.tensor(0.0)},
             )
         assert out["loss/total"] == pytest.approx(40.0 / 15.0)
 
-    def test_pack_layout_simulated_two_dp(self) -> None:
-        """Pack-layout sanity check: doubling every value preserves the
-        global mean. Catches off-by-one indexing in slice-by-`n_loss`."""
+    def test_max_reduce_path(self) -> None:
+        """MAX-reduced metrics compose via elementwise max across ranks.
+
+        Patches funcol.all_reduce to dispatch on reduceOp: SUM doubles
+        (simulating two ranks contributing equal shares); MAX takes the
+        elementwise max with a higher second-rank value.
+        """
+        import torch.distributed.distributed_c10d as c10d
+
         trainer = _stub_trainer_for_reducers(dp_size=2)
         trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
 
+        rank1_max = torch.tensor([0.006], dtype=torch.float32)
+
+        def fake_all_reduce(t, *, reduceOp, group):
+            if reduceOp == c10d.ReduceOp.SUM.name:
+                return t * 2
+            if reduceOp == c10d.ReduceOp.MAX.name:
+                return torch.maximum(t, rank1_max)
+            raise AssertionError(f"unexpected reduceOp={reduceOp!r}")
+
         with patch(
             "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
-            side_effect=lambda t, *, reduceOp, group: t * 2,
+            side_effect=fake_all_reduce,
         ):
             out = trainer.reduce_forward_backward_metrics(
-                loss_metric_sums={
-                    "loss/total": torch.tensor(6.0),
-                    "loss/ratio/mean": torch.tensor(2.0),
-                },
-                verification=_zero_verification(),
-                num_local_valid_tokens=torch.tensor(3.0),
+                sum_reduced_metrics={"loss/total": torch.tensor(0.5)},
+                max_reduced_metrics={"bit_wise/logprob_diff/max": torch.tensor(0.003)},
             )
-        # Doubling numerator + denominator => same ratio: 12/6, 4/6
-        assert out["loss/total"] == pytest.approx(2.0)
-        assert out["loss/ratio/mean"] == pytest.approx(2.0 / 3.0)
+        # SUM doubled: 0.5 + 0.5 = 1.0. MAX = max(0.003, 0.006) = 0.006.
+        assert out["loss/total"] == pytest.approx(1.0)
+        assert out["bit_wise/logprob_diff/max"] == pytest.approx(0.006)
+
+    def test_sum_only_skips_max_collective(self) -> None:
+        """max_reduced_metrics={} must not crash and must not call the
+        MAX collective; the SUM bucket is still reduced normally."""
+        import torch.distributed.distributed_c10d as c10d
+
+        trainer = _stub_trainer_for_reducers(dp_size=2)
+        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
+
+        seen_ops: list[str] = []
+
+        def fake_all_reduce(t, *, reduceOp, group):
+            seen_ops.append(reduceOp)
+            if reduceOp == c10d.ReduceOp.SUM.name:
+                return t * 2
+            raise AssertionError(f"unexpected reduceOp={reduceOp!r}")
+
+        with patch(
+            "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
+            side_effect=fake_all_reduce,
+        ):
+            out = trainer.reduce_forward_backward_metrics(
+                sum_reduced_metrics={"loss/total": torch.tensor(0.5)},
+                max_reduced_metrics={},
+            )
+        assert seen_ops == [c10d.ReduceOp.SUM.name]
+        assert out == {"loss/total": pytest.approx(1.0)}
+
+    def test_max_only_skips_sum_collective(self) -> None:
+        """sum_reduced_metrics={} must not crash and must not call the
+        SUM collective; the MAX bucket is still reduced normally."""
+        import torch.distributed.distributed_c10d as c10d
+
+        trainer = _stub_trainer_for_reducers(dp_size=2)
+        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
+
+        seen_ops: list[str] = []
+        rank1_max = torch.tensor([0.006], dtype=torch.float32)
+
+        def fake_all_reduce(t, *, reduceOp, group):
+            seen_ops.append(reduceOp)
+            if reduceOp == c10d.ReduceOp.MAX.name:
+                return torch.maximum(t, rank1_max)
+            raise AssertionError(f"unexpected reduceOp={reduceOp!r}")
+
+        with patch(
+            "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
+            side_effect=fake_all_reduce,
+        ):
+            out = trainer.reduce_forward_backward_metrics(
+                sum_reduced_metrics={},
+                max_reduced_metrics={
+                    "bit_wise/logprob_diff/max": torch.tensor(0.003),
+                },
+            )
+        assert seen_ops == [c10d.ReduceOp.MAX.name]
+        assert out == {"bit_wise/logprob_diff/max": pytest.approx(0.006)}
+
+    def test_both_empty_returns_empty(self) -> None:
+        """Both buckets empty: no collectives called, empty dict returned."""
+        trainer = _stub_trainer_for_reducers(dp_size=2)
+        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
+        with patch(
+            "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
+            side_effect=AssertionError("should not be called"),
+        ):
+            out = trainer.reduce_forward_backward_metrics(
+                sum_reduced_metrics={},
+                max_reduced_metrics={},
+            )
+        assert out == {}
+
+
+class TestReduceValidTokens:
+    def test_no_loss_mesh_returns_local(self) -> None:
+        trainer = _stub_trainer_for_reducers(dp_size=1)
+        out = trainer._reduce_valid_tokens(torch.tensor(7.0))
+        assert out.item() == pytest.approx(7.0)
+
+    def test_clamp_min_one(self) -> None:
+        """A degenerate batch with zero local valid tokens still produces a
+        non-zero denominator so downstream divisions don't NaN."""
+        trainer = _stub_trainer_for_reducers(dp_size=1)
+        out = trainer._reduce_valid_tokens(torch.tensor(0.0))
+        assert out.item() == pytest.approx(1.0)
+
+    def test_with_mesh_sums_across_ranks(self) -> None:
+        trainer = _stub_trainer_for_reducers(dp_size=2)
+        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
+        with patch(
+            "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
+            side_effect=lambda t, *, reduceOp, group: t * 3,
+        ):
+            out = trainer._reduce_valid_tokens(torch.tensor(5.0))
+        assert out.item() == pytest.approx(15.0)

@@ -53,54 +53,54 @@ def extract_response_logprobs(
 
 @dataclass(frozen=True, slots=True)
 class LogprobVerificationOutput:
-    """Local generator/trainer logprob comparison metrics."""
+    """Generator vs trainer drift metrics, pre-normalized by global tokens."""
 
-    logprob_diff_sum: torch.Tensor
+    logprob_diff_mean: torch.Tensor
     logprob_diff_max: torch.Tensor
-    num_tokens_different: torch.Tensor
+    ratio_tokens_different: torch.Tensor
 
 
 def verify_logprob_identity(
     generator_token_logprobs: list[list[float]],
     trainer_token_logprobs: list[torch.Tensor],
     *,
+    num_global_valid_tokens: torch.Tensor,
     device: torch.device,
 ) -> LogprobVerificationOutput:
     """Compare generator and trainer response-token logprobs.
 
-    Raises:
-        ValueError: If sample counts or per-sample token counts differ.
+    Returns:
+        metrics pre-normalized by num_global_valid_tokens for later reduction.
     """
-    if len(generator_token_logprobs) != len(trainer_token_logprobs):
-        raise ValueError(
-            "verify_logprob_identity sample count mismatch: "
-            f"generator={len(generator_token_logprobs)}, "
-            f"trainer={len(trainer_token_logprobs)}"
+    with torch.no_grad():
+        # Each tensor has a different number of tokens, so we flatten them.
+        generator_flat = torch.as_tensor(
+            [v for sample in generator_token_logprobs for v in sample],
+            dtype=torch.float32,
+            device=device,
+        )
+        trainer_flat = torch.cat(trainer_token_logprobs).to(
+            device=device, dtype=torch.float32
         )
 
-    generator_tensors: list[torch.Tensor] = []
-    trainer_tensors: list[torch.Tensor] = []
-    for sample_idx, (generator_values, trainer_values) in enumerate(
-        zip(generator_token_logprobs, trainer_token_logprobs, strict=True)
-    ):
-        if len(generator_values) != trainer_values.numel():
+        if generator_flat.numel() == 0:
+            zero = torch.zeros((), dtype=torch.float32, device=device)
+            return LogprobVerificationOutput(zero, zero, zero)
+
+        # Aggregate shape check prevents PyTorch broadcast from silently
+        # masking a shape mismatch as wrong numbers.
+        if trainer_flat.shape != generator_flat.shape:
             raise ValueError(
-                "verify_logprob_identity token count mismatch for sample "
-                f"{sample_idx}: generator={len(generator_values)}, "
-                f"trainer={trainer_values.numel()}"
+                f"verify_logprob_identity shape mismatch: "
+                f"generator={generator_flat.shape}, trainer={trainer_flat.shape}"
             )
-        generator_tensors.append(
-            torch.tensor(generator_values, dtype=torch.float32, device=device)
-        )
-        trainer_tensors.append(
-            trainer_values.detach().to(device=device, dtype=torch.float32)
-        )
 
-    generator_flat = torch.cat(generator_tensors)
-    trainer_flat = torch.cat(trainer_tensors)
-    diff = trainer_flat - generator_flat
-    return LogprobVerificationOutput(
-        logprob_diff_sum=diff.sum(),
-        logprob_diff_max=diff.abs().max(),
-        num_tokens_different=(generator_flat != trainer_flat).sum().to(torch.float32),
-    )
+        diff = trainer_flat - generator_flat
+        return LogprobVerificationOutput(
+            logprob_diff_mean=diff.sum() / num_global_valid_tokens,
+            logprob_diff_max=diff.abs().max(),
+            ratio_tokens_different=(
+                (generator_flat != trainer_flat).sum().to(torch.float32)
+                / num_global_valid_tokens
+            ),
+        )

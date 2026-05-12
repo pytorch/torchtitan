@@ -37,12 +37,12 @@ import torch
 import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
+
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.config.configs import CompileConfig
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.loss.types import LossOutput
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import (
     Completion,
@@ -56,31 +56,36 @@ from torchtitan.protocols.model_spec import ModelSpec
 logger = logging.getLogger(__name__)
 
 
-def masked_mean(
-    values: torch.Tensor,
-    mask: torch.Tensor,
-    loss_scale: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Compute masked mean: sum(values * mask) / divisor.
-
-    Can be specially useful in distributed settings, where loss_scale is the global
-    number of tokens / grad_avg_group_size. This ensures that normalization
-    takes into account all tokens in the batch, not just the local ones.
+@dataclass(kw_only=True, slots=True)
+class LossOutput:
+    """Loss scalar and loss-owned metrics returned by an RL loss.
 
     Args:
-        values (torch.Tensor): Per-token values (B, S).
-        mask (torch.Tensor): Valid token mask (B, S).
-        loss_scale (torch.Tensor | None): If provided, use as divisor instead of mask.sum().
-
-    Returns:
-        torch.Tensor: Scalar mean.
+        loss: Scalar tensor used for loss.backward().
+        metrics: Per-rank metric tensors that the trainer SUM-reduces across
+            the loss mesh. Producers must pre-normalize each value by the
+            global token count so SUM-reducing reconstructs the global
+            metric.
     """
-    masked_sum = (values * mask).sum()
-    if loss_scale is not None:
-        divisor = loss_scale.clamp(min=1.0)
-    else:
-        divisor = mask.sum().clamp(min=1.0)
-    return masked_sum / divisor
+
+    loss: torch.Tensor
+    metrics: dict[str, torch.Tensor]
+
+
+def _token_weighted_mean(
+    values: torch.Tensor,
+    *,
+    num_tokens_by_sample: torch.Tensor,
+    num_global_valid_tokens: torch.Tensor,
+) -> torch.Tensor:
+    """Each rank's share of the global token-weighted mean of `values`.
+
+    Computed as `sum(values * num_tokens_by_sample) / num_global_valid_tokens`.
+    SUM-reducing this share across the loss mesh reconstructs the global mean.
+    """
+    return (
+        values * num_tokens_by_sample.to(values.dtype)
+    ).sum() / num_global_valid_tokens
 
 
 class GRPOLoss(Configurable):
@@ -118,25 +123,26 @@ class GRPOLoss(Configurable):
         # pg = policy gradient.
         sample_pg_losses = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
-        # Each rank publishes its share of the global token-weighted mean;
-        # the reducer SUM-reduces shares to reconstruct the global value.
-        token_weighted_pg_sum = _token_weighted_sum(
-            sample_pg_losses, num_tokens_by_sample=response_lens
+        pg_loss = _token_weighted_mean(
+            sample_pg_losses,
+            num_tokens_by_sample=response_lens,
+            num_global_valid_tokens=num_global_valid_tokens,
         )
-        pg_loss = token_weighted_pg_sum / num_global_valid_tokens
 
         with torch.no_grad():
             clipped_frac = (torch.abs(ratio - clipped_ratio) > 1e-6).to(ratio.dtype)
             metrics = {
                 "loss/total": pg_loss.detach(),
-                "loss/ratio/mean": _token_weighted_sum(
-                    ratio, num_tokens_by_sample=response_lens
-                )
-                / num_global_valid_tokens,
-                "loss/ratio/clipped_frac": _token_weighted_sum(
-                    clipped_frac, num_tokens_by_sample=response_lens
-                )
-                / num_global_valid_tokens,
+                "loss/ratio/mean": _token_weighted_mean(
+                    ratio,
+                    num_tokens_by_sample=response_lens,
+                    num_global_valid_tokens=num_global_valid_tokens,
+                ),
+                "loss/ratio/clipped_frac": _token_weighted_mean(
+                    clipped_frac,
+                    num_tokens_by_sample=response_lens,
+                    num_global_valid_tokens=num_global_valid_tokens,
+                ),
             }
 
         return LossOutput(
@@ -191,36 +197,6 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
         reward_str = f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
         logger.info(f"  [prompt {item.prompt_idx}]{reward_str}")
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
-
-
-def _default_metrics_config() -> m.MetricsConfig:
-    """Build the default MetricsConfig for RL training.
-
-    Sets the train/validation console allow-lists to a curated, headline
-    subset of the metrics RL emits. Backend toggles (W&B, TensorBoard)
-    keep their dataclass defaults (off); the user enables them explicitly.
-    """
-    return m.MetricsConfig(
-        # Default metric keys printed to console; W&B receives all metrics.
-        # Patterns are passed to re.search; bare strings act as substrings.
-        console_log_keys_train=[
-            "loss/total",
-            "loss/ratio/clipped_frac",
-            "reward/_mean",
-            "reward/_max",
-            "reward/zero_std_frac",
-            "rollout/response_length/max",
-            "train/grad_norm/mean",
-            "train/lr",
-            "perf/tokens_per_second",
-            "timing/step",
-        ],
-        console_log_keys_validation=[
-            "validation/reward/_mean",
-            "validation/reward/_max",
-            "validation/response_length/mean",
-        ],
-    )
 
 
 def _population_std(values: list[float]) -> float:
@@ -301,7 +277,7 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
-        metrics: m.MetricsConfig = field(default_factory=_default_metrics_config)
+        metrics: m.MetricsConfig = field(default_factory=m.MetricsConfig)
 
         def __post_init__(self):
             if self.trainer.debug.batch_invariant:
@@ -553,7 +529,7 @@ class RLTrainer(Configurable):
 
         self.metric_logger = config.metrics.build(
             log_dir=config.dump_folder,
-            config_dict=config.to_dict(),
+            job_config=config.to_dict(),
         )
 
     def _collect_rollouts(
@@ -743,13 +719,15 @@ class RLTrainer(Configurable):
                 self.trainer.forward_backward.call(batches).get()
             )
             optim_output = self._get_rank_0_value(self.trainer.optim_step.call().get())
+            trainer_policy_version = optim_output.policy_version
+            optimizer_metrics = optim_output.metrics
             train_s = time.perf_counter() - train_start
 
             # --- weight sync ---
             push_start = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
             weight_sync_push_s = time.perf_counter() - push_start
-            self.generator.pull_model_state_dict.call(optim_output.policy_version).get()
+            self.generator.pull_model_state_dict.call(trainer_policy_version).get()
             weight_sync_total_s = time.perf_counter() - push_start
 
             # --- divergence check before any logging ---
@@ -766,7 +744,7 @@ class RLTrainer(Configurable):
             # Actor metrics are already globally reduced; NoReduce passes them through.
             step_metrics += [m.Metric(k, m.NoReduce(v)) for k, v in fwd_metrics.items()]
             step_metrics += [
-                m.Metric(k, m.NoReduce(v)) for k, v in optim_output.metrics.items()
+                m.Metric(k, m.NoReduce(v)) for k, v in optimizer_metrics.items()
             ]
             step_metrics += rollout_metrics
             step_metrics += episode_metrics

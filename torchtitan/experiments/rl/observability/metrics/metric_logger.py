@@ -14,7 +14,7 @@ import re
 import sys
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from torchtitan.components.metrics import (
@@ -24,7 +24,7 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config import Configurable
 from torchtitan.tools.console_format import fmt_metric_value
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import logger, warn_once
 from torchtitan.tools.utils import Color, NoColor
 
 from .types import Metric, MetricValue
@@ -141,23 +141,39 @@ class MetricLogger(Configurable):
             train/validation console allow lists.
         log_dir: Filesystem directory required when enable_wandb or
             enable_tensorboard is true; backends write under it.
-        job_config_dict: Job config logged to wandb to reproduce the run. It is **not**
-            a config dict to initialize wandb.
-        backends: Optional pre-built backends (e.g. a custom JSONL writer)
-            appended in addition to whatever the config-driven backends
-            produce.
+        job_config: Full training job config snapshot, forwarded to
+            experiment-tracking backends (W&B) as run metadata.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         """Metric logger configuration."""
 
-        console_log_keys_train: list[str] | None = None
+        console_log_keys_train: list[str] | None = field(
+            default_factory=lambda: [
+                "loss/total",
+                "loss/ratio/clipped_frac",
+                "reward/_mean",
+                "reward/_max",
+                "reward/zero_std_frac",
+                "rollout/response_length/max",
+                "train/grad_norm/mean",
+                "train/lr",
+                "perf/tokens_per_second",
+                "timing/step",
+            ]
+        )
         """Regex search patterns selecting console keys for train log lines.
         None prints every key; [] prints nothing. Backends always
         receive every reduced metric regardless of this filter."""
 
-        console_log_keys_validation: list[str] | None = None
+        console_log_keys_validation: list[str] | None = field(
+            default_factory=lambda: [
+                "validation/reward/_mean",
+                "validation/reward/_max",
+                "validation/response_length/mean",
+            ]
+        )
         """Same as console_log_keys_train but used when
         MetricLogger.log is called with is_validation=True."""
 
@@ -176,19 +192,19 @@ class MetricLogger(Configurable):
         config: Config,
         *,
         log_dir: str | None = None,
-        config_dict: dict[str, Any] | None = None,
-        backends: Sequence[MetricBackend] | None = None,
+        job_config: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
-        self._backends: list[MetricBackend] = list(backends or [])
+        self._backends: list[MetricBackend] = []
         if (config.enable_wandb or config.enable_tensorboard) and log_dir is None:
             raise ValueError(
                 "log_dir is required when enable_wandb or enable_tensorboard is True"
             )
         if config.enable_wandb:
             os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
+            # Core WandBLogger keeps `config_dict=`; pass through.
             self._backends.append(
-                WandbMetricLogger(log_dir=log_dir, config_dict=config_dict)
+                WandbMetricLogger(log_dir=log_dir, config_dict=job_config)
             )
         if config.enable_tensorboard:
             self._backends.append(TensorBoardLogger(log_dir=log_dir))
@@ -222,9 +238,14 @@ class MetricLogger(Configurable):
             reduced_outputs = value_cls.reduce(values)
             # A reduction can emit multiple outputs (e.g. SummaryStats).
             for output_suffix, value in reduced_outputs.items():
-                if isinstance(value, float) and math.isnan(value):
-                    continue
                 output_key = f"{key}/{output_suffix}" if output_suffix else key
+                if isinstance(value, float) and math.isnan(value):
+                    warn_once(
+                        logger,
+                        f"Dropping NaN metric {output_key} from "
+                        f"{value_cls.__name__} reduction.",
+                    )
+                    continue
                 if output_key in reduced_metrics:
                     raise ValueError(
                         f"Duplicate aggregated metric key {output_key!r}. "
