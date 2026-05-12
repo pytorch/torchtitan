@@ -547,15 +547,18 @@ def defer_offload_waits(
 
     deferred = 0
     for node, wait_node in wait_offload_map.items():
+        node_idx = node_to_region_idx.get(node)
+        if node_idx is None:
+            continue
+
         # The dep arg on wait_tensor encodes the last forward consumer
         # of the offloaded node's storage (set during insertion).
         dep = wait_node.args[2] if len(wait_node.args) > 2 else node
-        consumer_idx = node_to_region_idx.get(dep)
-        if consumer_idx is None:
-            continue
+        dep_idx = node_to_region_idx.get(dep, node_idx)
 
-        # Defer N regions past the consumer.
-        target_idx = min(consumer_idx + n_layers, len(fwd_anchors) - 1)
+        # Defer at least n_layers past the node for D2H overlap, but
+        # never before the last consumer (correctness).
+        target_idx = min(max(node_idx + n_layers, dep_idx), len(fwd_anchors) - 1)
         anchor = fwd_anchors[target_idx]
         anchor.append(wait_node)
         deferred += 1
