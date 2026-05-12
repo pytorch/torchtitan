@@ -531,7 +531,7 @@ def get_joint_custom_passes_from_config(
         if pass_name == "cpu_offload":
             raise ValueError(
                 "cpu_offload is not a joint pass. "
-                "Use --compile.memory_policy=budget_limited_offload in aot_fx_trace mode instead."
+                "Use --compile.memory_policy=sac_and_offload in aot_fx_trace mode instead."
             )
         if pass_name not in AVAILABLE_JOINT_PASSES:
             raise ValueError(
