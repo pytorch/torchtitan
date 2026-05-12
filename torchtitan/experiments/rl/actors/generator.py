@@ -204,8 +204,15 @@ class VLLMGenerator(Actor, Configurable):
             compile_config=compile_config,
         )
 
-        # Set vLLM environment variables from config before any vLLM initialization
-        os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        from torchtitan.models.common.attention import FlexAttention
+
+        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        self._use_flex = isinstance(inner_attn, FlexAttention.Config)
+
+        if self._use_flex:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        else:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
 
         set_batch_invariance(config.debug.batch_invariant)
 
@@ -234,14 +241,20 @@ class VLLMGenerator(Actor, Configurable):
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
-                backend=AttentionBackendEnum.CUSTOM,
+                backend=AttentionBackendEnum.FLEX_ATTENTION
+                if self._use_flex
+                else AttentionBackendEnum.CUSTOM,
             ),
             disable_log_stats=True,
         )
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
-        # FA2 requires block_size to be a multiple of 256
-        if not has_cuda_capability(9, 0):
+
+        if config.vllm_attn_backend == "flex":
+            engine_kwargs["enable_chunked_prefill"] = False
+        elif not has_cuda_capability(9, 0):
+            # FA2 requires block_size to be a multiple of 256
             engine_kwargs["block_size"] = 256
+
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
         )
