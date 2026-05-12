@@ -158,8 +158,6 @@ class CheckpointManager(Configurable):
         config (Checkpoint): The config used to configure the checkpointing.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
             with config.folder
-        The model's ``sd_adapter`` attribute provides HF I/O config (storage
-            reader/writer, fqn mapping, assets path) and key transforms.
 
     """
 
@@ -590,8 +588,6 @@ class CheckpointManager(Configurable):
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
-            # TODO: Since we flatten the model states in state_dict, we need to
-            # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
                 self.model_wrapper.load_state_dict(state_dict)
 
@@ -616,6 +612,7 @@ class CheckpointManager(Configurable):
         if not self._should_save(curr_step, last_step):
             return False
 
+        sl.add_step_tag("checkpoint_save")
         begin = time.monotonic()
         logger.info("Saving the checkpoint (or staging if async is enabled).")
         checkpoint_id = self._create_checkpoint_id(curr_step)
@@ -852,9 +849,9 @@ class CheckpointManager(Configurable):
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Flatten the model states into a single dictionary.
+        """Flatten model keys alongside training states.
 
-        Note that other states, such as optimizer states, are not flattened.
+        The caller must set ``self.model_wrapper.mode`` before calling.
         """
         states = state_dict if state_dict is not None else self.states
         sd = {k: v for k, v in states.items() if k != MODEL}
@@ -868,7 +865,6 @@ class CheckpointManager(Configurable):
         Resume always loads FULL model (base + adapters if present).
         The caller sets ``self.model_wrapper.mode`` to FULL before calling.
         """
-        # For the first step, we will only load the model.
         if model_only:
             return self.states[MODEL].state_dict()
 
@@ -883,10 +879,6 @@ class CheckpointManager(Configurable):
         return self._flattened_model_states_sd(states_to_load)
 
     def _save_last_step(self, curr_step: int) -> None:
-        # We only consider saving model only at the end of the training. So this
-        # won't affect preemption and training resume. We also only allow dtype
-        # conversion when we are checkpointing model only and the current dtype
-        # is not the same as the export dtype at the end of the training.
         if self.last_save_trainable_only:
             save_mode = StateDictMode.TRAINABLE
         else:
