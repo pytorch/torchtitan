@@ -397,3 +397,9 @@ AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "apply_sac": tag_sac_policy,
 }
+
+# Import paged stash registrations (registers additional policies + pipelines + hooks)
+try:
+    import torchtitan.experiments.graph_trainer.paged_stash_memory_policy  # noqa: F401, E402
+except ImportError:
+    pass

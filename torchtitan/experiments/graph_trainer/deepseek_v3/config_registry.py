@@ -37,7 +37,11 @@ def graph_trainer_deepseek_v3_debugmodel_ep() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel_ep(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        memory_policy="paged_stash",
+        pass_pipeline="paged_stash",
+    )
     config.model_spec = model_registry(
         "debugmodel",
         moe_comm_backend="hybridep",
