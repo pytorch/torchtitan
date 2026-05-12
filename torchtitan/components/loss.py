@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,9 +24,12 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
-def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+def cross_entropy_loss(
+    pred: torch.Tensor, labels: torch.Tensor, *, full_dtensor: bool = False
+) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
-    if isinstance(pred, DTensor) and isinstance(labels, DTensor):
+    if full_dtensor:
+        assert isinstance(pred, DTensor) and isinstance(labels, DTensor)
         return _cross_entropy_via_local_map(pred, labels)
 
     return torch.nn.functional.cross_entropy(
@@ -128,7 +132,10 @@ class BaseLoss(ABC, Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        full_dtensor: bool = False
+        """If True, ``cross_entropy_loss`` routes through the local_map path
+        that handles batch/seq-sharded DTensor inputs. Set by the model's
+        ``update_from_config`` from ``parallelism.full_dtensor``."""
 
     @abstractmethod
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
@@ -163,7 +170,9 @@ class CrossEntropyLoss(BaseLoss):
         pass
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        self.fn: LossFunction = cross_entropy_loss
+        self.fn: LossFunction = functools.partial(
+            cross_entropy_loss, full_dtensor=config.full_dtensor
+        )
         self._maybe_compile(compile_config)
 
 
@@ -315,7 +324,9 @@ class ChunkedCELoss(BaseLoss):
         *,
         compile_config: CompileConfig | None = None,
     ):
-        self.fn: LossFunction = cross_entropy_loss
+        self.fn: LossFunction = functools.partial(
+            cross_entropy_loss, full_dtensor=config.full_dtensor
+        )
         self._maybe_compile(compile_config)
         self.num_chunks = config.num_chunks
         self.lm_head: nn.Module | None = None

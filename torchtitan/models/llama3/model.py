@@ -119,6 +119,8 @@ class Llama3Model(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
             )
 
+            trainer_config.loss.full_dtensor = parallelism.full_dtensor
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
