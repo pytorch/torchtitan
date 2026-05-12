@@ -321,6 +321,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
             skip_rocm_test=True,
         ),
+        # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
         OverrideDefinitions(
             [
                 [
@@ -606,9 +607,6 @@ def _build_async_tp_tests() -> list[OverrideDefinitions]:
 def _build_autoparallel_tests() -> list[OverrideDefinitions]:
     """AutoParallel integration tests for default runners."""
     return [
-        # TODO: Disabled due to upstream AutoParallel regression in PyTorch
-        # nightly dev20260508. AutoParallel rejects FakeTensor device
-        # mismatch (traced on meta vs actual cuda). Re-enable once fixed.
         OverrideDefinitions(
             [
                 [
@@ -623,7 +621,6 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
             "autoparallel llama3 FSDP+TP",
             "autoparallel_llama3_fsdp_tp",
             ngpu=4,
-            disabled=True,
         ),
     ]
 
@@ -631,9 +628,6 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
 def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
     """AutoParallel integration tests that require H100 runners."""
     return [
-        # TODO: Disabled due to upstream AutoParallel regression in PyTorch
-        # nightly dev20260508. AutoParallel rejects FakeTensor device
-        # mismatch (traced on meta vs actual cuda). Re-enable once fixed.
         OverrideDefinitions(
             [
                 [
@@ -649,7 +643,6 @@ def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
             "autoparallel deepseek_v3 EFSDP+EP",
             "autoparallel_deepseek_v3_efsdp_ep",
             ngpu=4,
-            disabled=True,
         ),
     ]
 
