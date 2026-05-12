@@ -53,13 +53,15 @@ def extract_response_logprobs(
 
 @dataclass(frozen=True, slots=True)
 class LogprobVerificationOutput:
-    """Generator vs trainer drift metrics, pre-normalized by global tokens."""
+    """Generator vs trainer drift metrics normalized by `num_global_valid_tokens`,
+    so trainer can sum all-reduce them."""
 
     logprob_diff_mean: torch.Tensor
     logprob_diff_max: torch.Tensor
     ratio_tokens_different: torch.Tensor
 
 
+@torch.no_grad()
 def verify_logprob_identity(
     generator_token_logprobs: list[list[float]],
     trainer_token_logprobs: list[torch.Tensor],
@@ -69,38 +71,36 @@ def verify_logprob_identity(
 ) -> LogprobVerificationOutput:
     """Compare generator and trainer response-token logprobs.
 
+    Args:
+        vllm_token_log_probs: Per-token log probs from vLLM (generator)
+        batch_token_log_probs: Per-token log probs computed by the trainer model
+        num_global_valid_tokens: Number of valid tokens in the batch, summed
+            across all ranks. Used to normalize the output metrics.
+        device: Device to use for tensor allocation, so metrics are ready for
+            reduction across ranks.
+
     Returns:
         metrics pre-normalized by num_global_valid_tokens for later reduction.
     """
-    with torch.no_grad():
-        # Each tensor has a different number of tokens, so we flatten them.
-        generator_flat = torch.as_tensor(
-            [v for sample in generator_token_logprobs for v in sample],
-            dtype=torch.float32,
-            device=device,
-        )
-        trainer_flat = torch.cat(trainer_token_logprobs).to(
-            device=device, dtype=torch.float32
-        )
+    # Each tensor has a different number of tokens, so we flatten them.
+    generator_flat = torch.as_tensor(
+        [v for sample in generator_token_logprobs for v in sample],
+        dtype=torch.float32,
+        device=device,
+    )
+    trainer_flat = torch.cat(trainer_token_logprobs).to(
+        device=device, dtype=torch.float32
+    )
 
-        if generator_flat.numel() == 0:
-            zero = torch.zeros((), dtype=torch.float32, device=device)
-            return LogprobVerificationOutput(zero, zero, zero)
+    if generator_flat.numel() == 0:
+        zero = torch.zeros((), dtype=torch.float32, device=device)
+        return LogprobVerificationOutput(zero, zero, zero)
 
-        # Aggregate shape check prevents PyTorch broadcast from silently
-        # masking a shape mismatch as wrong numbers.
-        if trainer_flat.shape != generator_flat.shape:
-            raise ValueError(
-                f"verify_logprob_identity shape mismatch: "
-                f"generator={generator_flat.shape}, trainer={trainer_flat.shape}"
-            )
-
-        diff = trainer_flat - generator_flat
-        return LogprobVerificationOutput(
-            logprob_diff_mean=diff.sum() / num_global_valid_tokens,
-            logprob_diff_max=diff.abs().max(),
-            ratio_tokens_different=(
-                (generator_flat != trainer_flat).sum().to(torch.float32)
-                / num_global_valid_tokens
-            ),
-        )
+    diff = trainer_flat - generator_flat
+    return LogprobVerificationOutput(
+        logprob_diff_mean=diff.sum() / num_global_valid_tokens,
+        logprob_diff_max=diff.abs().max(),
+        ratio_tokens_different=(
+            (generator_flat != trainer_flat).sum() / num_global_valid_tokens
+        ),
+    )

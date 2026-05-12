@@ -292,8 +292,7 @@ class PolicyTrainer(Actor, Configurable):
             max_reduced_metrics: Per-rank values to be MAX-reduced.
 
         Returns:
-            {key: float} after collective reduction. Either input dict
-            may be empty.
+            {key: float} after collective reduction.
         """
         loss_mesh = self.parallel_dims.get_optional_mesh("loss")
 
@@ -305,9 +304,7 @@ class PolicyTrainer(Actor, Configurable):
             if not values_by_key:
                 continue
             keys = list(values_by_key)
-            stacked = torch.stack(
-                [values_by_key[key].detach().to(torch.float32) for key in keys]
-            )
+            stacked = torch.stack([values_by_key[key].detach() for key in keys])
             if loss_mesh is not None:
                 stacked = funcol.all_reduce(stacked, reduceOp=op.name, group=loss_mesh)
             for key, value in zip(keys, stacked.cpu().tolist(), strict=True):
@@ -376,26 +373,26 @@ class PolicyTrainer(Actor, Configurable):
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        loss_output = self.loss_fn(
+        loss, loss_metrics = self.loss_fn(
             policy_logprobs=policy_logprobs,
             advantages=advantages,
             num_global_valid_tokens=num_global_valid_tokens,
         )
 
         self.optimizers.zero_grad()
-        loss_output.loss.backward()
+        loss.backward()
 
         # Metrics for bitwise verification of policy logprobs.
         verification: LogprobVerificationOutput = verify_logprob_identity(
-            local_batch.token_logprobs,
-            policy_logprobs,
+            generator_token_logprobs=local_batch.token_logprobs,
+            trainer_token_logprobs=policy_logprobs,
             num_global_valid_tokens=num_global_valid_tokens,
             device=device,
         )
 
         # Per-rank pre-normalized metrics, so SUM-reducing reconstructs the global.
         sum_reduced_metrics = {
-            **loss_output.metrics,
+            **loss_metrics,
             "bit_wise/logprob_diff/mean": verification.logprob_diff_mean,
             "bit_wise/ratio_tokens_different/mean": verification.ratio_tokens_different,
         }
@@ -410,13 +407,7 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     async def optim_step(self) -> OptimStepOutput:
-        """Clip gradients, step optimizer + LR scheduler, return updated state.
-
-        Returns:
-            OptimStepOutput with the new policy_version and a small
-            dict of post-step scalars (LR, grad_norm, policy_version) that
-            the controller forwards to the metric logger.
-        """
+        """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules (see Tinker API).
 

@@ -4,16 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""MetricLogger + console rendering for typed metrics. See README.md."""
+"""MetricsProcessor for typed metrics. See README.md."""
 
 from __future__ import annotations
 
 import math
 import os
-import re
-import sys
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,121 +21,25 @@ from torchtitan.components.metrics import (
     WandBLogger,
 )
 from torchtitan.config import Configurable
-from torchtitan.tools.console_format import fmt_metric_value
 from torchtitan.tools.logging import logger, warn_once
-from torchtitan.tools.utils import Color, NoColor
 
+from .metric_console_logging import log_to_console
 from .types import Metric, MetricValue
 
 
 __all__ = [
     "MetricBackend",
-    "MetricLogger",
-    "WandbMetricLogger",
-    "log_to_console",
+    "MetricsProcessor",
 ]
 
 
-# Public name for torchtitan's W&B backend within this package.
-WandbMetricLogger = WandBLogger
-
-
-# ---------------------------------------------------------------------------
-# Console rendering (stateless utility, called inside MetricLogger.log).
-# ---------------------------------------------------------------------------
-
-
-# Color cycle for the console output. Skip `black` (invisible on dark
-# terminals) and `white` (low-contrast on light terminals); `red` is
-# reserved for the leading "{prefix} | Step:" rendering.
-_COLOR_CYCLE = [
-    name
-    for name in vars(Color)
-    if not name.startswith("_") and name not in ("reset", "black", "white", "red")
-]
-
-
-# Visual separator framing the metric line so it stands out from
-# surrounding actor / framework log spam.
-_CONSOLE_SEPARATOR = "-" * 10
-
-
-def _filter_allow_list(
-    metrics: dict[str, Any],
-    allow_list: Sequence[str] | None,
-) -> list[str]:
-    """Expand allow_list patterns against metrics keys.
-
-    None returns every key in alphabetical order; [] returns [].
-    """
-    if allow_list is None:
-        return sorted(metrics)
-    seen: list[str] = []
-    seen_set: set[str] = set()
-    for raw in allow_list:
-        pattern = re.compile(raw)
-        matches = sorted(
-            key for key in metrics if pattern.search(key) and key not in seen_set
-        )
-        for key in matches:
-            seen.append(key)
-            seen_set.add(key)
-    return seen
-
-
-def log_to_console(
-    step: int,
-    metrics: dict[str, Any],
-    *,
-    allow_list: Sequence[str] | None,
-    console_prefix: str = "Train",
-) -> None:
-    """Print one console metric line.
-
-    Example:
-        log_to_console(
-            step=5,
-            metrics={"loss/total": 0.42, "reward/_mean": 1.25},
-            allow_list=["loss"],
-            console_prefix="Train",
-        )
-        # Logs: Train | Step:  5  loss/total: 0.42
-
-    Args:
-        step: Step number to display.
-        metrics: Reduced metrics dict.
-        allow_list: Regex search patterns. None prints all keys; [] prints
-            nothing; a list prints matching keys in pattern order.
-        console_prefix: Text rendered before the step, e.g. "Train" or
-            "Validation".
-    """
-    keys = _filter_allow_list(metrics, allow_list)
-    if not keys:
-        return
-
-    # `isatty` detects if the output is a terminal. If it is, we can use colors.
-    color = Color() if sys.stdout.isatty() else NoColor()
-    parts = [f"{color.red}{console_prefix} | Step: {step:2}"]
-    for i, key in enumerate(keys):
-        color_name = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
-        tone = getattr(color, color_name)
-        parts.append(f"{tone}{key}: {fmt_metric_value(metrics[key])}")
-    parts.append(color.reset)
-    # Single log call so the timestamp prefix only appears once per step.
-    # Leading separator visually splits this line from other logs.
-    logger.info("%s\n%s", _CONSOLE_SEPARATOR, "  ".join(parts))
-
-
-# ---------------------------------------------------------------------------
-# MetricLogger
-# ---------------------------------------------------------------------------
-
-
-class MetricLogger(Configurable):
+class MetricsProcessor(Configurable):
     """Aggregates Metric records and dispatches to backends and console.
 
+    TODO: unify with torchtitan/components/metrics.py:MetricsProcessor.
+
     Args:
-        config: MetricLogger.Config with backend toggles and the
+        config: MetricsProcessor.Config with backend toggles and the
             train/validation console allow lists.
         log_dir: Filesystem directory required when enable_wandb or
             enable_tensorboard is true; backends write under it.
@@ -147,11 +49,11 @@ class MetricLogger(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Metric logger configuration."""
+        """Metrics processor configuration."""
 
         console_log_keys_train: list[str] | None = field(
             default_factory=lambda: [
-                "loss/total",
+                "loss/mean",
                 "loss/ratio/clipped_frac",
                 "reward/_mean",
                 "reward/_max",
@@ -172,10 +74,11 @@ class MetricLogger(Configurable):
                 "validation/reward/_mean",
                 "validation/reward/_max",
                 "validation/response_length/mean",
+                "timing/validate",
             ]
         )
         """Same as console_log_keys_train but used when
-        MetricLogger.log is called with is_validation=True."""
+        MetricsProcessor.log is called with is_validation=True."""
 
         enable_wandb: bool = False
         """Log metrics to Weights & Biases."""
@@ -202,10 +105,7 @@ class MetricLogger(Configurable):
             )
         if config.enable_wandb:
             os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
-            # Core WandBLogger keeps `config_dict=`; pass through.
-            self._backends.append(
-                WandbMetricLogger(log_dir=log_dir, config_dict=job_config)
-            )
+            self._backends.append(WandBLogger(log_dir=log_dir, config_dict=job_config))
         if config.enable_tensorboard:
             self._backends.append(TensorBoardLogger(log_dir=log_dir))
 
@@ -226,7 +126,7 @@ class MetricLogger(Configurable):
                 Metric("reward", Max.from_list([0.0, 1.0])),
                 Metric("reward", Max(3)),
             ]
-            MetricLogger._aggregate_metrics(records)
+            MetricsProcessor._aggregate_metrics(records)
             # {"reward/mean": 3.0, "reward/max": 3.0}
         """
         groupped_metrics: dict[tuple[str, type], list[MetricValue]] = defaultdict(list)
@@ -270,16 +170,20 @@ class MetricLogger(Configurable):
         Args:
             step: Step number to display and pass to backends.
             metrics: Records to aggregate and emit.
-            is_validation: When True, use console_log_keys_validation
+            is_validation: When True, use `console_log_keys_validation`
                 and render the prefix "Validation | Step: ...".
+                If False, use `console_log_keys_train` and render "Train | Step: ...".
 
         Example:
-            metric_logger.log(step=step, metrics=train_metrics)
-            metric_logger.log(
+            metrics_processor.log(step=step, metrics=train_metrics)
+            metrics_processor.log(
                 step=step, metrics=validation_metrics, is_validation=True,
             )
         """
-        reduced = self._aggregate_metrics(metrics)
+        # aggregate metrics
+        reduced_metrics = self._aggregate_metrics(metrics)
+
+        # Log to console
         if is_validation:
             allow_list = self.config.console_log_keys_validation
             console_prefix = "Validation"
@@ -288,13 +192,15 @@ class MetricLogger(Configurable):
             console_prefix = "Train"
         log_to_console(
             step=step,
-            metrics=reduced,
+            metrics=reduced_metrics,
             allow_list=allow_list,
             console_prefix=console_prefix,
         )
+
+        # log to backends
         for backend in self._backends:
             try:
-                backend.log(reduced, step)
+                backend.log(reduced_metrics, step)
             except Exception:
                 logger.exception(
                     "metric backend %s failed at step %d",

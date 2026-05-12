@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import math
-
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol
@@ -29,20 +28,22 @@ __all__ = [
 
 
 class MetricValue(Protocol):
-    """Value object that defines how a Metric is reduced.
+    """Value object that holds a metric partial value and defines how it
+    should be reduced later.
 
-    Subclasses provide output_suffix, from_list, and reduce.
-    MetricLogger.aggregate_metrics groups records by (key, type) and
-    calls reduce on each group; the resulting output_suffix becomes
+    MetricsProcessor._aggregate_metrics groups `Metric` records by (key, type(MetricValue))
+    and calls reduce on each group; the resulting output_suffix becomes
     "<key>/<output_suffix>" in the flat dict sent to backends.
 
+    Subclasses provide `output_suffix`, `from_list`, and `reduce`.
+
     Example:
-        records = [
+        metrics = [
             Metric("reward", Mean.from_list([1.0, 3.0])),  # total=4, count=2
             Metric("reward", Mean(6.0, count=2)),          # total=6, count=2
             Metric("reward", Max.from_list([1.0, 4.0])),
         ]
-        # MetricLogger.aggregate_metrics(records) emits:
+        # in MetricsProcessor._aggregate_metrics(metrics)
         # {"reward/mean": 2.5, "reward/max": 4.0}
     """
 
@@ -51,6 +52,7 @@ class MetricValue(Protocol):
     Empty string emits the key unchanged (used by NoReduce)."""
 
     def __repr__(self) -> str:
+        """Human-readable representation of print(self)"""
         kvs = ", ".join(f"{k}={v!r}" for k, v in self.__dict__.items())
         return f"{type(self).__name__}({kvs})"
 
@@ -60,6 +62,9 @@ class MetricValue(Protocol):
 
         Args:
             values: Numeric observations to fold into running stats.
+
+        Example:
+            Mean.from_list([1.0, 3.0])  # Mean(value=4.0, count=2)
 
         Returns:
             A new MetricValue carrying the running totals.
@@ -82,20 +87,18 @@ class MetricValue(Protocol):
 
 @dataclass
 class Metric:
-    """A keyed metric record: a name plus a MetricValue payload.
+    """A metric record that holds a name and a MetricValue payload.
 
     Args:
-        key: Hierarchical metric name (e.g. "loss/total",
-            "rollout/response_length"). Records that share both key
-            and type(value) are combined; same key + different value
-            types stay separate (e.g. Mean vs Max).
-        value: How the record reduces. See MetricValue subclasses
-            (Mean, Max, Min, Sum, Std, SummaryStats,
-            NoReduce).
+        key (str): Metric name to be logged to console and backends (e.g. "reward").
+            Note: MetricValue will append output_suffix to the key,
+            e.g. "reward" becomes "reward/mean". This means that you
+            can define two metrics with the same key but different MetricValue types.
+        value (MetricValue): A MetricValue object.
 
     Example:
-        Metric("loss/total", NoReduce(0.42))
         Metric("rollout/response_length", Max.from_list([12, 18, 9]))
+        Metric("rollout/response_length", Mean.from_list([12, 18, 9]))
     """
 
     key: str
@@ -103,8 +106,31 @@ class Metric:
 
 
 class Mean(MetricValue):
-    """Weighted mean. Mean(value) records one observation; Mean(value,
-    count=N) records a pre-aggregated (sum, count) pair."""
+    """Weighted mean.
+
+    Say you have two sources of numbers, e.g.:
+    source_1 = [1,1,1]
+    source_2 = [2]
+
+    If you naively do mean of means, i.e. mean(mean(source_1), mean(source_2)),
+    you get mean(1,2) = 1.5, which is incorrect.
+
+    The correct way is to do mean(source_1 + source_2) = (1+1+1+2)/4 = 1.25.
+
+    To avoid holding all numbers in memory, we can hold the sum and count of each.
+    source_1 = (value=3, count=3)
+    source_2 = (value=2, count=1)
+    mean = (3+2)/(3+1) = 1.25
+
+    Args:
+        value: Sum of observations (or the single observation when count=1.0).
+        count (Optional): Number of observations. Defaults to 1.0.
+
+    Example:
+        Mean(value)                              # one obs
+        Mean(value, count=N)                     # pre-aggregated
+        Mean.from_list(values)                   # many obs
+    """
 
     output_suffix: ClassVar[str] = "mean"
 
@@ -329,7 +355,14 @@ class SummaryStats(MetricValue):
 
 
 class NoReduce(MetricValue):
-    """Already-reduced value; logged unchanged."""
+    """Already-reduced value. Use this as a MetricValue to wrap already reduced
+    values. The wrapping exists so that all metrics are processed the same way.
+
+    Example:
+        trainer_reduced_metrics: dict[str, float] = trainer.fwd_backward(batch)
+        metrics = []
+        for key, value in trainer_reduced_metrics.items():
+            metrics.append(Metric(key, NoReduce(value)))"""
 
     output_suffix: ClassVar[str] = ""
 

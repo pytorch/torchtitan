@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 import os
+import statistics
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -54,22 +55,6 @@ from torchtitan.experiments.rl.types import (
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(kw_only=True, slots=True)
-class LossOutput:
-    """Loss scalar and loss-owned metrics returned by an RL loss.
-
-    Args:
-        loss: Scalar tensor used for loss.backward().
-        metrics: Per-rank metric tensors that the trainer SUM-reduces across
-            the loss mesh. Producers must pre-normalize each value by the
-            global token count so SUM-reducing reconstructs the global
-            metric.
-    """
-
-    loss: torch.Tensor
-    metrics: dict[str, torch.Tensor]
 
 
 def _token_weighted_mean(
@@ -108,7 +93,7 @@ class GRPOLoss(Configurable):
         policy_logprobs: list[torch.Tensor],
         advantages: torch.Tensor,
         num_global_valid_tokens: torch.Tensor,
-    ) -> LossOutput:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         response_lens = torch.tensor(
             [sample_logprobs.numel() for sample_logprobs in policy_logprobs],
             device=advantages.device,
@@ -131,8 +116,8 @@ class GRPOLoss(Configurable):
 
         with torch.no_grad():
             clipped_frac = (torch.abs(ratio - clipped_ratio) > 1e-6).to(ratio.dtype)
-            metrics = {
-                "loss/total": pg_loss.detach(),
+            loss_metrics = {
+                "loss/mean": pg_loss.detach(),
                 "loss/ratio/mean": _token_weighted_mean(
                     ratio,
                     num_tokens_by_sample=response_lens,
@@ -145,10 +130,7 @@ class GRPOLoss(Configurable):
                 ),
             }
 
-        return LossOutput(
-            loss=pg_loss,
-            metrics=metrics,
-        )
+        return pg_loss, loss_metrics
 
 
 class Provisioner:
@@ -197,15 +179,6 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
         reward_str = f" reward={item.reward:+.1f}" if hasattr(item, "reward") else ""
         logger.info(f"  [prompt {item.prompt_idx}]{reward_str}")
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
-
-
-def _population_std(values: list[float]) -> float:
-    """Population standard deviation; empty input returns NaN."""
-    if not values:
-        return float("nan")
-    mean = sum(values) / len(values)
-    variance = sum((value - mean) * (value - mean) for value in values) / len(values)
-    return math.sqrt(max(0.0, variance))
 
 
 def _build_reward_metrics(
@@ -277,7 +250,9 @@ class RLTrainer(Configurable):
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
         """VLLMGenerator actor configuration (vLLM engine, sampling)."""
 
-        metrics: m.MetricsConfig = field(default_factory=m.MetricsConfig)
+        metrics: m.MetricsProcessor.Config = field(
+            default_factory=m.MetricsProcessor.Config
+        )
 
         def __post_init__(self):
             if self.trainer.debug.batch_invariant:
@@ -305,16 +280,16 @@ class RLTrainer(Configurable):
     def __init__(self, config: Config):
         self.config = config
         self._proc_meshes = []
-        self.metric_logger: m.MetricLogger | None = None
+        self.metrics_processor: m.MetricsProcessor | None = None
 
     async def cleanup(self):
         """Stop all proc meshes to release GPU memory and close metric backends."""
-        if self.metric_logger is not None:
+        if self.metrics_processor is not None:
             try:
-                self.metric_logger.close()
+                self.metrics_processor.close()
             except Exception:
-                logger.exception("metric_logger close failed")
-            self.metric_logger = None
+                logger.exception("metrics_processor close failed")
+            self.metrics_processor = None
         for mesh in self._proc_meshes:
             try:
                 await mesh.stop()
@@ -527,7 +502,7 @@ class RLTrainer(Configurable):
         # pull weights for policy version 0 (initial weights)
         self.generator.pull_model_state_dict.call(0).get()
 
-        self.metric_logger = config.metrics.build(
+        self.metrics_processor = config.metrics.build(
             log_dir=config.dump_folder,
             job_config=config.to_dict(),
         )
@@ -586,7 +561,8 @@ class RLTrainer(Configurable):
         for sample_idx, group in groups.items():
             rewards = [t.total_reward for t in group]
             group_mean = sum(rewards) / len(rewards)
-            group_stds.append(_population_std([float(r) for r in rewards]))
+            # Population standard deviation; NaN for an empty group.
+            group_stds.append(statistics.pstdev(float(r) for r in rewards))
             for t in group:
                 # Single-turn: exactly one (completion, step) per trajectory.
                 c, _ = t.transitions[0]
@@ -642,6 +618,7 @@ class RLTrainer(Configurable):
 
         TODO: investigate using pass@k.
         """
+        t_validate_start = time.perf_counter()
         num_samples = self.config.num_validation_samples
         envs = [
             self.config.validation_env.build(step=0, group_idx=i)
@@ -679,6 +656,9 @@ class RLTrainer(Configurable):
             prefix="validation/reward/component",
             reward_dicts=[step_result.rewards for step_result in steps],
         )
+
+        t_validate_s = time.perf_counter() - t_validate_start
+        validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
         return validation_metrics
 
     async def train(self):
@@ -689,28 +669,28 @@ class RLTrainer(Configurable):
         # collect validation metrics before training
         # so we can compare before/after
         validation_metrics = await self.validate()
-        self.metric_logger.log(
+        self.metrics_processor.log(
             step=0,
             metrics=validation_metrics,
             is_validation=True,
         )
 
         for step in range(num_steps):
-            step_start = time.perf_counter()
+            t_step_start = time.perf_counter()
 
             # --- rollouts ---
-            rollout_start = time.perf_counter()
+            t_rollout_start = time.perf_counter()
             trajectories, rollout_metrics = self._collect_rollouts(
                 num_groups, step=step
             )
             episodes, episode_metrics = self._build_episodes(trajectories)
-            rollout_s = time.perf_counter() - rollout_start
+            t_rollout_s = time.perf_counter() - t_rollout_start
 
             if self.config.log_samples:
                 _log_samples(episodes)
 
             # --- train ---
-            train_start = time.perf_counter()
+            t_train_start = time.perf_counter()
             batches = [
                 self._collate_episodes(per_rank_episodes)
                 for per_rank_episodes in self._shard_episodes(episodes)
@@ -721,49 +701,58 @@ class RLTrainer(Configurable):
             optim_output = self._get_rank_0_value(self.trainer.optim_step.call().get())
             trainer_policy_version = optim_output.policy_version
             optimizer_metrics = optim_output.metrics
-            train_s = time.perf_counter() - train_start
+            t_train_s = time.perf_counter() - t_train_start
 
             # --- weight sync ---
-            push_start = time.perf_counter()
+            # TODO: we should have `push_model_state_dict` return `trainer_policy_version`
+            # instead of having `trainer.optim_step` return it
+            t_push_start = time.perf_counter()
             self.trainer.push_model_state_dict.call().get()
-            weight_sync_push_s = time.perf_counter() - push_start
+            t_weight_sync_push_s = time.perf_counter() - t_push_start
             self.generator.pull_model_state_dict.call(trainer_policy_version).get()
-            weight_sync_total_s = time.perf_counter() - push_start
-
+            t_weight_sync_total_s = time.perf_counter() - t_push_start
+            t_step_s = time.perf_counter() - t_step_start
             # --- divergence check before any logging ---
-            if not math.isfinite(fwd_metrics["loss/total"]):
+            if not math.isfinite(fwd_metrics["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
 
-            step_s = time.perf_counter() - step_start
+            # --- Prepare metrics ---
             total_tokens = sum(
                 len(ep.prompt_token_ids) + len(ep.token_ids) for ep in episodes
             )
 
             step_metrics: list[m.Metric] = []
+
+            step_metrics += rollout_metrics
+            step_metrics += episode_metrics
+
             # Actor metrics are already globally reduced; NoReduce passes them through.
             step_metrics += [m.Metric(k, m.NoReduce(v)) for k, v in fwd_metrics.items()]
             step_metrics += [
                 m.Metric(k, m.NoReduce(v)) for k, v in optimizer_metrics.items()
             ]
-            step_metrics += rollout_metrics
-            step_metrics += episode_metrics
+
+            # timing metrics
             for key, value in [
-                ("timing/step", step_s),
-                ("timing/rollout", rollout_s),
-                ("timing/train", train_s),
-                ("timing/weight_sync/push", weight_sync_push_s),
-                ("timing/weight_sync/total", weight_sync_total_s),
+                ("timing/step", t_step_s),
+                ("timing/rollout", t_rollout_s),
+                ("timing/train", t_train_s),
+                ("timing/weight_sync/push", t_weight_sync_push_s),
+                ("timing/weight_sync/total", t_weight_sync_total_s),
             ]:
                 step_metrics.append(m.Metric(key, m.NoReduce(value)))
+
             step_metrics.append(
-                m.Metric("perf/tokens_per_second", m.NoReduce(total_tokens / step_s))
+                m.Metric("perf/tokens_per_second", m.NoReduce(total_tokens / t_step_s))
             )
 
-            self.metric_logger.log(step=step, metrics=step_metrics, is_validation=False)
+            self.metrics_processor.log(
+                step=step, metrics=step_metrics, is_validation=False
+            )
 
         validation_metrics = await self.validate()
-        self.metric_logger.log(
+        self.metrics_processor.log(
             step=num_steps,
             metrics=validation_metrics,
             is_validation=True,
