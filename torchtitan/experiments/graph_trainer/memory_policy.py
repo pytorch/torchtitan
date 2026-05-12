@@ -86,7 +86,7 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
-def apply_sac_pass(
+def tag_sac_policy(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
@@ -215,7 +215,7 @@ def _default_memory_policy_pass(
     policy_fn = _make_default_memory_policy(
         fsdp_reshard_after_forward=fsdp_reshard_after_forward,
     )
-    apply_sac_pass(gm, policy_fn=policy_fn)
+    tag_sac_policy(gm, policy_fn=policy_fn)
     return gm
 
 
@@ -226,12 +226,12 @@ def _eager_memory_policy_pass(
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
     """SAC policy that alternates mm ops between save/recompute."""
-    apply_sac_pass(gm, policy_fn=_make_eager_memory_policy())
+    tag_sac_policy(gm, policy_fn=_make_eager_memory_policy())
     return gm
 
 
-@register_memory_policy("budget_limited_offload")
-def _budget_limited_offload_memory_policy_pass(
+@register_memory_policy("sac_and_offload")
+def _sac_and_offload_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
@@ -255,7 +255,7 @@ def tag_with_memory_policy_pass(
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
         eager: SAC alternating mm ops between save/recompute.
-        budget_limited_offload: SAC + CPU offload within budget.
+        sac_and_offload: SAC + CPU offload within budget.
 
     Other memory policies combining SAC and CPU offload can be added
     via ``register_memory_policy`` without modifying this function.

@@ -55,7 +55,7 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
-    apply_sac_pass,
+    tag_sac_policy,
     tag_with_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
@@ -395,5 +395,5 @@ AVAILABLE_COMPILER_PASSES = {
 # Registry for joint custom passes (applied before partitioning, AOT mode only)
 AVAILABLE_JOINT_PASSES = {
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "apply_sac": apply_sac_pass,
+    "apply_sac": tag_sac_policy,
 }
