@@ -98,6 +98,10 @@ class GraphTrainerCompileConfig(CompileConfig):
     path.
     """
 
+    enable_autoresearch_kernel_pass: bool = False
+    """Enable the autoresearch kernel pass, which replaces matched ops with
+    optimized kernels registered via ``register_autoresearch_kernel``."""
+
     enable_autoparallel: bool = False
     """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
     manual TP/FSDP/EP. Forces the AOT compilation path internally."""

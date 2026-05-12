@@ -204,6 +204,12 @@ def compile_time_passes(
 
             passes.append(annotate_rmsnorm_for_regional_inductor_pass)
         passes.append(regional_inductor_pass)
+        if config.compile.enable_autoresearch_kernel_pass:
+            from torchtitan.experiments.graph_trainer.autoresearch_kernel_pass import (
+                autoresearch_kernel_pass,
+            )
+
+            passes.append(autoresearch_kernel_pass)
         if use_cudagraph:
             # Must run before custom_codegen_pass (last in pre_passes)
             # which replaces the GraphModule's forward().
