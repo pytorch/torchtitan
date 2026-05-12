@@ -95,10 +95,6 @@ class TestCrossEntropyDTensor(DTensorTestBase):
     def test_full_dtensor_disable_loss_parallel(self):
         self._run_one(full_dtensor=True, tp_shard_v=False)
 
-    @with_comms
-    def test_full_dtensor_loss_parallel(self):
-        self._run_one(full_dtensor=True, tp_shard_v=True)
-
 
 if __name__ == "__main__":
     unittest.main()

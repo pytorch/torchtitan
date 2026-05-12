@@ -17,13 +17,8 @@ from torch.distributed.tensor.placement_types import Placement
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.protocols.sharding import (
-    NamedPlacement,
-    resolve_mesh,
-    resolve_placements,
-    resolve_shared_mesh,
-    ShardingConfig,
-)
+from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
+from torchtitan.protocols.types import NamedPlacement
 
 
 # Cache: maps nn.Module subclass -> created Module wrapper class.
@@ -242,7 +237,7 @@ class Module(nn.Module, Configurable):
                     "in sharding_config.state_shardings."
                 )
             axes = named_placements.keys()
-            mesh = resolve_mesh(axes, parallel_dims)
+            mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
             placements = resolve_placements(named_placements, mesh)
@@ -276,7 +271,7 @@ class Module(nn.Module, Configurable):
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
             axes = named_placements.keys()
-            mesh = resolve_mesh(axes, parallel_dims)
+            mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
             placements = resolve_placements(named_placements, mesh)
@@ -327,7 +322,7 @@ class Module(nn.Module, Configurable):
             p for p in lm.in_grad_placements if p is not None
         ]
 
-        resolved_mesh = resolve_shared_mesh(all_named, parallel_dims)
+        resolved_mesh = parallel_dims.resolve_shared_mesh(all_named)
         # This is True under non-full_dtensor mode with TP being disabled.
         if resolved_mesh is None:
             return fn
@@ -386,12 +381,14 @@ class Module(nn.Module, Configurable):
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
             grad_named_placements = in_grad_shardings.get(name)
-            mesh = resolve_shared_mesh(
-                [src_named_placements, dst_named_placements, grad_named_placements],
-                parallel_dims,
+            mesh = parallel_dims.resolve_shared_mesh(
+                [src_named_placements, dst_named_placements, grad_named_placements]
             )
             if mesh is None:
                 continue
+
+            if not isinstance(value, DTensor) and parallel_dims.full_dtensor:
+                raise ValueError("Got a plain Tensor under the full_dtensor mode.")
 
             if not isinstance(value, DTensor) and src_named_placements is not None:
                 layout = resolve_placements(src_named_placements, mesh)
@@ -430,8 +427,8 @@ class Module(nn.Module, Configurable):
 
         out_named_placements = sharding_config.out_dst_shardings
         out_grad_named_placements = sharding_config.local_output_grad_placements
-        mesh = resolve_shared_mesh(
-            [out_named_placements, out_grad_named_placements], parallel_dims
+        mesh = parallel_dims.resolve_shared_mesh(
+            [out_named_placements, out_grad_named_placements]
         )
         if mesh is None:
             return outputs
