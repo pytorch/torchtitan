@@ -100,10 +100,10 @@ def resolve_fsdp_mesh(
     1D ``dp_mesh`` and ``None``.
     """
     if full_dtensor:
-        spmd_mesh = parallel_dims.get_enabled_mesh(_DENSE_SPMD_AXES)
+        spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
         assert spmd_mesh is not None
         return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
-    dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+    dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
     assert dp_mesh is not None
     return dp_mesh, None
 
@@ -120,7 +120,7 @@ def parallelize_inputs(
     TP -> Replicate. Inputs are assumed already sharded; this only
     re-wraps via ``from_local``.
     """
-    mesh = parallel_dims.get_enabled_mesh(_DENSE_SPMD_AXES)
+    mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
     assert mesh is not None
     assert mesh.mesh_dim_names is not None
     input_shardings: dict[str, Placement] = {}
