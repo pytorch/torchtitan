@@ -539,6 +539,15 @@ def defer_offload_waits(
         if consumer_idx is None:
             continue
 
+        # If storage chain extends to a later region (cross-layer views),
+        # use the latest consumer region.
+        chain_nodes, _ = _get_storage_chain(node)
+        real_consumers = {n for n in chain_nodes if n.target not in _AO_OPS}
+        for c in real_consumers:
+            idx = node_to_region_idx.get(c)
+            if idx is not None:
+                consumer_idx = max(consumer_idx, idx)
+
         # Defer N regions past the production site. The async D2H starts
         # at the offload op (right after production), so deferring past
         # the production region gives enough overlap.
