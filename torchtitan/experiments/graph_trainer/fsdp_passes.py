@@ -39,7 +39,6 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
-    _is_recomputed_node,
     _MODULE_FQN,
 )
 from torchtitan.tools.logging import logger
@@ -70,6 +69,13 @@ def annotate_fsdp_all_gather(
     graph = gm.graph
 
     def force_recompute_node(node):
+        # Respect MUST_CPU_OFFLOAD set by ``tag_all_offloadable_activations``:
+        # the offload chain already keeps the activation off-GPU between
+        # forward and backward, so re-tagging as MUST_RECOMPUTE/MUST_SAVE
+        # would either undo the offload selection or re-save GPU memory we
+        # just freed.
+        if node.meta.get("recompute") == CheckpointPolicy.MUST_CPU_OFFLOAD:
+            return
         if reshard_after_forward:
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
         else:
@@ -448,9 +454,6 @@ def joint_transformer_block_bucketing_reordering_pass(
             defaults to ``"custom_ops"`` via the parent class.
     """
 
-    def _is_backward(node: torch.fx.Node) -> bool:
-        return _is_backward_node(node) or _is_recomputed_node(node)
-
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
         if not fqn:
@@ -461,7 +464,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         gm,
         module_bucket_plans,
         insert_overlap_deps,
-        is_backward_fn=_is_backward,
+        is_backward_fn=_is_backward_node,
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
     ).run()

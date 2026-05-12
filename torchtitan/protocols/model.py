@@ -7,7 +7,25 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 
+from torchtitan.config import Configurable
+
 from .module import Module
+
+
+class ModelConfigConverter(Configurable):
+    """Base class for converters that transform the model config tree.
+
+    Subclasses implement ``convert()`` to modify configs before model build
+    (e.g. quantization, LoRA).
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+    @abstractmethod
+    def convert(self, model_config) -> None:
+        raise NotImplementedError
 
 
 class BaseModel(Module):
