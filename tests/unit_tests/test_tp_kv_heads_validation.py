@@ -53,7 +53,8 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
         enable_sequence_parallel=False,
         full_dtensor=False,
     )
-    return SimpleNamespace(training=training, parallelism=parallelism)
+    loss = SimpleNamespace(full_dtensor=False)
+    return SimpleNamespace(training=training, parallelism=parallelism, loss=loss)
 
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
