@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -484,23 +485,35 @@ class Module(nn.Module, Configurable):
             device_mesh=mesh,
         )
 
-    def local_map_spmd(self, fn: Callable, lm: LocalMapConfig) -> Callable:
-        assert lm.in_placements is not None, (
-            "SPMD local_map requires explicit in_placements"
+    @staticmethod
+    def _resolve_placements_spmd(
+        placements: tuple, ndims: tuple[int | None, ...] | None,
+    ) -> tuple[tuple[dict, object], ...]:
+        if ndims is None:
+            ndims = (None,) * len(placements)
+        return tuple(
+            named_placement_to_spmd(p, ndim=nd)
+            for p, nd in zip(placements, ndims)
         )
-        in_ndims = lm.in_ndims or (None,) * len(lm.in_placements)
-        resolved_in = tuple(
-            None if p is None else named_placement_to_spmd(p, ndim=nd)
-            for p, nd in zip(lm.in_placements, in_ndims)
-        )
-        assert len(lm.out_placements) == 1, "spmd.local_map accepts 1 output"
-        outp = lm.out_placements[0]
-        out_nd = lm.out_ndims[0] if lm.out_ndims else None
-        resolved_out = None if outp is None else named_placement_to_spmd(outp, ndim=out_nd)
 
-        @spmd.local_map(in_types=resolved_in, out_types=resolved_out)
+    def local_map_spmd(self, fn: Callable, lm: LocalMapConfig) -> Callable:
+        resolved_in = self._resolve_placements_spmd(lm.in_placements, lm.in_ndims)
+        resolved_out = self._resolve_placements_spmd(lm.out_placements, lm.out_ndims)
+
+        def assert_types(tensors, specs):
+            if not spmd.is_type_checking():
+                return
+            for t, (types, pspec) in zip(tensors, specs):
+                if isinstance(t, torch.Tensor) and types:
+                    spmd.assert_type(t, types, partition_spec=pspec)
+
         def body(*args, **kwargs):
-            return fn(*args, **kwargs)
+            assert_types(args, resolved_in)
+            with spmd.typecheck(local=True) if spmd.is_type_checking() else contextlib.nullcontext():
+                result = fn(*args, **kwargs)
+            outputs = (result,) if isinstance(result, torch.Tensor) else result
+            assert_types(outputs, resolved_out)
+            return result
 
         return body
 
