@@ -405,14 +405,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
-    # TODO: Disabled due to upstream AutoParallel regression in PyTorch
-    # nightly dev20260508. AutoParallel rejects FakeTensor device
-    # mismatch (traced on meta vs actual cuda). Re-enable once fixed.
-    @unittest.skip("upstream AutoParallel FakeTensor device mismatch regression")
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 
-    @unittest.skip("upstream AutoParallel FakeTensor device mismatch regression")
     def test_deepseek_v3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_deepseek_v3_loss_compare())
 
