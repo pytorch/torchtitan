@@ -137,10 +137,6 @@ def tag_sac_policy(
         if fqn.startswith(("lm_head", "loss")):
             continue
 
-        # Skip metadata-only ops that don't produce tensors.
-        if node.target is torch.ops.device_mesh._get_submesh:
-            continue
-
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
