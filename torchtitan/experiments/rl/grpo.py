@@ -39,9 +39,12 @@ import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.config.configs import CompileConfig
-from torchtitan.config.manager import ConfigManager
+from torchtitan.config import (
+    CompileConfig,
+    ConfigManager,
+    Configurable,
+    ParallelismConfig,
+)
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.observability import metrics as m
@@ -279,22 +282,37 @@ class RLTrainer(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        self.trainer = None
+        self.generator = None
         self._proc_meshes = []
         self.metrics_processor: m.MetricsProcessor | None = None
 
-    async def cleanup(self):
-        """Stop all proc meshes to release GPU memory and close metric backends."""
+    async def close(self):
+        """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
+        logger.info("Closing: tearing down actors and process meshes.")
+        for actor_name, actor in (
+            ("trainer", self.trainer),
+            ("generator", self.generator),
+        ):
+            if actor is None:
+                continue
+            try:
+                await actor.close.call()
+            except Exception:
+                logger.exception("%s.close failed", actor_name)
+
         if self.metrics_processor is not None:
             try:
                 self.metrics_processor.close()
             except Exception:
                 logger.exception("metrics_processor close failed")
             self.metrics_processor = None
-        for mesh in self._proc_meshes:
+
+        for i, mesh in enumerate(self._proc_meshes):
             try:
                 await mesh.stop()
             except Exception:
-                pass
+                logger.exception("mesh.stop[%d] failed", i)
         self._proc_meshes = []
 
     def _get_rank_0_value(self, result, has_gpus: bool = True):
@@ -676,6 +694,12 @@ class RLTrainer(Configurable):
         )
 
         for step in range(num_steps):
+            # Cancellation point for Ctrl-C (KeyboardInterrupt) handling.
+            # This yields to the event loop to check for cancellation, which
+            # doesn't happen with `.get` calls.
+            # TODO: investigate replacing `.get()` with `await
+            await asyncio.sleep(0)
+
             t_step_start = time.perf_counter()
 
             # --- rollouts ---
@@ -760,11 +784,15 @@ class RLTrainer(Configurable):
 
 
 async def main():
-    """Run the distributed RL training loop using Monarch."""
     config = ConfigManager().parse_args()
     rl_trainer = RLTrainer(config)
-    await rl_trainer.setup()
-    await rl_trainer.train()
+    try:
+        await rl_trainer.setup()
+        await rl_trainer.train()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Interrupted; attempting graceful shutdown...")
+    finally:
+        await rl_trainer.close()
 
 
 if __name__ == "__main__":

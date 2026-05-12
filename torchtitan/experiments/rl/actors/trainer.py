@@ -22,12 +22,14 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import (
+from torchtitan.config import (
     ActivationCheckpointConfig,
+    CommConfig,
     CompileConfig,
+    Configurable,
     DebugConfig,
     ParallelismConfig,
+    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -176,6 +178,12 @@ class PolicyTrainer(Actor, Configurable):
         logger.debug(
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
+
+    @endpoint
+    async def close(self) -> None:
+        """Destroy the worker's torch.distributed process group."""
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
     def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
         """Load model weights from HF checkpoint using DCP and state_dict_adapter.
