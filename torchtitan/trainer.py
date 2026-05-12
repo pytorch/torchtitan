@@ -524,13 +524,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for model in self.model_parts:
                 convert_tp_states_for_compute(model, tp_pg)
 
-        if (
-            is_spmd_active()
-            and isinstance(self.loss_fn, ChunkedCELoss)
-            and parallel_dims.tp_enabled
-            and not config.parallelism.disable_loss_parallel
-        ):
-            self.loss_fn.loss_parallel = True
+        if is_spmd_active() and isinstance(self.loss_fn, ChunkedCELoss):
+            if parallel_dims.tp_enabled:
+                self.loss_fn.enable_sp = config.parallelism.enable_sequence_parallel
+                if not config.parallelism.disable_loss_parallel:
+                    self.loss_fn.loss_parallel = True
 
         # Build validator if validation is configured
         if config.validator.enable:

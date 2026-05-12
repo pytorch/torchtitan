@@ -265,9 +265,12 @@ def set_decoder_sharding_config(
         out_src = None
         out_dst = dense_activation_placement(tp=loss_tp)
 
+    # SPMD: ChunkedCELoss pre-all-gathers S(1)→R before the chunk loop,
+    # so lm_head input is always R@tp. DTensor: input is activation_tp.
+    lm_in_src_tp = shard.R() if is_spmd_active() else activation_tp
     config.lm_head.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=shard.S(0))},
-        in_src_shardings={"input": dense_activation_placement(tp=activation_tp)},
+        in_src_shardings={"input": dense_activation_placement(tp=lm_in_src_tp)},
         in_dst_shardings={"input": dense_activation_placement(tp=shard.R())},
         out_src_shardings=out_src,
         out_dst_shardings=out_dst,
