@@ -143,13 +143,13 @@ def _moe_wrapper_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     The flow under TP:
     - ``in_src_shardings`` declares the input arrives at ``sp_layout``.
     - ``in_dst_shardings`` redistributes input to ``Replicate`` (AG when
-      SP is on; no-op otherwise).
+      SP is on; no-op otherwise) and is also what ``local_map`` expects.
     - ``LocalMapConfig`` then converts the Replicate DTensor input to a
-      local tensor for the body. ``out_placements={TP: Partial()}`` wraps
-      the body's local output (which is the per-rank Partial sum of all
-      MoE contributions) as a ``Partial`` DTensor; ``in_grad_placements
-      ={TP: Partial()}`` declares that the body's input gradient is also
-      Partial on TP.
+      local tensor for the body. ``out_src_shardings={TP: Partial()}``
+      wraps the body's local output (which is the per-rank Partial sum of
+      all MoE contributions) as a ``Partial`` DTensor;
+      ``in_grad_placements={TP: Partial()}`` declares that the body's
+      input gradient is also Partial on TP.
     - ``out_dst_shardings`` redistributes ``Partial -> sp_layout`` (RS
       when SP is on; AR when SP is off).
 
@@ -161,10 +161,9 @@ def _moe_wrapper_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     return ShardingConfig(
         in_src_shardings={"x": dense_activation_placement(tp=sp_layout)},
         in_dst_shardings={"x": dense_activation_placement(tp=Replicate())},
+        out_src_shardings=dense_activation_placement(tp=Partial()),
         out_dst_shardings=dense_activation_placement(tp=sp_layout),
         local_map=LocalMapConfig(
-            in_placements=(dense_activation_placement(tp=Replicate()),),
-            out_placements=(dense_activation_placement(tp=Partial()),),
             in_grad_placements=(dense_activation_placement(tp=Partial()),),
         ),
     )

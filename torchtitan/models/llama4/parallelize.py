@@ -69,7 +69,7 @@ def parallelize_llama(
         # runs inside the local_map boundary on local tensors.
         if parallel_dims.cp_enabled:
             apply_cp_to_forward(
-                # pyrefly: ignore [missing-attribute, not-callable]
+                # pyrefly: ignore [missing-attribute]
                 [block.attention.inner_attention for block in model.layers.values()],
                 parallel_dims.get_mesh("cp"),
             )
@@ -101,13 +101,13 @@ def parallelize_llama(
             parallel_dims, parallelism.full_dtensor
         )
     else:
-        dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
         assert dp_mesh is not None
         dp_mesh_dims = None
         edp_mesh = None
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
-            edp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "efsdp"])
+            edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
 
     apply_fsdp(
         model,
@@ -267,27 +267,37 @@ def apply_fsdp(
                 # ep_degree > 1: per-param mesh
                 from torch.distributed.fsdp._fully_shard._fsdp_common import (
                     FSDPMeshInfo,
+                    HSDPMeshInfo,
                     ShardPlacementResult,
                 )
 
                 assert edp_mesh is not None
-                # Under full_dtensor, the meshes are SPMD meshes spanning
-                # multiple DP axes; pass dp_mesh_dims + spmd_mesh so FSDP2
-                # knows which axes are data-parallel. Under non-full_dtensor,
-                # dp_mesh_dims/edp_mesh_dims are None and FSDP uses the
-                # legacy single-axis (mesh, shard_mesh_dim=0) interpretation.
-                edp_mesh_info = FSDPMeshInfo(
-                    mesh=edp_mesh,
-                    shard_mesh_dim=0,
-                    dp_mesh_dims=edp_mesh_dims,
-                    spmd_mesh=edp_mesh if edp_mesh_dims is not None else None,
-                )
-                dp_mesh_info = FSDPMeshInfo(
-                    mesh=dp_mesh,
-                    shard_mesh_dim=0,
-                    dp_mesh_dims=dp_mesh_dims,
-                    spmd_mesh=dp_mesh if dp_mesh_dims is not None else None,
-                )
+
+                def _get_fsdp_mesh_info(
+                    mesh: DeviceMesh, mesh_dims: "Any"
+                ) -> FSDPMeshInfo:
+                    # full_dtensor: SPMD meshes spanning multiple DP axes;
+                    # pass dp_mesh_dims + spmd_mesh so FSDP2 knows which
+                    # axes are data-parallel.
+                    if mesh_dims is not None:
+                        return FSDPMeshInfo(
+                            mesh=mesh,
+                            shard_mesh_dim=0,
+                            dp_mesh_dims=mesh_dims,
+                            spmd_mesh=mesh,
+                        )
+                    if mesh.ndim == 1:
+                        return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
+                    if mesh.ndim == 2:
+                        return HSDPMeshInfo(
+                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
+                        )
+                    raise ValueError(
+                        f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
+                    )
+
+                edp_mesh_info = _get_fsdp_mesh_info(edp_mesh, edp_mesh_dims)
+                dp_mesh_info = _get_fsdp_mesh_info(dp_mesh, dp_mesh_dims)
 
                 def _shard_placement_fn(
                     param: nn.Parameter,

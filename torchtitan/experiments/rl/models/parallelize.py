@@ -23,8 +23,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.config.configs import CompileConfig
+from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.tensor_parallel import NoParallel
