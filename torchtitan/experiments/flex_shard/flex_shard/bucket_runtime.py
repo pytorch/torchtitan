@@ -302,8 +302,12 @@ class BucketRuntime:
             mod = getattr(mod, part)
         return mod
 
-    def hook_target_module(self) -> nn.Module | None:
+    def resolve_bucket_forward_hook_module(self) -> nn.Module | None:
         """Return the module whose forward should trigger this bucket."""
+        # Register hooks on the deepest common ancestor module for the bucket's
+        # params so one pre-forward all-gather covers their parameter accesses.
+        # For example, a bucket with "layers.0.attn.weight" and
+        # "layers.0.mlp.weight" hooks "layers.0".
         target = self.bucket_module()
         # TODO: Avoid registering bucket hooks on passive containers such as
         # ModuleList or ModuleDict. Catch-all buckets can resolve to those
@@ -704,7 +708,7 @@ def _install_batched_allgather_hooks(
         if bucket_runtime is None:
             continue
 
-        target = bucket_runtime.hook_target_module()
+        target = bucket_runtime.resolve_bucket_forward_hook_module()
         if target is None:
             _raise_unreplayable_reshard_hook(storage)
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
