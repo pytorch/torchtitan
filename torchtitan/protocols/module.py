@@ -212,7 +212,10 @@ class Module(nn.Module, Configurable):
             )
             self.register_parameter(
                 name,
-                nn.Parameter(distribute_tensor(param, mesh, list(placements))),
+                nn.Parameter(
+                    distribute_tensor(param, mesh, list(placements)),
+                    requires_grad=param.requires_grad,
+                ),
             )
 
         for name, buffer in self.named_buffers(recurse=False):
