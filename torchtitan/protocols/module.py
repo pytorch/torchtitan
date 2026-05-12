@@ -123,10 +123,8 @@ def redistribute_spmd_per_axis(
         src_t = src_types.get(axis)
         if src_t is not None and src_t != dst_t:
             pg = state.pg_for_axis(axis)
-            # print("redist", x.shape, x.dtype, src_t, dst_t)
             bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
             x = spmd.redistribute(x, pg, src=src_t, dst=dst_t, backward_options=bwd)
-            # x = spmd.redistribute(x, pg, src=src_t, dst=dst_t)
     return x
 
 

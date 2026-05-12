@@ -349,7 +349,6 @@ class ChunkedCELoss(BaseLoss):
             dtype=torch.float32,
         )
 
-        # torch.distributed.breakpoint()
         total_loss = h_detached.new_zeros((), dtype=torch.float32)
 
         # Disable FSDP reshard on lm_head to keep weight unsharded across
@@ -385,14 +384,6 @@ class ChunkedCELoss(BaseLoss):
                         total_loss = spmd.reinterpret(
                             total_loss, axis, src=spmd.R, dst=spmd.P, expert_mode=True
                         )
-                # tp_ax = mesh().tp
-                # if tp_ax is not None and self.loss_parallel:
-                #     if i == 0:
-                #         total_loss = spmd.reinterpret(
-                #             total_loss, tp_ax, src=spmd.R, dst=spmd.V, expert_mode=True
-                #         )
-
-            # torch.distributed.breakpoint()
             total_loss = total_loss + chunk_loss.detach()
 
             if requires_grad:
@@ -401,8 +392,6 @@ class ChunkedCELoss(BaseLoss):
                     assert h_chunk.grad is not None
                     grad_accumulator.add(h_chunk.grad)
                     h_chunk.grad = None
-
-        # torch.distributed.breakpoint()
 
         if fsdp_enabled:
             lm_head.set_reshard_after_forward(True)
@@ -415,10 +404,8 @@ class ChunkedCELoss(BaseLoss):
     def _spmd_out_types(self, h_detached: torch.Tensor) -> tuple:
         """Build expected output types for (total_loss, accumulated_grad).
 
-        total_loss: P on all DP axes (including CP) — each rank has a partial
-            loss sum from its local batch/seq tokens. R@tp when loss_parallel
-            (all-reduces ensure identical values), I@tp otherwise.
-        accumulated_grad: same types as h_detached (the input).
+        total_loss: P on DP axes, R@tp (identical across TP ranks).
+        accumulated_grad: same types as h_detached.
         """
         state = spmd_state()
 
