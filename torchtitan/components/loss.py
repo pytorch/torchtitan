@@ -25,17 +25,7 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
-
-    def _batch_and_seq_sharded(pred: DTensor) -> bool:
-        """Flattening (0, 1) on such a DTensor would yield ``_StridedShard``"""
-        sharded_dims = {p.dim for p in pred.placements if isinstance(p, Shard)}
-        return 0 in sharded_dims and 1 in sharded_dims
-
-    if isinstance(pred, DTensor) and _batch_and_seq_sharded(pred):
-        if not isinstance(labels, DTensor):
-            raise ValueError(
-                "cross_entropy_loss: labels must be a DTensor when pred is."
-            )
+    if isinstance(pred, DTensor) and isinstance(labels, DTensor):
         return _cross_entropy_via_local_map(pred, labels)
 
     return torch.nn.functional.cross_entropy(
