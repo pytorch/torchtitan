@@ -588,6 +588,8 @@ class CheckpointManager(Configurable):
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
+            # TODO: Since we flatten the model states in state_dict, we need to
+            # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
                 self.model_wrapper.load_state_dict(state_dict)
 
@@ -681,10 +683,12 @@ class CheckpointManager(Configurable):
         begin = time.monotonic()
 
         if not os.path.exists(self.folder):
-            # No checkpoint folder — try initial load
+            # Initial load: from HF or external DCP path. Supports
+            # BASE mode (frozen params only) for adapter training.
             if not self._load_initial():
                 return False
         else:
+            # Resume: always FULL mode, always DCP, includes all states.
             # Resume from checkpoint folder
             if self.initial_load_path:
                 logger.warning(
