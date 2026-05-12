@@ -421,9 +421,7 @@ class TestSpmdMeshesLegacy(DTensorTestBase):
             # Dense mesh names ``fsdp`` (the storage axis) instead of
             # ``dp_shard`` / ``cp`` under legacy.
             dense = next(m for m in meshes if "tp" in (m.mesh_dim_names or ()))
-            self.assertEqual(
-                set(dense.mesh_dim_names), {"dp_replicate", "fsdp", "tp"}
-            )
+            self.assertEqual(set(dense.mesh_dim_names), {"dp_replicate", "fsdp", "tp"})
 
 
 class TestSpmdMeshesFullDTensor(DTensorTestBase):

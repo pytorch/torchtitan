@@ -20,66 +20,12 @@ from torchtitan.protocols.module import Module
 from .token_dispatcher import LocalTokenDispatcher
 
 
-# NOTE: keeping this for-loop implementation for comparison
-#       and readability, may remove later
-def _run_experts_for_loop(
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w3: torch.Tensor,
-    x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
-) -> torch.Tensor:
-    # NOTE: this would incur a synchronization between device and host
-    num_tokens_per_expert_list = num_tokens_per_expert.tolist()
-
-    # a tuple of tensors indexed by experts
-    # each with shape (tokens_per_expert(varying), dim)
-    # NOTE: x is not sliced because padding was removed in #2774, so
-    # sum(num_tokens_per_expert) == x.shape[0] always holds.
-    x_splits = torch.split(
-        x,
-        split_size_or_sections=num_tokens_per_expert_list,
-        dim=0,
-    )
-    out_experts_splits = []
-    for expert_idx, x_expert in enumerate(x_splits):
-        h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
-        h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
-        h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
-        # h shape (tokens_per_expert(varying), dim)
-        out_experts_splits.append(h)
-    out = torch.cat(out_experts_splits, dim=0)
-
-    return out
-
-
-def _run_experts_grouped_mm(
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w3: torch.Tensor,
-    x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
-) -> torch.Tensor:
-    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-
-    h = F.silu(
-        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
-    )
-    h = h * torch._grouped_mm(
-        x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
-    )
-    out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
-
-    return out
-
-
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
         hidden_dim: int
         num_experts: int
-        use_grouped_mm: bool = True
         token_dispatcher: LocalTokenDispatcher.Config
 
     def __init__(self, config: Config):
@@ -94,7 +40,6 @@ class GroupedExperts(Module):
         self.w3 = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
-        self.use_grouped_mm = config.use_grouped_mm
         self.token_dispatcher = config.token_dispatcher.build()
 
     def _experts_forward(
@@ -116,10 +61,19 @@ class GroupedExperts(Module):
             w2 = self.w2
             w3 = self.w3
 
-        if self.use_grouped_mm:
-            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
-        else:
-            return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+
+        h = F.silu(
+            torch._grouped_mm(
+                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
+            )
+        )
+        h = h * torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        return torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
 
     def forward(
         self,
