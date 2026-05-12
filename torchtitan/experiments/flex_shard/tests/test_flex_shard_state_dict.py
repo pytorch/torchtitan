@@ -8,9 +8,9 @@ import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard.tests.common import (
-    flex_shard_cpu,
+    flex_shard_cuda,
     make_transformer_model,
-    single_rank_cpu_mesh,
+    single_rank_cuda_mesh,
     transformer_bucket_specs,
     transformer_inputs,
 )
@@ -18,7 +18,7 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 def _make_flex_sharded_transformer(mesh, **kwargs):
     args, model = make_transformer_model(**kwargs)
-    flex_shard_cpu(
+    flex_shard_cuda(
         model,
         mesh,
         buckets=transformer_bucket_specs(args.n_layers, reshard_after_forward=False),
@@ -28,7 +28,7 @@ def _make_flex_sharded_transformer(mesh, **kwargs):
 
 class TestFlexShardStateDict(TestCase):
     def test_state_dict_load_round_trip_into_flex_sharded_model(self):
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             torch.manual_seed(0)
             args, source = _make_flex_sharded_transformer(mesh)
             state_dict = {k: v.clone() for k, v in source.state_dict().items()}
@@ -40,7 +40,7 @@ class TestFlexShardStateDict(TestCase):
             self.assertEqual(load_result.missing_keys, [])
             self.assertEqual(load_result.unexpected_keys, [])
 
-            x = transformer_inputs(args, batch_size=3)
+            x = transformer_inputs(args, batch_size=3, device="cuda")
             self.assertEqual(source(x), target(x))
 
             source_optim = torch.optim.SGD(source.parameters(), lr=0.05)
@@ -54,7 +54,7 @@ class TestFlexShardStateDict(TestCase):
                 self.assertEqual(value, target.state_dict()[key])
 
     def test_load_state_dict_rejects_incompatible_shapes(self):
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             _, source = _make_flex_sharded_transformer(mesh, dim=8, n_heads=2)
             _, target = _make_flex_sharded_transformer(mesh, dim=12, n_heads=3)
 

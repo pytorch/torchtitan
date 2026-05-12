@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from tempfile import NamedTemporaryFile
+import unittest
 
 import torch
 import torch.distributed as dist
@@ -45,12 +46,36 @@ def single_rank_cpu_mesh() -> Iterator:
                 dist.destroy_process_group()
 
 
-def flex_shard_cpu(
+@contextmanager
+def single_rank_cuda_mesh() -> Iterator:
+    """Create a single-rank CUDA mesh for FlexShard runtime tests."""
+    if not torch.cuda.is_available():
+        raise unittest.SkipTest("CUDA is required for FlexShard runtime tests.")
+    torch.cuda.set_device(0)
+    created_pg = False
+    with NamedTemporaryFile() as store:
+        if not dist.is_initialized():
+            dist.init_process_group(
+                "nccl",
+                init_method=f"file://{store.name}",
+                rank=0,
+                world_size=1,
+                timeout=timedelta(seconds=20),
+            )
+            created_pg = True
+        try:
+            yield init_device_mesh("cuda", (1,), mesh_dim_names=("fsdp",))
+        finally:
+            if created_pg and dist.is_initialized():
+                dist.destroy_process_group()
+
+
+def flex_shard_cuda(
     model: nn.Module,
     mesh,
     buckets: list[BucketSpec] | None = None,
 ) -> nn.Module:
-    """Apply FlexShard with CPU-compatible eager settings."""
+    """Apply FlexShard with single-rank CUDA eager settings."""
     if buckets is None:
         buckets = [BucketSpec(["*"], reshard_after_forward=False)]
     return flex_shard(
@@ -62,9 +87,9 @@ def flex_shard_cpu(
 
 
 def flex_shard_transformer_model(mesh) -> tuple[ModelArgs, Transformer]:
-    """Return a small CPU Transformer and args after applying FlexShard."""
+    """Return a small Transformer and args after applying FlexShard."""
     args, model = make_transformer_model()
-    flex_shard_cpu(
+    flex_shard_cuda(
         model,
         mesh,
         buckets=transformer_bucket_specs(args.n_layers, reshard_after_forward=False),

@@ -12,17 +12,17 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_transformer_model,
-    single_rank_cpu_mesh,
+    single_rank_cuda_mesh,
     transformer_inputs,
 )
 
 
 class TestFlexShardEagerRuntime(TestCase):
-    def test_eager_forward_backward_on_cpu_mesh(self):
-        with single_rank_cpu_mesh() as mesh:
+    def test_eager_forward_backward_on_cuda_mesh(self):
+        with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
 
-            loss = model(transformer_inputs(args)).sum()
+            loss = model(transformer_inputs(args, device="cuda")).sum()
             loss.backward()
 
             for param in model.parameters():
@@ -30,24 +30,24 @@ class TestFlexShardEagerRuntime(TestCase):
                 self.assertIsNotNone(param.grad)
 
     def test_param_access_outside_forward_raises(self):
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             _, model = flex_shard_transformer_model(mesh)
 
             with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
                 _ = model.output.weight
 
     def test_graph_capture_raises(self):
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
 
             with patch.object(torch.compiler, "is_compiling", return_value=True):
                 with self.assertRaisesRegex(ValueError, "eager execution only"):
-                    model(transformer_inputs(args))
+                    model(transformer_inputs(args, device="cuda"))
 
     def test_graph_capture_error_does_not_poison_next_eager_forward(self):
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
-            inp = transformer_inputs(args)
+            inp = transformer_inputs(args, device="cuda")
 
             with patch.object(torch.compiler, "is_compiling", return_value=True):
                 with self.assertRaisesRegex(ValueError, "eager execution only"):

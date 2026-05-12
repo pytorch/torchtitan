@@ -47,6 +47,7 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
 from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,
     single_rank_cpu_mesh,
+    single_rank_cuda_mesh,
     transformer_bucket_specs,
     transformer_inputs,
 )
@@ -126,7 +127,7 @@ class _PaddedShard(Shard):
 
 
 # ---------------------------------------------------------------------------
-# Shard mesh tests (single-process CPU)
+# Shard mesh tests
 # ---------------------------------------------------------------------------
 
 
@@ -138,17 +139,26 @@ class TestFlexShardMesh(TestCase):
             _validate_flex_shard_mesh,
         )
 
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             _validate_flex_shard_mesh(mesh)
+
+    def test_rejects_cpu_mesh(self):
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_flex_shard_mesh,
+        )
+
+        with single_rank_cpu_mesh() as mesh:
+            with self.assertRaisesRegex(NotImplementedError, "CUDA DeviceMesh"):
+                _validate_flex_shard_mesh(mesh)
 
     def test_rejects_multi_dim_mesh(self):
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
             _validate_flex_shard_mesh,
         )
 
-        with single_rank_cpu_mesh():
+        with single_rank_cuda_mesh():
             mesh = init_device_mesh(
-                "cpu",
+                "cuda",
                 (1, 1),
                 mesh_dim_names=("fsdp", "tp"),
             )
@@ -374,7 +384,7 @@ class TestBucketPlacementValidation(TestCase):
                 "b": (Shard(1),),
             }
 
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             model = TwoParamModule()
             with self.assertRaisesRegex(ValueError, "mixed placements"):
                 flex_shard(

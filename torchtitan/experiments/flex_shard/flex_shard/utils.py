@@ -171,6 +171,11 @@ def _validate_flex_shard_mesh(mesh: DeviceMesh) -> None:
         raise ValueError(
             f"flex_shard requires a 1D DeviceMesh, but got {mesh.ndim}D mesh"
         )
+    if mesh.device_type != "cuda":
+        raise NotImplementedError(
+            "FlexShard runtime requires a CUDA DeviceMesh. CPU bucket runtime "
+            "is not supported; CPU offload will be added separately."
+        )
 
 
 def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:

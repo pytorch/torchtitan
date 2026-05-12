@@ -82,27 +82,8 @@ def _prepare_flex_shard_inputs(
 ) -> PreparedFlexShardInputs:
     """Validate inputs and derive setup state for flex_shard()."""
     _check_not_already_flex_sharded(module)
-
-    named_params = _get_managed_named_params(module)
-    if not named_params:
-        raise ValueError(
-            f"Module {type(module).__name__} has no parameters to shard. "
-            "All parameters may belong to already-wrapped submodules."
-        )
-
     _validate_flex_shard_mesh(mesh)
     shard_mesh = mesh
-    all_params_meta = all(param.device.type == "meta" for _, param in named_params)
-    device = (
-        torch.device("meta") if all_params_meta else _get_device_from_mesh(shard_mesh)
-    )
-    _validate_eager_params(
-        named_params,
-        expected_device=None if all_params_meta else device,
-    )
-
-    param_placements = shard_placement_fn(named_params, shard_mesh)
-    _validate_placements(param_placements, named_params, shard_mesh)
 
     if not buckets:
         raise ValueError("flex_shard requires at least one BucketSpec in buckets.")
@@ -113,6 +94,32 @@ def _prepare_flex_shard_inputs(
             raise NotImplementedError(
                 "FlexShard eager mode does not yet support BucketSpec.offload_policy."
             )
+
+    named_params = _get_managed_named_params(module)
+    if not named_params:
+        raise ValueError(
+            f"Module {type(module).__name__} has no parameters to shard. "
+            "All parameters may belong to already-wrapped submodules."
+        )
+
+    all_params_meta = all(param.device.type == "meta" for _, param in named_params)
+    device = (
+        torch.device("meta") if all_params_meta else _get_device_from_mesh(shard_mesh)
+    )
+    if (
+        not all_params_meta
+        and all(param.device.type == "cpu" for _, param in named_params)
+    ):
+        module.to(device)
+        named_params = _get_managed_named_params(module)
+
+    _validate_eager_params(
+        named_params,
+        expected_device=None if all_params_meta else device,
+    )
+
+    param_placements = shard_placement_fn(named_params, shard_mesh)
+    _validate_placements(param_placements, named_params, shard_mesh)
 
     param_fqns = [fqn for fqn, _ in named_params]
     bucket_assignments = _assign_params_to_buckets(param_fqns, buckets)
@@ -157,7 +164,8 @@ def flex_shard(
     from already-wrapped inner modules.
 
     Args:
-        module: The module to shard. Can have real or meta device parameters.
+        module: The module to shard. CPU modules are moved to the mesh's CUDA
+            device before sharding. Meta parameters keep uninitialized storage.
         mesh: The 1D device mesh for sharding.
         shard_placement_fn: Required callable that maps
             ``(named_params, mesh)`` to per-parameter placements.
@@ -177,7 +185,6 @@ def flex_shard(
 
         >>> mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
         >>> model = Transformer(args)
-        >>> model.to("cuda")
         >>> # Single bucket without reshard-after-forward:
         >>> flex_shard(
         ...     model,
