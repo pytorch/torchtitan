@@ -202,7 +202,7 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     )
     config.model_spec = model_registry(
         "flux-schnell",
-        quantization=[
+        converters=[
             MXFP8LinearConverter.Config(
                 model_compile_enabled=model_compile_enabled,
                 fqns=[
@@ -230,7 +230,7 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     )
     config.model_spec = model_registry(
         "flux-dev",
-        quantization=[
+        converters=[
             MXFP8LinearConverter.Config(
                 model_compile_enabled=model_compile_enabled,
                 fqns=[
