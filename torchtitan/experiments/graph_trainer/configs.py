@@ -11,6 +11,7 @@ from typing import Literal
 from torchtitan.components.loss import ChunkedCELoss, CrossEntropyLoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import PagedStash
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -49,7 +50,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "sac_and_offload"] = "default"
+    memory_policy: Literal[
+            "default", "eager", "sac_and_offload", "paged_stash"
+    ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
@@ -58,11 +61,16 @@ class GraphTrainerCompileConfig(CompileConfig):
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
+        paged_stash: paged activation stashing for MoE (requires HybridEP).
     """
 
     pass_pipeline: str = "default"
     """Pass pipeline selection. Controls which graph pass pipeline, post-init
     hooks, and pre-train-step hooks are activated."""
+
+    paged_stash: PagedStash.Config = field(default_factory=PagedStash.Config)
+    """Parameters for the paged stash memory policy. Only used when
+    pass_pipeline == "paged_stash"."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
