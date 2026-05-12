@@ -19,7 +19,7 @@ import torch.distributed.tensor._random
 import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -474,7 +474,8 @@ def clip_grad_norm_(
     norm_type: float = 2.0,
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
-    pp_mesh: DeviceMesh | None = None,
+    *,
+    parallel_dims: ParallelDims,
     ep_enabled: bool = False,
 ) -> torch.Tensor:
     """
@@ -497,9 +498,8 @@ def clip_grad_norm_(
             If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
             fall back to the slow implementation for other device types.
             Default: ``None``
-        pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
-        ep_dense_params_mesh_ndim: Mesh ndim of the dense params when EP is used. If EP is not used,
-            set it to ``None``.
+        parallel_dims: Source of the 1D ``grad_norm`` mesh (the flat
+            ``dp_shard * cp * tp`` group) and the ``pp`` mesh.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
@@ -512,7 +512,7 @@ def clip_grad_norm_(
             norm_type,
             error_if_nonfinite,
             foreach,
-            pp_mesh,
+            parallel_dims=parallel_dims,
         )
 
     if isinstance(parameters, torch.Tensor):
@@ -521,21 +521,40 @@ def clip_grad_norm_(
         # prevent generators from being exhausted
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
-    )
 
-    # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
-    # We can simply reduce the DTensor to get the total norm in this tensor's process group
-    # and then convert it to a local tensor.
-    # NOTE: It has two purposes:
-    #       1. to make sure the total norm is computed correctly when PP is used (see below)
-    #       2. to return a reduced total_norm tensor whose .item() would return the correct value
+    # Rebuild each DTensor grad as ``Shard(0)`` on the 1D ``grad_norm`` mesh,
+    # with local data pre-scaled by ``(1/replicate_factor)**(1/p)`` for any
+    # Replicate axis on the grad. ``dp_replicate`` is not in the mesh, so it
+    # needs no scaling -- one all_reduce regardless of sharding.
+    spmd_mesh = parallel_dims.get_mesh("grad_norm")
+    flatten_grads: list[torch.Tensor] = []
+    for g in grads:
+        if not isinstance(g, DTensor):
+            flatten_grads.append(g)
+            continue
+
+        axis_names = g.device_mesh.mesh_dim_names or ()
+        replicate_factor = 1
+        for ax_idx, p in enumerate(g.placements):
+            if not p.is_replicate():
+                continue
+            if axis_names[ax_idx] == "dp_replicate":
+                continue
+            replicate_factor *= g.device_mesh.size(ax_idx)
+        g_local = g.to_local()
+        if replicate_factor != 1 and not math.isinf(norm_type):
+            g_local = g_local * (1.0 / replicate_factor) ** (1.0 / norm_type)
+        flatten_grads.append(
+            DTensor.from_local(g_local, spmd_mesh, [Shard(0)], run_check=False)
+        )
+
+    total_norm = torch.nn.utils.get_total_norm(
+        flatten_grads, norm_type, error_if_nonfinite, foreach
+    )
     if isinstance(total_norm, DTensor):
-        # Will reach here if any non-PP parallelism is used.
-        # If only using PP, total_norm will be a local tensor.
         total_norm = total_norm.full_tensor()
 
+    pp_mesh = parallel_dims.get_optional_mesh("pp")
     if pp_mesh is not None:
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
@@ -555,8 +574,10 @@ def _clip_grad_norm_with_ep(
     norm_type: float,
     error_if_nonfinite: bool,
     foreach: bool | None,
-    pp_mesh: DeviceMesh | None,
+    *,
+    parallel_dims: ParallelDims,
 ) -> torch.Tensor:
+    pp_mesh = parallel_dims.get_optional_mesh("pp")
     ep_params = []
     non_ep_params = []
     ep_grads = []

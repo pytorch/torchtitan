@@ -174,6 +174,8 @@ def set_gqa_inner_attention_local_map(
     GPT-OSS's flash attention with ``return_lse=True``); both outputs share
     the same heads-sharded placement.
     """
+    import inspect
+
     q_placements: NamedPlacement = dense_activation_placement(tp=Shard(2))
     kv_placements: NamedPlacement = dense_activation_placement(
         tp=Shard(2), cp=Replicate()
@@ -181,11 +183,27 @@ def set_gqa_inner_attention_local_map(
     kv_grad_placements: NamedPlacement = dense_activation_placement(
         tp=Shard(2), cp=Partial()
     )
-    num_outputs = 2 if return_lse else 1
+    # Inner-attention forward signature varies by backend (q/k/v vs xq/xk/xv);
+    # bind in_dst_shardings by the actual arg names.
+    build_class = inner_attention_cfg._owner
+    q_name, k_name, v_name = [
+        p.name
+        for p in inspect.signature(build_class.forward).parameters.values()
+        if p.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and p.name != "self"
+    ][:3]
+    out_src: NamedPlacement | tuple[NamedPlacement, ...] = (
+        (q_placements, q_placements) if return_lse else q_placements
+    )
     inner_attention_cfg.sharding_config = ShardingConfig(
+        in_dst_shardings={
+            q_name: q_placements,
+            k_name: kv_placements,
+            v_name: kv_placements,
+        },
+        out_src_shardings=out_src,
         local_map=LocalMapConfig(
-            in_placements=(q_placements, kv_placements, kv_placements),
-            out_placements=(q_placements,) * num_outputs,
             in_grad_placements=(q_placements, kv_grad_placements, kv_grad_placements),
         ),
     )
