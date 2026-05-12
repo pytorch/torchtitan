@@ -36,7 +36,21 @@ from .utils import _get_storage_debug_fqn, _record_function_if_eager
 
 logger = logging.getLogger(__name__)
 
-ParamEntry = tuple[ParamModuleInfo, EagerParamAccessState, ParamInfo]
+
+@dataclass(frozen=True)
+class ParamEntry:
+    """Per-parameter bucket runtime state.
+
+    module_info locates the live nn.Parameter for local shard reads and grad
+    writes. access_state holds mutable forward/backward parameter access state.
+    param_info carries immutable storage and placement metadata for collectives.
+    Keeping them together preserves bucket order and avoids repeated FQN
+    resolution in hooks.
+    """
+
+    module_info: ParamModuleInfo
+    access_state: EagerParamAccessState
+    param_info: ParamInfo
 
 
 @dataclass
@@ -204,7 +218,13 @@ class BucketRuntime:
                     module_info.param_name
                 )
                 if param_state is not None:
-                    param_entries.append((module_info, param_state, info))
+                    param_entries.append(
+                        ParamEntry(
+                            module_info=module_info,
+                            access_state=param_state,
+                            param_info=info,
+                        )
+                    )
         return param_entries
 
     @staticmethod
@@ -214,22 +234,24 @@ class BucketRuntime:
     ) -> torch.device:
         """Return the device used for this bucket's collectives."""
         comm_device = storage.byte_storage.device
-        for _, param_state, _ in entries:
-            if param_state.compute_device is not None:
-                return param_state.compute_device
+        for entry in entries:
+            if entry.access_state.compute_device is not None:
+                return entry.access_state.compute_device
         return comm_device
 
     @property
     def infos(self) -> list[ParamInfo]:
-        return [info for _, _, info in self.entries]
+        return [entry.param_info for entry in self.entries]
 
     @property
     def param_refs(self) -> list[ParamModuleInfo]:
-        return [module_info for module_info, _, _ in self.entries]
+        return [entry.module_info for entry in self.entries]
 
     def _local_shards(self, use_autograd: bool) -> list[torch.Tensor]:
         local_shards: list[torch.Tensor] = []
-        for module_info, param_state, _ in self.entries:
+        for entry in self.entries:
+            module_info = entry.module_info
+            param_state = entry.access_state
             param = module_info.module._parameters[module_info.param_name]
             local_shard = param if use_autograd else param.data
             if (
@@ -409,13 +431,13 @@ class BucketRuntime:
         grads: list[torch.Tensor] = []
         infos: list[ParamInfo] = []
         param_refs: list[ParamModuleInfo] = []
-        for idx, (module_info, param_state, info) in enumerate(self.entries):
+        for idx, entry in enumerate(self.entries):
             grad = self.collected_grads.pop(idx, None)
             if grad is not None:
                 grads.append(grad)
-                infos.append(info)
-                param_refs.append(module_info)
-            param_state._unsharded_for_reduce = None
+                infos.append(entry.param_info)
+                param_refs.append(entry.module_info)
+            entry.access_state._unsharded_for_reduce = None
         self.reduce_grads(grads, infos, param_refs)
 
     def pre_forward_hook(self, mod, args) -> None:
@@ -443,24 +465,22 @@ class BucketRuntime:
                     )
                 full_params = result.finish()
                 self.prefetch_next()
-        for (_, param_state, _), full_param in zip(
-            self.entries, full_params, strict=True
-        ):
-            param_state._pre_gathered = full_param
+        for entry, full_param in zip(self.entries, full_params, strict=True):
+            entry.access_state._pre_gathered = full_param
 
     def post_forward_hook(self, mod, args, output) -> None:
         if torch.compiler.is_compiling():
             return
-        for _, param_state, _ in self.entries:
-            param_state._pre_gathered = None
+        for entry in self.entries:
+            entry.access_state._pre_gathered = None
         if self.use_autograd_unshard:
             return
 
         if torch.is_grad_enabled():
             self.collected_grads.clear()
             leaf_indices = []
-            for idx, (_, param_state, _) in enumerate(self.entries):
-                leaf = param_state._unsharded_for_reduce
+            for idx, entry in enumerate(self.entries):
+                leaf = entry.access_state._unsharded_for_reduce
                 if leaf is not None and leaf.requires_grad:
                     leaf_indices.append((idx, leaf))
 
@@ -677,5 +697,5 @@ def _install_batched_allgather_hooks(
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
         target.register_forward_hook(bucket_runtime.post_forward_hook)
         bucket_runtime.context.buckets.append(bucket_runtime)
-        for _, param_state, _ in bucket_runtime.entries:
-            setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
+        for entry in bucket_runtime.entries:
+            setattr(entry.access_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
