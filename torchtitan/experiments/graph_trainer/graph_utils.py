@@ -75,8 +75,6 @@ def export_joint(
     )
     with coor_ctx:
         with (
-            # TODO Investigate error on MOE model with use_grouped_mm=False.
-            # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
             torch._dynamo.config.patch(fake_tensor_cache_enabled=False),
             torch.fx.traceback.preserve_node_meta(),
         ):
