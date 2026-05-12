@@ -31,7 +31,9 @@ def compute_logprobs(
     # Config-based TP returns logits as a Replicate DTensor. Downstream RL
     # code (gather with plain-tensor indices, slicing per-sample) expects a
     # plain tensor — materialize once here.
+    dtensor_placements = None
     if isinstance(logits, DTensor):
+        dtensor_placements = logits.placements  # Save for chunking guard
         logits = logits.to_local()
 
     if chunk_size is not None and chunk_size <= 0:
@@ -49,6 +51,13 @@ def compute_logprobs(
         return log_probs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
 
     # Chunked log_softmax + gather to avoid materializing full [seq, vocab] fp32
+    # Guard: chunking with vocab-sharded logits would issue one collective per chunk
+    if dtensor_placements is not None:
+        if not all(p.is_replicate() for p in dtensor_placements):
+            raise ValueError(
+                f"Chunked logprobs incompatible with sharded DTensor: {dtensor_placements}. "
+                "Would issue one collective per chunk. Use chunk_size=None with loss_parallel."
+            )
     seq_len = shift_logits.shape[1]
     chunks = []
     for start in range(0, seq_len, chunk_size):
