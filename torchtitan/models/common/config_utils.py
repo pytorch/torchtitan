@@ -246,7 +246,6 @@ def make_experts_config(
     top_k: int,
     param_init: dict[str, Callable],
     score_before_experts: bool = True,
-    use_grouped_mm: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> GroupedExperts.Config:
@@ -255,7 +254,6 @@ def make_experts_config(
         dim=dim,
         hidden_dim=hidden_dim,
         num_experts=num_experts,
-        use_grouped_mm=use_grouped_mm,
         param_init=param_init,
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,

@@ -45,18 +45,17 @@ class LocalMapConfig:
     Wraps forward with ``local_map()``: DTensor -> local before forward,
     local -> DTensor after forward.
 
-    Placements are ``NamedPlacement`` (keyed by mesh axis name). At
-    parallelize time they are resolved to positional tuples matching the
-    runtime mesh's axis order.
+    Input placements come from ``ShardingConfig.in_dst_shardings``
+    (already aligned by ``_redistribute_inputs``); output placements from
+    ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
+    ``in_grad_placements`` since there's no equivalent slot on
+    ``ShardingConfig`` today.
 
     Attributes:
-        in_placements: Per-input NamedPlacements (positional: q, k, v).
-        out_placements: Per-output NamedPlacements.
-        in_grad_placements: Per-input-gradient NamedPlacements.
+        in_grad_placements: Per-input-gradient NamedPlacements (positional,
+            ordered by ``forward`` args).
     """
 
-    in_placements: tuple[NamedPlacement, ...]
-    out_placements: tuple[NamedPlacement, ...]
     in_grad_placements: tuple[NamedPlacement, ...]
 
     def to_dict(self) -> dict:
@@ -95,19 +94,29 @@ class ShardingConfig:
             keyed by ``forward()`` arg name.
             e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
             ``None`` means no input redistribution.
+        out_src_shardings: Source placement of the forward's output as a
+            DTensor. When ``local_map`` is set this also tells ``local_map``
+            what to wrap the local output back to. Accepts a single
+            ``NamedPlacement`` (single-output case) or a tuple (multi-
+            output case, e.g. attention with ``return_lse=True``). ``None``
+            means "infer from the output" (it's already a DTensor at the
+            right placement, or there's no local_map to drive).
+            e.g. ``{TP: Partial()}`` for the MoE wrapper.
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_map: If set, wraps forward with ``local_map()``.
-
-    TODO: add ``out_src_shardings`` to declare the output's source placement
-    when integrating with spmd_type (erased types), which requires both src
-    and dst for every redistribute.
+        local_map: If set, wraps forward with ``local_map()``. Input and
+            output placements come from ``in_dst_shardings`` and
+            ``out_src_shardings``; ``LocalMapConfig`` only carries
+            ``in_grad_placements``.
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
+    out_src_shardings: (
+        NamedPlacement | tuple[NamedPlacement, ...] | None
+    ) = None
     out_dst_shardings: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
 
@@ -136,7 +145,7 @@ def resolve_mesh(
     if not parallel_dims.full_dtensor:
         in_band = ("tp", "ep")
         axes_list = [axis for axis in axes_list if axis in in_band]
-    mesh = parallel_dims.get_enabled_mesh(axes_list)
+    mesh = parallel_dims.get_activated_mesh(axes_list)
     if mesh is None:
         return None
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"

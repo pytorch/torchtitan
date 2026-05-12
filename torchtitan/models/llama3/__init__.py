@@ -9,7 +9,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
@@ -25,6 +24,9 @@ from torchtitan.models.common.config_utils import (
     make_gqa_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
+from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
@@ -377,12 +379,13 @@ llama3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    quantization: list[QuantizationConverter.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
     return ModelSpec(
         name="llama3",
         flavor=flavor,
