@@ -310,7 +310,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 if token_id is not None
                 else self.tokenizer.token_to_id(token_str)
             )
-        elif token_str == config_eos_token:
+        if token_str == config_eos_token:
             self.eos_token = token_str
             self.eos_id = (
                 token_id
