@@ -37,7 +37,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
-    apply_sac_pass,
+    tag_sac_policy,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     remove_detach_pass,
@@ -206,7 +206,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
 
 
 class TestApplySACPass(TestCase):
-    """Unit tests for the apply_sac_pass joint graph pass."""
+    """Unit tests for the tag_sac_policy joint graph pass."""
 
     def _build_gm(self, op_targets):
         """Build a GraphModule with a chain of call_function nodes.
@@ -246,7 +246,7 @@ class TestApplySACPass(TestCase):
                 torch.ops.aten.relu.default,
             ]
         )
-        apply_sac_pass(gm)
+        tag_sac_policy(gm)
         for node in self._get_call_function_nodes(gm):
             self.assertEqual(node.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
 
@@ -254,7 +254,7 @@ class TestApplySACPass(TestCase):
         """Non-mm ops in the save list should be marked MUST_SAVE."""
         custom_save = {torch.ops.aten.add.Tensor}
         gm = self._build_gm([torch.ops.aten.add.Tensor])
-        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
         nodes = self._get_call_function_nodes(gm)
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
@@ -274,7 +274,7 @@ class TestApplySACPass(TestCase):
         self.assertEqual(nodes[0].target, torch.ops.aten.add.Tensor)
         self.assertEqual(nodes[2].target, operator.getitem)
 
-        apply_sac_pass(gm)
+        tag_sac_policy(gm)
 
         tuple_node = nodes[1]
         getitem_node = nodes[2]
@@ -292,7 +292,7 @@ class TestApplySACPass(TestCase):
         nodes = self._get_call_function_nodes(gm)
         nodes[0].meta["custom"] = {_MODULE_FQN: "layers.3.attention"}
 
-        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
 
         rs_node = nodes[0]
         wait_node = nodes[1]
@@ -311,7 +311,7 @@ class TestApplySACPass(TestCase):
         nodes[0].meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
         nodes[1].meta["custom"] = {_MODULE_FQN: "layers.1.attention"}
 
-        apply_sac_pass(gm)
+        tag_sac_policy(gm)
 
         # add is at the boundary (layer 0 -> layer 1), forced to MUST_SAVE
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
@@ -326,7 +326,7 @@ class TestApplySACPass(TestCase):
                 torch.ops.aten.relu.default,
             ]
         )
-        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
         policies = {
             n.target: n.meta["recompute"] for n in self._get_call_function_nodes(gm)
         }
@@ -349,7 +349,7 @@ class TestApplySACPass(TestCase):
                 torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
             ]
         )
-        apply_sac_pass(gm, policy_fn=_make_default_memory_policy(custom_save))
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
         nodes = self._get_call_function_nodes(gm)
         expected = [
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
@@ -1538,12 +1538,12 @@ class TestSelectiveActivationRematPass(TestCase):
     def test_offload_reload_chain_hoisted(self):
         """Mirrors the graph the CPU-offload pass produces: a forward
         offload chain (``ao.offload`` -> ``ao.wait_tensor``) and a backward
-        reload chain (``ao.reload`` -> ``ao.wait_tensor``), with
-        ``F.meta["cpu_offload_reload_node"]`` pointing at the backward
-        wait_tensor. When a recomputed node references the offloaded
-        forward node F, the dup must read from the backward wait_tensor on
-        GPU, not from F's freed-GPU storage. The remat pass therefore
-        hoists the backward reload chain in front of the dup's target.
+        reload chain (``ao.reload`` -> ``ao.wait_tensor``). When a
+        recomputed node references the offloaded forward node F, the dup
+        must read from the backward wait_tensor on GPU, not from F's
+        freed-GPU storage. The remat pass discovers the offload chain
+        through graph structure and hoists the backward reload chain in
+        front of the dup's target.
 
             # Forward (autograd_backward=False)
             F           = clone(inp1)
@@ -1588,7 +1588,6 @@ class TestSelectiveActivationRematPass(TestCase):
         graph.output((bwd_use, bwd_other))
 
         n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
-        f.meta["cpu_offload_reload_node"] = bwd_wait
         bwd_use.meta["autograd_backward"] = True
         reload_op.meta["autograd_backward"] = True
         bwd_wait.meta["autograd_backward"] = True
@@ -1614,7 +1613,7 @@ class TestSelectiveActivationRematPass(TestCase):
         # Forward chain is also before the (hoisted) backward chain.
         self.assertLess(fwd_wait_idx, reload_idx)
 
-        # The dup of N references bwd_wait (via cpu_offload_reload_node
+        # The dup of N references bwd_wait (via the offload chain
         # redirect), not the original offloaded forward node F.
         dup = next(d for d in nodes if d.name.endswith("_recomputed"))
         self.assertIn(bwd_wait, dup.all_input_nodes)
@@ -1685,7 +1684,6 @@ class TestSelectiveActivationRematPass(TestCase):
         graph.output((middle_bwd, bwd_use))
 
         n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
-        f.meta["cpu_offload_reload_node"] = bwd_wait
         early_bwd.meta["autograd_backward"] = True
         reload_op.meta["autograd_backward"] = True
         bwd_wait.meta["autograd_backward"] = True
