@@ -71,7 +71,7 @@ class PendingReduceGrad:
 
 @dataclass
 class BucketCommContext:
-    """Communication streams for batched collectives."""
+    """Communication streams shared by buckets on one root module/device."""
 
     device_handle: ModuleType
     all_gather_stream: torch.Stream
@@ -82,7 +82,18 @@ class BucketCommContext:
     reduce_scatter_callback_queued: bool = False
 
     @classmethod
-    def get_or_create(
+    def get(
+        cls,
+        root_module: nn.Module,
+        device: torch.device,
+    ) -> BucketCommContext | None:
+        contexts = getattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, None)
+        if contexts is None:
+            return None
+        return contexts.get(device)
+
+    @classmethod
+    def create(
         cls,
         root_module: nn.Module,
         device: torch.device,
@@ -91,16 +102,18 @@ class BucketCommContext:
         if contexts is None:
             contexts = {}
             setattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, contexts)
-
-        context = contexts.get(device)
-        if context is None:
-            device_handle = _get_device_handle(device.type)
-            context = cls(
-                device_handle=device_handle,
-                all_gather_stream=device_handle.Stream(priority=-1),
-                reduce_scatter_stream=device_handle.Stream(priority=-1),
+        if device in contexts:
+            raise AssertionError(
+                f"Communication context for device {device} already exists."
             )
-            contexts[device] = context
+
+        device_handle = _get_device_handle(device.type)
+        context = cls(
+            device_handle=device_handle,
+            all_gather_stream=device_handle.Stream(priority=-1),
+            reduce_scatter_stream=device_handle.Stream(priority=-1),
+        )
+        contexts[device] = context
         return context
 
     def queue_reduce_scatter_wait(self) -> None:
@@ -192,10 +205,10 @@ class BucketRuntime:
         if not entries:
             return None
         if context is None:
-            context = BucketCommContext.get_or_create(
-                storage._module,
-                cls._comm_device(storage, entries),
-            )
+            comm_device = cls._comm_device(storage, entries)
+            context = BucketCommContext.get(storage._module, comm_device)
+            if context is None:
+                context = BucketCommContext.create(storage._module, comm_device)
         return cls(
             storage=storage,
             entries=entries,
