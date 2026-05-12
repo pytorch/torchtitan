@@ -11,7 +11,7 @@ from typing import TypeAlias
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
@@ -24,30 +24,20 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy loss with sum reduction for token-based normalization.
+    """Cross-entropy loss with sum reduction for token-based normalization."""
 
-    Two paths:
+    def _batch_and_seq_sharded(pred: DTensor) -> bool:
+        """Flattening (0, 1) on such a DTensor would yield ``_StridedShard``"""
+        sharded_dims = {p.dim for p in pred.placements if isinstance(p, Shard)}
+        return 0 in sharded_dims and 1 in sharded_dims
 
-    - 3D-DTensor branch (FSDP + CP under full_dtensor): pred has
-      ``Shard(0)@dp_shard`` and ``Shard(1)@cp``. ``flatten(0, 1)`` would
-      merge them and produce ``_StridedShard``, which the ``nll_loss``
-      sharding handlers reject before kernel selection. ``permute(0, 2, 1)``
-      keeps each tensor dim distinct so placements stay plain ``Shard(d)``.
-      ``F.cross_entropy`` then dispatches to ``aten.nll_loss2d_forward``,
-      which lacks a deterministic CUDA kernel -- enable ``loss_parallel``
-      to route through its Python handler if determinism is required.
+    if isinstance(pred, DTensor) and _batch_and_seq_sharded(pred):
+        if not isinstance(labels, DTensor):
+            raise ValueError(
+                "cross_entropy_loss: labels must be a DTensor when pred is."
+            )
+        return _cross_entropy_via_local_map(pred, labels)
 
-    - Flatten branch: every other config (plain pred, 1D-DTensor pred,
-      full_dtensor without CP). Routes to ``aten.nll_loss_forward`` (1D),
-      which has a deterministic CUDA kernel.
-    """
-    if isinstance(pred, DTensor) and _flatten_would_strided_shard(pred):
-        return torch.nn.functional.cross_entropy(
-            pred.permute(0, 2, 1).float(),
-            labels,
-            reduction="sum",
-            ignore_index=IGNORE_INDEX,
-        )
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
         labels.flatten(0, 1),
@@ -56,13 +46,77 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
-def _flatten_would_strided_shard(pred: DTensor) -> bool:
-    """``pred.flatten(0, 1)`` produces ``_StridedShard`` iff the batch and
-    seq tensor dims are both sharded (on different mesh axes). In practice
-    this is the FSDP + CP under full_dtensor combination.
-    """
-    sharded_dims = {p.dim for p in pred.placements if isinstance(p, Shard)}
-    return 0 in sharded_dims and 1 in sharded_dims
+def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
+    mesh = pred.device_mesh
+    # Labels don't have a vocab dim.
+    labels_placements = tuple(
+        Replicate() if isinstance(p, Shard) and p.dim == 2 else p
+        for p in pred.placements
+    )
+    if labels.placements != labels_placements:
+        raise ValueError(
+            f"cross_entropy_loss: expected labels placements {labels_placements}, "
+            f"got {labels.placements}"
+        )
+
+    # After local flatten(0, 1), tensor dims are [batch*seq, vocab].
+    # Per-axis placement:
+    #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
+    #   Shard on vocab -> Shard(1)
+    def _flatten_placement(p):
+        if isinstance(p, Shard):
+            return Shard(0 if p.dim == 0 else p.dim - 1)
+        return p
+
+    flat_pred_placements = tuple(_flatten_placement(p) for p in pred.placements)
+    flat_labels_placements = tuple(_flatten_placement(p) for p in labels.placements)
+    vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
+
+    # Per-axis output placement for sum reduction:
+    #   Shard on non-vocab-dim -> Partial
+    #   Shard on vocab-dim -> Replicate
+    out_placements = [
+        Partial() if isinstance(p, Shard) and p.dim != 2 else Replicate()
+        for p in pred.placements
+    ]
+
+    @local_map(
+        out_placements=out_placements,
+        in_placements=(pred.placements, labels.placements),
+        in_grad_placements=(pred.placements, labels.placements),
+        device_mesh=mesh,
+    )
+    def _local_cross_entropy(
+        pred_local: torch.Tensor, labels_local: torch.Tensor
+    ) -> torch.Tensor:
+        flat_pred = pred_local.flatten(0, 1).float()
+        flat_labels = labels_local.flatten(0, 1)
+        if not vocab_sharded:
+            return torch.nn.functional.cross_entropy(
+                flat_pred,
+                flat_labels,
+                reduction="sum",
+                ignore_index=IGNORE_INDEX,
+            )
+
+        # vocab_sharded == True => loss parallel case
+        # TODO: rewrite the entire loss parallel using megatron style.
+        pred_dtensor = DTensor.from_local(
+            flat_pred, mesh, flat_pred_placements, run_check=False
+        )
+        labels_dtensor = DTensor.from_local(
+            flat_labels, mesh, flat_labels_placements, run_check=False
+        )
+        loss_dtensor = torch.nn.functional.cross_entropy(
+            pred_dtensor,
+            labels_dtensor,
+            reduction="sum",
+            ignore_index=IGNORE_INDEX,
+        )
+        assert isinstance(loss_dtensor, DTensor)
+        return loss_dtensor.to_local()
+
+    return _local_cross_entropy(pred, labels)
 
 
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -398,10 +452,25 @@ class ChunkedCELoss(BaseLoss):
 
         accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
 
-        # Return a differentiable loss via _DecoderOutputGradientBackProp. When
-        # .backward() is called (by the trainer or PP schedule), autograd
-        # calls _DecoderOutputGradientBackProp.backward which returns accumulated_grad
-        # as the gradient for hidden_states, propagating through the decoder.
+        return self._gradient_backprop(
+            hidden_states, accumulated_grad, total_loss, lm_head, fsdp_enabled
+        )
+
+    @staticmethod
+    def _gradient_backprop(
+        hidden_states: torch.Tensor,
+        accumulated_grad: torch.Tensor,
+        total_loss: torch.Tensor,
+        lm_head: nn.Module,
+        fsdp_enabled: bool,
+    ) -> torch.Tensor:
+        """Return a differentiable loss via _DecoderOutputGradientBackProp.
+        When ``.backward()`` is called (by the trainer or PP schedule),
+        autograd calls ``_DecoderOutputGradientBackProp.backward`` which
+        returns ``accumulated_grad`` as the gradient for ``hidden_states``,
+        propagating through the decoder. Subclasses override to swap in a
+        different autograd Function.
+        """
         return _DecoderOutputGradientBackProp.apply(
             hidden_states, accumulated_grad, total_loss
         )
@@ -411,8 +480,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """Bridges chunked lm_head backward with decoder backward via autograd.
 
     Forward takes hidden_states (connected to decoder graph), the accumulated
-    gradient from chunked lm_head backward, and the loss value. Returns the
-    loss value as a differentiable tensor.
+    gradient from chunked lm_head backward, and the loss value. Returns a
+    detached loss with this Function as its grad_fn.
 
     Backward returns accumulated_grad as the gradient for hidden_states.
     Autograd then propagates this through the decoder layers automatically —
@@ -428,9 +497,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         loss: torch.Tensor,
     ) -> torch.Tensor:
         ctx.save_for_backward(accumulated_grad)
-        # Return a tensor with the correct loss value. We clone to avoid
-        # in-place issues, and the grad_fn comes from this Function.
-        return loss.detach().clone()
+        return loss.detach()
 
     @staticmethod
     def backward(  # pyrefly: ignore[bad-override]
@@ -442,4 +509,8 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # decoder graph — equivalent to hidden_states.backward(accumulated_grad)
         # but expressed as a return value so autograd handles the traversal
         # in a single pass (no "backward through graph twice" error).
+        # Note: this is not safe if downstream accidentally runs tensor ops after
+        # the loss returns, which would produce a non-trivial grad_output that we need
+        # to properly handle. The complicated part is that grad_output might not be
+        # on the same device mesh as accumlated_grad.
         return accumulated_grad, None, None

@@ -80,13 +80,13 @@ def parallelize_gptoss(
             parallel_dims, parallelism.full_dtensor
         )
     else:
-        dp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "fsdp"])
+        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
         assert dp_mesh is not None
         dp_mesh_dims = None
         edp_mesh = None
         edp_mesh_dims = None
         if parallel_dims.ep_enabled:
-            edp_mesh = parallel_dims.get_enabled_mesh(["dp_replicate", "efsdp"])
+            edp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"])
 
     apply_fsdp(
         model,
