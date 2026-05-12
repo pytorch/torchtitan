@@ -401,10 +401,27 @@ class VLLMModelWrapper(Module):
         checkpointer.load()
 
     def load_weights(self, weights_iter):
-        """vLLM required API.
-
-        No-op: weights are loaded during ``_initial_load_weights`` (standalone)
-        or via TorchStore (RL loop). Returns all parameter names so vLLM's
-        safety check passes.
         """
-        return {"model." + n for n, _ in self.model.named_parameters()}
+        vLLM required API.
+
+        This is a no-op method since model weights are already loaded during initialization.
+        Returns the names of all parameters that have been loaded so vLLM's safety check passes.
+
+        Args:
+            weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
+
+        Returns:
+            Set of loaded parameter names
+        """
+
+        loaded_param_names = set()
+        for name, _ in self.model.named_parameters():
+            loaded_param_names.add("model." + name)
+
+        logger.info(
+            f"Weights already loaded during model initialization. \
+            Returning {len(loaded_param_names)} loaded parameter names to satisfy vLLM safety check."
+        )
+
+        # Return the names of all loaded parameters so vLLM knows they were handled
+        return loaded_param_names

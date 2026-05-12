@@ -130,7 +130,7 @@ def registry_to_vllm(
     *,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    checkpoint_config: CheckpointManager.Config | None = None,
+    checkpoint_config: CheckpointManager.Config,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -159,13 +159,11 @@ def registry_to_vllm(
             ``EngineArgs`` so vLLM's own world layout matches.
         compile_config: torch.compile config applied per-layer by the
             wrapper's parallelize step.
-        checkpoint_config: CheckpointManager config controlling whether to
-            load initial HF weights. ``None`` (default) loads from HF,
-            preserving standalone/test behavior. Pass a config with
-            ``enable=False`` to skip HF loading (RL loop).
+        checkpoint_config: CheckpointManager config controlling initial
+            weight loading. Set ``enable=True`` with ``initial_load_in_hf``
+            and ``initial_load_path`` for standalone inference. Set
+            ``enable=False`` to skip loading (RL loop, weights from TorchStore).
     """
-    if checkpoint_config is None:
-        checkpoint_config = CheckpointManager.Config()
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
