@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -61,10 +62,7 @@ class Shard(Placement):
         self, global_shape: torch.Size, rank: int, world_size: int
     ) -> int:
         local_shape = self.compute_local_shape(global_shape, rank, world_size)
-        numel = 1
-        for d in local_shape:
-            numel *= d
-        return numel
+        return math.prod(local_shape)
 
     @override
     def extract_local_shard(
@@ -87,10 +85,9 @@ class Shard(Placement):
         global_shape: torch.Size,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        non_empty = [s for s in per_rank_shards if s.numel() > 0]
-        if non_empty:
-            return torch.cat(non_empty, dim=self.dim)
-        return torch.empty(global_shape, dtype=dtype, device=per_rank_shards[0].device)
+        if not per_rank_shards:
+            raise AssertionError("Expected at least one shard to assemble.")
+        return torch.cat(per_rank_shards, dim=self.dim)
 
     @override
     def pack_reduce_grad(
