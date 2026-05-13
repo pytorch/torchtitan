@@ -638,94 +638,64 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--training.steps=10",
                     "--activation_checkpoint.mode=none",
                 ],
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=4",
-                    "--parallelism.spmd_typechecking=local",
-                    "--training.steps=10",
-                    "--activation_checkpoint.mode=none",
-                ],
-                [
-                    "--parallelism.full_spmd_types",
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "--parallelism.spmd_typechecking=global",
+                    "--debug.spmd_typechecking=global",
                     "--training.steps=10",
                     "--activation_checkpoint.mode=none",
                 ],
             ],
-            "spmd_types FSDP (no/local/global typecheck)",
+            "spmd_types FSDP (no/global typecheck)",
             "spmd_fsdp",
             ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=1",
                     "--parallelism.data_parallel_replicate_degree=4",
                     "--training.steps=10",
                     "--activation_checkpoint.mode=none",
                 ],
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=1",
                     "--parallelism.data_parallel_replicate_degree=4",
-                    "--parallelism.spmd_typechecking=local",
-                    "--training.steps=10",
-                    "--activation_checkpoint.mode=none",
-                ],
-                [
-                    "--parallelism.full_spmd_types",
-                    "--parallelism.data_parallel_shard_degree=1",
-                    "--parallelism.data_parallel_replicate_degree=4",
-                    "--parallelism.spmd_typechecking=global",
+                    "--debug.spmd_typechecking=global",
                     "--training.steps=10",
                     "--activation_checkpoint.mode=none",
                 ],
             ],
-            "spmd_types DDP (no/local/global typecheck)",
+            "spmd_types DDP (no/global typecheck)",
             "spmd_ddp",
             ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
                     "--training.steps=10",
                     "--activation_checkpoint.mode=none",
                 ],
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.spmd_typechecking=local",
-                    "--training.steps=10",
-                    "--activation_checkpoint.mode=none",
-                ],
-                [
-                    "--parallelism.full_spmd_types",
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.spmd_typechecking=global",
+                    "--debug.spmd_typechecking=global",
                     "--training.steps=10",
                     "--activation_checkpoint.mode=none",
                 ],
             ],
-            "spmd_types HSDP (no/local/global typecheck)",
+            "spmd_types HSDP (no/global typecheck)",
             "spmd_hsdp",
             ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--compile.enable",
                     "--training.steps=10",
@@ -739,7 +709,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=1",
                     "--parallelism.data_parallel_replicate_degree=4",
                     "--compile.enable",
@@ -754,7 +723,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.full_spmd_types",
                     "--parallelism.data_parallel_shard_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
                     "--compile.enable",
