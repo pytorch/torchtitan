@@ -204,6 +204,7 @@ class Module(nn.Module, Configurable):
                 # Look through non-Module wrappers, e.g., CheckpointWrapper.
                 queue.extend(child.children())
 
+        # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
         if self._sharding_config is None:
             return
 
@@ -300,30 +301,43 @@ class Module(nn.Module, Configurable):
         if sharding_config.local_map is None:
             return fn
 
+        if sharding_config.local_input_grad_placements is not None:
+            raise ValueError(
+                f"{type(self).__name__}: local_map and "
+                "local_input_grad_placements cannot coexist. "
+                "Use LocalMapConfig.in_grad_placements for modules "
+                "wrapped with local_map."
+            )
+
         lm = sharding_config.local_map
         in_dst = sharding_config.in_dst_shardings or {}
         pos_args = self._cache_pos_arg_names()
         out_src = sharding_config.out_src_shardings
-        out_src_list = list(out_src) if isinstance(out_src, tuple) else [out_src]
-
-        all_named = (
-            [in_dst.get(name) for name in pos_args]
-            + out_src_list
-            + list(lm.in_grad_placements)
-        )
-        if any(p is None for p in all_named):
+        if out_src is None:
             raise AssertionError(
-                f"{type(self).__name__}: local_map is set but some boundary "
-                "placement is None."
+                f"{type(self).__name__}: local_map is set but "
+                "out_src_shardings is None."
+            )
+        if isinstance(out_src, tuple):
+            out_src_list: list[NamedPlacement] = [p for p in out_src if p is not None]
+        else:
+            out_src_list = [out_src]
+
+        missing_in = [name for name in pos_args if name not in in_dst]
+        if missing_in:
+            raise AssertionError(
+                f"{type(self).__name__}: local_map is set but in_dst_shardings "
+                f"is missing entries for: {missing_in}"
             )
         in_named: list[NamedPlacement] = [in_dst[name] for name in pos_args]
-        out_named: list[NamedPlacement] = [p for p in out_src_list if p is not None]
-        grad_named: list[NamedPlacement] = [
-            p for p in lm.in_grad_placements if p is not None
-        ]
+        out_named: list[NamedPlacement] = out_src_list
+        # in_grad_placements may contain None for non-tensor args; filter
+        # them out for mesh resolution -- local_map passes None through.
+        grad_named: list[NamedPlacement | None] = list(lm.in_grad_placements)
 
-        resolved_mesh = parallel_dims.resolve_shared_mesh(all_named)
-        # This is True under non-full_dtensor mode with TP being disabled.
+        resolved_mesh = parallel_dims.resolve_shared_mesh(
+            in_named + out_named + grad_named
+        )
         if resolved_mesh is None:
             return fn
 
@@ -335,11 +349,10 @@ class Module(nn.Module, Configurable):
             in_placements=tuple(resolve_placements(p, resolved_mesh) for p in in_named),
             out_placements=out_placements,
             in_grad_placements=tuple(
-                resolve_placements(p, resolved_mesh) for p in grad_named
+                resolve_placements(p, resolved_mesh) if p is not None else None
+                for p in grad_named
             ),
             device_mesh=resolved_mesh,
-            # in_dst_shardings has already aligned inputs via
-            # _redistribute_inputs; let local_map assert strictly.
         )
 
     def _redistribute_inputs(
