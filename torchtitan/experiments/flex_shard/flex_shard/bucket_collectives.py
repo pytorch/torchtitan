@@ -370,6 +370,9 @@ def _run_reduce_scatter(
         device=send_buf.device,
     )
     with _record_comm_if_eager("FlexShard::reduce_scatter", debug_fqn):
+        # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
+        # AVG is a convenient default, but delayed grad scaling may need SUM
+        # plus an explicit scale at a different point in the training step.
         dist.reduce_scatter_tensor(
             output=recv_buf,
             input=send_buf,
