@@ -11,7 +11,7 @@ buffers, and inputs become DTensors on a multi-dimensional SPMD mesh.
 FSDP uses ``DataParallelMeshDims`` to identify which mesh axes
 are data-parallel.
 
-TP, CP, and EP shardings are handled by ``Module.parallelize(spmd_mesh)``
+TP, CP, and EP shardings are handled by ``Module.parallelize(parallel_dims)``
 using config-based ``ShardingConfig``.
 """
 
