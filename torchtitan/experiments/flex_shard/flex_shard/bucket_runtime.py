@@ -430,26 +430,6 @@ class BucketRuntime:
             self.context.reduce_scatter_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_scatter_wait()
 
-    def reduce_grads_to_shards(
-        self,
-        grads: list[torch.Tensor],
-        infos: list[ParamInfo],
-    ) -> list[torch.Tensor]:
-        """Reduce full-parameter grads and return local sharded grads."""
-        if not grads:
-            return []
-        with torch.no_grad():
-            result = begin_reduce_scatter_grad(
-                grads,
-                infos,
-                self.storage._mesh,
-                self.context.reduce_scatter_stream,
-                debug_fqn=self.debug_fqn,
-            )
-            sharded_grads = result.finish()
-            result.release_buffers(release_sharded_grads=False)
-            return sharded_grads
-
     def _reduce_collected_grads(self) -> None:
         grads: list[torch.Tensor] = []
         infos: list[ParamInfo] = []
@@ -529,7 +509,10 @@ class _BucketAllGather(torch.autograd.Function):
 
     Forward consumes a raw all-gather result, either prefetched by the previous
     bucket or launched on demand. Backward packs full-parameter gradients and
-    launches one explicit bucket reduce-scatter.
+    launches one explicit bucket reduce-scatter. The reduced sharded grads are
+    accumulated into the original sharded parameters asynchronously instead of
+    returned through autograd, so later backward compute can overlap with the
+    reduce-scatter.
     """
 
     @staticmethod
@@ -540,7 +523,6 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         ctx.runtime = runtime
         ctx.num_inputs = len(local_shards)
-        ctx.local_shard_dtypes = tuple(shard.dtype for shard in local_shards)
 
         result = runtime.prefetched_result
         runtime.prefetched_result = None
@@ -562,32 +544,24 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[Any, ...]:
         runtime: BucketAllGatherRuntime = ctx.runtime
         bucket = runtime.bucket
-        input_grads: list[torch.Tensor | None] = [None] * ctx.num_inputs
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
-        valid_indices: list[int] = []
-        for idx, (grad, info) in enumerate(
-            zip(full_param_grads, bucket.infos, strict=True)
+        valid_param_refs: list[ParamModuleInfo] = []
+        for grad, entry in zip(
+            full_param_grads,
+            bucket.entries,
+            strict=True,
         ):
             if grad is None:
                 continue
-            valid_indices.append(idx)
             grads.append(grad.contiguous())
-            valid_infos.append(info)
+            valid_infos.append(entry.param_info)
+            valid_param_refs.append(entry.module_info)
 
         if grads:
-            sharded_grads = bucket.reduce_grads_to_shards(grads, valid_infos)
-            for input_idx, sharded_grad in zip(
-                valid_indices,
-                sharded_grads,
-                strict=True,
-            ):
-                input_dtype = ctx.local_shard_dtypes[input_idx]
-                if sharded_grad.dtype != input_dtype:
-                    sharded_grad = sharded_grad.to(input_dtype)
-                input_grads[input_idx] = sharded_grad
+            bucket.reduce_grads(grads, valid_infos, valid_param_refs)
 
-        return (None, *input_grads)
+        return (None, *([None] * ctx.num_inputs))
 
 
 def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
