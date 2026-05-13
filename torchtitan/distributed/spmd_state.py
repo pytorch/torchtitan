@@ -77,8 +77,7 @@ _DP_AXIS_NAMES = ("dp_replicate", "dp_shard", "cp")
 def mesh() -> MeshAxes:
     """Return the global mesh axes. Must be called after init."""
     assert _MESH is not None, (
-        "SPMD mesh not initialized. "
-        "Call init_spmd_state() during build_mesh()."
+        "SPMD mesh not initialized. Call init_spmd_state() during build_mesh()."
     )
     return _MESH
 
