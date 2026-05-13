@@ -11,18 +11,20 @@ from typing import Literal
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config import ActivationCheckpointConfig
 from torchtitan.config.configs import CompileConfig
+from torchtitan.experiments.graph_trainer.chunked_loss import (
+    ChunkedCELossWithParamGrads,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
+    mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
         jit: standard torch.compile() with custom backend (deprecated)
-        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -31,12 +33,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
     Compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
-    In AOT mode: applied to the partitioned forward/backward graphs
     """
-
-    joint_passes: list[str] = field(default_factory=list)
-    """Joint graph pass names to apply on the joint forward-backward
-    graph before partitioning. Only used in AOT mode."""
 
     enable_passes: bool = True
     """When False, skip all graph passes (both default and user-configured)."""
@@ -49,13 +46,13 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "budget_limited_offload"] = "default"
+    memory_policy: Literal["default", "eager", "sac_and_offload"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         eager: SAC alternating mm ops between save/recompute, matching the
             eager AC policy in torchtitan.distributed.activation_checkpoint.
-        budget_limited_offload: SAC + CPU offload — apply default SAC first,
+        sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
     """
@@ -155,7 +152,9 @@ def to_graph_trainer_config(
     # params instead of relying on .grad side effects from chunk_loss.backward().
     loss_cfg = d.get("loss")
     if isinstance(loss_cfg, ChunkedCELoss.Config):
-        loss_cfg.support_autograd_grad = True
+        d["loss"] = ChunkedCELossWithParamGrads.Config(
+            **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
+        )
 
     # Merge CUDA graph kernel annotations into profiler traces when profiling
     # is active.  No-op otherwise (and no-op when requirements aren't met).

@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 
@@ -21,6 +23,10 @@ class ChunkedCELossWithParamGrads(ChunkedCELoss):
     replay therefore produces all-zero param grads. Compatible with both
     outer ``loss.backward()`` and ``torch.autograd.grad`` consumers.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ChunkedCELoss.Config):
+        pass
 
     @staticmethod
     def _gradient_backprop(
