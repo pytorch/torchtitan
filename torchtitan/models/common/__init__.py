@@ -24,7 +24,7 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import Linear
-from .moe import MoE
+from .moe import FlexGroupedExperts, MoE
 from .rmsnorm import RMSNorm
 from .rope import (
     apply_rotary_emb_complex,
@@ -40,6 +40,7 @@ __all__ = [
     "Embedding",
     "FeedForward",
     "FlexAttention",
+    "FlexGroupedExperts",
     "BaseQKVLinear",
     "FusedQKVLinear",
     "get_causal_mask_mod",

@@ -148,10 +148,13 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    comm_backend = getattr(
-                        layer_cfg.moe.experts.token_dispatcher,
-                        "comm_backend",
-                        "standard",
+                    token_dispatcher = getattr(
+                        layer_cfg.moe.experts, "token_dispatcher", None
+                    )
+                    comm_backend = (
+                        getattr(token_dispatcher, "comm_backend", "standard")
+                        if token_dispatcher is not None
+                        else "flex_ep"
                     )
                     if (
                         comm_backend in ("deepep", "hybridep")

@@ -7,12 +7,11 @@
 import torch.nn as nn
 from torch.distributed.tensor import (
     DeviceMesh,
+    Shard,
     distribute_module,
     distribute_tensor,
-    Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
-
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
@@ -53,19 +52,26 @@ class ExpertParallel(ParallelStyle):
         for param_name, param in mod.named_parameters(recurse=False):
             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
             mod.register_parameter(param_name, dist_param)
-        # Set ep_group on the token dispatcher for all-to-all communication.
         # device_mesh here is the 1D EP mesh.
-        assert hasattr(
-            mod, "token_dispatcher"
-        ), f"{type(mod)} missing token_dispatcher attribute"
-        assert isinstance(
-            mod.token_dispatcher,
-            (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
-        ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
-        # Pass DeviceMesh (not ProcessGroup) so that CooR precompile
-        # can use torch.ops._dtensor.mesh_get_process_group to keep
-        # the FX graph rank-agnostic.
-        mod.token_dispatcher.ep_mesh = device_mesh
+        if hasattr(mod, "token_dispatcher"):
+            assert isinstance(
+                mod.token_dispatcher,
+                (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
+            ), (
+                "Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, "
+                f"got {type(mod.token_dispatcher)}"
+            )
+            # Pass DeviceMesh (not ProcessGroup) so that CooR precompile
+            # can use torch.ops._dtensor.mesh_get_process_group to keep
+            # the FX graph rank-agnostic.
+            mod.token_dispatcher.ep_mesh = device_mesh
+        elif hasattr(mod, "ep_mesh"):
+            mod.ep_mesh = device_mesh
+        else:
+            raise ValueError(
+                f"{type(mod)} must expose either token_dispatcher or ep_mesh "
+                "for expert parallelism."
+            )
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(

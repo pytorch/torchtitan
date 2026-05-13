@@ -5,16 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
-
+from torch.distributed.tensor import DeviceMesh, DTensor, Partial
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -138,6 +136,164 @@ class GroupedExperts(Module):
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
         return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+
+
+def _load_flex_ep_hop():
+    try:
+        from torch._higher_order_ops.flex_ep import flex_ep
+    except ImportError as e:
+        raise ImportError(
+            "FlexGroupedExperts requires a PyTorch build with "
+            "torch._higher_order_ops.flex_ep."
+        ) from e
+    return flex_ep
+
+
+def _pack_flex_ep_w13(w1: torch.Tensor, w3: torch.Tensor) -> torch.Tensor:
+    return torch.cat((w1, w3), dim=1).contiguous()
+
+
+class FlexGroupedExperts(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        hidden_dim: int
+        num_experts: int
+        top_k: int
+        score_before_experts: bool = False
+        use_grouped_mm: bool = True
+        num_ctas: int = 152
+
+    def __init__(self, config: Config):
+        super().__init__()
+        if config.score_before_experts:
+            raise ValueError(
+                "FlexGroupedExperts currently supports only "
+                "score_before_experts=False."
+            )
+        if not config.use_grouped_mm:
+            raise ValueError("FlexGroupedExperts requires grouped GEMM kernels.")
+
+        self.num_experts = config.num_experts
+        self.top_k = config.top_k
+        self.num_ctas = config.num_ctas
+        self.w1 = nn.Parameter(
+            torch.empty(config.num_experts, config.hidden_dim, config.dim)
+        )
+        self.w2 = nn.Parameter(
+            torch.empty(config.num_experts, config.dim, config.hidden_dim)
+        )
+        self.w3 = nn.Parameter(
+            torch.empty(config.num_experts, config.hidden_dim, config.dim)
+        )
+
+        # Set by ExpertParallel._partition_fn() when EP is enabled. The router is
+        # created lazily because modules are constructed on meta before meshes and
+        # CUDA buffers are available.
+        self.ep_mesh: DeviceMesh | None = None
+        self._router: Any | None = None
+        self._router_shape: tuple[int, int, torch.device, int, int] | None = None
+
+    def _get_or_create_router(self, x: torch.Tensor) -> Any:
+        if x.device.type != "cuda":
+            raise ValueError(
+                f"FlexGroupedExperts requires CUDA tensors, got device={x.device}."
+            )
+        ep_size = 1 if self.ep_mesh is None else self.ep_mesh.size()
+        ep_rank = 0 if self.ep_mesh is None else self.ep_mesh.get_local_rank()
+        router_shape = (x.shape[0], x.shape[1], x.device, ep_size, ep_rank)
+        if self._router is not None and self._router_shape == router_shape:
+            return self._router
+
+        from torchtitan.distributed.flex_ep import FlexEPRouter
+
+        with torch.cuda.device(x.device):
+            router = FlexEPRouter.create(
+                max_tokens=x.shape[0],
+                dim=x.shape[1],
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                device=x.device,
+                ep_mesh=self.ep_mesh,
+                num_ctas=self.num_ctas,
+            )
+        self._router = router
+        self._router_shape = router_shape
+        return router
+
+    def _local_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if isinstance(self.w1, DTensor):
+            w1 = self.w1.to_local()
+            # pyrefly: ignore [missing-attribute]
+            w2 = self.w2.to_local()
+            # pyrefly: ignore [missing-attribute]
+            w3 = self.w3.to_local()
+        else:
+            w1 = self.w1
+            w2 = self.w2
+            w3 = self.w3
+        return w1, w2, w3
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+        shared_experts: nn.Module | None = None,
+    ) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError(f"FlexGroupedExperts expects 2D input, got {x.shape}.")
+        if selected_experts_indices.shape != top_scores.shape:
+            raise ValueError(
+                "selected_experts_indices and top_scores must have matching "
+                f"shape, got {selected_experts_indices.shape} and {top_scores.shape}."
+            )
+        if selected_experts_indices.shape[0] != x.shape[0]:
+            raise ValueError(
+                "selected_experts_indices and top_scores batch dimension must "
+                f"match x, got {selected_experts_indices.shape[0]} and {x.shape[0]}."
+            )
+        if selected_experts_indices.shape[1] != self.top_k:
+            raise ValueError(
+                f"Expected top_k={self.top_k}, got {selected_experts_indices.shape[1]}."
+            )
+
+        router = self._get_or_create_router(x)
+        w1, w2, w3 = self._local_weights()
+        if self.num_experts % router.ep_size != 0:
+            raise ValueError(
+                f"num_experts ({self.num_experts}) must be divisible by "
+                f"ep_size ({router.ep_size})."
+            )
+        expected_local_experts = self.num_experts // router.ep_size
+        if w1.shape[0] != expected_local_experts:
+            raise ValueError(
+                "FlexGroupedExperts local expert shard has unexpected size: "
+                f"expected {expected_local_experts}, got {w1.shape[0]}."
+            )
+
+        flex_ep = _load_flex_ep_hop()
+        y_partial = flex_ep(
+            x.contiguous().to(torch.bfloat16),
+            selected_experts_indices.contiguous(),
+            _pack_flex_ep_w13(w1, w3).to(torch.bfloat16),
+            w2.contiguous().to(torch.bfloat16),
+            *router.router_fns,
+            *router.router_operands,
+            num_experts=self.num_experts,
+            ep_rank=router.ep_rank,
+            ep_size=router.ep_size,
+            max_tokens=router.max_tokens,
+            topk=self.top_k,
+            num_ctas=router.num_ctas,
+        )
+        out = (
+            y_partial.to(torch.float32) * top_scores.to(torch.float32).unsqueeze(-1)
+        ).sum(dim=1)
+        out = out.to(x.dtype)
+        if shared_experts is not None:
+            out = out + shared_experts(x)
+        return out
 
 
 class TokenChoiceTopKRouter(Module):
@@ -305,12 +461,12 @@ class MoE(Module):
 
     The forward pass proceeds as:
     1. Router computes expert assignments
-    2. GroupedExperts.forward() handles:
-       a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
+    2. The experts module handles:
+       a. dispatch — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
        b. expert computation
-       c. combine (TokenDispatcher) — reverse the dispatch reordering.
+       c. combine — reverse the dispatch reordering.
           With EP, starts async communication (NCCL all-to-all or DeepEP
           combine), runs shared_experts in parallel, then forces sync
           (scatter_add for NCCL AllToAll, sync_combine for DeepEP) and
@@ -321,7 +477,7 @@ class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
-        experts: GroupedExperts.Config
+        experts: Module.Config
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None

@@ -75,6 +75,18 @@ def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_deepep_ep() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel", moe_comm_backend="deepep")
+    return config
+
+
+def deepseek_v3_debugmodel_flex_ep() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel", moe_comm_backend="flex_ep")
+    return config
+
+
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),

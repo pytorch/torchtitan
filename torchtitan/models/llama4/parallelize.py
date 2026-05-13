@@ -9,19 +9,18 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
-    parallelize_module,
     PrepareModuleInputOutput,
     RowwiseParallel,
+    parallelize_module,
 )
-
 from torchtitan.config import (
+    TORCH_DTYPE_MAP,
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
@@ -35,8 +34,8 @@ from torchtitan.distributed.fsdp import (
 )
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
-    maybe_enable_async_tp,
     NoParallel,
+    maybe_enable_async_tp,
 )
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.llama4.model import Llama4Model
@@ -318,7 +317,7 @@ def apply_fsdp(
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
-        transformer_blocks, next_transformer_blocks
+        transformer_blocks, next_transformer_blocks, strict=True
     ):
         if next_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
@@ -340,7 +339,7 @@ def apply_fsdp(
         model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
-        reversed_transformer_blocks, prev_transformer_blocks
+        reversed_transformer_blocks, prev_transformer_blocks, strict=True
     ):
         if prev_transformer_block is not None:
             # pyrefly: ignore [missing-attribute]
@@ -436,8 +435,16 @@ def apply_moe_ep_tp(
             experts_mesh = ep_mesh
             experts_plan = ExpertParallel()
             # pyrefly: ignore [missing-attribute]
-            dispatcher = transformer_block.moe.experts.token_dispatcher
-            if tp_mesh is not None:
+            dispatcher = getattr(
+                transformer_block.moe.experts, "token_dispatcher", None
+            )
+            if tp_mesh is not None and dispatcher is None:
+                raise ValueError(
+                    "MoE expert backends without a token_dispatcher do not "
+                    "currently support combined tensor parallelism and expert "
+                    "parallelism. Use tensor_parallel_degree=1 with this backend."
+                )
+            if tp_mesh is not None and dispatcher is not None:
                 if isinstance(dispatcher, AllToAllTokenDispatcher):
                     # sp_size and sp_rank are set for sequence-parallel token splitting
                     # when EP borrows from TP.

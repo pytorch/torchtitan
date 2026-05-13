@@ -23,7 +23,12 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts, MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    FlexGroupedExperts,
+    GroupedExperts,
+    MoE,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
@@ -149,7 +154,7 @@ def make_moe_config(
     *,
     num_experts: int = 8,
     router: TokenChoiceTopKRouter.Config,
-    experts: GroupedExperts.Config,
+    experts: Module.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
 ) -> MoE.Config:
@@ -233,7 +238,7 @@ def make_token_dispatcher_config(
         )
     else:
         raise ValueError(
-            f"Unknown comm_backend: '{comm_backend}'. "
+            f"Unknown comm_backend: {comm_backend!r}. "
             "Must be one of 'standard', 'deepep', 'hybridep'."
         )
 
@@ -249,8 +254,26 @@ def make_experts_config(
     use_grouped_mm: bool = True,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-) -> GroupedExperts.Config:
-    """Build a fully-specified GroupedExperts.Config."""
+) -> Module.Config:
+    """Build a fully-specified experts config."""
+    if comm_backend == "flex_ep":
+        if score_before_experts:
+            raise ValueError(
+                "comm_backend='flex_ep' currently supports only "
+                "score_before_experts=False."
+            )
+        if not use_grouped_mm:
+            raise ValueError("comm_backend='flex_ep' requires use_grouped_mm=True.")
+        return FlexGroupedExperts.Config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
+            use_grouped_mm=use_grouped_mm,
+            param_init=param_init,
+        )
+
     return GroupedExperts.Config(
         dim=dim,
         hidden_dim=hidden_dim,
