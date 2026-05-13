@@ -398,12 +398,17 @@ def apply_cpu_offload_pass(
         ), f"Node {node.name} tagged for offload has no 'val' metadata"
 
         device = val.device
+        # Propagate source node metadata to offload chain nodes so
+        # that tlparse/graph dumps show stacktraces and module_fqn.
+        src_meta = {k: v for k, v in node.meta.items() if k not in ("val", "recompute")}
+
         # --- Forward: async GPU->CPU offload right after production ---
         with gm.graph.inserting_after(node):
             offload_node = gm.graph.call_function(
                 torch.ops.ao.offload.default,
                 args=(node,),
             )
+            offload_node.meta.update(src_meta)
             offload_node.meta["val"] = val.to(torch.device("cpu"))
 
         # Find the last forward consumer of this node's storage (including
@@ -424,6 +429,7 @@ def apply_cpu_offload_pass(
                 torch.ops.ao.wait_tensor.default,
                 args=(offload_node, node, last_consumer),
             )
+            wait_offload_node.meta.update(src_meta)
             wait_offload_node.meta["val"] = offload_node.meta["val"]
 
         wait_offload_map[node] = wait_offload_node
@@ -436,24 +442,21 @@ def apply_cpu_offload_pass(
                 torch.ops.ao.reload.default,
                 args=(wait_offload_node, device),
             )
+            reload_node.meta.update(src_meta)
             reload_node.meta["val"] = val
             reload_node.meta["autograd_backward"] = True
-            reload_node.meta["custom"] = dict(node.meta.get("custom", {}))
 
         with gm.graph.inserting_before(first_consumer):
             wait_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
                 args=(reload_node,),
             )
+            wait_node.meta.update(src_meta)
             wait_node.meta["val"] = val
             wait_node.meta["autograd_backward"] = True
 
         for user in bwd_users:
             user.replace_input_with(node, wait_node)
-
-        # Store mapping so the remat pass can redirect recomputed nodes
-        # to the reloaded tensor instead of the freed forward tensor.
-        node.meta["cpu_offload_reload_node"] = wait_node
 
         logger.debug(
             f"CPU offload: offloading {node.name} "
@@ -530,8 +533,6 @@ def defer_offload_waits(
         if n.op == "call_function" and _is_backward_node(n):
             break
         if n.op != "call_function":
-            continue
-        if n.target in _AO_OPS:
             continue
         lid = _get_layer_id(n)
         if lid != current_layer:
