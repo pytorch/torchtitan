@@ -7,7 +7,7 @@
 """Sharding types for config-based parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize(mesh)``.  All placements use
+and read by ``Module.parallelize(parallel_dims)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
 self-documenting and support multi-dimensional meshes.
 """
@@ -157,13 +157,15 @@ def resolve_placements(
     as distinct and reject ``Shard`` in places where ``Replicate`` would
     work.
     """
+    # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
+    # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
         if key not in named:
             raise ValueError(
-                f"Sharding sharding_config does not declare a placement for mesh axis "
+                f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
                 f"{sorted(k.value for k in named)}; "
                 f"required: {list(mesh.mesh_dim_names)}."
