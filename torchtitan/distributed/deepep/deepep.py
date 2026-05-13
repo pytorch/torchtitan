@@ -348,9 +348,7 @@ def _permute_tokens(
     sort_order = torch.argsort(valid_expert_ids, stable=True)
     permuted_indices = torch.arange(
         len(hidden_states), device=hidden_states.device
-    ).repeat_interleave(mask.sum(dim=1), output_size=valid_expert_ids.shape[0])[
-        sort_order
-    ]
+    ).repeat_interleave(mask.sum(dim=1))[sort_order]
     permuted_hidden_states = hidden_states.index_select(0, permuted_indices)
     permuted_scores = valid_scores[sort_order]
 
