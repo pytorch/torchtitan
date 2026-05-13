@@ -39,7 +39,6 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
-    _is_recomputed_node,
     _MODULE_FQN,
 )
 from torchtitan.tools.logging import logger
@@ -70,6 +69,13 @@ def annotate_fsdp_all_gather(
     graph = gm.graph
 
     def force_recompute_node(node):
+        # Respect MUST_CPU_OFFLOAD set by ``tag_all_offloadable_activations``:
+        # the offload chain already keeps the activation off-GPU between
+        # forward and backward, so re-tagging as MUST_RECOMPUTE/MUST_SAVE
+        # would either undo the offload selection or re-save GPU memory we
+        # just freed.
+        if node.meta.get("recompute") == CheckpointPolicy.MUST_CPU_OFFLOAD:
+            return
         if reshard_after_forward:
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
         else:
@@ -229,6 +235,53 @@ def transformer_block_bucketing_reordering_pass(
     return gm
 
 
+def _add_chunked_ce_accumulator_deps(
+    graph: fx.Graph,
+    deps: dict[fx.Node, OrderedSet[fx.Node]],
+) -> None:
+    """Preserve copy-into-slice writes before later reads of the base buffer.
+
+    ChunkedCELoss's hidden-state gradient accumulator is traced as copy_ writes
+    into slice views of a zeros-like base tensor, followed by a read of that
+    base tensor. FX arg edges do not connect the mutating copy_ nodes to the
+    later base read, so bucketing's topological reorder can otherwise move the
+    read before the writes.
+    """
+
+    def copy_mutated_base(node: fx.Node) -> fx.Node | None:
+        if node.op != "call_function" or node.target != torch.ops.aten.copy_.default:
+            return None
+
+        dst = node.args[0]
+        if not isinstance(dst, fx.Node):
+            return None
+
+        if dst.op == "call_function" and dst.target == torch.ops.aten.slice.Tensor:
+            base = dst.args[0]
+            if isinstance(base, fx.Node):
+                return base
+        return dst
+
+    writes_by_base: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(OrderedSet)
+    copy_destinations = {
+        node.args[0]
+        for node in graph.nodes
+        if node.op == "call_function"
+        and node.target == torch.ops.aten.copy_.default
+        and isinstance(node.args[0], fx.Node)
+    }
+
+    for node in graph.nodes:
+        if node.op not in ("placeholder", "output") and node not in copy_destinations:
+            for input_node in node.all_input_nodes:
+                writes = writes_by_base.get(input_node)
+                if writes:
+                    deps.setdefault(node, OrderedSet()).update(writes)
+
+        if base := copy_mutated_base(node):
+            writes_by_base[base].add(node)
+
+
 class JointManualOverlapScheduler(ManualOverlapScheduler):
     """Manual overlap scheduler for joint forward+backward graphs.
 
@@ -285,7 +338,9 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             if bwd_nodes:
                 self.bucketer.manual_bucket_collectives(nodes=bwd_nodes)
 
-        _stable_topological_sort(self.graph, {})
+        deps: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(OrderedSet)
+        _add_chunked_ce_accumulator_deps(self.graph, deps)
+        _stable_topological_sort(self.graph, deps)
         self.graph.lint()
         self.nodes = list(self.graph.nodes)
         self.in_degree = Counter(user for node in self.nodes for user in node.users)
@@ -299,6 +354,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
 
         self._schedule_rs_prefetch(overlap_deps)
         self._schedule_ag_prefetch(overlap_deps)
+        _add_chunked_ce_accumulator_deps(self.graph, overlap_deps)
 
         _stable_topological_sort(self.graph, overlap_deps)
         self.graph.lint()
@@ -448,9 +504,6 @@ def joint_transformer_block_bucketing_reordering_pass(
             defaults to ``"custom_ops"`` via the parent class.
     """
 
-    def _is_backward(node: torch.fx.Node) -> bool:
-        return _is_backward_node(node) or _is_recomputed_node(node)
-
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
         if not fqn:
@@ -461,7 +514,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         gm,
         module_bucket_plans,
         insert_overlap_deps,
-        is_backward_fn=_is_backward,
+        is_backward_fn=_is_backward_node,
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
     ).run()
