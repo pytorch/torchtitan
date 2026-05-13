@@ -36,8 +36,7 @@ __all__ = ["Decoder", "TransformerBlock"]
 
 def _decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
     return {
-        MeshAxisName.DP_REPLICATE: spmd.S(0),
-        MeshAxisName.DP_SHARD: spmd.S(0),
+        MeshAxisName.DP: spmd.S(0),
         MeshAxisName.CP: spmd.S(1),
         MeshAxisName.TP: tp_type,
     }

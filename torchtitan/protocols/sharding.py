@@ -4,59 +4,50 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Sharding types for config-based parallelization.
+"""Sharding types for config-based SPMD parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize(mesh)``.  All placements use
-``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
-self-documenting and support multi-dimensional meshes.
-
-Placement values may be either DTensor ``Placement`` objects or semantic
-``spmd_types`` types (``R``/``I``/``P``/``S(dim)``). DTensor paths accept
-DTensor placements directly and translate SPMD placements at the boundary.
+and read by ``Module.parallelize(parallel_dims)``. All placements use
+``NamedPlacement`` (dict keyed by mesh axis name) so they are self-documenting
+and support multi-dimensional meshes.
 """
 
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
-from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.protocols.types import MeshAxisName
 
-# Sharding configs may temporarily use DTensor placements or semantic SPMD
-# vocabulary. DTensor paths accept both; SPMD paths require SPMD values.
-NamedPlacement = dict[MeshAxisName, Placement | spmd.PerMeshAxisSpmdType]
+
+# Per-axis SPMD type, keyed by mesh axis name. ``MeshAxisName`` is a StrEnum,
+# so these keys can be passed directly to spmd_types APIs that accept strings.
+NamedPlacement = dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
+
+
+def _mesh_axis_name(axis_name: object) -> str:
+    return axis_name.value if hasattr(axis_name, "value") else str(axis_name)
+
+
+def _named_placement_axes(named: NamedPlacement | None) -> set[str]:
+    if named is None:
+        return set()
+    return {_mesh_axis_name(axis_name) for axis_name in named}
 
 
 @dataclass(kw_only=True, slots=True)
-class LocalMapConfig:
+class LocalSpmdConfig:
     """Spec for modules computing on local tensors.
 
-    DTensor wraps forward with ``local_map()``: DTensor inputs become local
-    tensors before forward, and outputs become DTensors after forward.
-    SPMD keeps tensors local and uses the same placements to assert boundary
-    types around a local typechecked region.
-
-    Placements are ``NamedPlacement`` (keyed by mesh axis name). At
-    parallelize time they are resolved to positional tuples (DTensor) or
-    per-axis type dicts (SPMD) matching the runtime mesh.
+    SPMD keeps tensors local and uses placements to assert boundary types
+    around a typechecked local computation region.
 
     Attributes:
         in_placements: Per-input NamedPlacements (positional: q, k, v).
         out_placements: Per-output NamedPlacements.
-        in_grad_placements: Per-input-gradient NamedPlacements.
-            Ignored for SPMD path (no backward typechecking).
-        in_ndims: Per-input tensor ndim hints for SPMD PartitionSpec
-            resolution. Required when multiple axes shard the same dim
-            (e.g. HSDP). ``None`` means no hints (ok when no collisions).
-        out_ndims: Per-output tensor ndim hints.
     """
 
     in_placements: tuple[NamedPlacement, ...]
     out_placements: tuple[NamedPlacement, ...]
-    in_grad_placements: tuple[NamedPlacement, ...] | None = None
-    in_ndims: tuple[int, ...] | None = None
-    out_ndims: tuple[int, ...] | None = None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -66,24 +57,18 @@ class LocalMapConfig:
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
-    All placements use ``NamedPlacement`` (``dict[MeshAxisName, ...]``)
-    keyed by mesh axis names.
+    All placements use ``NamedPlacement`` keyed by mesh axis name.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
 
     Redistribution is expressed as a (source, destination) pair: src declares
     what the tensor's placement is entering the boundary, dst declares the
-    desired placement after redistribution. For DTensor, the src is usually
-    implicit in the tensor's ``placements``; declaring it explicitly keeps
-    the contract uniform with future erased-type systems that require both
-    sides of every redistribute.
+    desired placement after redistribution.
 
     Attributes:
-        state_shardings: Parameter/buffer placements.
-            DTensor path: used with ``distribute_tensor``.
-            SPMD path: used with ``spmd.assert_type`` (+ physical TP shard).
-            e.g. ``{"weight": {TP: Shard(0)}}`` or ``{"weight": {TP: S(0)}}``.
+        state_shardings: Parameter/buffer placements. Outer dict keys are
+            param/buffer names, e.g. ``{"weight": {TP: spmd.S(0)}}``.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
             arg name. Declares what the input's placement is before any
             redistribution.
@@ -91,12 +76,10 @@ class ShardingConfig:
             keyed by ``forward()`` arg name.
             ``None`` means no input redistribution.
         out_src_shardings: Source placement of outputs before redistribution.
-            DTensor path: usually implicit in tensor's placements.
-            SPMD path: required for ``spmd.redistribute``.
+            Required for ``spmd.redistribute``.
         out_dst_shardings: Desired output placement after redistribution.
             ``None`` means no output redistribution.
-        local_map: If set, wraps forward for local DTensor compute or local
-            SPMD typechecking.
+        local_spmd: If set, wraps forward for local SPMD typechecking.
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
@@ -104,7 +87,25 @@ class ShardingConfig:
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_src_shardings: NamedPlacement | None = None
     out_dst_shardings: NamedPlacement | None = None
-    local_map: LocalMapConfig | None = None
+    local_spmd: LocalSpmdConfig | None = None
+
+    def axes(self) -> set[str]:
+        """Return mesh axes referenced by this sharding config."""
+        axes: set[str] = set()
+        for named in self.state_shardings.values():
+            axes.update(_named_placement_axes(named))
+        for shardings in (self.in_src_shardings, self.in_dst_shardings):
+            if shardings is not None:
+                for named in shardings.values():
+                    axes.update(_named_placement_axes(named))
+        axes.update(_named_placement_axes(self.out_src_shardings))
+        axes.update(_named_placement_axes(self.out_dst_shardings))
+        if self.local_spmd is not None:
+            for named in self.local_spmd.in_placements:
+                axes.update(_named_placement_axes(named))
+            for named in self.local_spmd.out_placements:
+                axes.update(_named_placement_axes(named))
+        return axes
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""
@@ -122,39 +123,3 @@ class SpmdInputConfig:
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
-
-
-def _to_dtensor_placement(value: Placement | spmd.PerMeshAxisSpmdType) -> Placement:
-    if isinstance(value, Placement):
-        return value
-    if isinstance(value, spmd.Shard):
-        return Shard(value.dim)
-    if value is spmd.P:
-        return Partial()
-    if value in (spmd.R, spmd.I):
-        return Replicate()
-    raise TypeError(f"Unsupported placement value: {value!r}")
-
-
-def resolve_placements(
-    named: NamedPlacement,
-    mesh_axis_names: tuple[str, ...],
-) -> tuple[Placement, ...]:
-    """Resolve NamedPlacement against a mesh in axis order.
-
-    Every sharding_config must explicitly declare a placement for every mesh axis
-    it will be applied against. Missing declarations raise ``ValueError``;
-    extra declarations (axes not in the mesh) are ignored.
-    """
-    result = []
-    for axis_name in mesh_axis_names:
-        key = MeshAxisName(axis_name)
-        if key not in named:
-            raise ValueError(
-                f"Sharding sharding_config does not declare a placement for mesh axis "
-                f"{axis_name!r}. Declared: "
-                f"{sorted(k.value for k in named)}; "
-                f"required: {list(mesh_axis_names)}."
-            )
-        result.append(_to_dtensor_placement(named[key]))
-    return tuple(result)
