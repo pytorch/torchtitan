@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.distributed.spmd_state import init_spmd_state
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
@@ -31,6 +30,7 @@ class ParallelDims:
     full_spmd_types: bool = False
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
+    _global_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
 
     @classmethod
@@ -203,9 +203,6 @@ class ParallelDims:
             self._meshes["dp_shard"] = dense_mesh["dp_shard"]
         else:
             self._meshes["fsdp"] = dense_mesh["fsdp"]
-
-        if self.full_spmd_types:
-            init_spmd_state(dense_mesh)
 
         # Validate mesh sizes
         self._validate_meshes()

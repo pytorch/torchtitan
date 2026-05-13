@@ -21,9 +21,8 @@ from torch.distributed.tensor.experimental import local_map
 import spmd_types as spmd
 from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_state import (
+    current_pg,
     is_spmd_active,
-    mesh as spmd_mesh,
-    spmd_state,
 )
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
@@ -56,19 +55,20 @@ def preserve_buffer_spmd(model: nn.Module):
 
 
 def _resolve_named(named):
-    """Resolve MeshAxisName → MeshAxis, dropping inactive axes."""
-    m = spmd_mesh()
+    """Resolve MeshAxisName → string axes, dropping inactive axes."""
+    mesh_names = spmd.current_mesh_names()
     types = {}
     for axis_name, value in named.items():
-        if (ax := getattr(m, axis_name.value)) is None:
+        name = axis_name.value
+        if mesh_names is not None and name not in mesh_names:
             continue
-        types[ax] = value
+        types[name] = value
     return types
 
 
 def named_placement_to_spmd(named, ndim=None):
     """
-    Resolve NamedPlacement to {MeshAxis: spmd_type},
+    Resolve NamedPlacement to {axis_name: spmd_type},
     with optional S(*)->V+PartitionSpec normalization for ``spmd.assert_type`` usage.
 
     When ``ndim`` is None, returns raw types without normalization —
@@ -96,8 +96,8 @@ def named_placement_to_spmd(named, ndim=None):
         return types, None
 
     # Build PartitionSpec using canonical axis ordering for collisions.
-    axis_order = spmd_state().axis_order
-    order_idx = {ax: i for i, ax in enumerate(axis_order)}
+    current_mesh_names = spmd.current_mesh_names() or {}
+    order_idx = {ax: i for i, ax in enumerate(current_mesh_names)}
 
     pspec_entries: dict[int, object] = {}
     for dim, axes in dim_to_axes.items():
@@ -122,11 +122,11 @@ def redistribute_spmd_per_axis(
     dst_types: spmd.PerMeshAxisSpmdTypes,
 ) -> torch.Tensor:
     """Redistribute a tensor per-axis where src != dst."""
-    state = spmd_state()
-    for axis, dst_t in dst_types.items():
-        src_t = src_types.get(axis)
+    for axis_name, dst_t in dst_types.items():
+        src_t = src_types.get(axis_name)
         if src_t is not None and src_t != dst_t:
-            pg = state.pg_for_axis(axis)
+            pg = current_pg(axis_name)
+            assert pg is not None
             bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
             x = spmd.redistribute(
                 x,
@@ -302,10 +302,11 @@ class Module(nn.Module, Configurable):
         For each module with a ``sharding_config``:
 
         1. Distribute params and buffers per ``state_shardings``.
-        2. Wrap ``self.forward`` with local_map boundary + redistribution.
+        2. Wrap ``self.forward`` with local execution boundary + redistribution.
 
         fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
-        CP (applied before ``parallelize``) is captured inside ``local_map``.
+        CP (applied before ``parallelize``) is captured inside the local execution
+        boundary.
         """
         # Recurse children first
         queue = list(self.children())
@@ -347,7 +348,7 @@ class Module(nn.Module, Configurable):
         # Cache positional arg names before wrapping forward
         self._cache_pos_arg_names()
 
-        # Step 2: Wrap forward with local_map boundary
+        # Step 2: Wrap forward with local execution boundary
         fn = self.forward
         if sharding_config.local_map is not None:
             fn = self.local_map(fn, sharding_config.local_map, mesh_or_parallel_dims)
@@ -400,9 +401,6 @@ class Module(nn.Module, Configurable):
         is_param: bool,
     ) -> None:
         """SPMD path: physically shard where needed, then annotate."""
-        m = spmd_mesh()
-        state = spmd_state()
-
         # Validate and collect shards. Values must be raw per-axis types.
         shard_dims: dict[int, str] = {}
         for axis_name, value in named_placement.items():
@@ -424,11 +422,10 @@ class Module(nn.Module, Configurable):
                 shard_dims[value.dim] = axis_name.value
 
         for axis_name, value in named_placement.items():
-            if (ax := getattr(m, axis_name.value)) is None:
+            pg = current_pg(axis_name.value)
+            if pg is None:
                 continue
             if isinstance(value, spmd.Shard):
-                pg = state.pg_for_axis(ax)
-                assert pg is not None
                 tensor = spmd.shard(tensor, pg, src=spmd.I, dst=value)
 
         # register state
@@ -452,12 +449,9 @@ class Module(nn.Module, Configurable):
         local_map_config: LocalMapConfig,
         mesh_or_pd: DeviceMesh | ParallelDims,
     ) -> Callable:
-        """Wrap forward with local_map (DTensor) or spmd.local_map (SPMD).
-
-        Duck-types on placement values in the config to dispatch.
-        """
+        """Wrap forward for local DTensor compute or local SPMD typechecking."""
         if is_spmd_active():
-            return self.local_map_spmd(fn, local_map_config)
+            return self.local_spmd(fn, local_map_config)
         else:
             mesh = (
                 mesh_or_pd
@@ -501,7 +495,7 @@ class Module(nn.Module, Configurable):
             named_placement_to_spmd(p, ndim=nd) for p, nd in zip(placements, ndims)
         )
 
-    def local_map_spmd(self, fn: Callable, lm: LocalMapConfig) -> Callable:
+    def local_spmd(self, fn: Callable, lm: LocalMapConfig) -> Callable:
         resolved_in = self._resolve_placements_spmd(lm.in_placements, lm.in_ndims)
         resolved_out = self._resolve_placements_spmd(lm.out_placements, lm.out_ndims)
 
