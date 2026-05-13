@@ -7,6 +7,8 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -31,6 +33,9 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
 
+if TYPE_CHECKING:
+    from torch.distributed.fsdp import DataParallelMeshDims
+
 
 def parallelize_llama(
     model: Llama3Model,
@@ -49,9 +54,7 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
@@ -103,7 +106,9 @@ def parallelize_llama(
             replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
         )
     else:
-        names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
         dp_mesh = parallel_dims.get_mesh(names)
         dp_mesh_dims = None
 
