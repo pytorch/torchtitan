@@ -15,7 +15,11 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_state import is_spmd_active, mesh, spmd_state
+from torchtitan.distributed.spmd_state import (
+    current_dp_axis_names,
+    current_pg,
+    is_spmd_active,
+)
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -46,12 +50,14 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        tp_pg = spmd_state().get_pg("tp")
+        tp_pg = current_pg("tp")
         assert tp_pg is not None
         result = _LossParallelCrossEntropy.apply(logits, labels)
 
         out_type = dict(spmd.get_local_type(logits))
-        out_type[tp_pg] = spmd.I
+        mesh_names = spmd.current_mesh_names()
+        assert mesh_names is not None
+        out_type[mesh_names["tp"]] = spmd.I
         spmd.assert_type(result, out_type)
         return result
 
@@ -62,7 +68,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        tp_pg = spmd_state().get_pg("tp")
+        tp_pg = current_pg("tp")
         assert tp_pg is not None
         tp_rank = dist.get_rank(tp_pg)
 
@@ -395,13 +401,13 @@ class ChunkedCELoss(BaseLoss):
 
         total_loss = h_detached.new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
-            for axis in spmd_state().dp_axes:
+            for axis_name in current_dp_axis_names():
+                pg = current_pg(axis_name)
+                assert pg is not None
                 total_loss = spmd.reinterpret(
-                    total_loss, axis, src=spmd.R, dst=spmd.P, expert_mode=True
+                    total_loss, pg, src=spmd.R, dst=spmd.P, expert_mode=True
                 )
-            if (tp_ax := mesh().tp) is not None:
-                tp_pg = spmd_state().pg_for_axis(tp_ax)
-                assert tp_pg is not None
+            if (tp_pg := current_pg("tp")) is not None:
                 total_loss = spmd.convert(
                     total_loss, tp_pg, src=spmd.R, dst=spmd.I, expert_mode=True
                 )
@@ -431,9 +437,11 @@ class ChunkedCELoss(BaseLoss):
                 chunk_loss = chunk_loss / global_valid_tokens
 
             if spmd.is_type_checking():
-                for axis in spmd_state().dp_axes:
+                for axis_name in current_dp_axis_names():
+                    pg = current_pg(axis_name)
+                    assert pg is not None
                     chunk_loss = spmd.reinterpret(
-                        chunk_loss, axis, src=spmd.V, dst=spmd.P, expert_mode=True
+                        chunk_loss, pg, src=spmd.V, dst=spmd.P, expert_mode=True
                     )
 
             total_loss = total_loss + chunk_loss.detach()
@@ -461,14 +469,11 @@ class ChunkedCELoss(BaseLoss):
             computation is duplicated after the vocab-parallel reductions.
         accumulated_grad: same types as h_detached (the input).
         """
-        state = spmd_state()
-
         loss_type: dict = {}
-        for axis in state.dp_axes:
-            loss_type[axis] = spmd.P
-        tp_ax = mesh().tp
-        if tp_ax is not None:
-            loss_type[tp_ax] = spmd.I
+        for axis_name in current_dp_axis_names():
+            loss_type[axis_name] = spmd.P
+        if current_pg("tp") is not None:
+            loss_type["tp"] = spmd.I
 
         grad_types = dict(spmd.get_local_type(h_detached))
         grad_spec = spmd.get_partition_spec(h_detached)
@@ -516,8 +521,8 @@ class ChunkedCELoss(BaseLoss):
 
         # SPMD path: all-gather S(1)@tp -> R@tp before chunking.
         if is_spmd_active() and self.enable_sp:
-            tp_ax = mesh().tp
-            if tp_ax is not None:
+            tp_pg = current_pg("tp")
+            if tp_pg is not None:
                 bwd = (
                     {"op_dtype": torch.float32}
                     if hidden_states.dtype != torch.float32
@@ -525,7 +530,7 @@ class ChunkedCELoss(BaseLoss):
                 )
                 hidden_states = spmd.redistribute(
                     hidden_states,
-                    spmd_state().pgs["tp"],
+                    tp_pg,
                     src=spmd.S(1),
                     dst=spmd.R,
                     backward_options=bwd,

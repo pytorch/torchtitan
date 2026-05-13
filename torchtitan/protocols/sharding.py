@@ -11,9 +11,9 @@ and read by ``Module.parallelize(mesh)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
 self-documenting and support multi-dimensional meshes.
 
-Placement values are either DTensor ``Placement`` objects or ``spmd_types``
-types (``R``/``I``/``V``/``P``/``S(dim)``).  ``parallelize()`` duck-types
-on the values to dispatch DTensor vs SPMD paths.
+Placement values may be either DTensor ``Placement`` objects or semantic
+``spmd_types`` types (``R``/``I``/``P``/``S(dim)``). DTensor paths accept
+DTensor placements directly and translate SPMD placements at the boundary.
 """
 
 from dataclasses import dataclass, field
@@ -21,42 +21,21 @@ from dataclasses import dataclass, field
 import spmd_types as spmd
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
-from torchtitan.distributed.spmd_state import is_spmd_active
 from torchtitan.protocols.types import MeshAxisName
 
-# Value is either a DTensor Placement (Shard, Replicate, Partial) or an
-# spmd_types type (R, I, V, P, S(dim)).  parallelize() duck-types on the
-# value to dispatch DTensor vs SPMD paths.
+# Sharding configs may temporarily use DTensor placements or semantic SPMD
+# vocabulary. DTensor paths accept both; SPMD paths require SPMD values.
 NamedPlacement = dict[MeshAxisName, Placement | spmd.PerMeshAxisSpmdType]
-
-
-def S(dim: int) -> spmd.Shard | Shard:
-    """Shard on ``dim``. Returns ``spmd.S(dim)`` or ``Shard(dim)``."""
-    return spmd.S(dim) if is_spmd_active() else Shard(dim)
-
-
-def R() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
-    """Replicate. Returns ``spmd.R`` or ``Replicate()``."""
-    return spmd.R if is_spmd_active() else Replicate()
-
-
-def Inv() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
-    """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent)."""
-    return spmd.I if is_spmd_active() else Replicate()
-
-
-def P() -> spmd.PerMeshAxisLocalSpmdType | Partial:
-    """Partial. Returns ``spmd.P`` or ``Partial()``."""
-    return spmd.P if is_spmd_active() else Partial()
 
 
 @dataclass(kw_only=True, slots=True)
 class LocalMapConfig:
     """Spec for modules computing on local tensors.
 
-    Wraps forward with ``local_map()`` (DTensor) or ``spmd.local_map()``
-    (SPMD): strips distributed wrapper before forward, re-establishes it
-    after.
+    DTensor wraps forward with ``local_map()``: DTensor inputs become local
+    tensors before forward, and outputs become DTensors after forward.
+    SPMD keeps tensors local and uses the same placements to assert boundary
+    types around a local typechecked region.
 
     Placements are ``NamedPlacement`` (keyed by mesh axis name). At
     parallelize time they are resolved to positional tuples (DTensor) or
@@ -88,9 +67,7 @@ class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
     All placements use ``NamedPlacement`` (``dict[MeshAxisName, ...]``)
-    keyed by mesh axis names.  Values are either DTensor ``Placement``
-    objects or ``spmd_types`` types — ``parallelize()`` duck-types on
-    them to dispatch the right path.
+    keyed by mesh axis names.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
@@ -121,8 +98,8 @@ class ShardingConfig:
             SPMD path: required for ``spmd.redistribute``.
         out_dst_shardings: Desired output placement after redistribution.
             ``None`` means no output redistribution.
-        local_map: If set, wraps forward with ``local_map()`` or
-            ``spmd.local_map()``.
+        local_map: If set, wraps forward for local DTensor compute or local
+            SPMD typechecking.
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
@@ -136,6 +113,31 @@ class ShardingConfig:
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""
         return {"repr": repr(self)}
+
+
+@dataclass(kw_only=True, slots=True)
+class SpmdInputConfig:
+    """Model-owned trainer input annotations for the SPMD path."""
+
+    inputs: NamedPlacement | None = None
+    labels: NamedPlacement | None = None
+    extra_inputs: dict[str, NamedPlacement] = field(default_factory=dict)
+    extra_kwargs: dict[str, NamedPlacement] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {"repr": repr(self)}
+
+
+def _to_dtensor_placement(value: Placement | spmd.PerMeshAxisSpmdType) -> Placement:
+    if isinstance(value, Placement):
+        return value
+    if isinstance(value, spmd.Shard):
+        return Shard(value.dim)
+    if value is spmd.P:
+        return Partial()
+    if value in (spmd.R, spmd.I):
+        return Replicate()
+    raise TypeError(f"Unsupported placement value: {value!r}")
 
 
 def resolve_placements(
@@ -158,5 +160,5 @@ def resolve_placements(
                 f"{sorted(k.value for k in named)}; "
                 f"required: {list(mesh_axis_names)}."
             )
-        result.append(named[key])
+        result.append(_to_dtensor_placement(named[key]))
     return tuple(result)

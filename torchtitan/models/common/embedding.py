@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
+from torchtitan.distributed.spmd_state import current_pg, is_spmd_active
 from torchtitan.protocols.module import Module
 
 __all__ = ["Embedding"]
@@ -38,7 +38,7 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight = self.weight
-        tp_pg = spmd_state().get_pg("tp") if is_spmd_active() else None
+        tp_pg = current_pg("tp") if is_spmd_active() else None
         if tp_pg is None:
             return F.embedding(
                 input,
