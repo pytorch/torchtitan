@@ -7,63 +7,60 @@
 """
 Compiler passes for graph_trainer training.
 
-This module provides various compiler passes that can be applied to graph modules
-during compilation. Passes can be selected and configured via job config.
+This module provides pass orchestration: building the pass list, applying passes
+in order, and the pass registries.  Individual passes live in dedicated modules:
 
-Pass Types:
-- Joint custom passes: Applied to the joint forward-backward graph before partitioning
-- Compiler passes: Applied to the partitioned forward/backward graphs
+- ``memory_policy.py`` — SAC tagging and memory policy dispatch
+- ``inductor_passes.py`` — regional and full Inductor compilation
+- ``cudagraph.py`` — cudagraph wrapping and kernel annotations
+- ``fsdp_passes.py`` — FSDP bucketing and resharding
+- ``remove_noop_passes.py`` — no-op removal (detach, identity view/slice)
+- ``performance_passes.py`` — opt-in numerics-changing optimizations
+- ``selective_activation_remat.py`` — activation rematerialization
+- ``cpu_offload.py`` — CPU offload insertion
+- ``custom_codegen.py`` — custom code generation for profiling/debugging
 """
 
 from __future__ import annotations
 
 import functools
-import operator
 import time
-from collections import defaultdict
+import warnings
 from collections.abc import Callable
 
 import torch
-from torch._inductor.compile_fx import compile_fx_inner
-from torch._inductor.fx_passes.bucketing import (
-    is_all_gather_into_tensor as is_all_gather,
-)
-from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
-from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch._logging import trace_structured
-from torch.fx.passes.regional_inductor import regional_inductor
-from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.distributed.activation_checkpoint import _get_save_ops
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.experiments.graph_trainer.bucketing import (
-    joint_transformer_block_bucketing_reordering_pass,
-)
-from torchtitan.experiments.graph_trainer.common_utils import (
-    _get_layer_id,
-    _is_backward_node,
-    _NOT_IN_LAYERS,
-)
-from torchtitan.experiments.graph_trainer.cpu_offload import (
-    apply_cpu_offload_pass,
-    tag_all_offloadable_activations,
+from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
+from torchtitan.experiments.graph_trainer.cudagraph import (
+    cudagraph_pass,
+    insert_kernel_annotations_pass,
 )
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
 )
-from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
-    log_activation_memory_policy,
+from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    joint_transformer_block_bucketing_reordering_pass,
+    overlap_fsdp_ag_rs_pass,
+)
+from torchtitan.experiments.graph_trainer.inductor_passes import (
+    annotate_flex_attention_for_regional_inductor_pass,
+    full_inductor_compilation_pass,
+    regional_inductor_pass,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.memory_policy import (
+    tag_with_memory_policy_pass,
+)
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
-from torchtitan.experiments.graph_trainer.reshard_after_forward import (
-    annotate_fsdp_all_gather,
+from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+    selective_activation_remat_pass,
 )
 from torchtitan.tools.logging import logger
 
@@ -111,8 +108,6 @@ def async_tensor_parallel_pass(
     and matmul + reduce-scatter into
     ``symm_mem.fused_matmul_reduce_scatter``.
     """
-    import warnings
-
     from torch._inductor.fx_passes.micro_pipeline_tp import micro_pipeline_tp_pass
     from torch._inductor.fx_passes.overlap_scheduling import get_group_name
     from torch.distributed._symmetric_memory import enable_symm_mem_for_group
@@ -154,7 +149,13 @@ def compile_time_passes(
     they run at trace time via ``construct_default_graph_passes``.
 
     cudagraph is excluded because it needs to re-capture the graph into
-    an in-memory CUDA graph at runtime
+    an in-memory CUDA graph at runtime.
+
+    ``overlap_fsdp_ag_rs_pass`` runs immediately before
+    ``joint_transformer_block_bucketing_reordering_pass`` so that
+    forward+backward all-gathers end up on a separate CUDA stream from
+    reduce-scatters (enabling AG/RS overlap in backward). It is a no-op
+    when the graph contains no FSDP all-gathers.
     """
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
@@ -171,10 +172,13 @@ def compile_time_passes(
             tag_with_memory_policy_pass,
             config=config,
         ),
-        # TODO: currently either SAC or CPU offload is used, not both at the
-        # same time. Composability between these two passes is untested.
-        apply_cpu_offload_pass,
+        functools.partial(
+            apply_cpu_offload_pass,
+            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        ),
         selective_activation_remat_pass,
+        overlap_fsdp_ag_rs_pass,
         functools.partial(
             joint_transformer_block_bucketing_reordering_pass,
             module_bucket_plans=get_default_transformer_block_buckets(n_layers),
@@ -201,6 +205,13 @@ def compile_time_passes(
                 flex_compile_config=FlexAttention.inductor_configs,
             )
         )
+        # Performance passes that may change numerics.
+        if config.compile.numerics_changing_optim:
+            from torchtitan.experiments.graph_trainer.performance_passes import (
+                annotate_rmsnorm_for_regional_inductor_pass,
+            )
+
+            passes.append(annotate_rmsnorm_for_regional_inductor_pass)
         passes.append(regional_inductor_pass)
         if use_cudagraph:
             # Must run before custom_codegen_pass (last in pre_passes)
@@ -234,12 +245,8 @@ def construct_default_graph_passes(
     """
     from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-    use_cudagraph = (
-    config.compile.enable_cudagraph
-    and torch.cuda.is_available()
-    and _graph_has_cuda_tensor(traced_result.gm)
-    and is_cudagraph_compatible(traced_result.gm)
-)
+    cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
+    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
@@ -263,6 +270,32 @@ def construct_default_graph_passes(
     return passes
 
 
+def _get_pass_name(pass_fn: Callable) -> str:
+    return (
+        pass_fn.func.__name__
+        if isinstance(pass_fn, functools.partial)
+        else pass_fn.__name__
+    )
+
+
+def _filter_disabled_passes(
+    passes: list[Callable], disable_names: list[str]
+) -> list[Callable]:
+    """Remove passes whose names exactly match any entry in ``disable_names``."""
+    disable_set = set(disable_names)
+    filtered = []
+    skipped = []
+    for pass_fn in passes:
+        name = _get_pass_name(pass_fn)
+        if name in disable_set:
+            skipped.append(name)
+        else:
+            filtered.append(pass_fn)
+    if skipped:
+        logger.info(f"Disabled {len(skipped)} graph passes: {skipped}")
+    return filtered
+
+
 def apply_graph_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
@@ -282,15 +315,20 @@ def apply_graph_passes(
             and before/after graphs to tlparse for each pass.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
-    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced")
+    disable_patterns = (
+        compile_config.disable_passes if compile_config is not None else []
+    )
+    if disable_patterns:
+        passes = _filter_disabled_passes(passes, disable_patterns)
+    pass_names = [_get_pass_name(pass_fn) for pass_fn in passes]
+    pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
+    logger.info(f"Applying {len(passes)} graph passes:\n  {pass_list}")
+    all_passes_start = time.perf_counter()
+    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
     for pass_fn in passes:
-        pass_name = (
-            pass_fn.func.__name__
-            if isinstance(pass_fn, functools.partial)
-            else pass_fn.__name__
-        )
+        pass_name = _get_pass_name(pass_fn)
         if debug:
-            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}")
+            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
             before_snapshot = snapshot_graph(gm)
             start = time.perf_counter()
         gm = pass_fn(gm, example_inputs)
@@ -300,7 +338,7 @@ def apply_graph_passes(
         if debug:
             elapsed = time.perf_counter() - start
             logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
-            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}")
+            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
             after_snapshot = snapshot_graph(gm)
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
     return gm
@@ -1019,6 +1057,8 @@ def reassign_to_pg_pass(
             f"to PG {target_pg_name}"
         )
     gm.recompile()
+    all_passes_elapsed = time.perf_counter() - all_passes_start
+    logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
     return gm
 
 
@@ -1027,6 +1067,7 @@ def tlparse_log_graph_pass(
     example_inputs: tuple | None = None,
     *,
     graph_name: str,
+    debug: bool = False,
 ) -> torch.fx.GraphModule:
     """Log the transformed graph to tlparse via trace_structured.
 
@@ -1038,10 +1079,15 @@ def tlparse_log_graph_pass(
         example_inputs: The example inputs (unused, required by protocol).
         graph_name: The name for this graph artifact
             (e.g. "aot_forward_graph_transformed").
+        debug: When True, include additional metadata in the printed nodes.
 
     Returns:
         The graph module unchanged.
     """
+    additional_meta = ["autograd_backward"]
+    if debug:
+        additional_meta.append("seq_nr")
+
     trace_structured(
         "artifact",
         metadata_fn=lambda: {
@@ -1053,7 +1099,7 @@ def tlparse_log_graph_pass(
             include_stride=True,
             include_device=True,
             expanded_def=True,
-            additional_meta=["autograd_backward"],
+            additional_meta=additional_meta,
         ),
         expect_trace_id=False,
     )

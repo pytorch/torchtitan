@@ -5,6 +5,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Note CUDA uses devel container since comm_backend like DeepEP
+# needs the CUDA toolkit during runtime.
+
 set -exu
 
 IMAGE_NAME="$1"
@@ -18,10 +21,10 @@ PYTHON_VERSION=3.12
 MINICONDA_VERSION=24.3.0-0
 
 case "${IMAGE_NAME}" in
-  torchtitan-ubuntu-20.04-clang12)
-    OS_VERSION=20.04
+  torchtitan-ubuntu-22.04-clang12)
+    OS_VERSION=22.04
     CLANG_VERSION=12
-    BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu${OS_VERSION}
+    BASE_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu${OS_VERSION}
     ;;
   torchtitan-rocm-ubuntu-22.04-clang12)
     OS_VERSION=22.04

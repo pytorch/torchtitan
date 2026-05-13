@@ -12,7 +12,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -29,7 +28,6 @@ from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
 
 
 class Attention(BaseAttention):
@@ -202,17 +200,6 @@ class GptOssModel(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    if (
-                        layer_cfg.moe.experts.use_grouped_mm
-                        and not has_cuda_capability(9, 0)
-                    ):
-                        logger.warning(
-                            "Failed to use grouped mm, which is only supported on SM90 or later",
-                        )
-                        layer_cfg.moe.experts.use_grouped_mm = False
-
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
@@ -252,9 +239,7 @@ class GptOssModel(Decoder):
 
     def get_attention_masks(
         self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
+        positions: torch.Tensor,
     ) -> AttentionMasksType:
         basic_mask_mods = []
         attn_cfg = self.config.layers[0].attention
@@ -262,16 +247,14 @@ class GptOssModel(Decoder):
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(attn_cfg.sliding_window_size)
         ]
+        seq_len = positions.shape[1]
         match attn_cfg.mask_type:
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
             case "block_causal":
-                B = input_batch.shape[0]
-                assert tokenizer.eos_id is not None
-                basic_mask_mods.append(
-                    get_document_mask_mod(input_batch, tokenizer.eos_id)
-                )
+                B = positions.shape[0]
+                basic_mask_mods.append(get_document_mask_mod(positions))
             case _:
                 raise ValueError(f"Unknown attention mask type: {attn_cfg.mask_type}")
 
@@ -280,8 +263,8 @@ class GptOssModel(Decoder):
             and_masks(*basic_mask_mods),
             B,
             None,
-            input_batch.shape[1],
-            input_batch.shape[1],
+            seq_len,
+            seq_len,
         )
 
         # create sliding window mask, has to be created on top of basic attention mask
@@ -289,8 +272,8 @@ class GptOssModel(Decoder):
             and_masks(*basic_mask_mods, *sliding_window_mask_mods),
             B,
             None,
-            input_batch.shape[1],
-            input_batch.shape[1],
+            seq_len,
+            seq_len,
         )
 
         return {"basic_mask": basic_mask, "sliding_window_mask": sliding_window_mask}

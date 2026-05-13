@@ -87,7 +87,7 @@ class _CodegenGraphModule(torch.fx.GraphModule):
         Our custom codegen generates its own per-op profiling in
         _forward_profiled, so the base code must be clean.
         """
-        code = gm.graph.python_code("self").src
+        code = gm.graph.python_code("self", verbose=True).src
         assert "_RecordFunctionFast" not in code, (
             "Expected clean graph IR code without _RecordFunctionFast. "
             "graph.python_code('self') should not inject profiler instrumentation. "
@@ -321,10 +321,12 @@ def call(self, *args, **kwargs):
         }
 
         # Pre-compile a single regex to extract the leading identifier from
-        # assignment lines (``name = ...``) or tuple-unpacking lines
-        # (``name, ...``).  This replaces the previous O(lines × nodes)
-        # per-node regex scan with O(lines) extraction + O(1) dict lookup.
-        _leading_ident_re = re.compile(r"^([A-Za-z_]\w*)(?:\s*=\s|\s*,)")
+        # assignment lines (``name = ...``, ``name: "type" = ...``) or
+        # tuple-unpacking lines (``name, ...``).  python_code(verbose=True)
+        # adds per-node ``name: "..."`` type annotations before the ``=``,
+        # so the regex tolerates an optional ``: <anything>`` between the
+        # name and the ``=``.
+        _leading_ident_re = re.compile(r"^([A-Za-z_]\w*)(?:\s*:[^=]*=\s|\s*=\s|\s*,)")
 
         profiled_lines = [signature_line]
         for line in body_lines:

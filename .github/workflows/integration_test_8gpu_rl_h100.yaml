@@ -5,12 +5,10 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
+      - '.github/workflows/integration_test_8gpu_rl_h100.yaml'
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl_h100.yaml'
+    types: [labeled, synchronize]
+    branches: [ main ]
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -29,12 +27,13 @@ permissions:
 
 jobs:
   build-test:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.aws.h100.8
       gpu-arch-type: cuda
       gpu-arch-version: "13.0"
-      docker-image: torchtitan-ubuntu-20.04-clang12
+      docker-image: torchtitan-ubuntu-22.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 45
@@ -83,6 +82,11 @@ jobs:
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Install nvcc so FlashInfer can JIT compile its CUDA kernels.
+        # vLLM uses FlashInfer sampler by default (vllm-project/vllm#40376)
+        # but the CI docker image only has CUDA runtime, not the toolkit.
+        uv pip install nvidia-cuda-nvcc
 
         # Run bitwise parity tests (TP=2, batch-invariant mode)
         HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \

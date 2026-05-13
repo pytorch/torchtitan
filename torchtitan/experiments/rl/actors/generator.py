@@ -5,25 +5,30 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
-from typing import Literal
 
 import torch
 import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torchtitan.config import Configurable
-from torchtitan.config.configs import DebugConfig, ParallelismConfig
+from torchtitan.config import (
+    CompileConfig,
+    Configurable,
+    DebugConfig,
+    ParallelismConfig,
+)
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.models.vllm_registry import (
-    register_model_to_vllm_model_registry,
-    VLLM_MODEL_NAME,
+    registry_to_vllm,
+    TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
+from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -31,62 +36,53 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True)
-class GeneratorCompileConfig:
-    """Compilation and CUDA graph settings for the vLLM generator."""
+class VLLMCudagraphConfig:
+    """CUDA graph capture settings for the vLLM inference engine.
 
-    backend: Literal["none", "eager", "inductor"] = "eager"
-    """torch.compile backend for vLLM
-    When set to a value other than "none", enables compilation with the specified backend.
-    See https://docs.vllm.ai/en/stable/api/vllm/config/#vllm.config.CompilationConfig.backend
-    NOTE: "eager" means compile with dynamo backend (like torch.compile(backend="eager"))
-    NOTE: inductor will offer the best performance, but will impact numerics - use eager for
-    bitwise identical results."""
+    torch.compile is configured separately via ``CompileConfig`` at the
+    ``RLTrainer`` level, shared by both trainer and generator.  Only CUDA
+    graph capture, which is vLLM-specific, is controlled here.
 
-    cudagraph_mode: Literal[
-        "none", "piecewise", "full", "full_and_piecewise"
-    ] = "piecewise"
-    """CUDA graph capture mode for vLLM.
-    Piecewise capture supports dynamic sizes and splits cudagraphs around non capturable
-      ops like attention
-    Full capture captures one graph at the expense of less dynamism and requires full
-      capturability
-    full_and_piecewise does both and selects which to use based on dynamism
-    NOTE: Piecewise graph capture requires torch.compile for graph capture and splitting
-    See https://docs.vllm.ai/en/latest/design/cuda_graphs/#cudagraphmodes for more details."""
+    When enabled, vLLM captures the forward pass as a single CUDA graph
+    ("full" mode).  "piecewise" modes are intentionally excluded: they
+    require vLLM's whole-model torch.compile to split the graph around
+    non-capturable ops, which conflicts with per-layer compile.
+    """
 
-    def __post_init__(self) -> None:
-        if self.backend == "none" and self.cudagraph_mode in (
-            "piecewise",
-            "full_and_piecewise",
-        ):
-            raise ValueError(
-                f"cudagraph_mode='{self.cudagraph_mode}' requires piecewise graph "
-                "capture which depends on torch.compile. Set backend "
-                "to 'eager' or 'inductor'."
-            )
+    enable: bool = True
+    """Whether to enable CUDA graph capture (vLLM "full" mode)."""
 
-    @property
-    def is_eager(self) -> bool:
-        """Inferred from backend and cudagraph_mode."""
-        return self.backend == "none" and self.cudagraph_mode == "none"
+    # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
+    # MoE routing produces dynamic shapes that may conflict with full
+    # CUDA graph capture despite being torch.compile-compatible
+    # post https://github.com/pytorch/torchtitan/pull/3142
 
-    def get_vllm_compilation_config(self) -> CompilationConfig | None:
-        """Build a vLLM ``CompilationConfig``, or return ``None`` when both
-        compilation and CUDA graphs are disabled.
+    # TODO: Explore applying CUDA graph capture on the torchtitan trainer
+    # side as well (not just the vLLM generator).
+    # https://github.com/pytorch/torchtitan/issues/3175
+
+    def get_vllm_compilation_config(
+        self, *, max_num_seqs: int
+    ) -> CompilationConfig | None:
+        """Build a vLLM ``CompilationConfig``, or return ``None`` when
+        CUDA graphs are disabled.
+
+        ``max_num_seqs`` determines CUDA graph capture sizes: powers of
+        2 from 1 up to ``max_num_seqs``, plus ``max_num_seqs`` itself
+        if it isn't already a power of 2.
         """
-        if self.is_eager:
+        if not self.enable:
             return None
-
-        kwargs: dict = dict(cudagraph_mode=self.cudagraph_mode)
-        if self.backend == "none":
-            # Disable torch.compile but keep CUDA graphs (e.g. full mode).
-            # mode=0 (CompilationMode.NONE) prevents vLLM from inferring
-            # VLLM_COMPILE based on the default optimization level.
-            kwargs["mode"] = 0
-        else:
-            kwargs["backend"] = self.backend
-
-        return CompilationConfig(**kwargs)
+        if max_num_seqs <= 0:
+            raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
+        sizes = [1 << i for i in range(int(math.log2(max_num_seqs)) + 1)]
+        if max_num_seqs not in sizes:
+            sizes.append(max_num_seqs)
+        return CompilationConfig(
+            cudagraph_mode="full",
+            mode=0,
+            cudagraph_capture_sizes=sorted(sizes),
+        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -118,6 +114,8 @@ class VLLMGenerator(Actor, Configurable):
         config: Generator-specific configuration.
         model_spec: TorchTitan model specification.
         model_path: Path to the HF model checkpoint.
+        compile_config: Per-layer torch.compile config shared with the
+            trainer so both sides compile identically.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -137,15 +135,15 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
-        compile: GeneratorCompileConfig = field(default_factory=GeneratorCompileConfig)
-        """Compilation and CUDA graph settings for the vLLM engine."""
+        cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
+        """CUDA graph capture settings for the vLLM engine."""
 
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            # Generator only supports TP. vLLM handles its own parallelism
-            # and we only apply TP via the core parallelize function.
+            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
+            # we only apply TP via the core parallelize function.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
@@ -167,6 +165,18 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support expert parallelism, "
                     f"got ep={p.expert_parallel_degree}"
                 )
+            if p.enable_sequence_parallel:
+                raise ValueError(
+                    "Generator does not support sequence parallelism: "
+                    "spmd_types erasure mode requires sequence length to be "
+                    "evenly divisible by TP, which doesn't hold for inference "
+                    "(uneven batches). Set enable_sequence_parallel=False."
+                )
+            if not p.disable_loss_parallel:
+                raise ValueError(
+                    "Generator requires disable_loss_parallel=True, "
+                    f"got disable_loss_parallel={p.disable_loss_parallel}"
+                )
 
     def __init__(
         self,
@@ -174,15 +184,29 @@ class VLLMGenerator(Actor, Configurable):
         *,
         model_spec: ModelSpec,
         model_path: str,
+        compile_config: CompileConfig,
+        max_num_seqs: int,
     ):
         self.config = config
         self.model_spec = model_spec
 
-        # Register TorchTitan model with vLLM before any engine creation
-        register_model_to_vllm_model_registry(model_spec)
+        # max_num_seqs controls vLLM's maximum batch dimension: it sets
+        # the upper bound for concurrent sequences, determines KV-cache
+        # block allocation (and therefore GPU memory usage), and bounds
+        # the CUDA graph capture sizes.  Always computed by the caller
+        # (RLTrainer) as num_prompts_per_step * sampling.n.
+        self._max_num_seqs = max_num_seqs
+
+        # Register TorchTitan model + parser with vLLM
+        registry_to_vllm(
+            model_spec,
+            parallelism=config.parallelism,
+            compile_config=compile_config,
+        )
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
         set_batch_invariance(config.debug.batch_invariant)
 
@@ -192,25 +216,36 @@ class VLLMGenerator(Actor, Configurable):
 
         # Build vLLM engine
         engine_kwargs = dict(
+            # ``model`` is the path to the HF checkpoint directory. The
+            # config is sourced from torchtitan's ModelSpec via
+            # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
+            # read), but vLLM still uses this path to locate the
+            # tokenizer assets and the safetensors weight shards.
             model=model_path,
             trust_remote_code=True,
+            # Use the torchtitan custom config parser (registered by
+            # registry_to_vllm above). It builds PretrainedConfig from
+            # ModelSpec instead of reading config.json from disk.
+            config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.compile.is_eager,
-            hf_overrides={"architectures": [VLLM_MODEL_NAME]},
+            enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.CUSTOM,
             ),
             disable_log_stats=True,
         )
+        engine_kwargs["max_num_seqs"] = self._max_num_seqs
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
-        vllm_compilation_config = config.compile.get_vllm_compilation_config()
+        vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
+            max_num_seqs=self._max_num_seqs,
+        )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
@@ -245,7 +280,7 @@ class VLLMGenerator(Actor, Configurable):
 
     def _get_model(self):
         """Access the model from the vLLM engine.
-        Returns a TorchTitanVLLMModelWrapper instance.
+        Returns a VLLMModelWrapper instance.
         """
         return self._engine.model_executor.driver_worker.get_model()
 
@@ -354,8 +389,31 @@ class VLLMGenerator(Actor, Configurable):
             f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
         )
 
-    def __del__(self):
-        """Cleanup vLLM engine."""
-        if hasattr(self, "_engine"):
-            del self._engine
-            torch.cuda.empty_cache()
+    @endpoint
+    async def close(self) -> None:
+        """Release the vLLM engine and distributed state.
+
+        vLLM's sync ``LLMEngine`` (what we use) has no public ``shutdown``
+        method; only the async ``AsyncLLM`` does. We tear it down by
+        plumbing through its components in the same order ``AsyncLLM``
+        uses internally:
+
+        1. ``renderer.shutdown()`` — closes thread pools and the
+           multimodal-processor cache.
+        2. ``engine_core.shutdown()`` — stops the model worker and the
+           scheduler.
+        3. ``cleanup_dist_env_and_memory()`` — destroys NCCL / model-
+           parallel process groups, runs ``gc.collect``, empties the
+           accelerator cache.
+
+        Each step runs in a ``try/finally`` so a failure in one step
+        does not skip the next.
+        """
+        if self._engine is not None:
+            renderer = getattr(self._engine, "renderer", None)
+            try:
+                if renderer is not None:
+                    renderer.shutdown()
+            finally:
+                self._engine.engine_core.shutdown()
+        cleanup_dist_env_and_memory()
