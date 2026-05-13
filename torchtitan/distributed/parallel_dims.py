@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -27,7 +28,6 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
-    full_spmd_types: bool = False
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _global_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -45,7 +45,6 @@ class ParallelDims:
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
-            full_spmd_types=parallelism_config.full_spmd_types,
         )
 
     def __post_init__(self):
@@ -74,9 +73,9 @@ class ParallelDims:
         )
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
-        if name in ("fsdp", "dp_shard"):
-            # Always keep fsdp/dp_shard mesh with real backend so
-            # fully_shard() can apply MixedPrecisionPolicy even at degree 1.
+        if name == "fsdp":
+            # Always keep fsdp mesh with real backend so fully_shard()
+            # can apply MixedPrecisionPolicy even at degree 1.
             return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
@@ -127,13 +126,13 @@ class ParallelDims:
             world_mesh: DeviceMesh,
             dim_names: tuple[str, ...],
             dim_degrees: tuple[int, ...],
-        ):
+        ) -> DeviceMesh:
             """Unflatten the world mesh to create the required mesh dimensions.
 
             Uses fake backend for dimensions with degree 1 or for 'batch' dimension
             to avoid unnecessary process group creation.
             """
-            backend_override = {}
+            backend_override: dict[str, str] = {}
             for name, degree in zip(dim_names, dim_degrees, strict=True):
                 if not self._mesh_exist(name, degree):
                     backend_override[name] = "fake"
@@ -164,18 +163,16 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
-        if self.full_spmd_types:
-            dense_mesh = unflatten_mesh(
-                self._world_mesh,
-                ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
-                (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
-            )
-        else:
-            dense_mesh = unflatten_mesh(
-                self._world_mesh,
-                ("pp", "dp_replicate", "fsdp", "tp"),
-                (self.pp, self.dp_replicate, fsdp, self.tp),
-            )
+        dense_mesh = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "dp", "cp", "tp"),
+            (self.pp, batch, self.cp, self.tp),
+        )
+        fsdp_mesh = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "dp_replicate", "fsdp", "tp"),
+            (self.pp, self.dp_replicate, fsdp, self.tp),
+        )
         sparse_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "efsdp", "ep"),
@@ -186,6 +183,7 @@ class ParallelDims:
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
             "dense": dense_mesh,
+            "fsdp": fsdp_mesh,
             "sparse": sparse_mesh,
         }
 
@@ -193,16 +191,14 @@ class ParallelDims:
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
-            "dp_replicate": dense_mesh["dp_replicate"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
+            "dp_replicate": fsdp_mesh["dp_replicate"],
+            "fsdp": fsdp_mesh["fsdp"],
+            "dp": dense_mesh["dp"],
         }
-        if self.full_spmd_types:
-            self._meshes["dp_shard"] = dense_mesh["dp_shard"]
-        else:
-            self._meshes["fsdp"] = dense_mesh["fsdp"]
 
         # Validate mesh sizes
         self._validate_meshes()
@@ -221,15 +217,13 @@ class ParallelDims:
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
             "dp_replicate": self.dp_replicate,
+            "fsdp": self.dp_shard * self.cp,
             "cp": self.cp,
             "tp": self.tp,
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
+            "dp": self.dp_replicate * self.dp_shard,
         }
-        if self.full_spmd_types:
-            expected_sizes["dp_shard"] = self.dp_shard
-        else:
-            expected_sizes["fsdp"] = self.dp_shard * self.cp
 
         for mesh_name, expected_size in expected_sizes.items():
             actual_size = self._meshes[mesh_name].size()
@@ -307,6 +301,39 @@ class ParallelDims:
                 f"Ensure the corresponding parallelism dimension is {enabled_str}."
             )
         return mesh
+
+    def resolve_mesh(self, axes: Iterable[str]) -> DeviceMesh | None:
+        """Resolve model sharding axes to one SPMD compute mesh.
+
+        Config-based SPMD modules execute under either the dense model mesh
+        (``dp/cp/tp``) or sparse expert mesh (``dp_replicate/efsdp/ep``). A
+        config with no axes has no mesh-local work. A config whose axes cannot
+        live on exactly one model mesh is invalid and should be split.
+        """
+        axes = set(axes)
+        if not axes:
+            return None
+        if not self._global_meshes:
+            self.build_mesh()
+
+        candidates: list[DeviceMesh] = []
+        for mesh_name in ("dense", "sparse"):
+            mesh = self._global_meshes[mesh_name]
+            mesh_axis_names = mesh.mesh_dim_names
+            assert mesh_axis_names is not None
+            if axes.issubset(set(mesh_axis_names)):
+                candidates.append(mesh)
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Model sharding axes {sorted(axes)} resolve to multiple meshes. "
+                "Use placements that identify either the dense or sparse mesh."
+            )
+        raise ValueError(
+            f"Model sharding axes {sorted(axes)} do not fit a single model mesh."
+        )
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
