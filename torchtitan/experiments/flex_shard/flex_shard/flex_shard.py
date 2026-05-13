@@ -18,17 +18,12 @@ from .bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
     BucketSpec,
-    MixedPrecisionPolicy,
 )
 from .param_access import (
     _attach_flex_shard_module_state,
     _check_not_already_flex_sharded,
     _register_module_param_accessors,
     FlexShardModule,
-    get_global_shape,
-    get_placements,
-    is_flex_shard_param,
-    set_sharding_info,
 )
 from .reshard_after_forward import _apply_reshard_after_forward
 from .utils import (
@@ -47,13 +42,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "BucketSpec",
     "flex_shard",
-    "get_global_shape",
-    "get_placements",
-    "is_flex_shard_param",
-    "MixedPrecisionPolicy",
-    "set_sharding_info",
 ]
 
 

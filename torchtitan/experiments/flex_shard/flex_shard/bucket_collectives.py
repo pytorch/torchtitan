@@ -123,6 +123,22 @@ class ReduceScatterGradHandle:
 
 
 @dataclass
+class PreparedReduceScatterGrad:
+    """Packed reduce-scatter inputs whose NCCL launch can be deferred."""
+
+    send_buf: torch.Tensor
+    infos: list[ParamInfo]
+    placement: Any
+    layout: Any
+    rank: int
+    world_size: int
+    pg: Any
+    copy_in_done: torch.Event
+    device_handle: ModuleType
+    debug_fqn: str | None
+
+
+@dataclass
 class AsyncAllGatherResult(AllGatherUnshardHandle):
     """State needed to finish an async all-gather launched on a side stream."""
 
@@ -399,14 +415,13 @@ def _finish_reduce_scatter(
         )
 
 
-def begin_reduce_scatter_grad(
+def prepare_reduce_scatter_grad(
     tensors: list[torch.Tensor],
     infos: list[ParamInfo],
     mesh: DeviceMesh,
-    reduce_scatter_stream: torch.Stream,
     debug_fqn: str | None = None,
-) -> ReduceScatterGradHandle:
-    """Begin a bucket reduce-scatter and return a handle for local grad shards."""
+) -> PreparedReduceScatterGrad:
+    """Pack reduce-scatter inputs without launching the collective."""
     ws = mesh.size()
     rank = mesh.get_local_rank()
     pg = mesh.get_group()
@@ -431,27 +446,62 @@ def begin_reduce_scatter_grad(
     device_handle = _get_device_handle(device.type)
     copy_in_done = device_handle.Event()
     copy_in_done.record(device_handle.current_stream(device))
+    return PreparedReduceScatterGrad(
+        send_buf=send_buf,
+        infos=infos,
+        placement=placement,
+        layout=layout,
+        rank=rank,
+        world_size=ws,
+        pg=pg,
+        copy_in_done=copy_in_done,
+        device_handle=device_handle,
+        debug_fqn=debug_fqn,
+    )
 
+
+def launch_reduce_scatter_grad(
+    prepared: PreparedReduceScatterGrad,
+    reduce_scatter_stream: torch.Stream,
+) -> ReduceScatterGradHandle:
+    """Launch a previously packed reduce-scatter request."""
     recv_buf: torch.Tensor
-    with device_handle.stream(reduce_scatter_stream):
-        reduce_scatter_stream.wait_event(copy_in_done)
-        recv_buf = _run_reduce_scatter(send_buf, ws, pg, debug_fqn)
-        sharded_grads = _finish_reduce_scatter(
-            placement,
-            recv_buf,
-            infos,
-            layout,
-            rank,
-            ws,
-            debug_fqn,
+    with prepared.device_handle.stream(reduce_scatter_stream):
+        reduce_scatter_stream.wait_event(prepared.copy_in_done)
+        recv_buf = _run_reduce_scatter(
+            prepared.send_buf,
+            prepared.world_size,
+            prepared.pg,
+            prepared.debug_fqn,
         )
-        event = device_handle.Event()
+        sharded_grads = _finish_reduce_scatter(
+            prepared.placement,
+            recv_buf,
+            prepared.infos,
+            prepared.layout,
+            prepared.rank,
+            prepared.world_size,
+            prepared.debug_fqn,
+        )
+        event = prepared.device_handle.Event()
         event.record(reduce_scatter_stream)
     return AsyncReduceScatterResult(
         sharded_grads=sharded_grads,
         event=event,
-        send_buf=send_buf,
+        send_buf=prepared.send_buf,
         recv_buf=recv_buf,
-        device_handle=device_handle,
-        debug_fqn=debug_fqn,
+        device_handle=prepared.device_handle,
+        debug_fqn=prepared.debug_fqn,
     )
+
+
+def begin_reduce_scatter_grad(
+    tensors: list[torch.Tensor],
+    infos: list[ParamInfo],
+    mesh: DeviceMesh,
+    reduce_scatter_stream: torch.Stream,
+    debug_fqn: str | None = None,
+) -> ReduceScatterGradHandle:
+    """Begin a bucket reduce-scatter and return a handle for local grad shards."""
+    prepared = prepare_reduce_scatter_grad(tensors, infos, mesh, debug_fqn)
+    return launch_reduce_scatter_grad(prepared, reduce_scatter_stream)

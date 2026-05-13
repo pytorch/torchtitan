@@ -34,7 +34,6 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
-    is_flex_shard_param,
     LocalStorageLayout,
     Placement,
 )
@@ -43,6 +42,9 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
     DStorage,
+)
+from torchtitan.experiments.flex_shard.flex_shard.param_access import (
+    is_flex_shard_param,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,

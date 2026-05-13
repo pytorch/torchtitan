@@ -19,6 +19,9 @@ from .bucket_collectives import (
     AllGatherUnshardHandle,
     begin_all_gather_unshard,
     begin_reduce_scatter_grad,
+    launch_reduce_scatter_grad,
+    prepare_reduce_scatter_grad,
+    PreparedReduceScatterGrad,
     ReduceScatterGradHandle,
 )
 from .bucket_storage import BucketSpec, DStorage, ParamInfo
@@ -69,6 +72,15 @@ class PendingReduceGrad:
 
 
 @dataclass
+class PendingReduceScatterLaunch:
+    """One packed reduce-grad request waiting for an all-gather to launch first."""
+
+    bucket: BucketRuntime
+    prepared: PreparedReduceScatterGrad
+    param_refs: list[ParamModuleInfo]
+
+
+@dataclass
 class BucketCommContext:
     """Communication streams shared by buckets on one root module/device."""
 
@@ -77,6 +89,9 @@ class BucketCommContext:
     reduce_scatter_stream: torch.Stream
     buckets: list[BucketRuntime] = field(default_factory=list)
     pending: PendingAllGather | None = None
+    pending_reduce_scatter_launches: list[PendingReduceScatterLaunch] = field(
+        default_factory=list
+    )
     reduce_scatter_states: list[PendingReduceGrad] = field(default_factory=list)
     reduce_scatter_callback_queued: bool = False
 
@@ -123,6 +138,7 @@ class BucketCommContext:
 
         def _wait_for_reduce_scatter() -> None:
             try:
+                self.flush_pending_reduce_scatter_launches(max_to_flush=None)
                 for pending in self.reduce_scatter_states:
                     pending.result.wait()
                     pending.result.release_buffers(
@@ -130,6 +146,7 @@ class BucketCommContext:
                     )
             finally:
                 self.reduce_scatter_states.clear()
+                self.pending_reduce_scatter_launches.clear()
                 self.reduce_scatter_callback_queued = False
 
         torch.autograd.Variable._execution_engine.queue_callback(
@@ -150,6 +167,69 @@ class BucketCommContext:
                     release_sharded_grads=True,
                 )
             self.reduce_scatter_states.clear()
+
+    def _launch_pending_reduce_scatter(
+        self,
+        pending: PendingReduceScatterLaunch,
+    ) -> None:
+        bucket = pending.bucket
+        self.wait_and_clear_reduce_scatter_states(bucket.debug_fqn)
+        result = launch_reduce_scatter_grad(
+            pending.prepared,
+            self.reduce_scatter_stream,
+        )
+        with self.device_handle.stream(self.reduce_scatter_stream):
+            sharded_grads = result.finish()
+            result.record_sharded_grads(
+                _accumulate_sharded_grads(
+                    pending.param_refs,
+                    sharded_grads,
+                ),
+                self.reduce_scatter_stream,
+            )
+        self.reduce_scatter_states.append(PendingReduceGrad(result))
+
+    def queue_reduce_scatter_launch(
+        self,
+        bucket: BucketRuntime,
+        grads: list[torch.Tensor],
+        infos: list[ParamInfo],
+        param_refs: list[ParamModuleInfo],
+    ) -> None:
+        """Pack reduce-scatter input and delay NCCL launch until after next all-gather."""
+        if not grads:
+            return
+        with torch.no_grad():
+            prepared = prepare_reduce_scatter_grad(
+                grads,
+                infos,
+                bucket.storage._mesh,
+                debug_fqn=bucket.debug_fqn,
+            )
+        self.pending_reduce_scatter_launches.append(
+            PendingReduceScatterLaunch(
+                bucket=bucket,
+                prepared=prepared,
+                param_refs=param_refs,
+            )
+        )
+        self.queue_reduce_scatter_wait()
+
+    def flush_pending_reduce_scatter_launches(
+        self,
+        max_to_flush: int | None,
+    ) -> None:
+        """Launch deferred reduce-scatters after all-gather prefetch has priority."""
+        num_flushed = 0
+        while self.pending_reduce_scatter_launches and (
+            max_to_flush is None or num_flushed < max_to_flush
+        ):
+            pending = self.pending_reduce_scatter_launches.pop(0)
+            with torch.no_grad():
+                self._launch_pending_reduce_scatter(pending)
+            num_flushed += 1
+        if num_flushed:
+            self.queue_reduce_scatter_wait()
 
 
 @dataclass
@@ -437,6 +517,7 @@ class BucketRuntime:
         )
         full_params = list(_BucketAllGather.apply(runtime, *local_shards))
         self.prefetch_next()
+        self.context.flush_pending_reduce_scatter_launches(max_to_flush=1)
         for entry, full_param in zip(self.entries, full_params, strict=True):
             entry.access_state._pre_gathered = full_param
 
@@ -452,10 +533,10 @@ class _BucketAllGather(torch.autograd.Function):
 
     Forward consumes a raw all-gather result, either prefetched by the previous
     bucket or launched on demand. Backward packs full-parameter gradients and
-    launches one explicit bucket reduce-scatter. The reduced sharded grads are
-    accumulated into the original sharded parameters asynchronously instead of
-    returned through autograd, so later backward compute can overlap with the
-    reduce-scatter.
+    either launches or defers one explicit bucket reduce-scatter. The reduced
+    sharded grads are accumulated into the original sharded parameters
+    asynchronously instead of returned through autograd, so later backward
+    compute can overlap with the reduce-scatter.
     """
 
     @staticmethod
@@ -509,7 +590,15 @@ class _BucketAllGather(torch.autograd.Function):
             valid_param_refs.append(entry.module_info)
 
         if grads:
-            bucket.reduce_grads(grads, valid_infos, valid_param_refs)
+            if bucket.storage._reshard_after_forward:
+                bucket.context.queue_reduce_scatter_launch(
+                    bucket,
+                    grads,
+                    valid_infos,
+                    valid_param_refs,
+                )
+            else:
+                bucket.reduce_grads(grads, valid_infos, valid_param_refs)
 
         return (None, *([None] * ctx.num_inputs))
 
