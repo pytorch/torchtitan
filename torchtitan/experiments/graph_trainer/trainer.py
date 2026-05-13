@@ -27,6 +27,8 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
+)
+from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,

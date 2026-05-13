@@ -68,5 +68,3 @@ def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_671b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
-
-
