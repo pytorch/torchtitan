@@ -261,7 +261,6 @@ def set_decoder_sharding_config(
 
     # ChunkedCELoss gathers SP hidden states before chunking; normal model
     # forward enters lm_head directly from the SP residual stream.
-    # Maybe we should consider making ChunkedCELoss its own module with ShardingConfig?
     lm_head_input_tp = shard.R() if enable_sp and chunked_loss else activation_tp
     in_src = dense_activation_placement(tp=lm_head_input_tp)
     in_dst = dense_activation_placement(tp=shard.R())
