@@ -208,13 +208,6 @@ class ParallelDims:
             (self.pp, self.dp_replicate, efsdp, self.ep),
         )
 
-        # Used by clip_grad_norm_
-        grad_norm_parent = unflatten_mesh(
-            self._world_mesh,
-            ("pp", "dp_replicate", "grad_norm"),
-            (self.pp, self.dp_replicate, fsdp * self.tp),
-        )
-
         self._global_meshes = {
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
@@ -226,7 +219,6 @@ class ParallelDims:
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
-            "grad_norm": grad_norm_parent["grad_norm"],
             "dp_replicate": full_dense_mesh["dp_replicate"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
@@ -262,7 +254,6 @@ class ParallelDims:
             "pp": self.pp,
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
-            "grad_norm": self.dp_shard * self.cp * self.tp,
             "dp_replicate": self.dp_replicate,
             "cp": self.cp,
             "tp": self.tp,
