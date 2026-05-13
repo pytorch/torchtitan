@@ -58,7 +58,7 @@ def parallelize_llama(
 
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic
     # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled:
+    if parallel_dims.cp_enabled and not parallel_dims.full_spmd_types:
         apply_cp_to_forward(
             # pyrefly: ignore [missing-attribute]
             [block.attention.inner_attention for block in model.layers.values()],
@@ -91,18 +91,15 @@ def parallelize_llama(
     if parallel_dims.full_spmd_types:
         from torch.distributed.fsdp import DataParallelMeshDims
 
-        # CP ranks share weights → FSDP must shard across dp_shard*cp.
-        # Use flattened "fsdp" mesh when CP is enabled; plain "dp_shard" otherwise.
-        shard_name = "fsdp" if parallel_dims.cp_enabled else "dp_shard"
         mesh_names = []
         if parallel_dims.dp_replicate_enabled:
             mesh_names.append("dp_replicate")
-        mesh_names.append(shard_name)
+        mesh_names.append("dp_shard")
         if parallel_dims.tp_enabled:
             mesh_names.append("tp")
         dp_mesh = parallel_dims.get_mesh(mesh_names)
         dp_mesh_dims = DataParallelMeshDims(
-            shard=shard_name,
+            shard="dp_shard",
             replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
         )
     else:

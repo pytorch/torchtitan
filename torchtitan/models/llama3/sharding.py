@@ -24,6 +24,7 @@ def set_llama3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
+    chunked_loss: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
@@ -36,7 +37,10 @@ def set_llama3_sharding_config(
     ``loss_parallel`` controls whether the output projection is vocab-parallel.
     """
     set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+        config,
+        loss_parallel=loss_parallel,
+        enable_sp=enable_sp,
+        chunked_loss=chunked_loss,
     )
     for layer_cfg in config.layers:
         _set_llama3_layer_sharding(layer_cfg, enable_sp=enable_sp)
@@ -51,15 +55,14 @@ def _set_llama3_layer_sharding(
 
     ``enable_sp=True``  -> SP norms and Shard(1) activations around attention/FFN;
     ``attention.wo`` and ``feed_forward.w2`` reduce-scatter to Shard(1).
-    ``enable_sp=False`` -> norms stay Replicate (no parallelism), activations
-    stay Replicate; ``attention.wo`` and ``feed_forward.w2`` all-reduce to
-    Replicate.
+    ``enable_sp=False`` -> norms stay Invariant, activations stay Invariant;
+    ``attention.wo`` and ``feed_forward.w2`` all-reduce to Invariant.
     """
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
 
-    attn_x_placement = shard.S(1) if enable_sp else shard.R()
+    attn_x_placement = shard.S(1) if enable_sp else shard.Inv()
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)

@@ -22,14 +22,8 @@ class Embedding(nn.Embedding, Module):
     """Configurable nn.Embedding with optional vocab-parallel TP support.
 
     Without TP, forward is standard ``F.embedding``.
-    With TP (weight is vocab-sharded via ``distribute_state_spmd``), forward
-    uses masked-partial: each TP rank looks up its local slice of the vocab
-    table, masks out-of-range tokens, and reduces across TP ranks via
-    ``spmd.redistribute(P → _tp_out_type)``.
-
-    ``_tp_out_type`` is set during ``parallelize()`` from the ``local_map``
-    ``out_placements`` on the ``ShardingConfig``: ``R`` without SP,
-    ``S(1)`` with SP (reduce-scatter into sequence-parallel layout).
+    With SPMD TP, each rank looks up its local vocab shard, masks out-of-range
+    tokens, and reduces partial outputs to the configured TP output type.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -44,11 +38,8 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight = self.weight
-
-        if (
-            not is_spmd_active()
-            or (tp_pg := spmd_state().get_pg("tp")) is None
-        ):
+        tp_pg = spmd_state().get_pg("tp") if is_spmd_active() else None
+        if tp_pg is None:
             return F.embedding(
                 input,
                 weight,
@@ -59,16 +50,26 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        # Vocab-parallel: each rank has weight[vocab_start:vocab_end].
+        assert self.tp_out_type is not None
         chunk_size = weight.shape[0]
         offset = dist.get_rank(tp_pg) * chunk_size
         mask = (input >= offset) & (input < offset + chunk_size)
         local_input = (input - offset).clamp(0, chunk_size - 1)
-        out = F.embedding(local_input, weight)
+        out = F.embedding(
+            local_input,
+            weight,
+            self.padding_idx,
+            self.max_norm,
+            self.norm_type,
+            self.scale_grad_by_freq,
+            self.sparse,
+        )
         out = out * mask.unsqueeze(-1).to(out.dtype)
         bwd = {"op_dtype": torch.float32} if out.dtype != torch.float32 else None
-        out = spmd.redistribute(
-            out, tp_pg, src=spmd.P, dst=self.tp_out_type,
+        return spmd.redistribute(
+            out,
+            tp_pg,
+            src=spmd.P,
+            dst=self.tp_out_type,
             backward_options=bwd,
         )
-        return out

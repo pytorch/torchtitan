@@ -41,8 +41,7 @@ def R() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
 
 
 def Inv() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
-    """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent).
-    """
+    """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent)."""
     return spmd.I if is_spmd_active() else Replicate()
 
 
@@ -108,6 +107,9 @@ class ShardingConfig:
             DTensor path: used with ``distribute_tensor``.
             SPMD path: used with ``spmd.assert_type`` (+ physical TP shard).
             e.g. ``{"weight": {TP: Shard(0)}}`` or ``{"weight": {TP: S(0)}}``.
+        state_tp_ir: Local parameter names to convert from I@tp at rest to R@tp
+            during forward compute. Temporary SPMD escape hatch for replicated
+            parameters that need TP gradient reduction semantics.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
             arg name. Declares what the input's placement is before any
             redistribution.
@@ -124,6 +126,7 @@ class ShardingConfig:
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
+    state_tp_ir: set[str] = field(default_factory=set)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_src_shardings: NamedPlacement | None = None
