@@ -39,13 +39,13 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
 def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
-    labels_placements = tuple(
+    expected_labels_placements = tuple(
         Replicate() if isinstance(p, Shard) and p.dim == 2 else p
         for p in pred.placements
     )
-    if labels.placements != labels_placements:
+    if labels.placements != expected_labels_placements:
         raise ValueError(
-            f"cross_entropy_loss: expected labels placements {labels_placements}, "
+            f"cross_entropy_loss: expected labels placements {expected_labels_placements}, "
             f"got {labels.placements}"
         )
 
@@ -58,8 +58,6 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
             return Shard(0 if p.dim == 0 else p.dim - 1)
         return p
 
-    flat_pred_placements = tuple(_flatten_placement(p) for p in pred.placements)
-    flat_labels_placements = tuple(_flatten_placement(p) for p in labels.placements)
     vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
 
     # Per-axis output placement for sum reduction:
@@ -91,6 +89,8 @@ def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor
 
         # vocab_sharded == True => loss parallel case
         # TODO: rewrite the entire loss parallel using megatron style.
+        flat_pred_placements = tuple(_flatten_placement(p) for p in pred.placements)
+        flat_labels_placements = tuple(_flatten_placement(p) for p in labels.placements)
         pred_dtensor = DTensor.from_local(
             flat_pred, mesh, flat_pred_placements, run_check=False
         )
