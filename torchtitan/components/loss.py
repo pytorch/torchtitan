@@ -9,11 +9,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
-import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -54,9 +52,8 @@ class BaseLoss(ABC, Configurable):
         pass
 
     @abstractmethod
-    def __init__(
-        self, config: Config, *, compile_config: CompileConfig | None = None
-    ): ...
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        ...
 
     def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
         if (
@@ -330,24 +327,13 @@ class ChunkedCELoss(BaseLoss):
             chunk_loss = self.fn(logits, label_chunk)
             if global_valid_tokens is not None:
                 chunk_loss = chunk_loss / global_valid_tokens
-
-            if i == 0 and is_spmd_active() and spmd.is_type_checking():
-                # spmd_types: chunk_loss is P on DP axes (or V if local-typechecking).
-                # Reinterpret total_loss from R so addition stays in P/V.
-                for axis in spmd_state().dp_axes:
-                    dst_type = spmd.get_local_type(chunk_loss)[axis]
-                    total_loss = spmd.reinterpret(
-                        total_loss, axis, src=spmd.R, dst=dst_type, expert_mode=True
-                    )
-
             total_loss = total_loss + chunk_loss.detach()
 
             if requires_grad:
-                with spmd.no_typecheck():
-                    chunk_loss.backward()
-                    assert h_chunk.grad is not None
-                    grad_accumulator.add(h_chunk.grad)
-                    h_chunk.grad = None
+                chunk_loss.backward()
+                assert h_chunk.grad is not None
+                grad_accumulator.add(h_chunk.grad)
+                h_chunk.grad = None
 
         if fsdp_enabled:
             lm_head.set_reshard_after_forward(True)
@@ -381,20 +367,6 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """
 
     @staticmethod
-    def typecheck_forward(
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
-        loss: torch.Tensor,
-    ) -> torch.Tensor:
-        """Output has the same type as ``loss`` (3rd arg)."""
-        result = _DecoderOutputGradientBackProp.apply(
-            hidden_states, accumulated_grad, loss
-        )
-        if spmd.has_local_type(loss):
-            spmd.assert_type(result, spmd.get_local_type(loss))
-        return result
-
-    @staticmethod
     # pyrefly: ignore [bad-override]
     def forward(
         ctx,
@@ -418,6 +390,3 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
         # but expressed as a return value so autograd handles the traversal
         # in a single pass (no "backward through graph twice" error).
         return accumulated_grad, None, None
-
-
-spmd.register_autograd_function(_DecoderOutputGradientBackProp)

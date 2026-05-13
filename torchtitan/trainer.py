@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import contextlib
 import json
 import os
 import time
@@ -13,17 +14,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
-import contextlib
-
-import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.distributed.spmd_state import is_spmd_active, spmd_state
-from torchtitan.protocols.module import named_placement_to_spmd, preserve_buffer_spmd
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -46,6 +42,7 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.spmd_state import set_current_parallel_dims
 
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -53,18 +50,8 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
-from torchtitan.protocols.sharding import NamedPlacement
-from torchtitan.protocols.types import MeshAxisName
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
-
-# Input annotation for SPMD path: (batch, seq) — DP on batch, CP on seq.
-_INPUT_SPMD_TYPES: NamedPlacement = {
-    MeshAxisName.DP_REPLICATE: spmd.S(0),
-    MeshAxisName.DP_SHARD: spmd.S(0),
-    MeshAxisName.CP: spmd.S(1),
-    MeshAxisName.TP: spmd.R,
-}
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -259,9 +246,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # build model (using meta init)
         model_config = model_spec.model
         # set the model args from training job configs
-        model_config.update_from_config(
-            trainer_config=config,
+        spmd_scope = (
+            set_current_parallel_dims(parallel_dims)
+            if parallel_dims.full_spmd_types
+            else contextlib.nullcontext()
         )
+        with spmd_scope:
+            model_config.update_from_config(
+                trainer_config=config,
+            )
         self.model_config = model_config
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
@@ -398,17 +391,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                ctx = (
-                    preserve_buffer_spmd(model)
-                    if is_spmd_active()
-                    else contextlib.nullcontext()
-                )
-                with ctx:
-                    model.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                model.to_empty(device=init_device)
+                with torch.no_grad():
+                    # TODO: Change this back to init_weights once
+                    # autoparallel contains the wrap_init_states
+                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -478,12 +465,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled
-            and not config.parallelism.disable_loss_parallel
-            and not is_spmd_active()
+            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
-        self.spmd_typechecking = config.parallelism.spmd_typechecking
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -665,9 +649,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels
         )
 
-        if is_spmd_active():
-            self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
-
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             loss_kwargs = {"global_valid_tokens": global_valid_tokens}
@@ -705,50 +686,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            current_mesh = (
-                spmd.set_current_mesh(spmd_state().all_axes)
-                if is_spmd_active()
-                else contextlib.nullcontext()
-            )
-            typechecker = (
-                spmd.typecheck(local=(self.spmd_typechecking == "local"))
-                if is_spmd_active() and self.spmd_typechecking in ("local", "global")
-                else contextlib.nullcontext()
-            )
-            with self.train_context(), current_mesh:
-                with typechecker:
-                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    loss = self.loss_fn(pred, labels, global_valid_tokens)
+            with self.train_context():
+                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                loss = self.loss_fn(pred, labels, global_valid_tokens)
                 del pred
                 loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
-
-    def _annotate_inputs_spmd(
-        self,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
-        extra_inputs: dict[str, torch.Tensor],
-        extra_kwargs: dict[str, Any],
-    ) -> None:
-        """Annotate all forward inputs with spmd types.
-
-        Called after ``post_dataloading_process`` so that tensors created
-        there (e.g. positions) are also annotated.
-        """
-        for t in (inputs, labels):
-            types, pspec = named_placement_to_spmd(_INPUT_SPMD_TYPES, ndim=t.ndim)
-            if types:
-                spmd.assert_type(t, types, partition_spec=pspec)
-        for d in (extra_inputs, extra_kwargs):
-            for v in d.values():
-                if isinstance(v, torch.Tensor):
-                    types, pspec = named_placement_to_spmd(
-                        _INPUT_SPMD_TYPES, ndim=v.ndim
-                    )
-                    if types:
-                        spmd.assert_type(v, types, partition_spec=pspec)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -779,11 +724,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
         else:
             global_valid_tokens = local_valid_tokens.float()
-
-        if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
-            all_axes = spmd_state().all_axes
-            if all_axes:
-                spmd.assert_type(global_valid_tokens, {a: spmd.I for a in all_axes})
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
