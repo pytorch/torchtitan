@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import _maybe_redistribute_multiply, ChunkedCELoss
 
 
 class ChunkedCELossWithParamGrads(ChunkedCELoss):
@@ -115,10 +115,10 @@ class _ChunkedLossWithParamGrads(torch.autograd.Function):
                 lambda: lm_head.set_requires_gradient_sync(True, recurse=False)
             )
         return (
-            accumulated_h_grad,
+            _maybe_redistribute_multiply(accumulated_h_grad, grad_output),
             None,
             None,
             None,
             None,
-            *param_grads,
+            *(_maybe_redistribute_multiply(g, grad_output) for g in param_grads),
         )
