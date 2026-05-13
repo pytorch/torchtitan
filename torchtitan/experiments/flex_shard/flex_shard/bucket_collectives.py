@@ -200,9 +200,7 @@ def _assemble_full_params(
             shape = placement.compute_local_shape(info.global_shape, r, ws)
             if numel > 0:
                 offset = per_rank_param_offsets[r][i]
-                per_rank_shards.append(
-                    gathered[r][offset : offset + numel].view(shape)
-                )
+                per_rank_shards.append(gathered[r][offset : offset + numel].view(shape))
             else:
                 per_rank_shards.append(
                     torch.empty(shape, dtype=info.dtype, device=device)

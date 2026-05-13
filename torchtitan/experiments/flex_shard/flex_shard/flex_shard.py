@@ -106,9 +106,8 @@ def _prepare_flex_shard_inputs(
     device = (
         torch.device("meta") if all_params_meta else _get_device_from_mesh(shard_mesh)
     )
-    if (
-        not all_params_meta
-        and all(param.device.type == "cpu" for _, param in named_params)
+    if not all_params_meta and all(
+        param.device.type == "cpu" for _, param in named_params
     ):
         module.to(device)
         named_params = _get_managed_named_params(module)
