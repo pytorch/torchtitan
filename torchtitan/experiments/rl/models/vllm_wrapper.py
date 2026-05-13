@@ -14,6 +14,7 @@ TorchTitan models for vLLM.
 import dataclasses
 
 import torch
+import torch._dynamo
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed._tensor import DTensor, Replicate
@@ -22,7 +23,13 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.protocols.model_spec import ModelSpec
@@ -60,6 +67,7 @@ _torch_utils.weak_ref_tensor = _dtensor_safe_weak_ref_tensor
 # code's exec namespace (which only has `import torch`).
 _original_node_ref = _codegen._node_ref
 
+
 # TODO: Followup with core vLLM fix
 # https://github.com/pytorch/torchtitan/issues/3067
 def _patched_node_ref(arg):
@@ -81,71 +89,13 @@ def _patched_node_ref(arg):
 _codegen._node_ref = _patched_node_ref
 
 
-def create_torchtitan_config_from_vllm_config(
-    vllm_config: VllmConfig,
-) -> tuple[ParallelDims, ParallelismConfig]:
-    """
-    Create ParallelDims and ParallelismConfig from vLLM configuration.
-
-    Maps vLLM parallelism settings to TorchTitan's config objects so that
-    TorchTitan's parallelize functions can be called with the correct kwargs.
-
-    This is needed because vLLM doesn't separate model creation and parallelism
-    application — it requires parallelization inside the model constructor
-    (TorchTitanVLLMModelWrapper.__init__).
-
-    Args:
-        vllm_config: vLLM configuration object
-
-    Returns:
-        Tuple of (ParallelDims, ParallelismConfig) mapped from vLLM config
-
-    Note:
-        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
-        in inference. These are set to default values.
-    """
-    world_size = dist.get_world_size()
-    parallel_config = vllm_config.parallel_config
-
-    parallel_dims = ParallelDims(
-        dp_replicate=parallel_config.data_parallel_size,
-        dp_shard=1,
-        cp=parallel_config.decode_context_parallel_size,
-        tp=parallel_config.tensor_parallel_size,
-        pp=parallel_config.pipeline_parallel_size,
-        ep=1,
-        etp=1,
-        world_size=world_size,
-    )
-
-    parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=parallel_config.data_parallel_size,
-        data_parallel_shard_degree=1,
-        context_parallel_degree=parallel_config.decode_context_parallel_size,
-        tensor_parallel_degree=parallel_config.tensor_parallel_size,
-        pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
-        expert_parallel_degree=1,
-        expert_tensor_parallel_degree=1,
-        disable_loss_parallel=True,  # vLLM handles sampling and expects plain tensor logits.
-        enable_sequence_parallel=False,
-    )
-
-    logger.info(
-        f"Created TorchTitan config from vLLM: "
-        f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
-        f"CP={parallel_dims.cp}, PP={parallel_dims.pp}"
-    )
-
-    return parallel_dims, parallelism
-
-
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
         "positions": 0,
     }
 )
-class TorchTitanVLLMModelWrapper(Module):
+class VLLMModelWrapper(Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
     required interface required by vLLM Engine.
@@ -168,12 +118,27 @@ class TorchTitanVLLMModelWrapper(Module):
         self,
         *,
         model_spec: ModelSpec,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
         super().__init__()
 
         assert vllm_config is not None, "vllm_config is required"
+
+        # PP and CP are not supported on this inference path. User-facing
+        # validation lives in Generator.Config.__post_init__; these are
+        # internal invariants — by the time we get here, parallelism has
+        # already been validated.
+        assert parallelism.pipeline_parallel_degree == 1, (
+            "vLLM wrapper requires pipeline_parallel_degree=1, "
+            f"got {parallelism.pipeline_parallel_degree}"
+        )
+        assert parallelism.context_parallel_degree == 1, (
+            "vLLM wrapper requires context_parallel_degree=1, "
+            f"got {parallelism.context_parallel_degree}"
+        )
 
         # Store components from model_spec
         self.state_dict_adapter = model_spec.state_dict_adapter
@@ -207,9 +172,16 @@ class TorchTitanVLLMModelWrapper(Module):
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
-        # Create ParallelDims and configs from vLLM config at runtime.
-        self.parallel_dims, parallelism = create_torchtitan_config_from_vllm_config(
-            vllm_config
+        # Build ParallelDims from the torchtitan ParallelismConfig (the
+        # controller's source of truth) rather than vLLM's parallel_config.
+        self.parallel_dims = ParallelDims(
+            dp_replicate=parallelism.data_parallel_replicate_degree,
+            dp_shard=1,
+            cp=1,
+            tp=parallelism.tensor_parallel_degree,
+            pp=1,
+            ep=parallelism.expert_parallel_degree,
+            world_size=dist.get_world_size(),
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module
@@ -218,8 +190,6 @@ class TorchTitanVLLMModelWrapper(Module):
         # TODO: Refactor update_from_config to accept ParallelismConfig
         # directly instead of requiring a trainer_config wrapper.
         from types import SimpleNamespace
-
-        from torchtitan.config import DebugConfig, TrainingConfig
 
         self.config.update_from_config(
             trainer_config=SimpleNamespace(
@@ -235,16 +205,21 @@ class TorchTitanVLLMModelWrapper(Module):
         # RoPE config from model for cache extension
         self.rope_config = self.config.rope
 
-        # Apply parallelism using the model's own parallelize function.
-        # AC and compile are explicitly disabled; skip_dp=True skips FSDP.
-        from torchtitan.config import ActivationCheckpointConfig, CompileConfig
+        # With TP, collectives may return AsyncCollectiveTensor (overlap
+        # path) or plain Tensor (sync path) depending on timing.  Dynamo
+        # specializes on tensor type, so each switch triggers a
+        # recompile.  Because of this, the default recompile_limit (8) is
+        # too low; exceeding it fails under
+        # fullgraph=True so set to 10 for now
+        if compile_config.enable:
+            torch._dynamo.config.recompile_limit = 10
 
-        self.parallelize_fn(
-            self.model,
+        self.model = self.parallelize_fn(
+            model=self.model,
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
             parallelism=parallelism,
-            compile_config=CompileConfig(enable=False),
+            compile_config=compile_config,
             ac_config=ActivationCheckpointConfig(mode="none"),
             dump_folder="",
             skip_dp=True,
@@ -260,7 +235,7 @@ class TorchTitanVLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Initial load model weights from HuggingFace checkpoint path
+        # Initial load model weights from HuggingFace checkpoint path.
         self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
 
     def _extend_rope_cache(
@@ -376,7 +351,7 @@ class TorchTitanVLLMModelWrapper(Module):
         Compute logits from hidden states."""
 
         # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
-        # at the end of TorchTitanVLLMModelWrapper.forward().
+        # at the end of VLLMModelWrapper.forward().
         # We need to wrap the input from vLLM engine back to DTensor with Replicate() placement.
         if self.parallel_dims.tp_enabled:
             hidden_states = DTensor.from_local(

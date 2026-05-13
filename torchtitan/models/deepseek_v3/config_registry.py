@@ -46,7 +46,6 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -60,7 +59,7 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    config.model_spec = model_registry("debugmodel")
     return config
 
 
@@ -72,9 +71,7 @@ def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry(
-        "debugmodel", attn_backend="flex", moe_comm_backend="standard"
-    )
+    config.model_spec = model_registry("debugmodel", attn_backend="flex")
     return config
 
 
@@ -82,9 +79,7 @@ def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_registry(
-            "16B", attn_backend="flex", moe_comm_backend="standard"
-        ),
+        model_spec=model_registry("16B", attn_backend="flex"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -102,7 +97,6 @@ def deepseek_v3_16b() -> Trainer.Config:
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=8,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=10),
         activation_checkpoint=ActivationCheckpointConfig(
@@ -123,8 +117,7 @@ def deepseek_v3_671b() -> Trainer.Config:
         model_spec=model_registry(
             "671B",
             attn_backend="flex",
-            moe_comm_backend="standard",
-            quantization=[
+            converters=[
                 Float8LinearConverter.Config(
                     filter_fqns=["output", "router.gate"],
                     model_compile_enabled=model_compile_enabled,
@@ -152,7 +145,6 @@ def deepseek_v3_671b() -> Trainer.Config:
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=2,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(

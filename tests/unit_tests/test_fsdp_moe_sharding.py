@@ -62,6 +62,7 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
             interleave_moe_layer_step=1,
             fixed_attn_block_size=256,
             attn_backend="flex",
+            moe_comm_backend="standard",
         ),
     )
     return Llama4Model(config)

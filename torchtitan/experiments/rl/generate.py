@@ -38,11 +38,15 @@ def generate():
 
     # Register TorchTitan model with vLLM before engine creation
     from torchtitan.experiments.rl.models.vllm_registry import (
-        register_model_to_vllm_model_registry,
+        registry_to_vllm,
         VLLM_MODEL_NAME,
     )
 
-    register_model_to_vllm_model_registry(config.model_spec)
+    registry_to_vllm(
+        config.model_spec,
+        parallelism=gen_config.parallelism,
+        compile_config=config.compile,
+    )
     logger.info("Registered TorchTitan model with vLLM")
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
@@ -64,12 +68,16 @@ def generate():
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.compile.is_eager,
+        enforce_eager=not gen_config.cudagraph.enable,
         # HuggingFace overrides
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_backend="CUSTOM",
     )
-    vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+    max_num_seqs = config.num_prompts_per_step * gen_config.sampling.n
+    engine_kwargs["max_num_seqs"] = max_num_seqs
+    vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
+        max_num_seqs=max_num_seqs,
+    )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.debug.seed is not None:

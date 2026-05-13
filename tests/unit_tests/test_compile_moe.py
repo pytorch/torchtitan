@@ -49,23 +49,30 @@ class TestApplyCompile(unittest.TestCase):
 
         apply_compile(model, compile_config)
 
-        from torchtitan.models.common import moe as moe_module
+        from torchtitan.models.common.moe import GroupedExperts
+        from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
         num_experts = 8
         dim = 128
         hidden_dim = 256
-        w1 = torch.randn(num_experts, hidden_dim, dim, device="cuda")
-        w2 = torch.randn(num_experts, dim, hidden_dim, device="cuda")
-        w3 = torch.randn(num_experts, hidden_dim, dim, device="cuda")
+        experts = GroupedExperts(
+            GroupedExperts.Config(
+                dim=dim,
+                hidden_dim=hidden_dim,
+                num_experts=num_experts,
+                token_dispatcher=LocalTokenDispatcher.Config(
+                    num_experts=num_experts,
+                    top_k=1,
+                ),
+            )
+        ).cuda()
         num_tokens_per_expert = torch.tensor(
             [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32, device="cuda"
         )
         total_tokens = num_tokens_per_expert.sum().item()
         x = torch.randn(total_tokens, dim, device="cuda")
 
-        output = moe_module._run_experts_grouped_mm(
-            w1, w2, w3, x, num_tokens_per_expert
-        )
+        output = experts._experts_forward(x, num_tokens_per_expert)
 
         self.assertEqual(output.shape, x.shape)
 

@@ -73,7 +73,7 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_moe", moe_comm_backend="standard"),
+        model_spec=model_registry("debugmodel_moe"),
         dataloader=_qwen3_vl_dataloader("cc12m-test"),
         optimizer=OptimizersContainer.Config(lr=3e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -85,7 +85,6 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=4,
             expert_parallel_degree=4,
-            expert_tensor_parallel_degree=1,
             tensor_parallel_degree=2,
         ),
         checkpoint=CheckpointManager.Config(
@@ -163,7 +162,7 @@ def qwen3_vl_30b_a3b() -> Trainer.Config:
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/Qwen3-VL-30B-A3B-Instruct",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_VL_SPECIAL_TOKENS),
-        model_spec=model_registry("30B-A3B", moe_comm_backend="standard"),
+        model_spec=model_registry("30B-A3B"),
         dataloader=_qwen3_vl_dataloader("cc12m"),
         optimizer=OptimizersContainer.Config(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),

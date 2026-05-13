@@ -64,7 +64,7 @@ def apply_cp_to_forward(
                 def cp_forward(q, k, v, **kwargs):
                     k = k.contiguous()
                     v = v.contiguous()
-                    global_k, global_v = flex_cp_allgather(k, v, 2, pg_name)
+                    global_k, global_v = flex_cp_allgather(k, v, 1, pg_name)
                     return orig_fn(q, global_k, global_v, **kwargs)
 
                 return cp_forward

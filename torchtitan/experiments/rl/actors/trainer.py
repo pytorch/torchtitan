@@ -20,24 +20,25 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import (
+from torchtitan.config import (
     ActivationCheckpointConfig,
+    CommConfig,
     CompileConfig,
+    Configurable,
     DebugConfig,
     ParallelismConfig,
+    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
-    create_positions_from_seq_lens,
-    create_varlen_metadata,
     extract_response_logprobs,
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.types import TrainBatch
+from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
@@ -73,7 +74,6 @@ class PolicyTrainer(Actor, Configurable):
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
-        compile: CompileConfig = field(default_factory=CompileConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: Configurable.Config = field(default_factory=Configurable.Config)
         ac_config: ActivationCheckpointConfig = field(
@@ -87,6 +87,7 @@ class PolicyTrainer(Actor, Configurable):
         config: Config,
         *,
         model_spec: ModelSpec,
+        compile_config: CompileConfig,
         hf_assets_path: str = "",
         generator_dtype: str = "",
     ):
@@ -94,6 +95,7 @@ class PolicyTrainer(Actor, Configurable):
         init_logger()
 
         self.config = config
+        self.compile_config = compile_config
         self.loss_fn = config.loss.build()
 
         # Only cast if generator dtype differs from training dtype, otherwise
@@ -159,6 +161,12 @@ class PolicyTrainer(Actor, Configurable):
         logger.debug(
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
+
+    @endpoint
+    async def close(self) -> None:
+        """Destroy the worker's torch.distributed process group."""
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
     def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
         """Load model weights from HF checkpoint using DCP and state_dict_adapter.
@@ -234,7 +242,7 @@ class PolicyTrainer(Actor, Configurable):
             parallel_dims=self.parallel_dims,
             training=config.training,
             parallelism=config.parallelism,
-            compile_config=config.compile,
+            compile_config=self.compile_config,
             ac_config=config.ac_config,
             dump_folder=config.dump_folder,
         )
@@ -281,8 +289,10 @@ class PolicyTrainer(Actor, Configurable):
                 f"generation max_tokens."
             )
 
-        attention_masks = create_varlen_metadata(seq_lens, device)
-        positions = create_positions_from_seq_lens(seq_lens, device)
+        positions = torch.cat(
+            [torch.arange(l, device=device) for l in seq_lens]
+        ).unsqueeze(0)
+        attention_masks = create_varlen_metadata_for_document(positions)
 
         logits = self.model(
             token_ids, attention_masks=attention_masks, positions=positions

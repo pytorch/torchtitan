@@ -307,7 +307,12 @@ class ChatDataset(IterableDataset, Stateful):
                 "ChatDataset requires a tokenizer with a valid EOS token."
             )
 
-        self._original_data = split_dataset_by_node(dataset, dp_rank, dp_world_size)
+        # Shuffle the initial data to promote an even distribution across nodes. For map-style
+        # datasets, split_dataset_by_node assigns contiguous data chunks to consecutive nodes, which
+        # can lead to token imbalances, causing some nodes' epoch_idx to run ahead of others.
+        self._original_data = split_dataset_by_node(
+            cast(Dataset, dataset.shuffle(seed=42)), dp_rank, dp_world_size
+        )
         self._data = self._original_data
         self._tokenizer = tokenizer
         self._eos_id = tokenizer.eos_id
@@ -480,7 +485,8 @@ class ChatDataset(IterableDataset, Stateful):
                 self._epoch += 1
                 if isinstance(self._data, Dataset):
                     self._data = cast(
-                        Dataset, self._original_data.shuffle(seed=42 + self._epoch)
+                        Dataset,
+                        self._original_data.shuffle(seed=42 + self._epoch),
                     )
                 elif hasattr(self._data, "set_epoch"):
                     self._data.set_epoch(self._epoch)

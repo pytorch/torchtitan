@@ -10,7 +10,6 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
@@ -29,6 +28,8 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
@@ -86,7 +87,7 @@ def _build_llama4_layers(
     fixed_attn_block_size: int = 8192,
     attn_backend: str,
     shared_experts_hidden_dim: int | None = None,
-    moe_comm_backend: str | None = None,
+    moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for a Llama4 model.
@@ -181,8 +182,8 @@ def _build_llama4_layers(
 
 
 def _debugmodel(
-    attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> Llama4Model.Config:
     dim = 256
     n_heads = 16
@@ -227,8 +228,8 @@ def _debugmodel(
 
 
 def _17bx16e(
-    attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
@@ -284,8 +285,8 @@ def _17bx16e(
 
 
 def _17bx128e(
-    attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
+    attn_backend: str,
+    moe_comm_backend: str,
 ) -> Llama4Model.Config:
     dim = 5120
     n_heads = 40
@@ -348,16 +349,17 @@ llama4_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
-    quantization: list[QuantizationConverter.Config] | None = None,
+    moe_comm_backend: str = "standard",
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = llama4_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
     return ModelSpec(
         name="llama4",
         flavor=flavor,

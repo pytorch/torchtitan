@@ -15,6 +15,7 @@ from datasets import Dataset
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatDataLoader, ChatDataset
+from torchtitan.models.common.attention import get_document_mask_mod
 
 # Path to the test tokenizer and fixture data
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
@@ -77,9 +78,8 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
 
     def test_shifted_by_one(self):
         tokenizer = _load_tokenizer()
-        ds = _load_dataset()
         chat_ds = ChatDataset(
-            dataset=ds,
+            dataset=_load_dataset(),
             tokenizer=tokenizer,
             sample_processor=_process_sample,
             seq_len=2048,
@@ -90,8 +90,9 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         input_ids = batch["input"]
         label_ids = labels
 
-        # Tokenize the first sample directly to get ground truth tokens
-        sample = ds[0]
+        # Tokenize the first sample directly to get ground truth tokens. ChatDataset shuffles the
+        # dataset internally at init, and ChatDataset._original_data is the post-shuffle dataset.
+        sample = chat_ds._original_data[0]
         messages = _process_sample(sample)
         full_text = tokenizer.apply_chat_template(messages)
         # Chat templates already include end tokens, so no add_eos
@@ -437,6 +438,52 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
         batches = [next(it) for _ in range(20)]
         self.assertEqual(len(batches), 20)
         self.assertGreaterEqual(chat_ds._epoch, 1)
+
+
+class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
+    """Verify that position-based document masks block cross-document attention."""
+
+    def test_packed_samples_block_cross_document_attention(self):
+        tokenizer = _load_tokenizer()
+        ds = _load_dataset()
+        chat_ds = ChatDataset(
+            dataset=ds,
+            tokenizer=tokenizer,
+            sample_processor=_process_sample,
+            seq_len=2048,
+            infinite=False,
+        )
+
+        r0 = chat_ds._tokenize_sample(ds[0])
+        r1 = chat_ds._tokenize_sample(ds[1])
+        self.assertIsNotNone(r0)
+        self.assertIsNotNone(r1)
+        input_ids_0, _ = r0
+        input_ids_1, _ = r1
+
+        packed = input_ids_0 + input_ids_1
+        boundary = len(input_ids_0)
+        positions = torch.tensor(
+            [list(range(len(input_ids_0))) + list(range(len(input_ids_1)))]
+        )
+
+        mask_mod = get_document_mask_mod(positions)
+        b, h = torch.tensor(0), torch.tensor(0)
+
+        self.assertFalse(
+            mask_mod(b, h, torch.tensor(boundary), torch.tensor(boundary - 1)).item(),
+        )
+        self.assertFalse(
+            mask_mod(b, h, torch.tensor(len(packed) - 1), torch.tensor(0)).item(),
+        )
+        self.assertTrue(
+            mask_mod(b, h, torch.tensor(boundary - 1), torch.tensor(0)).item(),
+        )
+        self.assertTrue(
+            mask_mod(
+                b, h, torch.tensor(len(packed) - 1), torch.tensor(boundary)
+            ).item(),
+        )
 
 
 if __name__ == "__main__":

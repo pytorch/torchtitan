@@ -15,7 +15,7 @@ from torchtitan.models.llama3.model import Llama3Model
 
 def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
     # Start from the standard debugmodel config and adjust weight tying.
-    config = llama3_configs["debugmodel"]()
+    config = llama3_configs["debugmodel"](attn_backend="sdpa")
     # Replace tok_embeddings param_init based on weight tying flag.
     import dataclasses
     from functools import partial
@@ -62,6 +62,17 @@ class TestLlama3WeightTying(unittest.TestCase):
             model.lm_head.weight,
             "tok_embeddings.weight and output.weight must remain tied after init_states",
         )
+
+    def test_tied_parameter_count_matches_unique_parameters(self):
+        """Tied embeddings should be counted once, not subtracted away."""
+        config = _make_config(enable_weight_tying=True)
+        model = Llama3Model(config)
+        unique_param_count = sum(
+            p.numel() for p in {id(p): p for p in model.parameters()}.values()
+        )
+        reported_param_count, _ = config.get_nparams_and_flops(model, seq_len=512)
+
+        self.assertEqual(reported_param_count, unique_param_count)
 
     def test_pp_guard_raises_when_weight_tying_and_pp_enabled(self):
         """update_from_config must raise NotImplementedError when PP > 1 and weight tying is on."""

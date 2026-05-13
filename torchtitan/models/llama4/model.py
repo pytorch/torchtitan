@@ -11,7 +11,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -22,7 +21,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
 
 
 def compute_moe_hidden_dim(
@@ -138,17 +136,22 @@ class Llama4Model(Decoder):
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
-                    if (
-                        layer_cfg.moe.experts.use_grouped_mm
-                        and not has_cuda_capability(9, 0)
-                    ):
-                        logger.warning(
-                            "Failed to use grouped mm, which is only supported on SM90 or later",
-                        )
-                        layer_cfg.moe.experts.use_grouped_mm = False
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
+                    comm_backend = getattr(
+                        layer_cfg.moe.experts.token_dispatcher,
+                        "comm_backend",
+                        "standard",
+                    )
+                    if (
+                        comm_backend in ("deepep", "hybridep")
+                        and parallelism.expert_parallel_degree == 1
+                    ):
+                        raise ValueError(
+                            f"{comm_backend.upper()} requires expert parallelism "
+                            "(expert_parallel_degree > 1)."
+                        )
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -191,9 +194,7 @@ class Llama4Model(Decoder):
 
     def get_attention_masks(
         self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
+        positions: torch.Tensor,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
         attn_config = self.config.layers[0].attention
@@ -201,9 +202,8 @@ class Llama4Model(Decoder):
             case "causal":
                 B = 1
             case "block_causal":
-                assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
-                B = input_batch.shape[0]
+                mask_mods.append(get_document_mask_mod(positions))
+                B = positions.shape[0]
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"
@@ -217,7 +217,7 @@ class Llama4Model(Decoder):
         )
         nope_mask_mod = and_masks(*mask_mods)
 
-        seqlen = input_batch.shape[1]
+        seqlen = positions.shape[1]
         return {
             "rope": create_attention_mask(rope_mask_mod, B, None, seqlen, seqlen),
             "nope": create_attention_mask(nope_mask_mod, B, None, seqlen, seqlen),

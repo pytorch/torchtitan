@@ -45,7 +45,6 @@ def llama4_debugmodel() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -59,7 +58,7 @@ def llama4_debugmodel() -> Trainer.Config:
 
 def llama4_debugmodel_ep() -> Trainer.Config:
     config = llama4_debugmodel()
-    config.model_spec = model_registry("debugmodel", moe_comm_backend="standard")
+    config.model_spec = model_registry("debugmodel")
     return config
 
 
@@ -71,8 +70,7 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry(
             "debugmodel",
-            moe_comm_backend="standard",
-            quantization=[
+            converters=[
                 Float8GroupedExpertsConverter.Config(
                     model_compile_enabled=(
                         compile_config.enable and "model" in compile_config.components
@@ -97,7 +95,6 @@ def llama4_debugmodel_fp8() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=2,
-            expert_tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -132,7 +129,6 @@ def llama4_17bx128e() -> Trainer.Config:
             tensor_parallel_degree=8,
             pipeline_parallel_degree=4,
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
@@ -160,7 +156,6 @@ def llama4_17bx16e() -> Trainer.Config:
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
             expert_parallel_degree=1,
-            expert_tensor_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),

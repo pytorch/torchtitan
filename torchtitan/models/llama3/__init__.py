@@ -9,7 +9,6 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
@@ -25,6 +24,9 @@ from torchtitan.models.common.config_utils import (
     make_gqa_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
+from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
@@ -70,7 +72,7 @@ def _build_llama3_layers(
     hidden_dim: int,
     n_kv_heads: int | None = None,
     fuse_qkv: bool = False,
-    attn_backend: str = "sdpa",
+    attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention, mask_type = get_attention_config(attn_backend)
@@ -104,7 +106,7 @@ def _build_llama3_layers(
     return layers
 
 
-def _debugmodel(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _debugmodel(attn_backend: str) -> Llama3Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 6
@@ -135,7 +137,7 @@ def _debugmodel(attn_backend: str = "sdpa") -> Llama3Model.Config:
     )
 
 
-def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _debugmodel_fused_qkv(attn_backend: str) -> Llama3Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 6
@@ -167,7 +169,7 @@ def _debugmodel_fused_qkv(attn_backend: str = "sdpa") -> Llama3Model.Config:
     )
 
 
-def _1b(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _1b(attn_backend: str) -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
     n_kv_heads = 8
@@ -208,7 +210,7 @@ def _1b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     )
 
 
-def _3b(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _3b(attn_backend: str) -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
     n_kv_heads = 8
@@ -249,7 +251,7 @@ def _3b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     )
 
 
-def _8b(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _8b(attn_backend: str) -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
     n_kv_heads = 8
@@ -287,7 +289,7 @@ def _8b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     )
 
 
-def _70b(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _70b(attn_backend: str) -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
     n_kv_heads = 8
@@ -325,7 +327,7 @@ def _70b(attn_backend: str = "sdpa") -> Llama3Model.Config:
     )
 
 
-def _405b(attn_backend: str = "sdpa") -> Llama3Model.Config:
+def _405b(attn_backend: str) -> Llama3Model.Config:
     dim = 16384
     n_heads = 128
     n_kv_heads = 8
@@ -377,12 +379,13 @@ llama3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
-    quantization: list[QuantizationConverter.Config] | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
-    if quantization is not None:
-        for q in quantization:
-            q.build().convert(config)
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
     return ModelSpec(
         name="llama3",
         flavor=flavor,
