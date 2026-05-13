@@ -206,6 +206,7 @@ class VLLMGenerator(Actor, Configurable):
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
         set_batch_invariance(config.debug.batch_invariant)
 
