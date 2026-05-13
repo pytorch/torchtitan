@@ -131,16 +131,6 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    full_spmd_types: bool = False
-    """Use spmd_types annotations on plain tensors instead of DTensor for
-    parallelism typechecking. FSDP stores params as DTensors internally;
-    spmd_types annotations are restored at compute time."""
-
-    spmd_typechecking: str | None = None
-    """SPMD type checking mode. Only applies when full_spmd_types=True.
-    None: no type checking. "local": local SPMD type checking.
-    "global": global mode (every Varying axis must have a PartitionSpec)."""
-
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
@@ -355,6 +345,10 @@ class CommConfig:
 class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
+
+    spmd_typechecking: str | None = None
+    """SPMD type checking mode. None: no type checking.
+    "global": global mode (every Varying axis must have a PartitionSpec)."""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
