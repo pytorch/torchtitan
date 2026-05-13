@@ -41,8 +41,7 @@ def R() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
 
 
 def Inv() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
-    """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent).
-    """
+    """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent)."""
     return spmd.I if is_spmd_active() else Replicate()
 
 
