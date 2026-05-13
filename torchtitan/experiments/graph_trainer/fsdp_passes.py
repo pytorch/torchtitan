@@ -235,6 +235,53 @@ def transformer_block_bucketing_reordering_pass(
     return gm
 
 
+def _add_chunked_ce_accumulator_deps(
+    graph: fx.Graph,
+    deps: dict[fx.Node, OrderedSet[fx.Node]],
+) -> None:
+    """Preserve copy-into-slice writes before later reads of the base buffer.
+
+    ChunkedCELoss's hidden-state gradient accumulator is traced as copy_ writes
+    into slice views of a zeros-like base tensor, followed by a read of that
+    base tensor. FX arg edges do not connect the mutating copy_ nodes to the
+    later base read, so bucketing's topological reorder can otherwise move the
+    read before the writes.
+    """
+
+    def copy_mutated_base(node: fx.Node) -> fx.Node | None:
+        if node.op != "call_function" or node.target != torch.ops.aten.copy_.default:
+            return None
+
+        dst = node.args[0]
+        if not isinstance(dst, fx.Node):
+            return None
+
+        if dst.op == "call_function" and dst.target == torch.ops.aten.slice.Tensor:
+            base = dst.args[0]
+            if isinstance(base, fx.Node):
+                return base
+        return dst
+
+    writes_by_base: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(OrderedSet)
+    copy_destinations = {
+        node.args[0]
+        for node in graph.nodes
+        if node.op == "call_function"
+        and node.target == torch.ops.aten.copy_.default
+        and isinstance(node.args[0], fx.Node)
+    }
+
+    for node in graph.nodes:
+        if node.op not in ("placeholder", "output") and node not in copy_destinations:
+            for input_node in node.all_input_nodes:
+                writes = writes_by_base.get(input_node)
+                if writes:
+                    deps.setdefault(node, OrderedSet()).update(writes)
+
+        if base := copy_mutated_base(node):
+            writes_by_base[base].add(node)
+
+
 class JointManualOverlapScheduler(ManualOverlapScheduler):
     """Manual overlap scheduler for joint forward+backward graphs.
 
@@ -291,7 +338,9 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             if bwd_nodes:
                 self.bucketer.manual_bucket_collectives(nodes=bwd_nodes)
 
-        _stable_topological_sort(self.graph, {})
+        deps: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(OrderedSet)
+        _add_chunked_ce_accumulator_deps(self.graph, deps)
+        _stable_topological_sort(self.graph, deps)
         self.graph.lint()
         self.nodes = list(self.graph.nodes)
         self.in_degree = Counter(user for node in self.nodes for user in node.users)
@@ -305,6 +354,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
 
         self._schedule_rs_prefetch(overlap_deps)
         self._schedule_ag_prefetch(overlap_deps)
+        _add_chunked_ce_accumulator_deps(self.graph, overlap_deps)
 
         _stable_topological_sort(self.graph, overlap_deps)
         self.graph.lint()
