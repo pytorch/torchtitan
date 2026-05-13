@@ -29,7 +29,7 @@ def set_llama3_sharding_config(
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
     Specs are populated unconditionally — the mesh actually passed to
-    ``Module.parallelize()`` at runtime determines which declarations
+    ``Module.parallelize(parallel_dims)`` at runtime determines which declarations
     apply. Declarations for mesh axes that aren't enabled (e.g. ``TP``
     placements under FSDP-only) are skipped at parallelize time.
 
