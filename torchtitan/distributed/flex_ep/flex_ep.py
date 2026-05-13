@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -18,6 +19,7 @@ from torch.distributed.tensor import DeviceMesh
 DEFAULT_NUM_CTAS = 152
 EP_TIMEOUT_SECONDS = 30.0
 TOKEN_ALIGNMENT = 128
+logger = logging.getLogger(__name__)
 
 _REQUIRED_EP_BACKEND_OPS = (
     "flex_ep_allgather",
@@ -484,11 +486,40 @@ def _compute_max_tokens_recv(
     top_k: int,
 ) -> int:
     local_experts = num_experts // ep_size
-    max_tokens_received = _align_up(
-        max_tokens * ep_size * min(local_experts, top_k),
+    capacity_per_local_expert = _align_up(
+        ep_size * ((max_tokens * top_k + num_experts - 1) // num_experts),
         TOKEN_ALIGNMENT,
     )
-    return max_tokens_received + TOKEN_ALIGNMENT * local_experts
+    return capacity_per_local_expert * local_experts
+
+
+def _validate_balanced_routing_capacity(
+    local_experts_start: torch.Tensor,
+    max_recv_tokens: int,
+) -> None:
+    num_recv_tokens = int(local_experts_start[-1].item())
+    if num_recv_tokens > max_recv_tokens:
+        raise ValueError(
+            "FlexGroupedExperts flex_ep workspace capacity was exceeded. "
+            "This v1 path requires balanced routing; pass "
+            "--debug.moe_force_load_balance for DeepSeekV3 FlexEP testing. "
+            f"Received {num_recv_tokens} local expert tokens, but the balanced "
+            f"workspace capacity is {max_recv_tokens}."
+        )
+
+
+def _compute_dispatch_recv_weights_numel(
+    max_tokens: int,
+    max_tokens_received: int,
+    top_k: int,
+) -> int:
+    dispatch_id_scratch_bytes = max_tokens * top_k * torch.int64.itemsize
+    dispatch_weight_bytes = max_tokens_received * torch.float32.itemsize
+    return (
+        max(dispatch_id_scratch_bytes, dispatch_weight_bytes)
+        + torch.float32.itemsize
+        - 1
+    ) // torch.float32.itemsize
 
 
 def _scale_dim(dim: int) -> int:
@@ -528,6 +559,11 @@ class NvlSharedBuffer:
             num_experts,
             top_k,
         )
+        dispatch_recv_weights_numel = _compute_dispatch_recv_weights_numel(
+            max_tokens,
+            max_tokens_received,
+            top_k,
+        )
         scale_dim = _scale_dim(dim)
         return (
             ("barrier_counter", (16,), torch.int32),
@@ -537,7 +573,7 @@ class NvlSharedBuffer:
                 (max_tokens_received, scale_dim),
                 torch.uint8,
             ),
-            ("dispatch_recv_weights", (max_tokens_received,), torch.float32),
+            ("dispatch_recv_weights", (dispatch_recv_weights_numel,), torch.float32),
             (
                 "dispatch_recv_origin_global_token_id",
                 (max_tokens_received,),
@@ -594,14 +630,287 @@ class NvlSharedBuffer:
             name: view_buffer_chunk(shape, dtype)
             for name, shape, dtype in cls.tensors_shapes_and_dtypes(**kwargs)
         }
-        if offset != buffer.numel():
-            raise ValueError(
-                "NvlSharedBuffer raw buffer has unexpected trailing bytes."
-            )
         return cls(raw=buffer, **tensors)
 
     def offset_of(self, name: str) -> int:
         return getattr(self, name).data_ptr() - self.raw.data_ptr()
+
+
+_WorkspaceCacheKey = tuple[str, int | None, int | None, int, int]
+_FLEX_EP_WORKSPACE_CACHE: dict[_WorkspaceCacheKey, "FlexEPWorkspace"] = {}
+
+
+def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
+    device = torch.device(device)
+    device_index = device.index
+    if device.type == "cuda" and device_index is None:
+        device_index = torch.cuda.current_device()
+    return device.type, device_index
+
+
+def _clear_flex_ep_workspace_cache() -> None:
+    _FLEX_EP_WORKSPACE_CACHE.clear()
+
+
+@dataclass
+class FlexEPWorkspace:
+    device: torch.device
+    ep_rank: int
+    ep_size: int
+    raw: torch.Tensor
+    peer_buffers: tuple[torch.Tensor, ...]
+    buffers_cuda_ptrs: torch.Tensor
+    _views: dict[tuple[int, int, int, int, int], NvlSharedBuffer] = field(
+        default_factory=dict
+    )
+
+    @classmethod
+    def get_or_create(
+        cls,
+        *,
+        max_tokens: int,
+        dim: int,
+        num_experts: int,
+        top_k: int,
+        device: torch.device,
+        ep_mesh: DeviceMesh | None,
+    ) -> "FlexEPWorkspace":
+        ep_size = 1 if ep_mesh is None else ep_mesh.size()
+        ep_rank = 0 if ep_mesh is None else ep_mesh.get_local_rank()
+        if num_experts % ep_size != 0:
+            raise ValueError(
+                f"num_experts ({num_experts}) must be divisible by ep_size "
+                f"({ep_size})."
+            )
+
+        if ep_size == 1:
+            ep_group = None
+            ep_group_key = None
+        else:
+            assert ep_mesh is not None
+            ep_group = ep_mesh.get_group()
+            ep_group_key = id(ep_group)
+        device = torch.device(device)
+        device_type, device_index = _device_cache_key(device)
+        cache_key = (device_type, device_index, ep_group_key, ep_rank, ep_size)
+        nvl_buffer_size = NvlSharedBuffer.get_buffer_size_bytes(
+            max_tokens=max_tokens,
+            dim=dim,
+            ep_size=ep_size,
+            num_experts=num_experts,
+            top_k=top_k,
+        )
+        workspace = _FLEX_EP_WORKSPACE_CACHE.get(cache_key)
+        if workspace is None:
+            workspace = cls._allocate(
+                nvl_buffer_size,
+                max_tokens=max_tokens,
+                dim=dim,
+                ep_size=ep_size,
+                ep_rank=ep_rank,
+                num_experts=num_experts,
+                top_k=top_k,
+                device=device,
+                ep_group=ep_group,
+            )
+            _FLEX_EP_WORKSPACE_CACHE[cache_key] = workspace
+        elif workspace.raw.numel() < nvl_buffer_size:
+            workspace._resize(
+                nvl_buffer_size,
+                max_tokens=max_tokens,
+                dim=dim,
+                num_experts=num_experts,
+                top_k=top_k,
+                ep_group=ep_group,
+            )
+        return workspace
+
+    @classmethod
+    def _allocate(
+        cls,
+        nvl_buffer_size: int,
+        *,
+        max_tokens: int,
+        dim: int,
+        ep_size: int,
+        ep_rank: int,
+        num_experts: int,
+        top_k: int,
+        device: torch.device,
+        ep_group: Any,
+    ) -> "FlexEPWorkspace":
+        raw, peer_buffers, buffers_cuda_ptrs = _allocate_workspace_storage(
+            nvl_buffer_size=nvl_buffer_size,
+            device=device,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            ep_group=ep_group,
+        )
+        workspace = cls(
+            device=device,
+            ep_rank=ep_rank,
+            ep_size=ep_size,
+            raw=raw,
+            peer_buffers=peer_buffers,
+            buffers_cuda_ptrs=buffers_cuda_ptrs,
+        )
+        workspace._log_allocation(
+            nvl_buffer_size,
+            max_tokens=max_tokens,
+            dim=dim,
+            num_experts=num_experts,
+            top_k=top_k,
+        )
+        return workspace
+
+    def _resize(
+        self,
+        nvl_buffer_size: int,
+        *,
+        max_tokens: int,
+        dim: int,
+        num_experts: int,
+        top_k: int,
+        ep_group: Any,
+    ) -> None:
+        raw, peer_buffers, buffers_cuda_ptrs = _allocate_workspace_storage(
+            nvl_buffer_size=nvl_buffer_size,
+            device=self.device,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+            ep_group=ep_group,
+        )
+        self.raw = raw
+        self.peer_buffers = peer_buffers
+        self.buffers_cuda_ptrs = buffers_cuda_ptrs
+        self._views.clear()
+        self._log_allocation(
+            nvl_buffer_size,
+            max_tokens=max_tokens,
+            dim=dim,
+            num_experts=num_experts,
+            top_k=top_k,
+        )
+
+    def _log_allocation(
+        self,
+        nvl_buffer_size: int,
+        *,
+        max_tokens: int,
+        dim: int,
+        num_experts: int,
+        top_k: int,
+    ) -> None:
+        local_experts = num_experts // self.ep_size
+        capacity_per_local_expert = (
+            _compute_max_tokens_recv(
+                max_tokens,
+                self.ep_size,
+                num_experts,
+                top_k,
+            )
+            // local_experts
+        )
+        logger.info(
+            "Allocated FlexEP workspace: size_bytes=%s device=%s ep_rank=%s "
+            "ep_size=%s max_tokens=%s dim=%s num_experts=%s top_k=%s "
+            "local_experts=%s balanced_capacity_per_local_expert=%s",
+            nvl_buffer_size,
+            self.device,
+            self.ep_rank,
+            self.ep_size,
+            max_tokens,
+            dim,
+            num_experts,
+            top_k,
+            local_experts,
+            capacity_per_local_expert,
+        )
+
+    def view(
+        self,
+        *,
+        max_tokens: int,
+        dim: int,
+        num_experts: int,
+        top_k: int,
+    ) -> NvlSharedBuffer:
+        view_key = (max_tokens, dim, self.ep_size, num_experts, top_k)
+        view = self._views.get(view_key)
+        if view is None:
+            view = NvlSharedBuffer.view_from_buffer(
+                self.peer_buffers[self.ep_rank],
+                max_tokens=max_tokens,
+                dim=dim,
+                ep_size=self.ep_size,
+                num_experts=num_experts,
+                top_k=top_k,
+            )
+            self._views[view_key] = view
+        return view
+
+
+def _allocate_workspace_storage(
+    *,
+    nvl_buffer_size: int,
+    device: torch.device,
+    ep_size: int,
+    ep_rank: int,
+    ep_group: Any,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, ...], torch.Tensor]:
+    if ep_size == 1:
+        raw = torch.empty(nvl_buffer_size, device=device, dtype=torch.uint8)
+        raw.zero_()
+        peer_buffers = (raw,)
+    else:
+        if device.type != "cuda":
+            raise ValueError(
+                f"FlexGroupedExperts EP>1 requires CUDA tensors, got {device}."
+            )
+        _require_ep_backend_ops()
+        try:
+            import torch.distributed as dist
+            import torch.distributed._symmetric_memory as symm_mem
+        except ImportError as e:
+            raise ImportError(
+                "FlexGroupedExperts EP>1 requires PyTorch symmetric memory."
+            ) from e
+        if not symm_mem.is_nvshmem_available():
+            raise RuntimeError(
+                "FlexGroupedExperts EP>1 requires NVSHMEM symmetric memory."
+            )
+        symm_mem.set_backend("NVSHMEM")
+        raw = symm_mem.empty(nvl_buffer_size, device=device, dtype=torch.uint8)
+        raw.zero_()
+        handle = symm_mem.rendezvous(raw, ep_group)
+        peer_buffers = tuple(
+            (raw if peer == ep_rank else handle.get_buffer(peer, raw.shape, raw.dtype))
+            for peer in range(ep_size)
+        )
+        dist.barrier(group=ep_group)
+
+    buffer = NvlSharedBuffer.view_from_buffer(
+        peer_buffers[ep_rank],
+        max_tokens=1,
+        dim=1,
+        ep_size=ep_size,
+        num_experts=ep_size,
+        top_k=1,
+    )
+    buffer.barrier_counter.zero_()
+    buffers_cuda_ptrs = torch.tensor(
+        [peer_buffer.data_ptr() for peer_buffer in peer_buffers],
+        dtype=torch.int64,
+        device=device,
+    )
+    if ep_size > 1:
+        _router_barrier(
+            buffer.barrier_counter,
+            buffer.barrier_counter,
+            buffers_cuda_ptrs,
+            buffer.offset_of("barrier_counter"),
+        )
+    return raw, peer_buffers, buffers_cuda_ptrs
 
 
 def _view_beginning_as(
@@ -659,10 +968,7 @@ class FlexEPRouter:
         top_k: int,
         ep_rank: int,
         ep_size: int,
-        raw: torch.Tensor,
-        buffers_cuda_ptrs: torch.Tensor,
-        buffer: NvlSharedBuffer,
-        peer_buffers: tuple[torch.Tensor, ...],
+        workspace: FlexEPWorkspace,
         num_ctas: int = DEFAULT_NUM_CTAS,
     ) -> None:
         self.max_tokens = max_tokens
@@ -672,11 +978,20 @@ class FlexEPRouter:
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.num_ctas = num_ctas
-        self.raw = raw
-        self.buffers_cuda_ptrs = buffers_cuda_ptrs
-        self.buffer = buffer
-        self.peer_buffers = peer_buffers
+        self.workspace = workspace
         self.router_fns = self._make_router_fns()
+
+    @property
+    def raw(self) -> torch.Tensor:
+        return self.workspace.raw
+
+    @property
+    def buffers_cuda_ptrs(self) -> torch.Tensor:
+        return self.workspace.buffers_cuda_ptrs
+
+    @property
+    def peer_buffers(self) -> tuple[torch.Tensor, ...]:
+        return self.workspace.peer_buffers
 
     @classmethod
     def create(
@@ -693,69 +1008,13 @@ class FlexEPRouter:
         _ensure_flex_ep_imported()
         ep_size = 1 if ep_mesh is None else ep_mesh.size()
         ep_rank = 0 if ep_mesh is None else ep_mesh.get_local_rank()
-        if num_experts % ep_size != 0:
-            raise ValueError(
-                f"num_experts ({num_experts}) must be divisible by ep_size "
-                f"({ep_size})."
-            )
-        kwargs = {
-            "max_tokens": max_tokens,
-            "dim": dim,
-            "ep_size": ep_size,
-            "num_experts": num_experts,
-            "top_k": top_k,
-        }
-        nvl_buffer_size = NvlSharedBuffer.get_buffer_size_bytes(**kwargs)
-
-        if ep_size == 1:
-            raw = torch.empty(nvl_buffer_size, device=device, dtype=torch.uint8)
-            raw.zero_()
-            peer_buffers = (raw,)
-        else:
-            if device.type != "cuda":
-                raise ValueError(
-                    f"FlexGroupedExperts EP>1 requires CUDA tensors, got {device}."
-                )
-            _require_ep_backend_ops()
-            try:
-                import torch.distributed as dist
-                import torch.distributed._symmetric_memory as symm_mem
-            except ImportError as e:
-                raise ImportError(
-                    "FlexGroupedExperts EP>1 requires PyTorch symmetric memory."
-                ) from e
-            if not symm_mem.is_nvshmem_available():
-                raise RuntimeError(
-                    "FlexGroupedExperts EP>1 requires NVSHMEM symmetric memory."
-                )
-            symm_mem.set_backend("NVSHMEM")
-            raw = symm_mem.empty(nvl_buffer_size, device=device, dtype=torch.uint8)
-            raw.zero_()
-            assert ep_mesh is not None
-            ep_group = ep_mesh.get_group()
-            handle = symm_mem.rendezvous(raw, ep_group)
-            peer_buffers = tuple(
-                (
-                    raw
-                    if peer == ep_rank
-                    else handle.get_buffer(peer, raw.shape, raw.dtype)
-                )
-                for peer in range(ep_size)
-            )
-            dist.barrier(group=ep_group)
-
-        buffer = NvlSharedBuffer.view_from_buffer(peer_buffers[ep_rank], **kwargs)
-        buffer.barrier_counter.zero_()
-        buffers_cuda_ptrs = torch.tensor(
-            [peer_buffer.data_ptr() for peer_buffer in peer_buffers],
-            dtype=torch.int64,
+        workspace = FlexEPWorkspace.get_or_create(
+            max_tokens=max_tokens,
+            dim=dim,
+            num_experts=num_experts,
+            top_k=top_k,
             device=device,
-        )
-        _router_barrier(
-            buffer.barrier_counter,
-            buffer.barrier_counter,
-            buffers_cuda_ptrs,
-            buffer.offset_of("barrier_counter"),
+            ep_mesh=ep_mesh,
         )
         return cls(
             max_tokens=max_tokens,
@@ -764,19 +1023,21 @@ class FlexEPRouter:
             top_k=top_k,
             ep_rank=ep_rank,
             ep_size=ep_size,
-            raw=raw,
-            buffers_cuda_ptrs=buffers_cuda_ptrs,
-            buffer=buffer,
-            peer_buffers=peer_buffers,
+            workspace=workspace,
             num_ctas=num_ctas,
         )
 
     @property
     def router_operands(self) -> tuple[Any, ...]:
-        buffer = self.buffer
+        buffer = self.workspace.view(
+            max_tokens=self.max_tokens,
+            dim=self.dim,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+        )
         return (
-            self.raw,
-            self.buffers_cuda_ptrs,
+            self.workspace.raw,
+            self.workspace.buffers_cuda_ptrs,
             buffer.offset_of("barrier_counter"),
             buffer.offset_of("dispatch_recv_buffer"),
             buffer.offset_of("dispatch_recv_buffer_scaling_factors"),
@@ -884,6 +1145,10 @@ class FlexEPRouter:
                     local_experts,
                     TOKEN_ALIGNMENT,
                 )
+            )
+            _validate_balanced_routing_capacity(
+                local_experts_start,
+                max_recv_tokens,
             )
             expert_begin_offset = all_offsets[ep_rank]
             recv_ofs = all_offsets[:, :, ep_rank].reshape(-1)
