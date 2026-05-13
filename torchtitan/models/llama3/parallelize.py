@@ -96,9 +96,7 @@ def parallelize_llama(
     # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
     # all-gather but still installs the MixedPrecisionPolicy.
     if parallelism.full_dtensor:
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
-            model, parallel_dims, parallelism.full_dtensor
-        )
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
     else:
         names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]

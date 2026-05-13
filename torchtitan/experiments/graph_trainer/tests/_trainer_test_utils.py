@@ -24,7 +24,6 @@ def build_minimal_trainer(
     activation_checkpoint_mode: str = "none",
     compile_enable_passes: bool = True,
     compile_passes: list[str] | None = None,
-    compile_joint_passes: list[str] | None = None,
     compile_numerics_changing_optim: bool = False,
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
@@ -46,9 +45,6 @@ def build_minimal_trainer(
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 passes=[] if compile_passes is None else list(compile_passes),
-                joint_passes=(
-                    [] if compile_joint_passes is None else list(compile_joint_passes)
-                ),
                 precompile_artifact_dir="",
                 memory_policy="default",
                 pass_pipeline="default",
