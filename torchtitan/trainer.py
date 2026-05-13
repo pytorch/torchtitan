@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -13,12 +14,19 @@ from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
+import torch.utils._pytree as pytree
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.distributed.spmd_state import (
+    is_spmd_active,
+    set_current_parallel_dims,
+)
+from torchtitan.protocols.module import named_placement_to_spmd, preserve_buffer_spmd
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedCELoss, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -41,12 +49,12 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.types import MeshAxisName
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -193,9 +201,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
-        assert (
-            config.model_spec is not None
-        ), "model_spec must be set before creating Trainer"
+        assert config.model_spec is not None, (
+            "model_spec must be set before creating Trainer"
+        )
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
@@ -244,9 +252,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # build model (using meta init)
         model_config = model_spec.model
         # set the model args from training job configs
-        model_config.update_from_config(
-            trainer_config=config,
+        spmd_scope = (
+            set_current_parallel_dims(parallel_dims)
+            if parallel_dims.full_spmd_types
+            else contextlib.nullcontext()
         )
+        with spmd_scope:
+            model_config.update_from_config(
+                trainer_config=config,
+            )
         self.model_config = model_config
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
@@ -383,11 +397,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                ctx = (
+                    preserve_buffer_spmd(model)
+                    if parallel_dims.full_spmd_types
+                    else contextlib.nullcontext()
+                )
+                with ctx:
+                    model.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -399,23 +419,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
-                    assert (
-                        lm_head is not None
-                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    assert lm_head is not None, (
+                        "Last PP stage must have lm_head for ChunkedCELoss"
+                    )
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
-                    self.model_parts[
-                        -1
-                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                    self.model_parts[-1]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
                 assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
-                self.model_parts[
-                    0
-                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[0]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -461,9 +477,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled
+            and not config.parallelism.disable_loss_parallel
+            and not parallel_dims.full_spmd_types
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.spmd_typechecking = config.parallelism.spmd_typechecking
+
+        if (
+            parallel_dims.full_spmd_types
+            and isinstance(self.loss_fn, ChunkedCELoss)
+            and parallel_dims.tp_enabled
+        ):
+            self.loss_fn.enable_sp = config.parallelism.enable_sequence_parallel
+            self.loss_fn.loss_parallel = not config.parallelism.disable_loss_parallel
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -596,9 +623,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inner_attention = attn_config.inner_attention
 
             if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
+                assert positions is not None, (
+                    "block_causal mask requires per-document positions from the dataloader"
+                )
             else:
                 positions = torch.arange(
                     inputs.shape[1], dtype=torch.int32, device=inputs.device
@@ -645,51 +672,116 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels
         )
 
-        if parallel_dims.pp_enabled:
-            # Pipeline Parallel forward / backward inside step() call
-            loss_kwargs = {"global_valid_tokens": global_valid_tokens}
-            with self.train_context():
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
-                )
-                if self.pp_has_first_stage:
-                    self.pp_schedule.step(
-                        inputs,
-                        **extra_inputs,
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        loss_kwargs=loss_kwargs,
-                        return_outputs=False,
-                    )
-                else:
-                    self.pp_schedule.step(
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        loss_kwargs=loss_kwargs,
-                        return_outputs=False,
-                    )
+        spmd_scope = (
+            set_current_parallel_dims(parallel_dims)
+            if parallel_dims.full_spmd_types
+            else contextlib.nullcontext()
+        )
 
-            # accumulate losses across pipeline microbatches
-            # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-            if self.pp_has_last_stage:
-                assert losses is not None
-                # All loss classes scale by global_valid_tokens internally
-                loss = torch.sum(torch.stack(losses)).to(self.device)
+        with spmd_scope:
+            if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
+                spmd.assert_type(global_valid_tokens, spmd.I)
+            if is_spmd_active():
+                self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
+
+            if parallel_dims.pp_enabled:
+                # Pipeline Parallel forward / backward inside step() call
+                loss_kwargs = {"global_valid_tokens": global_valid_tokens}
+                with self.train_context():
+                    targets, losses = (
+                        (labels, []) if self.pp_has_last_stage else (None, None)
+                    )
+                    if self.pp_has_first_stage:
+                        self.pp_schedule.step(
+                            inputs,
+                            **extra_inputs,
+                            **extra_kwargs,
+                            target=targets,
+                            losses=losses,
+                            loss_kwargs=loss_kwargs,
+                            return_outputs=False,
+                        )
+                    else:
+                        self.pp_schedule.step(
+                            **extra_kwargs,
+                            target=targets,
+                            losses=losses,
+                            loss_kwargs=loss_kwargs,
+                            return_outputs=False,
+                        )
+
+                # accumulate losses across pipeline microbatches
+                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
+                if self.pp_has_last_stage:
+                    assert losses is not None
+                    # All loss classes scale by global_valid_tokens internally
+                    loss = torch.sum(torch.stack(losses)).to(self.device)
+                else:
+                    loss = torch.tensor([-1.0], device=self.device)
             else:
-                loss = torch.tensor([-1.0], device=self.device)
-        else:
-            # Non-PP forward / backward
-            assert len(model_parts) == 1
-            with self.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
-                del pred
-                loss.backward()
+                # Non-PP forward / backward
+                assert len(model_parts) == 1
+                typechecker = (
+                    spmd.typecheck(local=(self.spmd_typechecking == "local"))
+                    if is_spmd_active()
+                    and self.spmd_typechecking in ("local", "global")
+                    else contextlib.nullcontext()
+                )
+                with self.train_context():
+                    with typechecker:
+                        pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                        loss = self.loss_fn(pred, labels, global_valid_tokens)
+                    del pred
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
+
+    def _annotate_inputs_spmd(
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        extra_inputs: dict[str, torch.Tensor],
+        extra_kwargs: dict[str, Any],
+    ) -> None:
+        """Annotate configured forward inputs with spmd types.
+
+        Called after ``post_dataloading_process`` so that tensors created
+        there (e.g. positions) are also annotated.
+        """
+        spmd_input_config = getattr(self.model_config, "spmd_input_config", None)
+        if spmd_input_config is None:
+            raise NotImplementedError(
+                f"{type(self.model_config).__name__} does not define "
+                "spmd_input_config for full_spmd_types."
+            )
+
+        def is_named_placement(x: object) -> bool:
+            return isinstance(x, dict) and all(isinstance(k, MeshAxisName) for k in x)
+
+        def annotate_input_type(value: object, placements: object) -> None:
+            if not isinstance(value, torch.Tensor):
+                return
+            types, pspec = named_placement_to_spmd(placements, ndim=value.ndim)
+            if types:
+                spmd.assert_type(value, types, partition_spec=pspec)
+
+        pytree.tree_map(
+            annotate_input_type,
+            (
+                inputs,
+                labels,
+                extra_inputs,
+                extra_kwargs,
+            ),
+            (
+                spmd_input_config.inputs,
+                spmd_input_config.labels,
+                spmd_input_config.extra_inputs,
+                spmd_input_config.extra_kwargs,
+            ),
+            is_leaf=is_named_placement,
+        )
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -758,7 +850,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return
 
         with sl.log_trace_span("collect_dist_metrics"):
-
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:
