@@ -66,11 +66,6 @@ class _TestPlacement(Placement):
     ) -> torch.Size:
         return global_shape
 
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        return int(torch.Size(global_shape).numel())
-
     def extract_local_shard(
         self,
         param: torch.Tensor,

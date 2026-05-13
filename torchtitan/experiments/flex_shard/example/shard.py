@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -56,13 +55,6 @@ class Shard(Placement):
         shape = list(global_shape)
         shape[self.dim] = local_dim
         return torch.Size(shape)
-
-    @override
-    def compute_local_numel(
-        self, global_shape: torch.Size, rank: int, world_size: int
-    ) -> int:
-        local_shape = self.compute_local_shape(global_shape, rank, world_size)
-        return math.prod(local_shape)
 
     @override
     def extract_local_shard(

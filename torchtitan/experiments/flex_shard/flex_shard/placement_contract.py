@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -35,7 +36,7 @@ class Placement:
         self, global_shape: torch.Size, rank: int, world_size: int
     ) -> int:
         """How many elements this rank holds for a param with global_shape."""
-        raise NotImplementedError
+        return math.prod(self.compute_local_shape(global_shape, rank, world_size))
 
     def compute_local_shape(
         self, global_shape: torch.Size, rank: int, world_size: int

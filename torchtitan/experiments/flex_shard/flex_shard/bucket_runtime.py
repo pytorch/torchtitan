@@ -214,7 +214,7 @@ class BucketRuntime:
             entries=entries,
             context=context,
             debug_fqn=_get_storage_debug_fqn(storage),
-            use_autograd_unshard=_storage_supports_shard_to_full_autograd(storage),
+            use_autograd_unshard=storage._reshard_after_forward,
         )
 
     @staticmethod
@@ -590,19 +590,6 @@ class _BucketAllGather(torch.autograd.Function):
         return (None, *input_grads)
 
 
-def _storage_supports_shard_to_full_autograd(storage: DStorage) -> bool:
-    """Return whether local shards can autograd through bucket all-gather."""
-    if not storage._reshard_after_forward:
-        return False
-    if not storage._param_infos:
-        raise AssertionError("Expected FlexShard bucket storage to own parameters.")
-    if storage.byte_storage.device.type != "cuda":
-        raise AssertionError(
-            "Expected FlexShard reshard-after-forward bucket storage to be on CUDA."
-        )
-    return True
-
-
 def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
     bucket_fqn = _get_storage_debug_fqn(storage)
     bucket_msg = f" for bucket {bucket_fqn!r}" if bucket_fqn else ""
@@ -625,7 +612,6 @@ def _create_eager_param_states(
     module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]] = {}
 
     for storage in storages:
-        uses_shard_to_full_autograd = _storage_supports_shard_to_full_autograd(storage)
         bucket_fqn = _get_storage_debug_fqn(storage)
         for fqn, info in storage._param_infos.items():
             bucket_spec = fqn_to_bucket_spec[fqn]
@@ -645,7 +631,7 @@ def _create_eager_param_states(
             setattr(
                 param_state,
                 _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-                uses_shard_to_full_autograd,
+                storage._reshard_after_forward,
             )
             setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
             setattr(param_state, _PARAM_FQN_ATTR, fqn)
@@ -673,8 +659,8 @@ def _install_batched_allgather_hooks(
     for storage in storages:
         if not storage._param_infos:
             raise AssertionError("Expected FlexShard bucket storage to own parameters.")
-        if storage._reshard_after_forward:
-            _storage_supports_shard_to_full_autograd(storage)
+        if storage.byte_storage.device.type != "cuda":
+            raise AssertionError("Expected FlexShard bucket storage to be on CUDA.")
 
         bucket_runtime = BucketRuntime.from_storage(
             storage=storage,
