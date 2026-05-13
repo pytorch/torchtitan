@@ -548,11 +548,11 @@ class Module(nn.Module, Configurable):
 
         def body(*args, **kwargs):
             assert_types(args, resolved_in)
-            with (
-                spmd.typecheck(local=True)
-                if spmd.is_type_checking()
-                else contextlib.nullcontext()
-            ):
+            if not spmd.is_type_checking():
+                cm = contextlib.nullcontext()
+            else:
+                cm = spmd.typecheck(local=True)
+            with cm:
                 result = fn(*args, **kwargs)
             outputs = (result,) if isinstance(result, torch.Tensor) else result
             assert_types(outputs, resolved_out)

@@ -100,11 +100,24 @@ def parallelize_llama(
         if parallel_dims.dp_replicate_enabled:
             mesh_names.append("dp_replicate")
         mesh_names.append("dp_shard")
+        if parallel_dims.cp_enabled:
+            mesh_names.append("cp")
         if parallel_dims.tp_enabled:
             mesh_names.append("tp")
         dp_mesh = parallel_dims.get_mesh(mesh_names)
+        shard_axes = []
+        if parallel_dims.dp_shard_enabled:
+            shard_axes.append("dp_shard")
+        if parallel_dims.cp_enabled:
+            shard_axes.append("cp")
+        if len(shard_axes) > 1:
+            shard_axis: str | tuple[str, ...] = tuple(shard_axes)
+        elif shard_axes:
+            shard_axis = shard_axes[0]
+        else:
+            shard_axis = "dp_shard"
         dp_mesh_dims = DataParallelMeshDims(
-            shard="dp_shard",
+            shard=shard_axis,
             replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
         )
     else:

@@ -167,21 +167,26 @@ def set_gqa_inner_attention_local_map(
     """Install a ``LocalMapConfig`` on an inner-attention config.
 
     q/k/v arrive as ``(bs, seq, heads, head_dim)`` with heads TP-sharded
-    (``Shard(2)``), regardless of SP. ``local_map`` converts them to local
-    tensors before the kernel runs, then wraps outputs back.
+    (``Shard(2)``), regardless of SP. Under CP, K/V are gathered across the
+    sequence axis before entering the local attention kernel, while Q and the
+    attention output remain sequence-sharded.
 
     ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
     GPT-OSS's flash attention with ``return_lse=True``); both outputs share
     the same heads-sharded placement.
     """
-    qkv: NamedPlacement = dense_activation_placement(tp=spmd.S(2))
+    q: NamedPlacement = dense_activation_placement(tp=spmd.S(2))
+    kv_src: NamedPlacement = dense_activation_placement(tp=spmd.S(2))
+    kv_dst: NamedPlacement = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
+    kv_grad: NamedPlacement = dense_activation_placement(tp=spmd.S(2), cp=spmd.P)
     num_outputs = 2 if return_lse else 1
-    in_placements = (qkv, qkv, qkv)
     inner_attention_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={"k": kv_src, "v": kv_src},
+        in_dst_shardings={"k": kv_dst, "v": kv_dst},
         local_map=LocalMapConfig(
-            in_placements=in_placements,
-            out_placements=(qkv,) * num_outputs,
-            in_grad_placements=in_placements if not is_spmd_active() else None,
+            in_placements=(q, kv_dst, kv_dst),
+            out_placements=(q,) * num_outputs,
+            in_grad_placements=(q, kv_grad, kv_grad) if not is_spmd_active() else None,
             in_ndims=(4, 4, 4) if is_spmd_active() else None,
             out_ndims=(4,) * num_outputs if is_spmd_active() else None,
         ),

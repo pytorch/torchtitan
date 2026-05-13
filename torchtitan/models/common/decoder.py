@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
+    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
@@ -104,6 +105,27 @@ class Decoder(BaseModel):
         spmd_input_config: SpmdInputConfig = field(
             default_factory=_decoder_spmd_input_config
         )
+
+        def validate_context_parallel_attention(
+            self,
+            *,
+            full_spmd_types: bool,
+        ) -> None:
+            inner_attention = self.layers[0].attention.inner_attention
+            if full_spmd_types and isinstance(
+                inner_attention,
+                (ScaledDotProductAttention.Config, VarlenAttention.Config),
+            ):
+                raise NotImplementedError(
+                    "full_spmd_types + CP is not supported with "
+                    "ScaledDotProductAttention or VarlenAttention. "
+                    "Use FlexAttention + CP or disable CP."
+                )
+            if isinstance(inner_attention, VarlenAttention.Config):
+                raise NotImplementedError(
+                    "Context Parallel only supports SDPA and FlexAttention. "
+                    "Varlen attention is not supported with CP."
+                )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

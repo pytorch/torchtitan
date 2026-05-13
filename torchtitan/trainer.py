@@ -766,22 +766,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if types:
                 spmd.assert_type(value, types, partition_spec=pspec)
 
-        pytree.tree_map(
-            annotate_input_type,
-            (
-                inputs,
-                labels,
-                extra_inputs,
-                extra_kwargs,
-            ),
-            (
-                spmd_input_config.inputs,
-                spmd_input_config.labels,
-                spmd_input_config.extra_inputs,
-                spmd_input_config.extra_kwargs,
-            ),
-            is_leaf=is_named_placement,
-        )
+        def annotate_tree(value: object, placements: object) -> None:
+            pytree.tree_map(
+                annotate_input_type,
+                value,
+                placements,
+                is_leaf=is_named_placement,
+            )
+
+        if spmd_input_config.inputs is not None:
+            annotate_tree(inputs, spmd_input_config.inputs)
+        if spmd_input_config.labels is not None:
+            annotate_tree(labels, spmd_input_config.labels)
+        for name, placements in spmd_input_config.extra_inputs.items():
+            if name in extra_inputs:
+                annotate_tree(extra_inputs[name], placements)
+        for name, placements in spmd_input_config.extra_kwargs.items():
+            if name in extra_kwargs:
+                annotate_tree(extra_kwargs[name], placements)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]

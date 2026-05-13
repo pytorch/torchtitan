@@ -434,7 +434,17 @@ class ChunkedCELoss(BaseLoss):
             else:
                 chunk_loss = self.fn(logits, label_chunk)
             if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
+                loss_scale = global_valid_tokens
+                if spmd.is_type_checking() and isinstance(loss_scale, torch.Tensor):
+                    if (pg := current_pg("cp")) is not None:
+                        loss_scale = spmd.convert(
+                            loss_scale,
+                            pg,
+                            src=spmd.I,
+                            dst=spmd.R,
+                            expert_mode=True,
+                        )
+                chunk_loss = chunk_loss / loss_scale
 
             if spmd.is_type_checking():
                 for axis_name in current_dp_axis_names():
