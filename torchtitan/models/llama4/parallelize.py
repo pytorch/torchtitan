@@ -94,12 +94,8 @@ def parallelize_llama(
         apply_compile(model, compile_config)
 
     if parallelism.full_dtensor:
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
-            model, parallel_dims, parallelism.full_dtensor
-        )
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(
-            parallel_dims, parallelism.full_dtensor
-        )
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:
         dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
         assert dp_mesh is not None

@@ -95,42 +95,27 @@ def get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims
 
 
 def resolve_fsdp_mesh(
-    model: nn.Module,
     parallel_dims: ParallelDims,
-    full_dtensor: bool,
-) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
-    """Select the dense FSDP mesh and optional DataParallelMeshDims.
-
-    Under ``full_dtensor`` returns the full dense SPMD mesh and the DP
-    axes from ``_get_dp_mesh_axes``. Otherwise returns the conventional
-    1D ``dp_mesh`` and ``None``.
-    """
-    if full_dtensor:
-        spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
-        assert spmd_mesh is not None
-        return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
-    dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-    assert dp_mesh is not None
-    return dp_mesh, None
+) -> tuple[DeviceMesh, DataParallelMeshDims]:
+    """Select the dense SPMD mesh and DataParallelMeshDims for full_dtensor."""
+    spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
+    assert spmd_mesh is not None
+    return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
 
 
 def resolve_sparse_fsdp_mesh(
     parallel_dims: ParallelDims,
-    full_dtensor: bool,
 ) -> tuple[DeviceMesh | None, DataParallelMeshDims | None]:
     """Sparse counterpart of ``resolve_fsdp_mesh`` for routed experts.
 
-    ``(None, None)`` when EP is disabled. Otherwise returns the sparse
-    SPMD mesh + sparse DP axes under ``full_dtensor``, or the
-    conventional 1D ``edp`` mesh otherwise.
+    Returns ``(None, None)`` when EP is disabled; otherwise the sparse
+    SPMD mesh + sparse DP axes.
     """
     if not parallel_dims.ep_enabled:
         return None, None
-    if full_dtensor:
-        sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_SPMD_AXES)
-        assert sparse_mesh is not None
-        return sparse_mesh, get_sparse_dp_mesh_axes(parallel_dims)
-    return parallel_dims.get_activated_mesh(["dp_replicate", "efsdp"]), None
+    sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_SPMD_AXES)
+    assert sparse_mesh is not None
+    return sparse_mesh, get_sparse_dp_mesh_axes(parallel_dims)
 
 
 def parallelize_inputs(
