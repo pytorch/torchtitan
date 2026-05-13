@@ -130,9 +130,7 @@ class ShardingConfig:
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: (
-        NamedPlacement | tuple[NamedPlacement, ...] | None
-    ) = None
+    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
     out_dst_shardings: NamedPlacement | None = None
     local_input_grad_placements: dict[str, NamedPlacement] | None = None
     local_output_grad_placements: NamedPlacement | None = None
