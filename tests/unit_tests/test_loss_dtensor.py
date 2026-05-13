@@ -66,9 +66,7 @@ class TestCrossEntropyDTensor(DTensorTestBase):
             return loss_parallel() if tp_shard_v else contextlib.nullcontext()
 
         with _ctx():
-            new_loss_dt = cross_entropy_loss(
-                pred_dt, labels_dt, full_dtensor=full_dtensor
-            )
+            new_loss_dt = cross_entropy_loss(pred_dt, labels_dt)
             new_loss = new_loss_dt.full_tensor()
 
         # tp_shard_v=True routes through loss_parallel's Python decomposition
