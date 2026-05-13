@@ -10,48 +10,74 @@
 and read by ``Module.parallelize(mesh)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
 self-documenting and support multi-dimensional meshes.
+
+Placement values are either DTensor ``Placement`` objects or ``spmd_types``
+types (``R``/``I``/``V``/``P``/``S(dim)``).  ``parallelize()`` duck-types
+on the values to dispatch DTensor vs SPMD paths.
 """
 
 from dataclasses import dataclass, field
 
-from torch.distributed.tensor import Placement
+import spmd_types as spmd
+from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
+from torchtitan.distributed.spmd_state import is_spmd_active
 from torchtitan.protocols.types import MeshAxisName
 
+# Value is either a DTensor Placement (Shard, Replicate, Partial) or an
+# spmd_types type (R, I, V, P, S(dim)).  parallelize() duck-types on the
+# value to dispatch DTensor vs SPMD paths.
+NamedPlacement = dict[MeshAxisName, Placement | spmd.PerMeshAxisSpmdType]
 
-# Placement per mesh axis, keyed by MeshAxisName.
-# Example: {MeshAxisName.TP: Shard(0), MeshAxisName.DP_SHARD: Replicate()}
-# Every sharding_config must declare a placement for every mesh axis it will be applied
-# against; ``resolve_placements`` errors otherwise.
-#
-# Shard order: we implicitly assume the trivial outer -> inner order matching
-# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
-# tensor dim 0, but it doesn't need to be annotated today.
-# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
-# carrying explicit shard-order info) once that lands.
-NamedPlacement = dict[MeshAxisName, Placement]
+
+def S(dim: int) -> spmd.Shard | Shard:
+    """Shard on ``dim``. Returns ``spmd.S(dim)`` or ``Shard(dim)``."""
+    return spmd.S(dim) if is_spmd_active() else Shard(dim)
+
+
+def R() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
+    """Replicate. Returns ``spmd.R`` or ``Replicate()``."""
+    return spmd.R if is_spmd_active() else Replicate()
+
+
+def Inv() -> spmd.PerMeshAxisLocalSpmdType | Replicate:
+    """Invariant. Returns ``spmd.I`` or ``Replicate()`` (DTensor equivalent)."""
+    return spmd.I if is_spmd_active() else Replicate()
+
+
+def P() -> spmd.PerMeshAxisLocalSpmdType | Partial:
+    """Partial. Returns ``spmd.P`` or ``Partial()``."""
+    return spmd.P if is_spmd_active() else Partial()
 
 
 @dataclass(kw_only=True, slots=True)
 class LocalMapConfig:
     """Spec for modules computing on local tensors.
 
-    Wraps forward with ``local_map()``: DTensor -> local before forward,
-    local -> DTensor after forward.
+    Wraps forward with ``local_map()`` (DTensor) or ``spmd.local_map()``
+    (SPMD): strips distributed wrapper before forward, re-establishes it
+    after.
 
     Placements are ``NamedPlacement`` (keyed by mesh axis name). At
-    parallelize time they are resolved to positional tuples matching the
-    runtime mesh's axis order.
+    parallelize time they are resolved to positional tuples (DTensor) or
+    per-axis type dicts (SPMD) matching the runtime mesh.
 
     Attributes:
         in_placements: Per-input NamedPlacements (positional: q, k, v).
         out_placements: Per-output NamedPlacements.
         in_grad_placements: Per-input-gradient NamedPlacements.
+            Ignored for SPMD path (no backward typechecking).
+        in_ndims: Per-input tensor ndim hints for SPMD PartitionSpec
+            resolution. Required when multiple axes shard the same dim
+            (e.g. HSDP). ``None`` means no hints (ok when no collisions).
+        out_ndims: Per-output tensor ndim hints.
     """
 
     in_placements: tuple[NamedPlacement, ...]
     out_placements: tuple[NamedPlacement, ...]
-    in_grad_placements: tuple[NamedPlacement, ...]
+    in_grad_placements: tuple[NamedPlacement, ...] | None = None
+    in_ndims: tuple[int, ...] | None = None
+    out_ndims: tuple[int, ...] | None = None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -61,9 +87,10 @@ class LocalMapConfig:
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
-    All placements use ``NamedPlacement`` (``dict[MeshAxisName, Placement]``)
-    keyed by mesh axis names.  At ``parallelize()`` time, NamedPlacements
-    are resolved to ``tuple[Placement, ...]`` in mesh axis order.
+    All placements use ``NamedPlacement`` (``dict[MeshAxisName, ...]``)
+    keyed by mesh axis names.  Values are either DTensor ``Placement``
+    objects or ``spmd_types`` types — ``parallelize()`` duck-types on
+    them to dispatch the right path.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
@@ -76,32 +103,29 @@ class ShardingConfig:
     sides of every redistribute.
 
     Attributes:
-        state_shardings: Parameter/buffer placements for ``distribute_tensor``.
-            Outer dict keys are param names.
-            e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
+        state_shardings: Parameter/buffer placements.
+            DTensor path: used with ``distribute_tensor``.
+            SPMD path: used with ``spmd.assert_type`` (+ physical TP shard).
+            e.g. ``{"weight": {TP: Shard(0)}}`` or ``{"weight": {TP: S(0)}}``.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
-            arg name. Used to annotate plain tensors as DTensors via
-            ``DTensor.from_local`` when inputs arrive plain (e.g. from
-            dataloader or FSDP-only path). Also declares the src side of
-            the input redistribute pair.
-            e.g. ``{"x": {TP: Shard(1)}}``.
+            arg name. Declares what the input's placement is before any
+            redistribution.
         in_dst_shardings: Desired input placements after redistribution,
             keyed by ``forward()`` arg name.
-            e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
             ``None`` means no input redistribution.
+        out_src_shardings: Source placement of outputs before redistribution.
+            DTensor path: usually implicit in tensor's placements.
+            SPMD path: required for ``spmd.redistribute``.
         out_dst_shardings: Desired output placement after redistribution.
-            e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_map: If set, wraps forward with ``local_map()``.
-
-    TODO: add ``out_src_shardings`` to declare the output's source placement
-    when integrating with spmd_type (erased types), which requires both src
-    and dst for every redistribute.
+        local_map: If set, wraps forward with ``local_map()`` or
+            ``spmd.local_map()``.
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
+    out_src_shardings: NamedPlacement | None = None
     out_dst_shardings: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
 
