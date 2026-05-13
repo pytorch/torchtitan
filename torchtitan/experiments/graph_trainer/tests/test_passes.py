@@ -29,7 +29,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
 )
-from torchtitan.experiments.graph_trainer.fsdp_passes import overlap_fsdp_ag_rs_pass
+from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    _add_chunked_ce_accumulator_deps,
+    overlap_fsdp_ag_rs_pass,
+)
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -381,6 +384,36 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(len(recomputed_nodes), 1)
         self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
+
+
+class TestChunkedCEAccumulatorDeps(TestCase):
+    def test_copy_slice_writes_ordered_before_later_base_reads(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        grad0 = graph.placeholder("grad0")
+        grad1 = graph.placeholder("grad1")
+        base = graph.call_function(torch.ops.aten.zeros_like.default, args=(x,))
+
+        slice0 = graph.call_function(torch.ops.aten.slice.Tensor, args=(base, 1, 0, 2))
+        copy0 = graph.call_function(torch.ops.aten.copy_.default, args=(slice0, grad0))
+        read_after_first = graph.call_function(
+            torch.ops.aten._to_copy.default, args=(base,)
+        )
+
+        slice1 = graph.call_function(torch.ops.aten.slice.Tensor, args=(base, 1, 2, 4))
+        copy1 = graph.call_function(torch.ops.aten.copy_.default, args=(slice1, grad1))
+        read_after_second = graph.call_function(
+            torch.ops.aten._to_copy.default, args=(base,)
+        )
+        graph.output(read_after_second)
+
+        deps = {}
+        _add_chunked_ce_accumulator_deps(graph, deps)
+
+        self.assertEqual(list(deps[read_after_first]), [copy0])
+        self.assertEqual(list(deps[read_after_second]), [copy0, copy1])
+        self.assertNotIn(slice0, deps)
+        self.assertNotIn(slice1, deps)
 
 
 class TestBucketingPrefetchOrder(FSDPTest):

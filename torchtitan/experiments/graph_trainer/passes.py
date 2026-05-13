@@ -149,7 +149,7 @@ def compile_time_passes(
     )
     from torchtitan.models.common.attention import FlexAttention
 
-    n_layers = len(config.model_spec.model.layers)
+    layers = config.model_spec.model.layers
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -166,11 +166,23 @@ def compile_time_passes(
         ),
         selective_activation_remat_pass,
         overlap_fsdp_ag_rs_pass,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
-        ),
     ]
+    ep_enabled = config.parallelism.expert_parallel_degree > 1
+    has_moe_layers = any(
+        getattr(layer_cfg, "moe", None) is not None for layer_cfg in layers
+    )
+    if ep_enabled and has_moe_layers:
+        logger.info(
+            "Skipping joint transformer block bucketing for MoE under "
+            "expert parallelism"
+        )
+    else:
+        passes.append(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=get_default_transformer_block_buckets(len(layers)),
+            )
+        )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
