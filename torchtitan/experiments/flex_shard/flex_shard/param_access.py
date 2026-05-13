@@ -33,7 +33,6 @@ _EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
 _PARAM_FQN_ATTR = "_flex_shard_param_fqn"
 _BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
-_EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR = "_flex_shard_eager_autograd_bucket_unshard"
 
 
 def set_sharding_info(
@@ -155,12 +154,10 @@ class ParamModuleInfo:
 class EagerParamAccessState:
     """Mutable state for eager-only FlexShard parameter access."""
 
-    requires_grad: bool = True
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
     compute_device: torch.device | None = None
     _pre_gathered: torch.Tensor | None = None
-    _unsharded_for_reduce: torch.Tensor | None = None
 
     def consume_pre_gathered_param(self) -> torch.Tensor:
         """Return the hook-provided full param or raise for unsupported access."""
@@ -172,29 +169,13 @@ class EagerParamAccessState:
             # here breaks legal modules that read the same parameter more than
             # once, and the post-forward hook already owns cleanup.
             self._pre_gathered = None
-            if getattr(self, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
-                if self.param_dtype is not None or self.reduce_dtype is not None:
-                    pre = _MixedPrecisionCast.apply(
-                        pre,
-                        self.param_dtype,
-                        self.reduce_dtype,
-                    )
-                return pre
-
-            if self.param_dtype is not None and pre.dtype != self.param_dtype:
-                pre = pre.to(self.param_dtype)
-            unsharded = pre.detach().requires_grad_(self.requires_grad)
-            if (
-                torch.is_grad_enabled()
-                and self.requires_grad
-                and self._unsharded_for_reduce is None
-            ):
-                # TODO: Track a reduction leaf per forward instead of only the
-                # first leaf. Multiple forwards before one backward currently
-                # register later bucket hooks against this stale leaf and can
-                # reduce gradients into the wrong shard.
-                self._unsharded_for_reduce = unsharded
-            return unsharded
+            if self.param_dtype is not None or self.reduce_dtype is not None:
+                pre = _MixedPrecisionCast.apply(
+                    pre,
+                    self.param_dtype,
+                    self.reduce_dtype,
+                )
+            return pre
 
         if _is_graph_capture_active():
             _raise_graph_capture_unsupported()

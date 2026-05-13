@@ -24,7 +24,6 @@ from .bucket_collectives import (
 from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .param_access import (
     _BUCKET_FQN_ATTR,
-    _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
@@ -155,7 +154,7 @@ class BucketCommContext:
 
 @dataclass
 class BucketAllGatherRuntime:
-    """Runtime metadata passed to reshard-after-forward bucket autograd."""
+    """Runtime metadata passed to bucket all-gather autograd."""
 
     bucket: BucketRuntime
     prefetched_result: AllGatherUnshardHandle | None
@@ -187,8 +186,6 @@ class BucketRuntime:
     entries: list[ParamEntry]
     context: BucketCommContext
     debug_fqn: str | None
-    use_autograd_unshard: bool
-    collected_grads: dict[int, torch.Tensor] = field(default_factory=dict)
 
     @classmethod
     def from_storage(
@@ -214,7 +211,6 @@ class BucketRuntime:
             entries=entries,
             context=context,
             debug_fqn=_get_storage_debug_fqn(storage),
-            use_autograd_unshard=storage._reshard_after_forward,
         )
 
     @staticmethod
@@ -260,7 +256,7 @@ class BucketRuntime:
     def param_refs(self) -> list[ParamModuleInfo]:
         return [entry.module_info for entry in self.entries]
 
-    def _local_shards(self, use_autograd: bool) -> list[torch.Tensor]:
+    def _local_shards(self, *, use_autograd: bool) -> list[torch.Tensor]:
         local_shards: list[torch.Tensor] = []
         for entry in self.entries:
             module_info = entry.module_info
@@ -430,44 +426,17 @@ class BucketRuntime:
             self.context.reduce_scatter_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_scatter_wait()
 
-    def _reduce_collected_grads(self) -> None:
-        grads: list[torch.Tensor] = []
-        infos: list[ParamInfo] = []
-        param_refs: list[ParamModuleInfo] = []
-        for idx, entry in enumerate(self.entries):
-            grad = self.collected_grads.pop(idx, None)
-            if grad is not None:
-                grads.append(grad)
-                infos.append(entry.param_info)
-                param_refs.append(entry.module_info)
-            entry.access_state._unsharded_for_reduce = None
-        self.reduce_grads(grads, infos, param_refs)
-
     def pre_forward_hook(self, mod, args) -> None:
         if torch.compiler.is_compiling():
             return
-        local_shards = self._local_shards(use_autograd=self.use_autograd_unshard)
-        if self.use_autograd_unshard:
-            prefetched_result = self.take_pending()
-            runtime = BucketAllGatherRuntime(
-                bucket=self,
-                prefetched_result=prefetched_result,
-            )
-            full_params = list(_BucketAllGather.apply(runtime, *local_shards))
-            self.prefetch_next()
-        else:
-            with torch.no_grad():
-                result = self.take_pending()
-                if result is None:
-                    result = begin_all_gather_unshard(
-                        local_shards,
-                        self.infos,
-                        self.storage._mesh,
-                        self.context.all_gather_stream,
-                        debug_fqn=self.debug_fqn,
-                    )
-                full_params = result.finish()
-                self.prefetch_next()
+        local_shards = self._local_shards(use_autograd=True)
+        prefetched_result = self.take_pending()
+        runtime = BucketAllGatherRuntime(
+            bucket=self,
+            prefetched_result=prefetched_result,
+        )
+        full_params = list(_BucketAllGather.apply(runtime, *local_shards))
+        self.prefetch_next()
         for entry, full_param in zip(self.entries, full_params, strict=True):
             entry.access_state._pre_gathered = full_param
 
@@ -476,36 +445,10 @@ class BucketRuntime:
             return
         for entry in self.entries:
             entry.access_state._pre_gathered = None
-        if self.use_autograd_unshard:
-            return
-
-        if torch.is_grad_enabled():
-            self.collected_grads.clear()
-            leaf_indices = []
-            for idx, entry in enumerate(self.entries):
-                leaf = entry.access_state._unsharded_for_reduce
-                if leaf is not None and leaf.requires_grad:
-                    leaf_indices.append((idx, leaf))
-
-            if leaf_indices:
-                indices = [idx for idx, _ in leaf_indices]
-                leaves = [leaf for _, leaf in leaf_indices]
-
-                def _on_grads(grads):
-                    self.collected_grads.clear()
-                    for idx, grad in zip(indices, grads, strict=True):
-                        if grad is not None:
-                            self.collected_grads[idx] = grad
-                    self._reduce_collected_grads()
-
-                torch.autograd.graph.register_multi_grad_hook(
-                    leaves,
-                    _on_grads,
-                )
 
 
 class _BucketAllGather(torch.autograd.Function):
-    """Autograd boundary for reshard-after-forward bucket all-gather.
+    """Autograd boundary for bucket all-gather.
 
     Forward consumes a raw all-gather result, either prefetched by the previous
     bucket or launched on demand. Backward packs full-parameter gradients and
@@ -535,6 +478,13 @@ class _BucketAllGather(torch.autograd.Function):
                 debug_fqn=runtime.bucket.debug_fqn,
             )
         full_params = result.finish()
+        frozen_params = [
+            full_param
+            for full_param, info in zip(full_params, runtime.bucket.infos, strict=True)
+            if not info.requires_grad
+        ]
+        if frozen_params:
+            ctx.mark_non_differentiable(*frozen_params)
         return tuple(full_params)
 
     @staticmethod
@@ -596,17 +546,11 @@ def _create_eager_param_states(
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
             param_state = EagerParamAccessState(
-                requires_grad=info.requires_grad,
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
             )
 
-            setattr(
-                param_state,
-                _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-                storage._reshard_after_forward,
-            )
             setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
             setattr(param_state, _PARAM_FQN_ATTR, fqn)
             setattr(param_state, _BUCKET_FQN_ATTR, bucket_fqn)
