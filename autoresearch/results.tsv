@@ -1,0 +1,4 @@
+commit	tps	memory_gib	status	mfu_pct	description
+460d8d3	6621	30.9	keep	38.77	baseline (autoresearch_kernel_pass enabled, no-op placeholder)
+xxxxxxx	0	0.0	crash	0.0	annotate silu+mul for regional Inductor (OOM during compilation)
+xxxxxxx	2504	30.4	discard	14.66	replace silu with in-place silu_ (60% tps regression)
