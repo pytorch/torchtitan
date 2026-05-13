@@ -20,7 +20,11 @@ from torch.distributed.tensor.experimental import local_map
 
 import spmd_types as spmd
 from torchtitan.config import Configurable
-from torchtitan.distributed.spmd_state import is_spmd_active, mesh as spmd_mesh, spmd_state
+from torchtitan.distributed.spmd_state import (
+    is_spmd_active,
+    mesh as spmd_mesh,
+    spmd_state,
+)
 from torchtitan.protocols.sharding import (
     LocalMapConfig,
     resolve_placements,
@@ -123,9 +127,14 @@ def redistribute_spmd_per_axis(
         src_t = src_types.get(axis)
         if src_t is not None and src_t != dst_t:
             pg = state.pg_for_axis(axis)
-            # bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
-            # x = spmd.redistribute(x, pg, src=src_t, dst=dst_t, backward_options=bwd)
-            x = spmd.redistribute(x, pg, src=src_t, dst=dst_t)
+            bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
+            x = spmd.redistribute(
+                x,
+                pg,
+                src=src_t,
+                dst=dst_t,
+                backward_options=bwd,
+            )
     return x
 
 
@@ -284,9 +293,7 @@ class Module(nn.Module, Configurable):
     # parallelize: distribute states, wrap local boundary, wrap forward
     # ------------------------------------------------------------------
 
-    def parallelize(
-        self, mesh_or_parallel_dims: DeviceMesh | ParallelDims
-    ) -> None:
+    def parallelize(self, mesh_or_parallel_dims: DeviceMesh | ParallelDims) -> None:
         """Parallelize this module and all Module children recursively.
 
         Accepts either a ``DeviceMesh`` (DTensor path) or ``ParallelDims``
@@ -343,9 +350,7 @@ class Module(nn.Module, Configurable):
         # Step 2: Wrap forward with local_map boundary
         fn = self.forward
         if sharding_config.local_map is not None:
-            fn = self.local_map(
-                fn, sharding_config.local_map, mesh_or_parallel_dims
-            )
+            fn = self.local_map(fn, sharding_config.local_map, mesh_or_parallel_dims)
 
         # Step 3: Wrap forward with input/output redistribution
         def with_redistribution(*args, **kwargs):
@@ -401,9 +406,7 @@ class Module(nn.Module, Configurable):
         # Validate and collect shards. Values must be raw per-axis types.
         shard_dims: dict[int, str] = {}
         for axis_name, value in named_placement.items():
-            assert isinstance(
-                value, (spmd.Shard, spmd.PerMeshAxisLocalSpmdType)
-            ), (
+            assert isinstance(value, (spmd.Shard, spmd.PerMeshAxisLocalSpmdType)), (
                 f"Expected per-axis spmd type for state {name!r} on axis "
                 f"{axis_name.value!r}, got {type(value).__name__}: {value!r}"
             )
@@ -474,9 +477,11 @@ class Module(nn.Module, Configurable):
         out_placements = tuple(
             resolve_placements(p, mesh_axis_names) for p in lm.out_placements
         )
-        in_grad_placements = tuple(
-            resolve_placements(p, mesh_axis_names) for p in lm.in_grad_placements
-        ) if lm.in_grad_placements is not None else in_placements
+        in_grad_placements = (
+            tuple(resolve_placements(p, mesh_axis_names) for p in lm.in_grad_placements)
+            if lm.in_grad_placements is not None
+            else in_placements
+        )
         return local_map(
             fn,
             in_placements=in_placements,
@@ -487,13 +492,13 @@ class Module(nn.Module, Configurable):
 
     @staticmethod
     def _resolve_placements_spmd(
-        placements: tuple, ndims: tuple[int | None, ...] | None,
+        placements: tuple,
+        ndims: tuple[int | None, ...] | None,
     ) -> tuple[tuple[dict, object], ...]:
         if ndims is None:
             ndims = (None,) * len(placements)
         return tuple(
-            named_placement_to_spmd(p, ndim=nd)
-            for p, nd in zip(placements, ndims)
+            named_placement_to_spmd(p, ndim=nd) for p, nd in zip(placements, ndims)
         )
 
     def local_map_spmd(self, fn: Callable, lm: LocalMapConfig) -> Callable:
@@ -509,7 +514,11 @@ class Module(nn.Module, Configurable):
 
         def body(*args, **kwargs):
             assert_types(args, resolved_in)
-            with spmd.typecheck(local=True) if spmd.is_type_checking() else contextlib.nullcontext():
+            with (
+                spmd.typecheck(local=True)
+                if spmd.is_type_checking()
+                else contextlib.nullcontext()
+            ):
                 result = fn(*args, **kwargs)
             outputs = (result,) if isinstance(result, torch.Tensor) else result
             assert_types(outputs, resolved_out)
@@ -552,7 +561,9 @@ class Module(nn.Module, Configurable):
                 if isinstance(mesh_or_pd, DeviceMesh)
                 else mesh_or_pd.world_mesh
             )
-            self._shard_inputs_dtensor(new_kwargs, in_src_shardings, in_dst_shardings, mesh)
+            self._shard_inputs_dtensor(
+                new_kwargs, in_src_shardings, in_dst_shardings, mesh
+            )
 
         new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
         return new_args, new_kwargs
@@ -621,9 +632,7 @@ class Module(nn.Module, Configurable):
             )
             return self._shard_outputs_dtensor(outputs, mesh)
 
-    def _shard_outputs_dtensor(
-        self, outputs: Any, mesh: DeviceMesh
-    ) -> Any:
+    def _shard_outputs_dtensor(self, outputs: Any, mesh: DeviceMesh) -> Any:
         sharding_config = self._sharding_config
         assert sharding_config is not None
         assert mesh.mesh_dim_names is not None
@@ -638,7 +647,10 @@ class Module(nn.Module, Configurable):
         sharding_config = self._sharding_config
         assert sharding_config is not None
         if isinstance(outputs, torch.Tensor):
-            out_src, out_dst = sharding_config.out_src_shardings, sharding_config.out_dst_shardings
+            out_src, out_dst = (
+                sharding_config.out_src_shardings,
+                sharding_config.out_dst_shardings,
+            )
             if out_src is None:
                 out_src = out_dst
             src_types, _ = named_placement_to_spmd(out_src)

@@ -54,8 +54,9 @@ class BaseLoss(ABC, Configurable):
         pass
 
     @abstractmethod
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        ...
+    def __init__(
+        self, config: Config, *, compile_config: CompileConfig | None = None
+    ): ...
 
     def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
         if (
