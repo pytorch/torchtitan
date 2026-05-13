@@ -81,6 +81,13 @@ _TT_SPECIFIC_ATTRIBUTES = [
     "attn_mask_type",
 ]
 
+# NOTE: This backend instantiates model classes from the installed
+# ``transformers`` package. When a model repo ships an older remote config
+# implementation, mixing that remote config with the newer local model code can
+# drop compatibility attrs the local model expects. Prefer the local
+# ``transformers`` config/model pair for denylisted model types.
+_REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v3"})
+
 
 class HFTransformerModel(BaseModel):
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
@@ -263,10 +270,15 @@ class HFTransformerModel(BaseModel):
             debug = trainer_config.debug
             # Extract HF model ID from the extended trainer_config
             hf_model_id = getattr(trainer_config, "hf_model", "")
+            config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
+            trust_remote_code = (
+                config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
+            )
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
+                trust_remote_code=trust_remote_code,
             )
 
             # Explicitly update attributes based on mappings
@@ -495,11 +507,26 @@ class HFTransformerModel(BaseModel):
                     if shared is not None:
                         shared.layer_idx = layer_idx
 
-        def _initialize_weights_patched(self, module):
+        def _initialize_weights_patched(self, module, is_remote_code: bool = False):
             # NOTE(3outeille): monkey-patch PreTrainedModel to handle meta device initialization correctly
             # The default _initialize_weights sets _is_hf_initialized = True even on a meta device,
             # which prevents subsequent proper initialization.
             if getattr(module, "_is_hf_initialized", False):
+                return
+
+            if (
+                is_remote_code
+                and all(
+                    getattr(param, "_is_hf_initialized", False)
+                    for param in module.parameters(recurse=False)
+                )
+                and all(
+                    getattr(buffer, "_is_hf_initialized", False)
+                    for buffer in module.buffers(recurse=False)
+                    if buffer is not None
+                )
+            ):
+                module._is_hf_initialized = True
                 return
 
             for param in module.parameters(recurse=True):
