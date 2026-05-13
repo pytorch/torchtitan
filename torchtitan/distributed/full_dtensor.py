@@ -89,23 +89,12 @@ _DENSE_SPMD_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 
 
 def resolve_fsdp_mesh(
-    model: nn.Module,
     parallel_dims: ParallelDims,
-    full_dtensor: bool,
-) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
-    """Select the dense FSDP mesh and optional DataParallelMeshDims.
-
-    Under ``full_dtensor`` returns the full dense SPMD mesh and the DP
-    axes from ``_get_dp_mesh_axes``. Otherwise returns the conventional
-    1D ``dp_mesh`` and ``None``.
-    """
-    if full_dtensor:
-        spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
-        assert spmd_mesh is not None
-        return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
-    dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-    assert dp_mesh is not None
-    return dp_mesh, None
+) -> tuple[DeviceMesh, DataParallelMeshDims]:
+    """Select the dense SPMD mesh and DataParallelMeshDims for full_dtensor."""
+    spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
+    assert spmd_mesh is not None
+    return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
 
 
 def parallelize_inputs(
