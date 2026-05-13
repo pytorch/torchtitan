@@ -29,6 +29,7 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.spmd_state import set_current_parallel_dims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
@@ -69,7 +70,8 @@ def parallelize_llama(
         )
 
     if parallel_dims.full_spmd_types:
-        model.parallelize(parallel_dims)
+        with set_current_parallel_dims(parallel_dims):
+            model.parallelize(parallel_dims)
     elif parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
         model.parallelize(tp_mesh)
