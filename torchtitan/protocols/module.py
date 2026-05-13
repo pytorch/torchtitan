@@ -399,7 +399,11 @@ class Module(nn.Module, Configurable):
 
         def body(*args: Any, **kwargs: Any) -> Any:
             assert_types(args, resolved_in)
-            result = fn(*args, **kwargs)
+            if spmd.is_type_checking():
+                with spmd.typecheck(local=True):
+                    result = fn(*args, **kwargs)
+            else:
+                result = fn(*args, **kwargs)
             outputs = (result,) if isinstance(result, torch.Tensor) else result
             assert_types(outputs, resolved_out)
             return result
