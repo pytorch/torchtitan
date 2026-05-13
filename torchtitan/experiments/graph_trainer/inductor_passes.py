@@ -14,6 +14,10 @@ regional_inductor.
 from __future__ import annotations
 
 import torch
+from torch._inductor._functionalize_collectives import (
+    _functionalize_inplace_collectives,
+    _unbox_process_group_torchbinds,
+)
 from torch._inductor.compile_fx import compile_fx_inner
 from torch.fx.passes.regional_inductor import regional_inductor
 
@@ -241,6 +245,24 @@ def full_inductor_compilation_pass(
 
         return gm
 
+    # ``make_fx`` traces ``dist.*`` collectives as raw ``c10d.{op}_`` inplace
+    # ops with a torchbind ``ProcessGroup`` baked in as a graph attr. Inductor
+    # only recognizes the ``_c10d_functional.{op}`` + ``wait_tensor`` form,
+    # and downstream caching (FakeTensor dispatch cache during the decomp
+    # retrace, and ``compile_fx_inner``'s own cache) calls ``__eq__`` on the
+    # PG — not implemented on the torchbind. Mirror ``standalone_compile``'s
+    # pre-compile prep before retracing: rewrite to functional form and unbox
+    # the PG.
+    #
+    # Separately: see https://github.com/pytorch/pytorch/issues/183469,
+    # discovered when trying to use ``standalone_compile``. TorchTitan also
+    # runs Inductor's bucketing pass (intended for the post-joint graph) on
+    # the traced graph, which inserts ``_out`` variant c10d ops like
+    #   torch.ops._c10d_functional.all_gather_into_tensor_out.default(
+    #       input, GROUP_SIZE, GROUP_NAME, out=out)
+    # that AOTAutograd doesn't handle.
+    gm = _functionalize_inplace_collectives(gm)
+    gm = _unbox_process_group_torchbinds(gm)
     gm = _apply_decompositions(gm, example_inputs)
     output_code = compile_fx_inner(gm, example_inputs)
 
