@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import contextlib
 import json
 import os
 import time
@@ -41,6 +42,10 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.distributed.spmd_state import (
+    is_spmd_active,
+    set_current_parallel_dims,
+)
 
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -193,9 +198,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
-        assert (
-            config.model_spec is not None
-        ), "model_spec must be set before creating Trainer"
+        assert config.model_spec is not None, (
+            "model_spec must be set before creating Trainer"
+        )
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
@@ -244,9 +249,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # build model (using meta init)
         model_config = model_spec.model
         # set the model args from training job configs
-        model_config.update_from_config(
-            trainer_config=config,
+        spmd_scope = (
+            set_current_parallel_dims(parallel_dims)
+            if parallel_dims.full_spmd_types
+            else contextlib.nullcontext()
         )
+        with spmd_scope:
+            model_config.update_from_config(
+                trainer_config=config,
+            )
         self.model_config = model_config
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
@@ -399,23 +410,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if parallel_dims.pp_enabled:
                 if self.pp_has_last_stage:
                     lm_head = self.model_parts[-1].lm_head
-                    assert (
-                        lm_head is not None
-                    ), "Last PP stage must have lm_head for ChunkedCELoss"
+                    assert lm_head is not None, (
+                        "Last PP stage must have lm_head for ChunkedCELoss"
+                    )
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
-                    self.model_parts[
-                        -1
-                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                    self.model_parts[-1]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
                 assert lm_head is not None, "Model must have lm_head for ChunkedCELoss"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
-                self.model_parts[
-                    0
-                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[0]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -464,6 +471,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+
+        if (
+            is_spmd_active()
+            and isinstance(self.loss_fn, ChunkedCELoss)
+            and parallel_dims.tp_enabled
+            and not config.parallelism.disable_loss_parallel
+        ):
+            self.loss_fn.loss_parallel = True
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -596,9 +611,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             inner_attention = attn_config.inner_attention
 
             if attn_config.mask_type == "block_causal":
-                assert (
-                    positions is not None
-                ), "block_causal mask requires per-document positions from the dataloader"
+                assert positions is not None, (
+                    "block_causal mask requires per-document positions from the dataloader"
+                )
             else:
                 positions = torch.arange(
                     inputs.shape[1], dtype=torch.int32, device=inputs.device
@@ -758,7 +773,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return
 
         with sl.log_trace_span("collect_dist_metrics"):
-
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:
