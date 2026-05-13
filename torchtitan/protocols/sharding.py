@@ -28,12 +28,6 @@ def _mesh_axis_name(axis_name: object) -> str:
     return axis_name.value if hasattr(axis_name, "value") else str(axis_name)
 
 
-def _named_placement_axes(named: NamedPlacement | None) -> set[str]:
-    if named is None:
-        return set()
-    return {_mesh_axis_name(axis_name) for axis_name in named}
-
-
 @dataclass(kw_only=True, slots=True)
 class LocalSpmdConfig:
     """Spec for modules computing on local tensors.
@@ -95,20 +89,25 @@ class ShardingConfig:
 
     def axes(self) -> set[str]:
         """Return mesh axes referenced by this sharding config."""
+        def add_axes(named: NamedPlacement | None) -> None:
+            if named is None:
+                return
+            axes.update(_mesh_axis_name(axis_name) for axis_name in named)
+
         axes: set[str] = set()
         for named in self.state_shardings.values():
-            axes.update(_named_placement_axes(named))
+            add_axes(named)
         for shardings in (self.in_src_shardings, self.in_dst_shardings):
             if shardings is not None:
                 for named in shardings.values():
-                    axes.update(_named_placement_axes(named))
-        axes.update(_named_placement_axes(self.out_src_shardings))
-        axes.update(_named_placement_axes(self.out_dst_shardings))
+                    add_axes(named)
+        add_axes(self.out_src_shardings)
+        add_axes(self.out_dst_shardings)
         if self.local_spmd is not None:
             for named in self.local_spmd.in_placements:
-                axes.update(_named_placement_axes(named))
+                add_axes(named)
             for named in self.local_spmd.out_placements:
-                axes.update(_named_placement_axes(named))
+                add_axes(named)
         return axes
 
     def to_dict(self) -> dict:
