@@ -16,8 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_state import (
-    current_dp_axis_names,
-    current_pg,
+    current_mesh,
     is_spmd_active,
 )
 from torchtitan.tools.logging import logger
@@ -26,7 +25,6 @@ from torchtitan.tools.logging import logger
 IGNORE_INDEX = -100
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
-
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
@@ -38,6 +36,7 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
+@spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """Vocab-parallel cross entropy with a fused sharded-logits backward.
 
@@ -50,14 +49,11 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        tp_pg = current_pg("tp")
-        assert tp_pg is not None
+        current_mesh().get_group("tp")
         result = _LossParallelCrossEntropy.apply(logits, labels)
 
         out_type = dict(spmd.get_local_type(logits))
-        mesh_names = spmd.current_mesh_names()
-        assert mesh_names is not None
-        out_type[mesh_names["tp"]] = spmd.I
+        out_type["tp"] = spmd.I
         spmd.assert_type(result, out_type)
         return result
 
@@ -68,8 +64,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        tp_pg = current_pg("tp")
-        assert tp_pg is not None
+        tp_pg = current_mesh().get_group("tp")
         tp_rank = dist.get_rank(tp_pg)
 
         logits_shape = logits.shape
@@ -321,19 +316,19 @@ class ChunkedCELoss(BaseLoss):
         fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
 
     TP / SP composability:
-        Hidden states are redistributed to ``Replicate()`` on the TP mesh
-        before chunking, so each chunk enters the lm_head as ``Replicate()``
-        input regardless of whether SP is enabled. With SP, this is an
-        all-gather from ``Shard(1)``; without SP, it's a no-op.
+        Hidden states are redistributed to ``R`` on the TP mesh before
+        chunking, so each chunk enters the lm_head as ``R`` input regardless
+        of whether SP is enabled. With SP, this is an all-gather from
+        ``S(1)``; without SP, it's a no-op.
 
         When loss parallel is applied, each TP rank
         computes partial CE on its ``V/tp`` slice, with an internal
         all-reduce for the correct log-sum-exp.
 
     SPMD composability:
-        The chunk loop body runs inside a ``local_map`` boundary that strips
-        all SPMD types — chunking, flatten, and CE operate on plain local
-        tensors. ``local_map`` re-annotates outputs on exit.
+        The chunk loop body runs inside a local SPMD boundary that strips all
+        SPMD types — chunking, flatten, and CE operate on plain local tensors.
+        The boundary re-annotates outputs on exit.
 
     CP: Further chunks the local sequence dimension. Works out of the box.
 
@@ -371,8 +366,7 @@ class ChunkedCELoss(BaseLoss):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Chunk loop body: chunk → lm_head → CE → backward → accumulate.
 
-        Operates on plain local tensors when called via ``local_map`` (SPMD
-        path). DTensor path calls this directly.
+        Operates on plain local tensors when called via local SPMD.
 
         Returns (total_loss, accumulated_grad_buffer).
         """
@@ -385,8 +379,8 @@ class ChunkedCELoss(BaseLoss):
 
         # Split hidden states and labels into chunks along seq dim.
         # Use .contiguous() to break shared storage from torch.chunk().
-        # TODO: When CP mesh is in DTensor, chunking along dim=1 won't work
-        # directly with Shard(1) on CP. Need local_map to operate on local tensors
+        # TODO: With CP enabled, chunking along dim=1 should happen inside
+        # local SPMD so it operates on local tensors.
         h_chunks = [
             c.contiguous().detach().requires_grad_(requires_grad)
             for c in torch.chunk(h_detached, num_chunks, dim=1)
@@ -401,15 +395,24 @@ class ChunkedCELoss(BaseLoss):
 
         total_loss = h_detached.new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
-            for axis_name in current_dp_axis_names():
-                pg = current_pg(axis_name)
-                assert pg is not None
+            mesh_axis_names = spmd.current_mesh_names() or {}
+            for axis_name in ("dp", "cp"):
+                if axis_name not in mesh_axis_names:
+                    continue
                 total_loss = spmd.reinterpret(
-                    total_loss, pg, src=spmd.R, dst=spmd.P, expert_mode=True
+                    total_loss,
+                    current_mesh().get_group(axis_name),
+                    src=spmd.R,
+                    dst=spmd.P,
+                    expert_mode=True,
                 )
-            if (tp_pg := current_pg("tp")) is not None:
+            if "tp" in mesh_axis_names:
                 total_loss = spmd.convert(
-                    total_loss, tp_pg, src=spmd.R, dst=spmd.I, expert_mode=True
+                    total_loss,
+                    current_mesh().get_group("tp"),
+                    src=spmd.R,
+                    dst=spmd.I,
+                    expert_mode=True,
                 )
 
         # Disable FSDP reshard on lm_head to keep weight unsharded across
@@ -436,10 +439,12 @@ class ChunkedCELoss(BaseLoss):
             if global_valid_tokens is not None:
                 loss_scale = global_valid_tokens
                 if spmd.is_type_checking() and isinstance(loss_scale, torch.Tensor):
-                    if (pg := current_pg("cp")) is not None:
+                    mesh_axis_names = current_mesh().mesh_dim_names
+                    assert mesh_axis_names is not None
+                    if "cp" in mesh_axis_names:
                         loss_scale = spmd.convert(
                             loss_scale,
-                            pg,
+                            current_mesh().get_group("cp"),
                             src=spmd.I,
                             dst=spmd.R,
                             expert_mode=True,
@@ -447,11 +452,17 @@ class ChunkedCELoss(BaseLoss):
                 chunk_loss = chunk_loss / loss_scale
 
             if spmd.is_type_checking():
-                for axis_name in current_dp_axis_names():
-                    pg = current_pg(axis_name)
-                    assert pg is not None
+                mesh_axis_names = current_mesh().mesh_dim_names
+                assert mesh_axis_names is not None
+                for axis_name in ("dp", "cp"):
+                    if axis_name not in mesh_axis_names:
+                        continue
                     chunk_loss = spmd.reinterpret(
-                        chunk_loss, pg, src=spmd.V, dst=spmd.P, expert_mode=True
+                        chunk_loss,
+                        current_mesh().get_group(axis_name),
+                        src=spmd.V,
+                        dst=spmd.P,
+                        expert_mode=True,
                     )
 
             total_loss = total_loss + chunk_loss.detach()
@@ -480,9 +491,11 @@ class ChunkedCELoss(BaseLoss):
         accumulated_grad: same types as h_detached (the input).
         """
         loss_type: dict = {}
-        for axis_name in current_dp_axis_names():
-            loss_type[axis_name] = spmd.P
-        if current_pg("tp") is not None:
+        mesh_axis_names = spmd.current_mesh_names() or {}
+        for axis_name in ("dp", "cp"):
+            if axis_name in mesh_axis_names:
+                loss_type[axis_name] = spmd.P
+        if "tp" in mesh_axis_names:
             loss_type["tp"] = spmd.I
 
         grad_types = dict(spmd.get_local_type(h_detached))
@@ -509,42 +522,24 @@ class ChunkedCELoss(BaseLoss):
         (either by the trainer or the PP schedule), it triggers backward
         through the decoder via a custom autograd Function.
         """
-        from torch.distributed.tensor import DTensor, Replicate
-
         hidden_states = pred
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
 
-        # If SP is enabled, hidden states are Shard(1) on the TP mesh dim.
-        # Redistribute only the TP dim to Replicate before chunking so that
-        # the lm_head receives Replicate input on TP.
-        if isinstance(hidden_states, DTensor):
-            dt_mesh = hidden_states.device_mesh
-            if dt_mesh.mesh_dim_names is not None and "tp" in dt_mesh.mesh_dim_names:
-                tp_dim = dt_mesh.mesh_dim_names.index("tp")
-                placements = list(hidden_states.placements)
-                if not isinstance(placements[tp_dim], Replicate):
-                    placements[tp_dim] = Replicate()
-                    hidden_states = hidden_states.redistribute(
-                        dt_mesh, tuple(placements)
-                    )
-
         # SPMD path: all-gather S(1)@tp -> R@tp before chunking.
         if is_spmd_active() and self.enable_sp:
-            tp_pg = current_pg("tp")
-            if tp_pg is not None:
-                bwd = (
-                    {"op_dtype": torch.float32}
-                    if hidden_states.dtype != torch.float32
-                    else None
-                )
-                hidden_states = spmd.redistribute(
-                    hidden_states,
-                    tp_pg,
-                    src=spmd.S(1),
-                    dst=spmd.R,
-                    backward_options=bwd,
-                )
+            bwd = (
+                {"op_dtype": torch.float32}
+                if hidden_states.dtype != torch.float32
+                else None
+            )
+            hidden_states = spmd.redistribute(
+                hidden_states,
+                current_mesh().get_group("tp"),
+                src=spmd.S(1),
+                dst=spmd.R,
+                backward_options=bwd,
+            )
 
         requires_grad = hidden_states.requires_grad
         h_detached = hidden_states.detach().requires_grad_(requires_grad)

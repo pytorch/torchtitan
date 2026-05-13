@@ -86,9 +86,7 @@ class Llama3Model(Decoder):
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             if parallelism.context_parallel_degree > 1:
-                self.validate_context_parallel_attention(
-                    full_spmd_types=getattr(parallelism, "full_spmd_types", False),
-                )
+                self.validate_context_parallel_attention()
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:

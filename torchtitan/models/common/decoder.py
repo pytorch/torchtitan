@@ -37,8 +37,7 @@ __all__ = ["Decoder", "TransformerBlock"]
 
 def _decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
     return {
-        MeshAxisName.DP_REPLICATE: spmd.S(0),
-        MeshAxisName.DP_SHARD: spmd.S(0),
+        MeshAxisName.DP: spmd.S(0),
         MeshAxisName.CP: spmd.S(1),
         MeshAxisName.TP: tp_type,
     }
@@ -108,23 +107,16 @@ class Decoder(BaseModel):
 
         def validate_context_parallel_attention(
             self,
-            *,
-            full_spmd_types: bool,
         ) -> None:
             inner_attention = self.layers[0].attention.inner_attention
-            if full_spmd_types and isinstance(
+            if isinstance(
                 inner_attention,
                 (ScaledDotProductAttention.Config, VarlenAttention.Config),
             ):
                 raise NotImplementedError(
-                    "full_spmd_types + CP is not supported with "
-                    "ScaledDotProductAttention or VarlenAttention. "
+                    "SPMD CP is not supported with ScaledDotProductAttention "
+                    "or VarlenAttention. "
                     "Use FlexAttention + CP or disable CP."
-                )
-            if isinstance(inner_attention, VarlenAttention.Config):
-                raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
                 )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied

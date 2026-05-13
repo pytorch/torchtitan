@@ -24,12 +24,10 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.spmd_state import set_current_parallel_dims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
@@ -60,21 +58,9 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-    # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled and not parallel_dims.full_spmd_types:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
-
-    if parallel_dims.full_spmd_types:
-        with set_current_parallel_dims(parallel_dims):
-            model.parallelize(parallel_dims)
-    elif parallel_dims.tp_enabled:
+    model.parallelize(parallel_dims)
+    if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     model_compile_enabled = (
@@ -93,39 +79,19 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
-    if parallel_dims.full_spmd_types:
-        from torch.distributed.fsdp import DataParallelMeshDims
+    from torch.distributed.fsdp import DataParallelMeshDims
 
-        mesh_names = []
-        if parallel_dims.dp_replicate_enabled:
-            mesh_names.append("dp_replicate")
-        mesh_names.append("dp_shard")
-        if parallel_dims.cp_enabled:
-            mesh_names.append("cp")
-        if parallel_dims.tp_enabled:
-            mesh_names.append("tp")
-        dp_mesh = parallel_dims.get_mesh(mesh_names)
-        shard_axes = []
-        if parallel_dims.dp_shard_enabled:
-            shard_axes.append("dp_shard")
-        if parallel_dims.cp_enabled:
-            shard_axes.append("cp")
-        if len(shard_axes) > 1:
-            shard_axis: str | tuple[str, ...] = tuple(shard_axes)
-        elif shard_axes:
-            shard_axis = shard_axes[0]
-        else:
-            shard_axis = "dp_shard"
-        dp_mesh_dims = DataParallelMeshDims(
-            shard=shard_axis,
-            replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
-        )
-    else:
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(names)
-        dp_mesh_dims = None
+    mesh_names = []
+    if parallel_dims.dp_replicate_enabled:
+        mesh_names.append("dp_replicate")
+    mesh_names.append("fsdp")
+    if parallel_dims.tp_enabled:
+        mesh_names.append("tp")
+    dp_mesh = parallel_dims.get_mesh(mesh_names)
+    dp_mesh_dims = DataParallelMeshDims(
+        shard="fsdp",
+        replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+    )
 
     apply_fsdp(
         model,
@@ -138,9 +104,7 @@ def parallelize_llama(
         dp_mesh_dims=dp_mesh_dims,
     )
 
-    if parallel_dims.full_spmd_types:
-        logger.info("Applied FSDP with spmd_types to the model")
-    elif parallel_dims.dp_replicate_enabled:
+    if parallel_dims.dp_replicate_enabled:
         logger.info("Applied HSDP to the model")
     else:
         logger.info("Applied FSDP to the model")
