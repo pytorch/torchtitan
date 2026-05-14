@@ -19,6 +19,35 @@ from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
 
 
+class FakeBaseModel(nn.Linear):
+    """A fake BaseModel for checkpoint tests.
+
+    Inherits nn.Linear so get_model_state_dict works directly, and
+    provides the BaseModel transform methods that CheckpointManager expects.
+    """
+
+    def __init__(self, in_features: int = 2, out_features: int = 2):
+        super().__init__(in_features, out_features)
+
+    @property
+    def sd_adapter(self):
+        return None
+
+    def get_sd(self, mode=None):
+        from torch.distributed.checkpoint.state_dict import get_model_state_dict
+
+        return get_model_state_dict(self)
+
+    def to_hf(self, sd):
+        return sd
+
+    def from_hf(self, sd):
+        return sd
+
+    def adapter_to_hf(self, sd):
+        return sd
+
+
 class FakeOptimizersContainer:
     """A fake OptimizersContainer that returns fake state dicts."""
 
@@ -106,8 +135,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
         os.makedirs(self.test_folder, exist_ok=True)
 
-        self.model_part = nn.Linear(2, 2)
-        self.model_parts = [self.model_part]
+        self.model = FakeBaseModel(2, 2)
         self.states = {"trainer": torch.tensor([1.2347])}
         # TODO: Use a real OptimizerContainer here so that we can actually verify
         # some optimizer.state_dict() behavior (e.g., the key being the parameter name.)
@@ -170,27 +198,26 @@ class TestCheckpointManager(unittest.TestCase):
         mock_load.side_effect = self.fake_load
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
-        w0 = self.model_part.weight.clone()
-        b0 = self.model_part.bias.clone()
+        w0 = self.model.weight.clone()
+        b0 = self.model.bias.clone()
         p0 = self.optimizers._fake_param.clone()
         manager.save(curr_step=1)
         with torch.no_grad():
-            self.model_part.weight.zero_()
-            self.model_part.bias.zero_()
+            self.model.weight.zero_()
+            self.model.bias.zero_()
         self.optimizers._fake_param = torch.tensor([42.0], dtype=torch.float32)
         manager.load(step=1)
 
-        self.assertTrue(torch.equal(self.model_part.weight, w0))
-        self.assertTrue(torch.equal(self.model_part.bias, b0))
+        self.assertTrue(torch.equal(self.model.weight, w0))
+        self.assertTrue(torch.equal(self.model.bias, b0))
         self.assertTrue(torch.equal(self.optimizers._fake_param, p0))
         manager.close()
 
@@ -203,12 +230,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -244,12 +270,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -267,12 +292,11 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.folder = "nonexistent"
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         self.assertFalse(manager.load(step=-1))
@@ -291,12 +315,11 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.folder = "checkpoints"
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         res = manager.load(step=-1)
@@ -321,12 +344,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         manager.save(curr_step=1)
@@ -355,12 +377,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.trainer_config.checkpoint.last_save_model_only = True
         manager1 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         manager1.save(curr_step=1, last_step=True)
@@ -375,12 +396,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.trainer_config.dump_folder = self.test_folder
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
         r1 = manager2.load(step=1)
@@ -430,12 +450,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=checkpoint_config,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -471,12 +490,11 @@ class TestCheckpointManager(unittest.TestCase):
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=states,
             config=checkpoint_config,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -508,12 +526,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -534,12 +551,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -572,6 +588,24 @@ class TestCheckpointManager(unittest.TestCase):
                 self.register_buffer("freqs_cis", torch.randn(10, 5), persistent=False)
                 self.other_param = nn.Parameter(torch.randn(3, 3))
 
+            @property
+            def sd_adapter(self):
+                return None
+
+            def get_sd(self, mode=None):
+                from torch.distributed.checkpoint.state_dict import get_model_state_dict
+
+                return get_model_state_dict(self)
+
+            def to_hf(self, sd):
+                return sd
+
+            def from_hf(self, sd):
+                return sd
+
+            def adapter_to_hf(self, sd):
+                return sd
+
         fake_model = FakeModelWithFreqsCis()
         mock_save.side_effect = self.fake_save
 
@@ -585,7 +619,6 @@ class TestCheckpointManager(unittest.TestCase):
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -618,12 +651,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -645,12 +677,11 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 
@@ -686,12 +717,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.trainer_config.checkpoint.initial_load_model_only = False
         manager = CheckpointManager(
             dataloader=self.data_loader,
-            model_parts=self.model_parts,
+            model_parts=[self.model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states=self.states,
             config=self.trainer_config.checkpoint,
-            sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
 

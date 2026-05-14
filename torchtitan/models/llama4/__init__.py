@@ -356,10 +356,13 @@ def model_registry(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
     )
+    built_converters = []
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            converter = c.build()
+            converter.convert(config)
+            built_converters.append(converter)
     return ModelSpec(
         name="llama4",
         flavor=flavor,
@@ -368,4 +371,5 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Llama4StateDictAdapter,
+        converters=built_converters or None,
     )

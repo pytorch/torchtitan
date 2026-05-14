@@ -382,10 +382,13 @@ def model_registry(
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     config = llama3_configs[flavor](attn_backend=attn_backend)
+    built_converters = []
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            converter = c.build()
+            converter.convert(config)
+            built_converters.append(converter)
     return ModelSpec(
         name="llama3",
         flavor=flavor,
@@ -394,4 +397,5 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
+        converters=built_converters or None,
     )

@@ -626,10 +626,13 @@ def model_registry(
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_configs[flavor](**kwargs)
+    built_converters = []
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
-            c.build().convert(config)
+            converter = c.build()
+            converter.convert(config)
+            built_converters.append(converter)
     return ModelSpec(
         name="qwen3",
         flavor=flavor,
@@ -638,4 +641,5 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
+        converters=built_converters or None,
     )

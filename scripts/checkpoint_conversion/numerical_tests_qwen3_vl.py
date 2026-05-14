@@ -251,7 +251,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, device):
     model.init_weights(buffer_device=torch.device("cpu"))
     model.half()
 
-    state_dict = ModelWrapper(model)._get_state_dict()
+    state_dict = ModelWrapper([model]).state_dict()
     print(f"  Loading checkpoint: {checkpoint_path}")
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
     model.to(device)

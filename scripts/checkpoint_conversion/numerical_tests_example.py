@@ -77,8 +77,7 @@ def forward_tt(model_name, config_name, checkpoint_path, test_set):
     model.init_weights(buffer_device=device)
     model.eval()
 
-    modelWrapper = ModelWrapper(model)
-    state_dict = modelWrapper._get_state_dict()
+    state_dict = ModelWrapper([model]).state_dict()
 
     # Checkpoint Loading
     logger.info(f"Loading checkpoint at: {checkpoint_path}")
