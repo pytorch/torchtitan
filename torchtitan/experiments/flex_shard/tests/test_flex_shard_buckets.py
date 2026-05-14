@@ -37,7 +37,7 @@ from torchtitan.experiments.flex_shard import (
     LocalStorageLayout,
     Placement,
 )
-from torchtitan.experiments.flex_shard.example.shard import Shard
+from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
@@ -179,8 +179,16 @@ class TestBucketAssignment(TestCase):
 
         fqns = ["attn.weight", "attn.bias", "ffn.weight", "ffn.bias"]
         buckets = [
-            BucketSpec(["attn.*"], reshard_after_forward=False),
-            BucketSpec(["ffn.*"], reshard_after_forward=False),
+            BucketSpec(
+                ["attn.*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            ),
+            BucketSpec(
+                ["ffn.*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            ),
         ]
         result = _assign_params_to_buckets(fqns, buckets)
 
@@ -194,7 +202,13 @@ class TestBucketAssignment(TestCase):
         )
 
         fqns = ["attn.weight", "norm.weight"]
-        buckets = [BucketSpec(["attn.*"], reshard_after_forward=False)]
+        buckets = [
+            BucketSpec(
+                ["attn.*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            )
+        ]
         with self.assertRaises(ValueError, msg="not covered by any bucket"):
             _assign_params_to_buckets(fqns, buckets)
 
@@ -206,8 +220,16 @@ class TestBucketAssignment(TestCase):
 
         fqns = ["attn.weight"]
         buckets = [
-            BucketSpec(["attn.*"], reshard_after_forward=False),
-            BucketSpec(["*"], reshard_after_forward=False),
+            BucketSpec(
+                ["attn.*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            ),
+            BucketSpec(
+                ["*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            ),
         ]
         with self.assertRaises(ValueError, msg="matched multiple buckets"):
             _assign_params_to_buckets(fqns, buckets)
@@ -337,7 +359,13 @@ class TestBucketPlacementValidation(TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(0),),
         }
-        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        buckets = [
+            BucketSpec(
+                ["*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            )
+        ]
         with self.assertRaisesRegex(ValueError, "mixed parameter dtypes"):
             _validate_bucket_placements(
                 assignments,
@@ -357,7 +385,13 @@ class TestBucketPlacementValidation(TestCase):
             "a.weight": (Shard(0),),
             "b.weight": (Shard(1),),
         }
-        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        buckets = [
+            BucketSpec(
+                ["*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            )
+        ]
         with self.assertRaisesRegex(ValueError, "mixed placements"):
             _validate_bucket_placements(
                 assignments,
@@ -387,8 +421,13 @@ class TestBucketPlacementValidation(TestCase):
                 flex_shard(
                     model,
                     mesh,
-                    shard_placement_fn=mixed_placements,
-                    buckets=[BucketSpec(["*"], reshard_after_forward=False)],
+                    buckets=[
+                        BucketSpec(
+                            ["*"],
+                            shard_placement_fn=mixed_placements,
+                            reshard_after_forward=False,
+                        )
+                    ],
                 )
             self.assertFalse(hasattr(model, "_dstorages"))
 
@@ -539,7 +578,13 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         named_params = list(model.named_parameters())
         padding_nbytes = 16
         placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
-        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        buckets = [
+            BucketSpec(
+                ["*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            )
+        ]
         assignments = [[fqn for fqn, _ in named_params]]
 
         storages, _ = _materialize_bucket_storages(
@@ -599,8 +644,16 @@ class TestDistributedBuckets(FSDPTest):
         from torchtitan.experiments.flex_shard import flex_shard
         from torchtitan.experiments.flex_shard.example.shard import per_param_placements
 
-        kwargs.setdefault("shard_placement_fn", per_param_placements)
-        kwargs.setdefault("buckets", [BucketSpec(["*"], reshard_after_forward=False)])
+        kwargs.setdefault(
+            "buckets",
+            [
+                BucketSpec(
+                    ["*"],
+                    shard_placement_fn=per_param_placements,
+                    reshard_after_forward=False,
+                )
+            ],
+        )
         return flex_shard(
             model,
             mesh,
