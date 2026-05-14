@@ -32,23 +32,21 @@ if TYPE_CHECKING:
     from ..flex_shard.bucket_storage import ParamInfo
 
 
-@dataclass(frozen=True)
-class _OwnedUnshardState:
-    pg: Any
-    debug_fqn: str | None
-
-
-@dataclass(frozen=True)
-class _OwnedReduceGradState:
-    infos: list[ParamInfo]
-    rank: int
-    world_size: int
-    pg: Any
-    debug_fqn: str | None
-
-
 class Owned(Placement):
     """Placement where one rank owns the full parameter and other ranks hold empty tensors."""
+
+    @dataclass(frozen=True)
+    class _UnshardState:
+        pg: Any
+        debug_fqn: str | None
+
+    @dataclass(frozen=True)
+    class _ReduceGradState:
+        infos: list[ParamInfo]
+        rank: int
+        world_size: int
+        pg: Any
+        debug_fqn: str | None
 
     def __init__(self, owner_rank: int):
         self.owner_rank = owner_rank
@@ -142,7 +140,7 @@ class Owned(Placement):
         return PlacementPreparedUnshard(
             placement=self,
             buffers=full_params,
-            placement_state=_OwnedUnshardState(
+            placement_state=Owned._UnshardState(
                 pg=mesh.get_group(),
                 debug_fqn=debug_fqn,
             ),
@@ -151,9 +149,9 @@ class Owned(Placement):
     @override
     def run_prepared_unshard(self, prepared: PlacementPreparedUnshard) -> None:
         """Broadcast prepared full-parameter buffers from the owner rank."""
-        if not isinstance(prepared.placement_state, _OwnedUnshardState):
+        if not isinstance(prepared.placement_state, Owned._UnshardState):
             raise AssertionError(
-                "Expected _OwnedUnshardState, "
+                "Expected Owned._UnshardState, "
                 f"got {type(prepared.placement_state).__name__}"
             )
         for full_param in prepared.buffers:
@@ -190,7 +188,7 @@ class Owned(Placement):
         return PlacementPreparedReduceGrad(
             placement=self,
             buffers=send_tensors,
-            placement_state=_OwnedReduceGradState(
+            placement_state=Owned._ReduceGradState(
                 infos=infos,
                 rank=mesh.get_local_rank(),
                 world_size=mesh.size(),
@@ -205,9 +203,9 @@ class Owned(Placement):
         prepared: PlacementPreparedReduceGrad,
     ) -> PlacementReduceGradResult:
         """Reduce full gradients to the owner rank and return local owned grads."""
-        if not isinstance(prepared.placement_state, _OwnedReduceGradState):
+        if not isinstance(prepared.placement_state, Owned._ReduceGradState):
             raise AssertionError(
-                "Expected _OwnedReduceGradState, "
+                "Expected Owned._ReduceGradState, "
                 f"got {type(prepared.placement_state).__name__}"
             )
         sharded_grads: list[torch.Tensor] = []
