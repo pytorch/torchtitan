@@ -11,9 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
-
-from .utils import _record_comm_if_eager, _record_function_if_eager
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -72,25 +69,6 @@ class PlacementReduceGradResult:
 
     sharded_grads: list[torch.Tensor]
     buffers: list[torch.Tensor] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class _AllGatherUnshardState:
-    infos: list[ParamInfo]
-    world_size: int
-    pg: Any
-    debug_fqn: str | None
-    per_rank_param_offsets: list[list[int]]
-
-
-@dataclass(frozen=True)
-class _ReduceScatterGradState:
-    infos: list[ParamInfo]
-    layout: Any
-    rank: int
-    world_size: int
-    pg: Any
-    debug_fqn: str | None
 
 
 class Placement:
@@ -186,26 +164,6 @@ class Placement:
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
 
-    def pack_reduce_grad(
-        self,
-        tensors: list[torch.Tensor],
-        infos: list[ParamInfo],
-        world_size: int,
-    ) -> tuple[torch.Tensor, Any]:
-        """Pack full gradients into a flat reduce-scatter input buffer."""
-        raise NotImplementedError
-
-    def unpack_reduced_grad(
-        self,
-        recv_buf: torch.Tensor,
-        infos: list[ParamInfo],
-        layout: Any,
-        rank: int,
-        world_size: int,
-    ) -> list[torch.Tensor]:
-        """Unpack a flat reduce-scatter output buffer into local grad shards."""
-        raise NotImplementedError
-
     def prepare_unshard_bucket(
         self,
         tensors: list[torch.Tensor],
@@ -213,108 +171,22 @@ class Placement:
         mesh: DeviceMesh,
         debug_fqn: str | None,
     ) -> PlacementPreparedUnshard:
-        """Prepare buffers for the placement's default all-gather unshard."""
-        ws = mesh.size()
-        pg = mesh.get_group()
-        dtype = tensors[0].dtype
-        device = tensors[0].device
-
-        with _record_function_if_eager("FlexShard::all_gather_copy_in", debug_fqn):
-            send_buf = torch.cat([t.reshape(-1) for t in tensors])
-
-            per_rank_sizes: list[int] = []
-            per_rank_param_offsets: list[list[int]] = []
-            for r in range(ws):
-                offset = 0
-                offsets_r: list[int] = []
-                for info in infos:
-                    offsets_r.append(offset)
-                    offset += self.compute_local_numel(info.global_shape, r, ws)
-                per_rank_sizes.append(offset)
-                per_rank_param_offsets.append(offsets_r)
-
-            gathered = [
-                torch.empty(per_rank_sizes[r], dtype=dtype, device=device)
-                for r in range(ws)
-            ]
-
-        return PlacementPreparedUnshard(
-            placement=self,
-            buffers=[send_buf, *gathered],
-            placement_state=_AllGatherUnshardState(
-                infos=infos,
-                world_size=ws,
-                pg=pg,
-                debug_fqn=debug_fqn,
-                per_rank_param_offsets=per_rank_param_offsets,
-            ),
-        )
+        """Prepare buffers for this placement's bucket unshard collective."""
+        raise NotImplementedError
 
     def run_prepared_unshard(
         self,
         prepared: PlacementPreparedUnshard,
     ) -> None:
-        """Launch the placement's prepared unshard collective."""
-        if not isinstance(prepared.placement_state, _AllGatherUnshardState):
-            raise AssertionError(
-                "Expected _AllGatherUnshardState, "
-                f"got {type(prepared.placement_state).__name__}"
-            )
-        send_buf = prepared.buffers[0]
-        gathered = prepared.buffers[1:]
-        with _record_comm_if_eager(
-            "FlexShard::all_gather",
-            prepared.placement_state.debug_fqn,
-        ):
-            dist.all_gather(gathered, send_buf, group=prepared.placement_state.pg)
+        """Launch this placement's prepared unshard collective."""
+        raise NotImplementedError
 
     def finish_prepared_unshard(
         self,
         prepared: PlacementPreparedUnshard,
     ) -> PlacementUnshardResult:
         """Finish the prepared unshard and return full parameters."""
-        if not isinstance(prepared.placement_state, _AllGatherUnshardState):
-            raise AssertionError(
-                "Expected _AllGatherUnshardState, "
-                f"got {type(prepared.placement_state).__name__}"
-            )
-        gathered = prepared.buffers[1:]
-        device = prepared.buffers[0].device
-        with _record_function_if_eager(
-            "FlexShard::all_gather_copy_out",
-            prepared.placement_state.debug_fqn,
-        ):
-            full_params = []
-            for i, info in enumerate(prepared.placement_state.infos):
-                per_rank_shards: list[torch.Tensor] = []
-                for r in range(prepared.placement_state.world_size):
-                    numel = self.compute_local_numel(
-                        info.global_shape,
-                        r,
-                        prepared.placement_state.world_size,
-                    )
-                    shape = self.compute_local_shape(
-                        info.global_shape,
-                        r,
-                        prepared.placement_state.world_size,
-                    )
-                    if numel > 0:
-                        offset = prepared.placement_state.per_rank_param_offsets[r][i]
-                        per_rank_shards.append(
-                            gathered[r][offset : offset + numel].view(shape)
-                        )
-                    else:
-                        per_rank_shards.append(
-                            torch.empty(shape, dtype=info.dtype, device=device)
-                        )
-                full_params.append(
-                    self.assemble_from_shards(
-                        per_rank_shards, info.global_shape, info.dtype
-                    )
-                )
-                del per_rank_shards
-
-        return PlacementUnshardResult(full_params, prepared.buffers)
+        raise NotImplementedError
 
     def prepare_reduce_grad(
         self,
@@ -323,71 +195,15 @@ class Placement:
         mesh: DeviceMesh,
         debug_fqn: str | None,
     ) -> PlacementPreparedReduceGrad:
-        """Pack full gradients for the placement's default reduce-scatter path."""
-        ws = mesh.size()
-        rank = mesh.get_local_rank()
-        pg = mesh.get_group()
-        with _record_function_if_eager("FlexShard::reduce_scatter_copy_in", debug_fqn):
-            send_buf, layout = self.pack_reduce_grad(tensors, infos, ws)
-            if send_buf.numel() % ws != 0:
-                raise AssertionError(
-                    f"Packed reduce-scatter buffer has {send_buf.numel()} elements, "
-                    f"which is not divisible by world size {ws}."
-                )
-        return PlacementPreparedReduceGrad(
-            placement=self,
-            buffers=[send_buf],
-            placement_state=_ReduceScatterGradState(
-                infos=infos,
-                layout=layout,
-                rank=rank,
-                world_size=ws,
-                pg=pg,
-                debug_fqn=debug_fqn,
-            ),
-        )
+        """Prepare buffers for this placement's bucket gradient reduction."""
+        raise NotImplementedError
 
     def reduce_prepared_grad(
         self,
         prepared: PlacementPreparedReduceGrad,
     ) -> PlacementReduceGradResult:
-        """Reduce a prepared gradient request using reduce-scatter."""
-        if not isinstance(prepared.placement_state, _ReduceScatterGradState):
-            raise AssertionError(
-                "Expected _ReduceScatterGradState, "
-                f"got {type(prepared.placement_state).__name__}"
-            )
-        send_buf = prepared.buffers[0]
-        recv_buf = torch.empty(
-            send_buf.numel() // prepared.placement_state.world_size,
-            dtype=send_buf.dtype,
-            device=send_buf.device,
-        )
-        with _record_comm_if_eager(
-            "FlexShard::reduce_scatter",
-            prepared.placement_state.debug_fqn,
-        ):
-            # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
-            # AVG is a convenient default, but delayed grad scaling may need SUM
-            # plus an explicit scale at a different point in the training step.
-            dist.reduce_scatter_tensor(
-                output=recv_buf,
-                input=send_buf,
-                op=dist.ReduceOp.AVG,
-                group=prepared.placement_state.pg,
-            )
-        with _record_function_if_eager(
-            "FlexShard::reduce_scatter_copy_out",
-            prepared.placement_state.debug_fqn,
-        ):
-            sharded_grads = self.unpack_reduced_grad(
-                recv_buf,
-                prepared.placement_state.infos,
-                prepared.placement_state.layout,
-                prepared.placement_state.rank,
-                prepared.placement_state.world_size,
-            )
-        return PlacementReduceGradResult(sharded_grads, [recv_buf])
+        """Reduce prepared full gradients and return local gradient shards."""
+        raise NotImplementedError
 
 
 __all__ = [

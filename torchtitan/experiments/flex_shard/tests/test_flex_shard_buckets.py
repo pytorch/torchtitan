@@ -93,24 +93,6 @@ class _TestPlacement(Placement):
     ) -> torch.Tensor:
         return per_rank_shards[0].to(dtype).view(global_shape)
 
-    def pack_reduce_grad(
-        self,
-        tensors: list[torch.Tensor],
-        infos,
-        world_size: int,
-    ):
-        raise NotImplementedError
-
-    def unpack_reduced_grad(
-        self,
-        recv_buf: torch.Tensor,
-        infos,
-        layout,
-        rank: int,
-        world_size: int,
-    ):
-        raise NotImplementedError
-
 
 class _PaddedShard(Shard):
     def __init__(self, padding_nbytes: int) -> None:
