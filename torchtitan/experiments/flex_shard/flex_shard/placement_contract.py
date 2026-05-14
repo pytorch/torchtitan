@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
+
     from .bucket_storage import ParamInfo
 
 
@@ -25,11 +27,58 @@ class LocalStorageLayout:
     storage_nbytes: int
 
 
+@dataclass
+class PlacementPreparedUnshard:
+    """Placement-owned prepared bucket unshard request.
+
+    ``buffers`` are tensors whose lifetime the bucket runtime owns.
+    ``placement_state`` is private metadata passed back to the same placement's
+    run/finish methods.
+    """
+
+    placement: Placement
+    buffers: list[torch.Tensor]
+    placement_state: Any
+
+
+@dataclass
+class PlacementUnshardResult:
+    """Placement-owned unshard result and temporary buffers."""
+
+    full_params: list[torch.Tensor]
+    buffers: list[torch.Tensor] = field(default_factory=list)
+
+
+@dataclass
+class PlacementPreparedReduceGrad:
+    """Placement-owned packed gradient reduction request.
+
+    ``buffers`` are tensors whose lifetime the bucket runtime owns.
+    ``placement_state`` is private metadata passed back to the same placement's
+    reduce method.
+    """
+
+    placement: Placement
+    buffers: list[torch.Tensor]
+    placement_state: Any
+
+
+@dataclass
+class PlacementReduceGradResult:
+    """Placement-owned reduced local gradients and temporary buffers."""
+
+    sharded_grads: list[torch.Tensor]
+    buffers: list[torch.Tensor] = field(default_factory=list)
+
+
 class Placement:
     """Base class for FlexShard placement strategies.
 
     Each subclass implements per-param sharding, storage layout, full-parameter
-    assembly, and gradient-reduction packing.
+    assembly, and gradient-reduction packing. The placement also owns the
+    collective pattern for bucket unshard and gradient reduction. For example,
+    Shard uses all-gather and reduce-scatter, while Owned uses broadcast and
+    reduce-to-owner.
     """
 
     def compute_local_numel(
@@ -115,28 +164,53 @@ class Placement:
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
 
-    def pack_reduce_grad(
+    def prepare_unshard_bucket(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
-        world_size: int,
-    ) -> tuple[torch.Tensor, Any]:
-        """Pack full gradients into a flat reduce-scatter input buffer."""
+        mesh: DeviceMesh,
+        debug_fqn: str | None,
+    ) -> PlacementPreparedUnshard:
+        """Prepare buffers for this placement's bucket unshard collective."""
         raise NotImplementedError
 
-    def unpack_reduced_grad(
+    def run_prepared_unshard(
         self,
-        recv_buf: torch.Tensor,
+        prepared: PlacementPreparedUnshard,
+    ) -> None:
+        """Launch this placement's prepared unshard collective."""
+        raise NotImplementedError
+
+    def finish_prepared_unshard(
+        self,
+        prepared: PlacementPreparedUnshard,
+    ) -> PlacementUnshardResult:
+        """Finish the prepared unshard and return full parameters."""
+        raise NotImplementedError
+
+    def prepare_reduce_grad(
+        self,
+        tensors: list[torch.Tensor],
         infos: list[ParamInfo],
-        layout: Any,
-        rank: int,
-        world_size: int,
-    ) -> list[torch.Tensor]:
-        """Unpack a flat reduce-scatter output buffer into local grad shards."""
+        mesh: DeviceMesh,
+        debug_fqn: str | None,
+    ) -> PlacementPreparedReduceGrad:
+        """Prepare buffers for this placement's bucket gradient reduction."""
+        raise NotImplementedError
+
+    def reduce_prepared_grad(
+        self,
+        prepared: PlacementPreparedReduceGrad,
+    ) -> PlacementReduceGradResult:
+        """Reduce prepared full gradients and return local gradient shards."""
         raise NotImplementedError
 
 
 __all__ = [
     "LocalStorageLayout",
     "Placement",
+    "PlacementPreparedUnshard",
+    "PlacementPreparedReduceGrad",
+    "PlacementReduceGradResult",
+    "PlacementUnshardResult",
 ]

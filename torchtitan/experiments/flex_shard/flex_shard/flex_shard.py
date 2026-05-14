@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .bucket_runtime import _create_eager_param_states, _install_batched_allgather_hooks
+from .bucket_runtime import _create_eager_param_states, _install_bucket_unshard_hooks
 from .bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
@@ -166,7 +166,7 @@ def flex_shard(
     6. Stores DStorages on the module (accessible via module.dstorages)
 
     Each bucket gets its own byte buffer and DStorage, enabling independent
-    all-gather operations per bucket.
+    unshard operations per bucket.
 
     Args:
         module: The module to shard. CPU modules are moved to the mesh's CUDA
@@ -246,8 +246,8 @@ def flex_shard(
     if reshard_storages:
         _apply_reshard_after_forward(module, reshard_storages)
 
-    # Install batched all-gather hooks for eager mode when the storage layout
+    # Install bucket unshard hooks for eager mode when the storage layout
     # supports one collective per bucket.
-    _install_batched_allgather_hooks(storages, module_param_map)
+    _install_bucket_unshard_hooks(storages, module_param_map)
 
     return module

@@ -29,7 +29,9 @@ _PLACEMENTS_ATTR = "_placements"
 _GLOBAL_SHAPE_ATTR = "_global_shape"
 _GLOBAL_STRIDE_ATTR = "_global_stride"
 _MESH_ATTR = "_mesh"
-_EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered"
+_EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR = (
+    "_flex_shard_eager_bucket_unshard_hook_registered"
+)
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
 _PARAM_FQN_ATTR = "_flex_shard_param_fqn"
 _BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
@@ -64,10 +66,12 @@ def is_flex_shard_param(tensor: torch.Tensor) -> bool:
     return hasattr(tensor, _PLACEMENTS_ATTR)
 
 
-def _raise_missing_eager_batched_unshard(param_state: Any) -> None:
+def _raise_missing_eager_bucket_unshard(param_state: Any) -> None:
     param_fqn = getattr(param_state, _PARAM_FQN_ATTR, "<unknown>")
     bucket_fqn = getattr(param_state, _BUCKET_FQN_ATTR, None)
-    hook_registered = getattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
+    hook_registered = getattr(
+        param_state, _EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False
+    )
     bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
     hook_msg = (
         " The bucket hook was registered but did not run before parameter access."
@@ -75,8 +79,8 @@ def _raise_missing_eager_batched_unshard(param_state: Any) -> None:
         else " No bucket hook was registered for this parameter."
     )
     raise RuntimeError(
-        "FlexShard eager mode requires pre-gathered parameter data from a "
-        f"batched all-gather hook for parameter {param_fqn!r}{bucket_msg}."
+        "FlexShard eager mode requires full parameter data from a "
+        f"bucket unshard hook for parameter {param_fqn!r}{bucket_msg}."
         f"{hook_msg} This usually means the parameter was accessed outside "
         "the hooked module forward, or the BucketSpec boundary does not match "
         "the module hook/checkpoint execution unit. Split the bucket to match "
@@ -140,18 +144,18 @@ class EagerParamAccessState:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
     compute_device: torch.device | None = None
-    _pre_gathered: torch.Tensor | None = None
+    _pre_unsharded: torch.Tensor | None = None
 
-    def consume_pre_gathered_param(self) -> torch.Tensor:
+    def consume_pre_unsharded_param(self) -> torch.Tensor:
         """Return the hook-provided full param or raise for unsupported access."""
-        # In eager mode, _pre_gathered is set by the batched all-gather
+        # In eager mode, _pre_unsharded is set by the bucket unshard
         # pre-forward hook so parameter reads preserve bucketed collectives.
-        pre = self._pre_gathered
+        pre = self._pre_unsharded
         if pre is not None:
             # TODO: Keep this cache valid for the whole forward. Clearing it
             # here breaks legal modules that read the same parameter more than
             # once, and the post-forward hook already owns cleanup.
-            self._pre_gathered = None
+            self._pre_unsharded = None
             if self.param_dtype is not None or self.reduce_dtype is not None:
                 pre = _MixedPrecisionCast.apply(
                     pre,
@@ -160,7 +164,7 @@ class EagerParamAccessState:
                 )
             return pre
 
-        _raise_missing_eager_batched_unshard(self)
+        _raise_missing_eager_bucket_unshard(self)
 
 
 class FlexShardModule:
@@ -238,7 +242,7 @@ def _register_param_accessors(
 
     def _make_flex_shard_param_getter(param_state: EagerParamAccessState):
         def get_flex_shard_param(self):
-            return param_state.consume_pre_gathered_param()
+            return param_state.consume_pre_unsharded_param()
 
         return get_flex_shard_param
 

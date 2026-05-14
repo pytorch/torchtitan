@@ -91,24 +91,6 @@ class _TestPlacement(Placement):
     ) -> torch.Tensor:
         return per_rank_shards[0].to(dtype).view(global_shape)
 
-    def pack_reduce_grad(
-        self,
-        tensors: list[torch.Tensor],
-        infos,
-        world_size: int,
-    ):
-        raise NotImplementedError
-
-    def unpack_reduced_grad(
-        self,
-        recv_buf: torch.Tensor,
-        infos,
-        layout,
-        rank: int,
-        world_size: int,
-    ):
-        raise NotImplementedError
-
 
 class _PaddedShard(Shard):
     def __init__(self, padding_nbytes: int) -> None:
@@ -140,8 +122,8 @@ class TestBucketCommScheduling(TestCase):
     def _context_with_reshard_flags(flags: list[bool]) -> BucketCommContext:
         context = BucketCommContext(
             device_handle=ModuleType("dummy_device_handle"),
-            all_gather_stream=cast(torch.Stream, object()),
-            reduce_scatter_stream=cast(torch.Stream, object()),
+            unshard_stream=cast(torch.Stream, object()),
+            reduce_grad_stream=cast(torch.Stream, object()),
         )
         context.buckets = [
             cast(
@@ -154,43 +136,43 @@ class TestBucketCommScheduling(TestCase):
         ]
         return context
 
-    def test_defer_reduce_scatter_for_previous_bucket_backward_all_gather(self):
+    def test_defer_reduce_grad_for_previous_bucket_backward_unshard(self):
         context = self._context_with_reshard_flags([True, True, True])
 
         self.assertFalse(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[0],
             )
         )
         self.assertIs(
-            context.next_backward_all_gather_bucket(context.buckets[1]),
+            context.next_backward_unshard_bucket(context.buckets[1]),
             context.buckets[0],
         )
         self.assertTrue(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[1],
             )
         )
         self.assertIs(
-            context.next_backward_all_gather_bucket(context.buckets[2]),
+            context.next_backward_unshard_bucket(context.buckets[2]),
             context.buckets[1],
         )
         self.assertTrue(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[2],
             )
         )
 
-    def test_reduce_scatter_defer_depends_on_previous_bucket_not_current_bucket(self):
+    def test_reduce_grad_defer_depends_on_previous_bucket_not_current_bucket(self):
         context = self._context_with_reshard_flags([True, False, True])
 
         self.assertTrue(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[1],
             )
         )
         self.assertFalse(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[2],
             )
         )
@@ -687,7 +669,6 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             )
             self.assertEqual(param, expected)
             self.assertEqual(param, storage.get_local_view(fqn))
-
 
 # ---------------------------------------------------------------------------
 # Distributed per-bucket DStorage tests (torchrun only)
