@@ -13,6 +13,11 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from .reshard_provenance import (
+    _is_flex_shard_recompute_tensor,
+    _mark_flex_shard_recompute_tensors,
+)
+
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
@@ -169,12 +174,15 @@ class EagerParamAccessState:
             # here breaks legal modules that read the same parameter more than
             # once, and the post-forward hook already owns cleanup.
             self._pre_gathered = None
+            flex_shard_recompute = _is_flex_shard_recompute_tensor(pre)
             if self.param_dtype is not None or self.reduce_dtype is not None:
                 pre = _MixedPrecisionCast.apply(
                     pre,
                     self.param_dtype,
                     self.reduce_dtype,
                 )
+                if flex_shard_recompute:
+                    _mark_flex_shard_recompute_tensors(pre)
             return pre
 
         if _is_graph_capture_active():

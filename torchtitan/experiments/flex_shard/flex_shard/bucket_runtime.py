@@ -33,6 +33,10 @@ from .param_access import (
     EagerParamAccessState,
     ParamModuleInfo,
 )
+from .reshard_provenance import (
+    _flex_shard_all_gather_region,
+    _mark_flex_shard_recompute_tensors,
+)
 from .utils import _get_storage_debug_fqn, _record_function_if_eager
 
 
@@ -561,7 +565,9 @@ class _BucketAllGather(torch.autograd.Function):
                 runtime.bucket.context.all_gather_stream,
                 debug_fqn=runtime.bucket.debug_fqn,
             )
-        full_params = result.finish()
+        with _flex_shard_all_gather_region():
+            full_params = result.finish()
+        _mark_flex_shard_recompute_tensors(full_params)
         frozen_params = [
             full_param
             for full_param, info in zip(full_params, runtime.bucket.infos, strict=True)
