@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
@@ -71,7 +72,7 @@ class PlacementReduceGradResult:
     buffers: list[torch.Tensor] = field(default_factory=list)
 
 
-class Placement:
+class Placement(ABC):
     """Base class for FlexShard placement strategies.
 
     Each subclass implements per-param sharding, storage layout, full-parameter
@@ -80,6 +81,23 @@ class Placement:
     Shard uses all-gather and reduce-scatter, while Owned uses broadcast and
     reduce-to-owner.
     """
+
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        if "__eq__" in cls.__dict__ and cls.__dict__.get("__hash__") is None:
+            raise TypeError(
+                f"{cls.__name__} must define __hash__ when overriding __eq__."
+            )
+
+    @abstractmethod
+    def __eq__(self, other: object) -> bool:
+        """Return whether two placement instances have identical semantics."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def __hash__(self) -> int:
+        """Return a hash consistent with placement equality."""
+        raise NotImplementedError
 
     def compute_local_numel(
         self, global_shape: torch.Size, rank: int, world_size: int
