@@ -10,15 +10,15 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import Any, TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
-
-from .placement_contract import Placement
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from .bucket_storage import DStorage
+    from .placement_contract import Placement
 
 
 def _with_fqn(label: str, fqn: str | None) -> str:
@@ -36,6 +36,16 @@ def _record_function_if_eager(
     if torch.compiler.is_compiling():
         return nullcontext()
     return torch.profiler.record_function(_with_fqn(label, fqn))
+
+
+def _record_comm_if_eager(
+    label: str,
+    fqn: str | None,
+) -> AbstractContextManager[Any]:
+    """Return a c10d profiler range in eager and a no-op during compile."""
+    if torch.compiler.is_compiling():
+        return nullcontext()
+    return dist.record_comm(_with_fqn(label, fqn))
 
 
 def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
@@ -224,6 +234,8 @@ def _validate_placements(
 
     rank = mesh.get_local_rank()
     world_size = mesh.size()
+    from .placement_contract import Placement
+
     for fqn, placements in param_placements.items():
         placement = _get_single_placement(placements)
         if not isinstance(placement, Placement):
@@ -247,7 +259,7 @@ def _validate_placements(
         except Exception as exc:
             raise ValueError(
                 f"Placement {placement!r} is invalid for parameter {fqn!r} "
-                f"with shape {tuple(param.shape)}."
+                f"with shape {tuple(param.shape)}: {exc}"
             ) from exc
         if layout.local_numel < 0 or layout.storage_nbytes < 0:
             raise ValueError(
