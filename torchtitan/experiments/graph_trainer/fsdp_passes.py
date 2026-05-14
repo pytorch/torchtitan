@@ -263,7 +263,6 @@ class JointManualOverlapScheduler:
         self,
         gm: fx.GraphModule,
         module_bucket_plans: list[list[str] | str],
-        insert_overlap_deps: bool,
         *,
         is_backward_fn: Callable[[fx.Node], bool],
         module_stack_fn: Callable[[fx.Node], list[tuple[str, type[Any]]]],
@@ -271,7 +270,6 @@ class JointManualOverlapScheduler:
     ) -> None:
         self.gm = gm
         self.graph = gm.graph
-        self.insert_overlap_deps = insert_overlap_deps
         self.module_bucket_plans = module_bucket_plans
         self.module_stack_fn = module_stack_fn
         self._is_backward_fn = is_backward_fn
@@ -405,13 +403,6 @@ class JointManualOverlapScheduler:
         self._execute_direct_moves(overlap_deps)
         self._tlparse_dump("after_reorder_graph_move_pass")
         self.graph.lint()
-
-        if self.insert_overlap_deps:
-            from torch._inductor.fx_passes.control_dependencies import (
-                preserve_node_ordering,
-            )
-
-            preserve_node_ordering(self.graph, overlap_deps)
 
     def _execute_direct_moves(
         self, overlap_deps: dict[fx.Node, OrderedSet[fx.Node]]
@@ -635,7 +626,6 @@ def joint_transformer_block_bucketing_reordering_pass(
     example_inputs: tuple | None = None,
     *,
     module_bucket_plans: list[list[str] | str],
-    insert_overlap_deps: bool = False,
     bucket_mode: BucketMode | None = None,
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
@@ -651,8 +641,6 @@ def joint_transformer_block_bucketing_reordering_pass(
         module_bucket_plans: list of module FQNs (or lists of FQNs); each
             entry defines one bucketing scope whose collectives should be
             merged into a single bucket per direction per collective type.
-        insert_overlap_deps: if ``True``, insert explicit control deps via
-            ``preserve_node_ordering`` after the topological sort.
         bucket_mode: bucket mode forwarded to the underlying bucketer;
             defaults to ``"custom_ops"`` via the parent class.
     """
@@ -666,7 +654,6 @@ def joint_transformer_block_bucketing_reordering_pass(
     overlapped_gm = JointManualOverlapScheduler(
         gm,
         module_bucket_plans,
-        insert_overlap_deps,
         is_backward_fn=_is_backward_node,
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
