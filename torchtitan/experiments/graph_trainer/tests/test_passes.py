@@ -190,6 +190,62 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
 
         self.assertEqual(total_before, total_after)
 
+    def test_overlap_rewrites_multiple_pgs(self):
+        """When the graph has AG nodes from multiple FSDP PGs (e.g. FSDP +
+        expert-FSDP), each source PG should be mapped to its own extra PG."""
+        import torch.distributed as dist
+
+        from torchtitan.experiments.graph_trainer.fsdp_passes import (
+            _EXTRA_FSDP_PG_REGISTRY,
+        )
+
+        self._setup()
+        model = self._make_fsdp_model()
+        inputs = torch.randn(4, 16).cuda()
+        fsdp_pg_name = self._get_fsdp_pg_name()
+
+        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
+
+        # Create a second PG to simulate expert-FSDP
+        second_pg = dist.new_group(
+            ranks=list(range(self.world_size)),
+            use_local_synchronization=True,
+        )
+        second_pg_name = second_pg.group_name
+
+        # Rewrite half the AG nodes to use the second PG
+        ag_nodes = [n for n in bw_gm.graph.nodes if is_all_gather(n)]
+        self.assertGreater(len(ag_nodes), 1)
+        half = len(ag_nodes) // 2
+        for node in ag_nodes[:half]:
+            node.args = (node.args[0], node.args[1], second_pg_name)
+
+        ag_pg1_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
+        ag_pg2_before = self._count_ag_nodes_with_pg(bw_gm, second_pg_name)
+        self.assertGreater(ag_pg1_before, 0)
+        self.assertGreater(ag_pg2_before, 0)
+
+        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        _EXTRA_FSDP_PG_REGISTRY.pop(second_pg_name, None)
+        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
+
+        # Both source PGs should have their own extra PG
+        self.assertIn(fsdp_pg_name, _EXTRA_FSDP_PG_REGISTRY)
+        self.assertIn(second_pg_name, _EXTRA_FSDP_PG_REGISTRY)
+        extra_pg1 = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
+        extra_pg2 = _EXTRA_FSDP_PG_REGISTRY[second_pg_name]
+        self.assertNotEqual(
+            extra_pg1, extra_pg2, "Each source PG must map to a distinct extra PG"
+        )
+
+        # No AG nodes should still use original PGs
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name), 0)
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, second_pg_name), 0)
+
+        # All AG nodes should use their respective extra PGs
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg1), ag_pg1_before)
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg2), ag_pg2_before)
+
     def test_overlap_is_noop_when_no_fsdp_ag(self):
         """If the graph has no FSDP all-gathers, the pass is a no-op."""
         self._setup()
