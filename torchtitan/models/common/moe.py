@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DeviceMesh, DTensor, Partial
+
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -162,7 +163,8 @@ class FlexGroupedExperts(Module):
         top_k: int
         score_before_experts: bool = False
         use_grouped_mm: bool = True
-        num_ctas: int = 152
+        num_ctas: int = 1024
+        _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -177,6 +179,7 @@ class FlexGroupedExperts(Module):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.num_ctas = config.num_ctas
+        self._debug_force_load_balance = config._debug_force_load_balance
         self.w1 = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
@@ -192,7 +195,7 @@ class FlexGroupedExperts(Module):
         # CUDA buffers are available.
         self.ep_mesh: DeviceMesh | None = None
         self._router: Any | None = None
-        self._router_shape: tuple[int, int, torch.device, int, int] | None = None
+        self._router_shape: tuple[int, int, torch.device, int, int, bool] | None = None
 
     def _get_or_create_router(self, x: torch.Tensor) -> Any:
         if x.device.type != "cuda":
@@ -201,7 +204,14 @@ class FlexGroupedExperts(Module):
             )
         ep_size = 1 if self.ep_mesh is None else self.ep_mesh.size()
         ep_rank = 0 if self.ep_mesh is None else self.ep_mesh.get_local_rank()
-        router_shape = (x.shape[0], x.shape[1], x.device, ep_size, ep_rank)
+        router_shape = (
+            x.shape[0],
+            x.shape[1],
+            x.device,
+            ep_size,
+            ep_rank,
+            self._debug_force_load_balance,
+        )
         if self._router is not None and self._router_shape == router_shape:
             return self._router
 
@@ -216,6 +226,7 @@ class FlexGroupedExperts(Module):
                 device=x.device,
                 ep_mesh=self.ep_mesh,
                 num_ctas=self.num_ctas,
+                debug_force_load_balance=self._debug_force_load_balance,
             )
         self._router = router
         self._router_shape = router_shape
@@ -273,6 +284,8 @@ class FlexGroupedExperts(Module):
             )
 
         flex_ep = _load_flex_ep_hop()
+        from torchtitan.distributed.flex_ep import flex_ep_weighted_sum
+
         y_partial = flex_ep(
             x.contiguous().to(torch.bfloat16),
             selected_experts_indices.contiguous(),
@@ -287,10 +300,7 @@ class FlexGroupedExperts(Module):
             topk=self.top_k,
             num_ctas=router.num_ctas,
         )
-        out = (
-            y_partial.to(torch.float32) * top_scores.to(torch.float32).unsqueeze(-1)
-        ).sum(dim=1)
-        out = out.to(x.dtype)
+        out = flex_ep_weighted_sum(y_partial, top_scores).to(x.dtype)
         if shared_experts is not None:
             out = out + shared_experts(x)
         return out

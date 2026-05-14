@@ -7,9 +7,10 @@
 """Experimental FlexEP backend helpers."""
 
 from torchtitan.distributed.flex_ep.flex_ep import (
+    flex_ep_weighted_sum,
     FlexEPRouter,
     FlexEPWorkspace,
     NvlSharedBuffer,
 )
 
-__all__ = ["FlexEPRouter", "FlexEPWorkspace", "NvlSharedBuffer"]
+__all__ = ["FlexEPRouter", "FlexEPWorkspace", "NvlSharedBuffer", "flex_ep_weighted_sum"]

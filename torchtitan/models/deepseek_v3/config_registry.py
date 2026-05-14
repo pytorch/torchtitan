@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
@@ -23,6 +25,7 @@ from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+from .model import DeepSeekV3Model
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
@@ -116,6 +119,33 @@ def deepseek_v3_16b() -> Trainer.Config:
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
     )
+
+
+def deepseek_v3_16b_flex_ep() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry(
+        "16B", attn_backend="flex", moe_comm_backend="flex_ep"
+    )
+    return config
+
+
+def _keep_first_16b_half_layers(config: Trainer.Config) -> None:
+    if config.model_spec is None:
+        raise RuntimeError("DeepSeek V3 16B config must define model_spec.")
+    model_config = cast(DeepSeekV3Model.Config, config.model_spec.model)
+    model_config.layers = model_config.layers[:14]
+
+
+def deepseek_v3_16b_half_layers() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    _keep_first_16b_half_layers(config)
+    return config
+
+
+def deepseek_v3_16b_flex_ep_half_layers() -> Trainer.Config:
+    config = deepseek_v3_16b_flex_ep()
+    _keep_first_16b_half_layers(config)
+    return config
 
 
 def deepseek_v3_671b() -> Trainer.Config:
