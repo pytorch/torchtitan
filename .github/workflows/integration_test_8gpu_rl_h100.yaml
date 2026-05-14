@@ -88,11 +88,8 @@ jobs:
         # but the CI docker image only has CUDA runtime, not the toolkit.
         uv pip install nvidia-cuda-nvcc
 
-        # Run bitwise parity tests (TP=2, batch-invariant mode)
-        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
-
-        # Run batch-invariant E2E RL integration test (TP=2 on 4 GPUs)
-        python -m torchtitan.experiments.rl.tests.integration_tests \
-          $RUNNER_TEMP/artifacts-to-be-uploaded --test_suite h100 --ngpu 4 \
-          --hf_assets_path "$MODEL_PATH"
+        # runs tests tagged with @h100_gpu
+        RL_TEST_OUTPUT_DIR="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+        HF_ASSETS_PATH="$MODEL_PATH" \
+          python -m pytest torchtitan/experiments/rl/tests \
+          -m h100 --durations=20 -v

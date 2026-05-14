@@ -1,0 +1,56 @@
+name: RL CPU Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'torchtitan/experiments/rl/**'
+      - '.github/workflows/unit_test_cpu_rl.yaml'
+      - 'pyproject.toml'
+  pull_request:
+    types: [labeled, synchronize]
+    branches: [ main ]
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+jobs:
+  build-test:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    with:
+      docker-image: torchtitan-ubuntu-22.04-clang12
+      repository: pytorch/torchtitan
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        pip config --user set global.progress_bar off
+
+        # Install steps follow torchtitan/experiments/rl/README.md
+        # (the canonical setup guide for the RL experiment). Omitted:
+        #   - flash-attn-3 (H100-only)
+        #   - batch_invariant_ops (only used by `set_batch_invariance(True)`
+        #     which CPU tests don't call)
+        pip install uv
+        uv pip install torchmonarch==0.4.1
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+        uv pip install pygtrie portpicker
+        # TODO: Drop torchvision once CPU collection no longer imports vLLM.
+        # vLLM imports torchvision today, so keep it ABI-matched with torch.
+        uv pip install torch torchvision vllm torchcomms --pre \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --index-strategy unsafe-best-match
+
+        uv pip install -e .
+
+        python -m pytest torchtitan/experiments/rl/tests \
+          -m "not gpu" --durations=20 -v

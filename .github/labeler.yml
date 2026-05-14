@@ -9,3 +9,4 @@
   - torchtitan/experiments/rl/**
   - .github/workflows/integration_test_4gpu_rl.yaml
   - .github/workflows/integration_test_8gpu_rl_h100.yaml
+  - .github/workflows/unit_test_cpu_rl.yaml
