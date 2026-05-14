@@ -17,7 +17,7 @@ def compute_logprobs(
     *,
     chunk_size: int | None = None,
 ) -> torch.Tensor:
-    """Compute per-token logprobs from logits.
+    """Compute per-token logprobs from logits via negative cross-entropy.
 
     Returns logprobs for positions 1..N (the predicted tokens).
     Output shape is ``[batch, seq_len - 1]``.
@@ -25,9 +25,11 @@ def compute_logprobs(
     Args:
         logits: Model output logits, shape [batch, seq_len, vocab_size].
         token_ids: Input token IDs, shape [batch, seq_len].
-        chunk_size: If set, process log_softmax in chunks of this many tokens
-            along the sequence dimension to reduce peak memory. When None
-            (default), the full sequence is computed at once.
+        chunk_size: If set, process cross-entropy in chunks of this many tokens
+            along the sequence dimension to reduce peak memory. The peak
+            intermediate per chunk is ``B * chunk_size * V`` in float32
+            (all batches are processed together). When None (default), the
+            full sequence is computed at once.
     """
     from torch.distributed.tensor import DTensor
 
@@ -45,15 +47,19 @@ def compute_logprobs(
     # Shift: logits[:-1] predict token_ids[1:]
     shift_logits = logits[:, :-1, :]
     shift_targets = token_ids[:, 1:]
+    B, S, V = shift_logits.shape
 
-    if chunk_size is None or shift_logits.shape[1] <= chunk_size:
+    if chunk_size is None or S <= chunk_size:
         # Full computation — simple and fast, but uses more memory.
-        # Also covers shift_logits.shape[1] == 0 (single-token input),
-        # keeping grad_fn intact.
-        log_probs = F.log_softmax(shift_logits.float(), dim=-1)
-        return log_probs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
+        # Also covers S == 0 (single-token input), keeping grad_fn intact.
+        logprobs = -F.cross_entropy(
+            shift_logits.float().reshape(-1, V),
+            shift_targets.reshape(-1).long(),
+            reduction="none",
+        ).reshape(B, S)
+        return logprobs
 
-    # Chunked log_softmax + gather to avoid materializing full [seq, vocab] fp32
+    # Chunked cross-entropy to avoid materializing full [seq, vocab] fp32
     # Guard: chunking with vocab-sharded logits would issue one collective per chunk
     if dtensor_placements is not None:
         if not all(p.is_replicate() for p in dtensor_placements):
@@ -61,14 +67,18 @@ def compute_logprobs(
                 f"Chunked logprobs incompatible with sharded DTensor: {dtensor_placements}. "
                 "Would issue one collective per chunk. Use chunk_size=None with loss_parallel."
             )
-    seq_len = shift_logits.shape[1]
     chunks = []
-    for start in range(0, seq_len, chunk_size):
-        end = min(start + chunk_size, seq_len)
+    for start in range(0, S, chunk_size):
+        end = min(start + chunk_size, S)
         chunk_logits = shift_logits[:, start:end, :].float()
-        chunk_lp = F.log_softmax(chunk_logits, dim=-1)
-        chunk_targets = shift_targets[:, start:end].unsqueeze(-1)
-        chunks.append(chunk_lp.gather(2, chunk_targets).squeeze(-1))
+        chunk_targets = shift_targets[:, start:end]
+        chunk_B, chunk_S, _ = chunk_logits.shape
+        chunk_logprobs = -F.cross_entropy(
+            chunk_logits.reshape(-1, V),
+            chunk_targets.reshape(-1).long(),
+            reduction="none",
+        ).reshape(chunk_B, chunk_S)
+        chunks.append(chunk_logprobs)
 
     return torch.cat(chunks, dim=1)
 
