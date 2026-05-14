@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import torch
 from torch.distributed.device_mesh import _get_device_handle
 
-from .placement_contract import PlacementPreparedReduceGrad
+from .placement_contract import PlacementPreparedReduceGrad, PlacementPreparedUnshard
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -179,6 +179,11 @@ class AsyncUnshardResult(UnshardHandle):
             handoff.release()
 
 
+def _run_and_finish_unshard(prepared: PlacementPreparedUnshard):
+    prepared.placement.run_prepared_unshard(prepared)
+    return prepared.placement.finish_prepared_unshard(prepared)
+
+
 def begin_bucket_unshard(
     tensors: list[torch.Tensor],
     infos: list[ParamInfo],
@@ -197,7 +202,8 @@ def begin_bucket_unshard(
             )
 
     if torch.compiler.is_compiling():
-        result = placement.unshard_bucket(tensors, infos, mesh, debug_fqn)
+        prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, debug_fqn)
+        result = _run_and_finish_unshard(prepared)
         return SyncUnshardResult(result.full_params)
 
     device = tensors[0].device
@@ -206,7 +212,8 @@ def begin_bucket_unshard(
     copy_in_done.record(device_handle.current_stream(device))
     with device_handle.stream(unshard_stream):
         unshard_stream.wait_event(copy_in_done)
-        result = placement.unshard_bucket(tensors, infos, mesh, debug_fqn)
+        prepared = placement.prepare_unshard_bucket(tensors, infos, mesh, debug_fqn)
+        result = _run_and_finish_unshard(prepared)
         event = device_handle.Event()
         event.record(unshard_stream)
     return AsyncUnshardResult(

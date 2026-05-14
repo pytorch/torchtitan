@@ -797,7 +797,9 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         expected = torch.arange(4, dtype=torch.float32).view(2, 2)
         local = expected.clone() if self.rank == 0 else torch.empty(0)
 
-        result = placement.unshard_bucket([local], [info], mesh, None).full_params[0]
+        prepared = placement.prepare_unshard_bucket([local], [info], mesh, None)
+        placement.run_prepared_unshard(prepared)
+        result = placement.finish_prepared_unshard(prepared).full_params[0]
 
         self.assertEqual(result, expected)
 

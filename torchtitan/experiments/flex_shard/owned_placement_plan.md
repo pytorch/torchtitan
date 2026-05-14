@@ -13,7 +13,7 @@ Move the collective choice out of `bucket_collectives.py` and into the
 
 ```text
 BucketRuntime
-  -> asks placement to unshard bucket
+  -> asks placement to prepare/run/finish bucket unshard
   -> asks placement to prepare/reduce grads
 
 Shard placement
@@ -25,8 +25,8 @@ Owned placement
   backward reduce: reduce full-param grad to owner rank
 ```
 
-The bucket runtime still owns stream/event scheduling, pending all-gather
-prefetch handles, deferred reduce-grad launch ordering, and buffer lifetime. The
+The bucket runtime still owns stream/event scheduling, pending unshard prefetch
+handles, deferred reduce-grad launch ordering, and buffer lifetime. The
 placement owns the communication algorithm and tensor packing semantics.
 
 ## API Shape
@@ -35,12 +35,22 @@ Add placement-side methods:
 
 ```python
 class Placement:
-    def unshard_bucket(
+    def prepare_unshard_bucket(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
         debug_fqn: str | None,
+    ) -> PlacementPreparedUnshard: ...
+
+    def run_prepared_unshard(
+        self,
+        prepared: PlacementPreparedUnshard,
+    ) -> None: ...
+
+    def finish_prepared_unshard(
+        self,
+        prepared: PlacementPreparedUnshard,
     ) -> PlacementUnshardResult: ...
 
     def prepare_reduce_grad(
@@ -60,9 +70,14 @@ class Placement:
 Default `Placement` behavior is the `Shard`-style path:
 
 ```text
-unshard_bucket:
+prepare_unshard_bucket:
   concatenate local shards
+  allocate per-rank all-gather buffers
+
+run_prepared_unshard:
   all-gather per-rank buffers
+
+finish_prepared_unshard:
   assemble full params
 
 prepare_reduce_grad:
@@ -76,10 +91,15 @@ reduce_prepared_grad:
 `Owned` overrides the collective methods:
 
 ```text
-unshard_bucket:
+prepare_unshard_bucket:
   owner rank uses its full local tensor
   non-owner ranks allocate full tensor
+
+run_prepared_unshard:
   broadcast owner tensor to all ranks
+
+finish_prepared_unshard:
+  return broadcast full params
 
 prepare_reduce_grad:
   make contiguous full-grad tensors

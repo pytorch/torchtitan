@@ -31,6 +31,20 @@ class LocalStorageLayout:
 
 
 @dataclass
+class PlacementPreparedUnshard:
+    """Placement-owned prepared bucket unshard request."""
+
+    placement: Placement
+    infos: list[ParamInfo]
+    layout: Any
+    rank: int
+    world_size: int
+    pg: Any
+    buffers: list[torch.Tensor]
+    debug_fqn: str | None
+
+
+@dataclass
 class PlacementUnshardResult:
     """Placement-owned unshard result and temporary buffers."""
 
@@ -58,6 +72,11 @@ class PlacementReduceGradResult:
 
     sharded_grads: list[torch.Tensor]
     buffers: list[torch.Tensor] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _AllGatherUnshardLayout:
+    per_rank_param_offsets: list[list[int]]
 
 
 class Placement:
@@ -173,14 +192,14 @@ class Placement:
         """Unpack a flat reduce-scatter output buffer into local grad shards."""
         raise NotImplementedError
 
-    def unshard_bucket(
+    def prepare_unshard_bucket(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
         debug_fqn: str | None,
-    ) -> PlacementUnshardResult:
-        """Unshard one bucket using the placement's default all-gather path."""
+    ) -> PlacementPreparedUnshard:
+        """Prepare buffers for the placement's default all-gather unshard."""
         ws = mesh.size()
         pg = mesh.get_group()
         dtype = tensors[0].dtype
@@ -205,18 +224,58 @@ class Placement:
                 for r in range(ws)
             ]
 
-        with _record_comm_if_eager("FlexShard::all_gather", debug_fqn):
-            dist.all_gather(gathered, send_buf, group=pg)
+        return PlacementPreparedUnshard(
+            placement=self,
+            infos=infos,
+            layout=_AllGatherUnshardLayout(per_rank_param_offsets),
+            rank=mesh.get_local_rank(),
+            world_size=ws,
+            pg=pg,
+            buffers=[send_buf, *gathered],
+            debug_fqn=debug_fqn,
+        )
 
-        with _record_function_if_eager("FlexShard::all_gather_copy_out", debug_fqn):
+    def run_prepared_unshard(
+        self,
+        prepared: PlacementPreparedUnshard,
+    ) -> None:
+        """Launch the placement's prepared unshard collective."""
+        send_buf = prepared.buffers[0]
+        gathered = prepared.buffers[1:]
+        with _record_comm_if_eager("FlexShard::all_gather", prepared.debug_fqn):
+            dist.all_gather(gathered, send_buf, group=prepared.pg)
+
+    def finish_prepared_unshard(
+        self,
+        prepared: PlacementPreparedUnshard,
+    ) -> PlacementUnshardResult:
+        """Finish the prepared unshard and return full parameters."""
+        if not isinstance(prepared.layout, _AllGatherUnshardLayout):
+            raise AssertionError(
+                f"Expected _AllGatherUnshardLayout, got {type(prepared.layout).__name__}"
+            )
+        gathered = prepared.buffers[1:]
+        device = prepared.buffers[0].device
+        with _record_function_if_eager(
+            "FlexShard::all_gather_copy_out",
+            prepared.debug_fqn,
+        ):
             full_params = []
-            for i, info in enumerate(infos):
+            for i, info in enumerate(prepared.infos):
                 per_rank_shards: list[torch.Tensor] = []
-                for r in range(ws):
-                    numel = self.compute_local_numel(info.global_shape, r, ws)
-                    shape = self.compute_local_shape(info.global_shape, r, ws)
+                for r in range(prepared.world_size):
+                    numel = self.compute_local_numel(
+                        info.global_shape,
+                        r,
+                        prepared.world_size,
+                    )
+                    shape = self.compute_local_shape(
+                        info.global_shape,
+                        r,
+                        prepared.world_size,
+                    )
                     if numel > 0:
-                        offset = per_rank_param_offsets[r][i]
+                        offset = prepared.layout.per_rank_param_offsets[r][i]
                         per_rank_shards.append(
                             gathered[r][offset : offset + numel].view(shape)
                         )
@@ -231,7 +290,7 @@ class Placement:
                 )
                 del per_rank_shards
 
-        return PlacementUnshardResult(full_params, [send_buf, *gathered])
+        return PlacementUnshardResult(full_params, prepared.buffers)
 
     def prepare_reduce_grad(
         self,
@@ -300,6 +359,7 @@ class Placement:
 __all__ = [
     "LocalStorageLayout",
     "Placement",
+    "PlacementPreparedUnshard",
     "PlacementPreparedReduceGrad",
     "PlacementReduceGradResult",
     "PlacementUnshardResult",

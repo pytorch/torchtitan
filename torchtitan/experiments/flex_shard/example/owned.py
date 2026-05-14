@@ -18,6 +18,7 @@ from typing_extensions import override
 from ..flex_shard.placement_contract import (
     Placement,
     PlacementPreparedReduceGrad,
+    PlacementPreparedUnshard,
     PlacementReduceGradResult,
     PlacementUnshardResult,
 )
@@ -98,16 +99,15 @@ class Owned(Placement):
         return per_rank_shards[self.owner_rank].view(global_shape)
 
     @override
-    def unshard_bucket(
+    def prepare_unshard_bucket(
         self,
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         mesh: DeviceMesh,
         debug_fqn: str | None,
-    ) -> PlacementUnshardResult:
-        """Broadcast owner-rank parameters to every rank."""
+    ) -> PlacementPreparedUnshard:
+        """Prepare full-parameter buffers for owner-rank broadcast."""
         rank = mesh.get_local_rank()
-        pg = mesh.get_group()
         self._validate_owner_rank(mesh.size())
 
         full_params: list[torch.Tensor] = []
@@ -121,10 +121,32 @@ class Owned(Placement):
                         dtype=info.dtype,
                         device=tensor.device,
                     )
-            with _record_comm_if_eager("FlexShard::broadcast", debug_fqn):
-                dist.broadcast(full_param, src=self.owner_rank, group=pg)
             full_params.append(full_param)
-        return PlacementUnshardResult(full_params)
+        return PlacementPreparedUnshard(
+            placement=self,
+            infos=infos,
+            layout=None,
+            rank=rank,
+            world_size=mesh.size(),
+            pg=mesh.get_group(),
+            buffers=full_params,
+            debug_fqn=debug_fqn,
+        )
+
+    @override
+    def run_prepared_unshard(self, prepared: PlacementPreparedUnshard) -> None:
+        """Broadcast prepared full-parameter buffers from the owner rank."""
+        for full_param in prepared.buffers:
+            with _record_comm_if_eager("FlexShard::broadcast", prepared.debug_fqn):
+                dist.broadcast(full_param, src=self.owner_rank, group=prepared.pg)
+
+    @override
+    def finish_prepared_unshard(
+        self,
+        prepared: PlacementPreparedUnshard,
+    ) -> PlacementUnshardResult:
+        """Return the full parameters produced by the owner-rank broadcast."""
+        return PlacementUnshardResult(list(prepared.buffers))
 
     @override
     def prepare_reduce_grad(
