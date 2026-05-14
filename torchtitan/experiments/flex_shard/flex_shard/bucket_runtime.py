@@ -73,7 +73,7 @@ class PendingReduceGrad:
 
 @dataclass
 class PendingReduceScatterLaunch:
-    """One packed reduce-grad request waiting for an all-gather to launch first."""
+    """One packed reduce-grad request waiting for a backward all-gather first."""
 
     bucket: BucketRuntime
     prepared: PreparedReduceScatterGrad
@@ -94,6 +94,39 @@ class BucketCommContext:
     )
     reduce_scatter_states: list[PendingReduceGrad] = field(default_factory=list)
     reduce_scatter_callback_queued: bool = False
+
+    def next_backward_all_gather_bucket(
+        self,
+        bucket: BucketRuntime,
+    ) -> BucketRuntime | None:
+        """Return the next bucket whose backward all-gather has priority.
+
+        Buckets execute forward in ``self.buckets`` order and backward in reverse
+        order. After bucket ``i`` produces gradients, bucket ``i - 1``'s
+        all-gather is the next critical-path backward communication when that
+        bucket uses reshard-after-forward. In that case bucket ``i``'s
+        reduce-scatter should be delayed until after the previous bucket's
+        all-gather has launched.
+        """
+        idx = next(
+            (i for i, candidate in enumerate(self.buckets) if candidate is bucket),
+            None,
+        )
+        if idx is None:
+            return None
+        if idx == 0:
+            return None
+        next_bucket = self.buckets[idx - 1]
+        if not next_bucket.storage._reshard_after_forward:
+            return None
+        return next_bucket
+
+    def should_defer_reduce_scatter_for_backward_prefetch(
+        self,
+        bucket: BucketRuntime,
+    ) -> bool:
+        """Return whether reduce-scatter should wait for backward prefetch."""
+        return self.next_backward_all_gather_bucket(bucket) is not None
 
     @classmethod
     def get(
@@ -593,7 +626,7 @@ class _BucketAllGather(torch.autograd.Function):
             valid_param_refs.append(entry.module_info)
 
         if grads:
-            if bucket.storage._reshard_after_forward:
+            if bucket.context.should_defer_reduce_scatter_for_backward_prefetch(bucket):
                 bucket.context.queue_reduce_scatter_launch(
                     bucket,
                     grads,

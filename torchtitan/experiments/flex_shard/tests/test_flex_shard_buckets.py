@@ -19,6 +19,9 @@ Usage:
       torchtitan/experiments/flex_shard/tests/test_flex_shard_buckets.py
 """
 
+from types import ModuleType, SimpleNamespace
+from typing import cast
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -38,6 +41,10 @@ from torchtitan.experiments.flex_shard import (
     Placement,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
+from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
+    BucketCommContext,
+    BucketRuntime,
+)
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
@@ -120,6 +127,72 @@ class _PaddedShard(Shard):
             local_shape=layout.local_shape,
             local_numel=layout.local_numel,
             storage_nbytes=layout.storage_nbytes + self.padding_nbytes,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bucket communication scheduling tests (single-process, no NCCL)
+# ---------------------------------------------------------------------------
+
+
+class TestBucketCommScheduling(TestCase):
+    @staticmethod
+    def _context_with_reshard_flags(flags: list[bool]) -> BucketCommContext:
+        context = BucketCommContext(
+            device_handle=ModuleType("dummy_device_handle"),
+            all_gather_stream=cast(torch.Stream, object()),
+            reduce_scatter_stream=cast(torch.Stream, object()),
+        )
+        context.buckets = [
+            cast(
+                BucketRuntime,
+                SimpleNamespace(
+                    storage=SimpleNamespace(_reshard_after_forward=flag),
+                ),
+            )
+            for flag in flags
+        ]
+        return context
+
+    def test_defer_reduce_scatter_for_previous_bucket_backward_all_gather(self):
+        context = self._context_with_reshard_flags([True, True, True])
+
+        self.assertFalse(
+            context.should_defer_reduce_scatter_for_backward_prefetch(
+                context.buckets[0],
+            )
+        )
+        self.assertIs(
+            context.next_backward_all_gather_bucket(context.buckets[1]),
+            context.buckets[0],
+        )
+        self.assertTrue(
+            context.should_defer_reduce_scatter_for_backward_prefetch(
+                context.buckets[1],
+            )
+        )
+        self.assertIs(
+            context.next_backward_all_gather_bucket(context.buckets[2]),
+            context.buckets[1],
+        )
+        self.assertTrue(
+            context.should_defer_reduce_scatter_for_backward_prefetch(
+                context.buckets[2],
+            )
+        )
+
+    def test_reduce_scatter_defer_depends_on_previous_bucket_not_current_bucket(self):
+        context = self._context_with_reshard_flags([True, False, True])
+
+        self.assertTrue(
+            context.should_defer_reduce_scatter_for_backward_prefetch(
+                context.buckets[1],
+            )
+        )
+        self.assertFalse(
+            context.should_defer_reduce_scatter_for_backward_prefetch(
+                context.buckets[2],
+            )
         )
 
 
