@@ -7,20 +7,22 @@
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.flex_shard import is_flex_shard_param
+from torchtitan.experiments.flex_shard.flex_shard.param_access import (
+    is_flex_shard_param,
+)
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_transformer_model,
-    single_rank_cpu_mesh,
+    single_rank_cuda_mesh,
     transformer_inputs,
 )
 
 
 class TestFlexShardEagerRuntime(TestCase):
-    def test_eager_forward_backward_on_cpu_mesh(self):
-        with single_rank_cpu_mesh() as mesh:
+    def test_eager_forward_backward_on_cuda_mesh(self):
+        with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
 
-            loss = model(transformer_inputs(args)).sum()
+            loss = model(transformer_inputs(args, device="cuda")).sum()
             loss.backward()
 
             for param in model.parameters():
@@ -28,19 +30,19 @@ class TestFlexShardEagerRuntime(TestCase):
                 self.assertIsNotNone(param.grad)
 
     def test_param_access_outside_forward_raises(self):
-        with single_rank_cpu_mesh() as mesh:
+        with single_rank_cuda_mesh() as mesh:
             _, model = flex_shard_transformer_model(mesh)
 
             with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
                 _ = model.output.weight
 
-    def test_torch_compile_forward_backward_on_cpu_mesh(self):
-        with single_rank_cpu_mesh() as mesh:
+    def test_torch_compile_forward_backward_on_cuda_mesh(self):
+        with single_rank_cuda_mesh() as mesh:
             args, model = flex_shard_transformer_model(mesh)
 
             compiled_model = torch.compile(model, backend="eager")
 
-            loss = compiled_model(transformer_inputs(args)).sum()
+            loss = compiled_model(transformer_inputs(args, device="cuda")).sum()
             loss.backward()
 
             for param in model.parameters():

@@ -14,6 +14,7 @@ import torch.nn as nn
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .bucket_storage import DStorage
+from .reshard_provenance import _maybe_mark_policy_outputs, _with_flex_shard_provenance
 from .utils import (
     _module_path_common_prefix,
     _strip_checkpoint_wrapped_module_path,
@@ -44,7 +45,7 @@ class _ReshardAfterForwardRecomputeState:
 
 
 class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
-    """TorchDispatchMode wrapper that marks reshard-after-forward recompute."""
+    """Context wrapper that marks bucket-specific recomputation during tracing."""
 
     @classmethod
     def ignore_compile_internals(cls) -> bool:
@@ -52,51 +53,48 @@ class _MarkRecomputeTorchDispatchMode(TorchDispatchMode):
 
     def __init__(
         self,
-        mode: TorchDispatchMode,
+        ctx: Any,
         recompute_state: _ReshardAfterForwardRecomputeState,
         recompute_bucket_ids: frozenset[int],
     ) -> None:
         super().__init__()
-        self.mode = mode
+        self.ctx = ctx
         self.recompute_state = recompute_state
         self.recompute_bucket_ids = recompute_bucket_ids
         self._token: Any | None = None
 
     def __enter__(self) -> _MarkRecomputeTorchDispatchMode:
+        self.ctx.__enter__()
         self._token = self.recompute_state.enter_recompute(self.recompute_bucket_ids)
         return super().__enter__()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        suppress = False
         try:
-            return super().__exit__(exc_type, exc_val, exc_tb)
+            suppress = bool(super().__exit__(exc_type, exc_val, exc_tb))
         finally:
             token = self._token
             self._token = None
             if token is not None:
                 self.recompute_state.exit_recompute(token)
+            suppress = bool(self.ctx.__exit__(exc_type, exc_val, exc_tb)) or suppress
+        return suppress
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        return self.mode.__torch_dispatch__(func, types, args, kwargs)
-
-
-# These produce the unsharded param tensors that we want freed per-layer.
-_FLEX_SHARD_COLLECTIVE_OPS = {
-    torch.ops._c10d_functional.all_gather_into_tensor.default,
-    torch.ops._c10d_functional.wait_tensor.default,
-}
+        kwargs = {} if kwargs is None else kwargs
+        return func(*args, **kwargs)
 
 
 def _reshard_after_forward_policy(ctx, func, *args, **kwargs):
     """Activation recompute policy for per-layer reshard-after-forward.
 
-    Marks collective ops (all-gather, broadcast, wait_tensor) for
-    recomputation; activation checkpointing discards their outputs after each layer's
-    forward. All other ops (matmul, attention, etc.) are saved, avoiding
-    redundant compute recomputation in backward.
+    Only FlexShard-derived tensors are forced to recompute: bucket all-gather
+    full params and their alias/view outputs such as transposes. Other ops,
+    including non-FlexShard collectives, use the normal checkpoint policy.
     """
     from torch.utils.checkpoint import CheckpointPolicy
 
-    if func in _FLEX_SHARD_COLLECTIVE_OPS:
+    if _maybe_mark_policy_outputs(ctx, func, args, kwargs):
         return CheckpointPolicy.MUST_RECOMPUTE
     # PREFER_RECOMPUTE lets checkpoint decide what to save vs recompute
     # for non-collective ops, matching standard AC behavior.
@@ -110,9 +108,9 @@ def _compose_with_ac_policy(
 ):
     """Compose FlexShard reshard policy with an existing AC context_fn.
 
-    Returns a new context_fn that wraps the AC policy: FlexShard collective
-    ops are forced to MUST_RECOMPUTE, everything else delegates to the
-    original AC policy. The two op sets are disjoint so no conflicts arise.
+    Returns a new context_fn that wraps the AC policy: FlexShard-derived
+    full params and their aliases are forced to MUST_RECOMPUTE, everything
+    else delegates to the original AC policy.
     """
 
     def merged_context_fn():
@@ -125,14 +123,16 @@ def _compose_with_ac_policy(
                 continue
 
             def merged_policy(sctx, func, *args, _orig=original_policy, **kwargs):
-                if func in _FLEX_SHARD_COLLECTIVE_OPS:
+                if _maybe_mark_policy_outputs(sctx, func, args, kwargs):
                     return CheckpointPolicy.MUST_RECOMPUTE
                 return _orig(sctx, func, *args, **kwargs)
 
             ctx.policy_fn = merged_policy
         forward_ctx, recompute_ctx = contexts
-        return forward_ctx, _MarkRecomputeTorchDispatchMode(
-            recompute_ctx,
+        return _with_flex_shard_provenance(
+            forward_ctx
+        ), _MarkRecomputeTorchDispatchMode(
+            _with_flex_shard_provenance(recompute_ctx),
             recompute_state,
             recompute_bucket_ids,
         )
@@ -150,8 +150,10 @@ def _make_reshard_only_context_fn(
         forward_ctx, recompute_ctx = create_selective_checkpoint_contexts(
             _reshard_after_forward_policy
         )
-        return forward_ctx, _MarkRecomputeTorchDispatchMode(
-            recompute_ctx,
+        return _with_flex_shard_provenance(
+            forward_ctx
+        ), _MarkRecomputeTorchDispatchMode(
+            _with_flex_shard_provenance(recompute_ctx),
             recompute_state,
             recompute_bucket_ids,
         )
@@ -277,13 +279,13 @@ def _apply_reshard_after_forward(
     """Wrap FlexShard-managed bucket modules for reshard-after-forward.
 
     Each selected bucket's owning module gets wrapped with an activation
-    recompute policy that marks collective ops (all-gather, broadcast,
-    wait_tensor) as MUST_RECOMPUTE so unsharded params are freed after each
+    recompute policy that marks FlexShard-derived all-gather full params and
+    their aliases as MUST_RECOMPUTE so unsharded params are freed after each
     layer's forward.
 
     Composes with activation checkpointing: if a child is already wrapped
     by AC's CheckpointWrapper, the two policies are merged into a single
-    wrapper (FlexShard collectives → MUST_RECOMPUTE, AC compute ops →
+    wrapper (FlexShard-derived tensors → MUST_RECOMPUTE, AC compute ops →
     MUST_SAVE, everything else → PREFER_RECOMPUTE).
     """
     recompute_state = _ReshardAfterForwardRecomputeState()
