@@ -35,7 +35,7 @@ class TestFlexShardEagerRuntime(TestCase):
         with single_rank_cuda_mesh() as mesh:
             _, model = flex_shard_transformer_model(mesh)
 
-            with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+            with self.assertRaisesRegex(RuntimeError, "bucket unshard hook"):
                 _ = model.output.weight
 
     def test_graph_capture_raises(self):
