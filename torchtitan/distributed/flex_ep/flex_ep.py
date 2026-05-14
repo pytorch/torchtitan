@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _REQUIRED_EP_BACKEND_OPS = (
     "flex_ep_allgather",
+    "flex_ep_router_compute_all_expert_offsets",
+    "flex_ep_router_compute_dest_offsets",
     "flex_ep_router_dispatch",
     "flex_ep_router_combine",
     "flex_ep_barrier_arrive",
@@ -37,6 +40,80 @@ _REQUIRED_EP_BACKEND_OPS = (
     "flex_ep_weighted_sum_backward",
     "flex_ep_zfill_ranges_inplace",
 )
+
+
+def _is_power_of_2(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def _align_up_tensor(x: torch.Tensor, alignment: int) -> torch.Tensor:
+    return ((x + alignment - 1) // alignment) * alignment
+
+
+def _compute_all_expert_offsets_reference(
+    all_expert_counts: torch.Tensor,
+    ep_rank: int,
+    local_experts: int,
+    token_alignment: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ep_size = all_expert_counts.shape[0]
+    offsets = all_expert_counts.new_empty(
+        (ep_size, local_experts, ep_size + 1),
+        dtype=torch.int32,
+    )
+    expert_start = all_expert_counts.new_empty(
+        (ep_size, local_experts + 1),
+        dtype=torch.int32,
+    )
+    grand_total = all_expert_counts.sum(0).new_empty((ep_size,), dtype=torch.int64)
+    for dest in range(ep_size):
+        counts = all_expert_counts[
+            :,
+            dest * local_experts : (dest + 1) * local_experts,
+        ]
+        total_per_expert = counts.sum(0)
+        grand_total[dest] = total_per_expert.sum()
+        aligned = _align_up_tensor(total_per_expert, token_alignment).to(torch.int32)
+        starts = torch.cat(
+            (
+                torch.zeros(1, device=all_expert_counts.device, dtype=torch.int32),
+                aligned.cumsum(0),
+            )
+        )
+        expert_start[dest].copy_(starts)
+        offsets[dest, :, 0].copy_(starts[:-1])
+        offsets[dest, :, 1:].copy_(
+            starts[:-1].unsqueeze(1) + counts.cumsum(0, dtype=torch.int32).T
+        )
+    return offsets, grand_total[ep_rank].clone(), expert_start[ep_rank].clone()
+
+
+def _compute_dest_offsets_reference(
+    topk_idx: torch.Tensor,
+    recv_ofs: torch.Tensor,
+    ep_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch, top_k = topk_idx.shape
+    num_experts = recv_ofs.shape[0]
+    local_experts = num_experts // ep_size
+    flat_idx = topk_idx.reshape(-1)
+    dest_ranks = torch.div(flat_idx, local_experts, rounding_mode="floor").to(
+        torch.int32
+    )
+    dest_offsets = torch.empty(
+        flat_idx.shape,
+        device=topk_idx.device,
+        dtype=torch.int64,
+    )
+    for expert in range(num_experts):
+        is_mine = flat_idx == expert
+        rank_in_expert = is_mine.to(torch.int64).cumsum(0) - 1
+        dest_offsets = torch.where(
+            is_mine,
+            recv_ofs[expert].to(torch.int64) + rank_in_expert,
+            dest_offsets,
+        )
+    return dest_ranks.view(batch, top_k), dest_offsets.view(batch, top_k)
 
 
 def _ensure_flex_ep_imported() -> None:
@@ -161,6 +238,93 @@ def _register_ep_backend_ops() -> None:
         )
         shmem_backend.put(dst_ptr, input_ptr, input_num_bytes, peer)
         shmem_backend.quiet()
+
+    @triton.jit
+    def _compute_expert_offsets_kernel(
+        counts_ptr,
+        offsets_ptr,
+        expert_start_ptr,
+        grand_total_ptr,
+        LOCAL_EXPERTS: tl.constexpr,
+        EP_SIZE: tl.constexpr,
+        TOKEN_ALIGNMENT: tl.constexpr,
+    ):
+        dest = tl.program_id(0)
+        num_experts = EP_SIZE * LOCAL_EXPERTS
+
+        src_idx = tl.arange(0, EP_SIZE)
+        expert_idx = tl.arange(0, LOCAL_EXPERTS)
+        counts = tl.load(
+            counts_ptr
+            + src_idx[:, None] * num_experts
+            + dest * LOCAL_EXPERTS
+            + expert_idx[None, :]
+        )
+
+        total_per_expert = tl.sum(counts, axis=0)
+        tl.store(grand_total_ptr + dest, tl.sum(total_per_expert))
+
+        aligned = (
+            (total_per_expert + TOKEN_ALIGNMENT - 1) // TOKEN_ALIGNMENT
+        ) * TOKEN_ALIGNMENT
+        aligned_inclusive = tl.cumsum(aligned, axis=0)
+        aligned_exclusive = aligned_inclusive - aligned
+
+        tl.store(
+            expert_start_ptr + dest * (LOCAL_EXPERTS + 1) + expert_idx,
+            aligned_exclusive.to(tl.int32),
+        )
+        tl.store(
+            expert_start_ptr + dest * (LOCAL_EXPERTS + 1) + LOCAL_EXPERTS,
+            tl.sum(aligned).to(tl.int32),
+        )
+
+        counts_inclusive = tl.cumsum(counts, axis=0)
+        tl.store(
+            offsets_ptr
+            + dest * (LOCAL_EXPERTS * (EP_SIZE + 1))
+            + expert_idx * (EP_SIZE + 1),
+            aligned_exclusive.to(tl.int32),
+        )
+        tl.store(
+            offsets_ptr
+            + dest * (LOCAL_EXPERTS * (EP_SIZE + 1))
+            + expert_idx[None, :] * (EP_SIZE + 1)
+            + (src_idx[:, None] + 1),
+            (aligned_exclusive[None, :] + counts_inclusive).to(tl.int32),
+        )
+
+    @triton.jit
+    def _compute_dest_offsets_kernel(
+        topk_idx_ptr,
+        recv_ofs_ptr,
+        recv_ofs_stride,
+        dest_offsets_ptr,
+        batch,
+        TOPK: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        expert = tl.program_id(0)
+        flat_offsets = tl.arange(0, BLOCK)
+        total = batch * TOPK
+        base = tl.load(recv_ofs_ptr + expert * recv_ofs_stride).to(tl.int64)
+        count = tl.zeros([], dtype=tl.int64)
+
+        for flat_begin in range(0, total, BLOCK):
+            flat_idx = flat_begin + flat_offsets
+            valid = flat_idx < total
+            routed_expert = tl.load(topk_idx_ptr + flat_idx, mask=valid, other=-1)
+            is_mine = (routed_expert == expert) & valid
+            match = is_mine.to(tl.int64)  # pyrefly: ignore[missing-attribute]
+            inclusive = tl.cumsum(match, axis=0)
+            exclusive = inclusive - match
+
+            tl.store(
+                dest_offsets_ptr + flat_idx,
+                base + count + exclusive,
+                mask=is_mine,
+            )
+            count += tl.sum(match)
 
     @triton.jit
     def _swiglu_forward_kernel(
@@ -625,6 +789,8 @@ def _register_ep_backend_ops() -> None:
     _barrier_arrive_kernel_untyped = cast(Any, _barrier_arrive_kernel)
     _barrier_wait_kernel_untyped = cast(Any, _barrier_wait_kernel)
     _ep_allgather_kernel_untyped = cast(Any, _ep_allgather_kernel)
+    _compute_expert_offsets_kernel_untyped = cast(Any, _compute_expert_offsets_kernel)
+    _compute_dest_offsets_kernel_untyped = cast(Any, _compute_dest_offsets_kernel)
     _swiglu_forward_kernel_untyped = cast(Any, _swiglu_forward_kernel)
     _swiglu_backward_kernel_untyped = cast(Any, _swiglu_backward_kernel)
     _weighted_sum_forward_kernel_untyped = cast(Any, _weighted_sum_forward_kernel)
@@ -686,6 +852,177 @@ def _register_ep_backend_ops() -> None:
                 ep_rank,
                 input_num_bytes=input_u8.numel(),
                 num_warps=1,
+            )
+
+    if not hasattr(torch.ops.inductor, "flex_ep_router_compute_all_expert_offsets"):
+
+        @torch.library.custom_op(
+            "inductor::flex_ep_router_compute_all_expert_offsets",
+            mutates_args=(),
+        )
+        def _flex_ep_router_compute_all_expert_offsets(
+            all_expert_counts: torch.Tensor,
+            ep_rank: int,
+            local_experts: int,
+            token_alignment: int,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            if all_expert_counts.dim() != 2:
+                raise ValueError(
+                    "flex_ep_router_compute_all_expert_offsets expects "
+                    f"[ep_size, num_experts], got {all_expert_counts.shape}."
+                )
+            ep_size, num_experts = all_expert_counts.shape
+            if local_experts <= 0 or num_experts != ep_size * local_experts:
+                raise ValueError(
+                    "flex_ep_router_compute_all_expert_offsets expects "
+                    f"num_experts == ep_size * local_experts, got "
+                    f"{num_experts=} {ep_size=} {local_experts=}."
+                )
+            if not 0 <= ep_rank < ep_size:
+                raise ValueError(f"ep_rank must be in [0, {ep_size}), got {ep_rank}.")
+            if (
+                all_expert_counts.device.type != "cuda"
+                or all_expert_counts.dtype != torch.int64
+                or not all_expert_counts.is_contiguous()
+                or not _is_power_of_2(ep_size)
+                or not _is_power_of_2(local_experts)
+            ):
+                return _compute_all_expert_offsets_reference(
+                    all_expert_counts,
+                    ep_rank,
+                    local_experts,
+                    token_alignment,
+                )
+
+            offsets = torch.empty(
+                (ep_size, local_experts, ep_size + 1),
+                dtype=torch.int32,
+                device=all_expert_counts.device,
+            )
+            expert_start = torch.empty(
+                (ep_size, local_experts + 1),
+                dtype=torch.int32,
+                device=all_expert_counts.device,
+            )
+            grand_total = torch.empty(
+                (ep_size,),
+                dtype=torch.int64,
+                device=all_expert_counts.device,
+            )
+            _compute_expert_offsets_kernel_untyped[(ep_size,)](
+                all_expert_counts,
+                offsets,
+                expert_start,
+                grand_total,
+                LOCAL_EXPERTS=local_experts,
+                EP_SIZE=ep_size,
+                TOKEN_ALIGNMENT=token_alignment,
+                num_warps=4,
+            )
+            return offsets, grand_total[ep_rank].clone(), expert_start[ep_rank].clone()
+
+        @_flex_ep_router_compute_all_expert_offsets.register_fake
+        def _flex_ep_router_compute_all_expert_offsets_fake(
+            all_expert_counts: torch.Tensor,
+            ep_rank: int,
+            local_experts: int,
+            token_alignment: int,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            del ep_rank, token_alignment
+            ep_size = all_expert_counts.shape[0]
+            return (
+                torch.empty(
+                    (ep_size, local_experts, ep_size + 1),
+                    dtype=torch.int32,
+                    device=all_expert_counts.device,
+                ),
+                torch.empty((), dtype=torch.int64, device=all_expert_counts.device),
+                torch.empty(
+                    (local_experts + 1,),
+                    dtype=torch.int32,
+                    device=all_expert_counts.device,
+                ),
+            )
+
+    if not hasattr(torch.ops.inductor, "flex_ep_router_compute_dest_offsets"):
+
+        @torch.library.custom_op(
+            "inductor::flex_ep_router_compute_dest_offsets",
+            mutates_args=(),
+        )
+        def _flex_ep_router_compute_dest_offsets(
+            topk_idx: torch.Tensor,
+            recv_ofs: torch.Tensor,
+            ep_size: int,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            if topk_idx.dim() != 2 or recv_ofs.dim() != 1:
+                raise ValueError(
+                    "flex_ep_router_compute_dest_offsets expects topk_idx [batch, top_k] "
+                    f"and recv_ofs [num_experts], got {topk_idx.shape} and {recv_ofs.shape}."
+                )
+            if ep_size <= 0 or recv_ofs.numel() % ep_size != 0:
+                raise ValueError(
+                    "flex_ep_router_compute_dest_offsets expects num_experts "
+                    f"to be divisible by ep_size, got num_experts={recv_ofs.numel()} "
+                    f"and {ep_size=}."
+                )
+            if topk_idx.dtype not in (torch.int32, torch.int64):
+                raise ValueError(
+                    "flex_ep_router_compute_dest_offsets expects int32 or int64 topk_idx."
+                )
+            if recv_ofs.dtype not in (torch.int32, torch.int64):
+                raise ValueError(
+                    "flex_ep_router_compute_dest_offsets expects int32 or int64 recv_ofs."
+                )
+
+            batch, top_k = topk_idx.shape
+            num_experts = recv_ofs.numel()
+            local_experts = num_experts // ep_size
+            if topk_idx.numel() == 0:
+                return (
+                    torch.empty_like(topk_idx, dtype=torch.int32),
+                    torch.empty_like(topk_idx, dtype=torch.int64),
+                )
+            if (
+                topk_idx.device.type != "cuda"
+                or not topk_idx.is_contiguous()
+                or not _is_power_of_2(num_experts)
+            ):
+                return _compute_dest_offsets_reference(topk_idx, recv_ofs, ep_size)
+
+            dest_ranks = torch.div(
+                topk_idx,
+                local_experts,
+                rounding_mode="floor",
+            ).to(torch.int32)
+            dest_offsets = torch.empty(
+                topk_idx.shape,
+                dtype=torch.int64,
+                device=topk_idx.device,
+            )
+            block = 512
+            _compute_dest_offsets_kernel_untyped[(num_experts,)](
+                topk_idx,
+                recv_ofs,
+                recv_ofs.stride(0),
+                dest_offsets,
+                batch,
+                TOPK=top_k,
+                BLOCK=block,
+                num_warps=4,
+            )
+            return dest_ranks, dest_offsets
+
+        @_flex_ep_router_compute_dest_offsets.register_fake
+        def _flex_ep_router_compute_dest_offsets_fake(
+            topk_idx: torch.Tensor,
+            recv_ofs: torch.Tensor,
+            ep_size: int,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            del recv_ofs, ep_size
+            return (
+                torch.empty_like(topk_idx, dtype=torch.int32),
+                torch.empty_like(topk_idx, dtype=torch.int64),
             )
 
     if not hasattr(torch.ops.inductor, "flex_ep_swiglu_forward"):
@@ -1157,7 +1494,15 @@ def _align_up(x: int, alignment: int) -> int:
     return ((x + alignment - 1) // alignment) * alignment
 
 
-def _compute_max_tokens_recv(
+def _validate_flex_ep_capacity_factor(capacity_factor: float) -> float:
+    if not 0 < capacity_factor <= 1.0:
+        raise ValueError(
+            "FlexEP capacity factor must satisfy 0 < capacity_factor <= 1.0."
+        )
+    return float(capacity_factor)
+
+
+def _compute_balanced_max_tokens_recv(
     max_tokens: int,
     ep_size: int,
     num_experts: int,
@@ -1171,14 +1516,79 @@ def _compute_max_tokens_recv(
     return capacity_per_local_expert * local_experts
 
 
-def _validate_balanced_routing_capacity(
+def _compute_capacity_factor_max_tokens_recv(
+    max_tokens: int,
+    ep_size: int,
+    num_experts: int,
+    top_k: int,
+    capacity_factor: float,
+) -> int:
+    capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
+    local_experts = num_experts // ep_size
+    max_unaligned_tokens = math.ceil(
+        max_tokens * ep_size * min(local_experts, top_k) * capacity_factor
+    )
+    return (
+        _align_up(max_unaligned_tokens, TOKEN_ALIGNMENT)
+        + TOKEN_ALIGNMENT * local_experts
+    )
+
+
+def _compute_flex_ep_max_tokens_recv(
+    max_tokens: int,
+    ep_size: int,
+    num_experts: int,
+    top_k: int,
+    *,
+    capacity_factor: float,
+    debug_force_load_balance: bool,
+) -> int:
+    capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
+    if debug_force_load_balance:
+        return _compute_balanced_max_tokens_recv(
+            max_tokens,
+            ep_size,
+            num_experts,
+            top_k,
+        )
+    return _compute_capacity_factor_max_tokens_recv(
+        max_tokens,
+        ep_size,
+        num_experts,
+        top_k,
+        capacity_factor,
+    )
+
+
+def _compute_max_tokens_recv(
+    max_tokens: int,
+    ep_size: int,
+    num_experts: int,
+    top_k: int,
+    *,
+    capacity_factor: float = 1.0,
+    debug_force_load_balance: bool = True,
+) -> int:
+    return _compute_flex_ep_max_tokens_recv(
+        max_tokens,
+        ep_size,
+        num_experts,
+        top_k,
+        capacity_factor=capacity_factor,
+        debug_force_load_balance=debug_force_load_balance,
+    )
+
+
+def _validate_flex_ep_capacity(
     local_experts_start: torch.Tensor,
     max_recv_tokens: int,
+    *,
+    capacity_factor: float,
 ) -> None:
     error_msg = (
-        "FlexGroupedExperts flex_ep workspace capacity was exceeded. "
-        "This v1 path requires balanced routing; pass "
-        "--debug.moe_force_load_balance for DeepSeekV3 FlexEP testing. "
+        "FlexGroupedExperts flex_ep receive workspace capacity was exceeded. "
+        f"Receive workspace capacity is {max_recv_tokens}; increase the FlexEP "
+        f"capacity factor (currently {capacity_factor}) up to 1.0."
     )
     if local_experts_start.is_cuda:
         # Avoid a host sync in the hot path. The CPU branch below keeps the
@@ -1191,11 +1601,7 @@ def _validate_balanced_routing_capacity(
 
     num_recv_tokens = int(local_experts_start[-1].item())
     if num_recv_tokens > max_recv_tokens:
-        raise ValueError(
-            error_msg
-            + f"Received {num_recv_tokens} local expert tokens, but the balanced "
-            f"workspace capacity is {max_recv_tokens}."
-        )
+        raise ValueError(f"{error_msg} Received {num_recv_tokens} local expert tokens.")
 
 
 @dataclass(frozen=True)
@@ -1261,7 +1667,7 @@ def _compute_balanced_routing_metadata(
         )
 
     local_experts = num_experts // ep_size
-    max_recv_tokens = _compute_max_tokens_recv(
+    max_recv_tokens = _compute_balanced_max_tokens_recv(
         max_tokens,
         ep_size,
         num_experts,
@@ -1292,7 +1698,11 @@ def _compute_balanced_routing_metadata(
         + counts_by_dest[ep_rank].unsqueeze(1) * source_ranks
     ).to(torch.int32)
     local_experts_start = starts_by_dest[ep_rank].to(torch.int32)
-    _validate_balanced_routing_capacity(local_experts_start, max_recv_tokens)
+    _validate_flex_ep_capacity(
+        local_experts_start,
+        max_recv_tokens,
+        capacity_factor=1.0,
+    )
 
     total_copies = max_tokens * top_k
     copy_ids = torch.arange(total_copies, dtype=torch.int64, device=device)
@@ -1416,17 +1826,21 @@ class NvlSharedBuffer:
         ep_size: int,
         num_experts: int,
         top_k: int,
+        capacity_factor: float = 1.0,
+        debug_force_load_balance: bool = False,
     ) -> tuple[tuple[str, tuple[int, ...], torch.dtype], ...]:
         if num_experts % ep_size != 0:
             raise ValueError(
                 f"num_experts ({num_experts}) must be divisible by ep_size "
                 f"({ep_size})."
             )
-        max_tokens_received = _compute_max_tokens_recv(
+        max_tokens_received = _compute_flex_ep_max_tokens_recv(
             max_tokens,
             ep_size,
             num_experts,
             top_k,
+            capacity_factor=capacity_factor,
+            debug_force_load_balance=debug_force_load_balance,
         )
         dispatch_recv_weights_numel = _compute_dispatch_recv_weights_numel(
             max_tokens,
@@ -1505,7 +1919,7 @@ class NvlSharedBuffer:
         return getattr(self, name).data_ptr() - self.raw.data_ptr()
 
 
-_WorkspaceCacheKey = tuple[str, int | None, int | None, int, int]
+_WorkspaceCacheKey = tuple[str, int | None, int | None, int, int, bool, float]
 _FLEX_EP_WORKSPACE_CACHE: dict[_WorkspaceCacheKey, "FlexEPWorkspace"] = {}
 
 
@@ -1530,7 +1944,7 @@ class FlexEPWorkspace:
     raw: torch.Tensor
     peer_buffers: tuple[torch.Tensor, ...]
     buffers_cuda_ptrs: torch.Tensor
-    _views: dict[tuple[int, int, int, int, int], NvlSharedBuffer] = field(
+    _views: dict[tuple[int, int, int, int, int, bool, float], NvlSharedBuffer] = field(
         default_factory=dict
     )
 
@@ -1544,7 +1958,10 @@ class FlexEPWorkspace:
         top_k: int,
         device: torch.device,
         ep_mesh: DeviceMesh | None,
+        capacity_factor: float,
+        debug_force_load_balance: bool,
     ) -> "FlexEPWorkspace":
+        capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         ep_size = 1 if ep_mesh is None else ep_mesh.size()
         ep_rank = 0 if ep_mesh is None else ep_mesh.get_local_rank()
         if num_experts % ep_size != 0:
@@ -1562,13 +1979,23 @@ class FlexEPWorkspace:
             ep_group_key = id(ep_group)
         device = torch.device(device)
         device_type, device_index = _device_cache_key(device)
-        cache_key = (device_type, device_index, ep_group_key, ep_rank, ep_size)
+        cache_key = (
+            device_type,
+            device_index,
+            ep_group_key,
+            ep_rank,
+            ep_size,
+            debug_force_load_balance,
+            capacity_factor,
+        )
         nvl_buffer_size = NvlSharedBuffer.get_buffer_size_bytes(
             max_tokens=max_tokens,
             dim=dim,
             ep_size=ep_size,
             num_experts=num_experts,
             top_k=top_k,
+            capacity_factor=capacity_factor,
+            debug_force_load_balance=debug_force_load_balance,
         )
         workspace = _FLEX_EP_WORKSPACE_CACHE.get(cache_key)
         if workspace is None:
@@ -1580,6 +2007,8 @@ class FlexEPWorkspace:
                 ep_rank=ep_rank,
                 num_experts=num_experts,
                 top_k=top_k,
+                capacity_factor=capacity_factor,
+                debug_force_load_balance=debug_force_load_balance,
                 device=device,
                 ep_group=ep_group,
             )
@@ -1591,6 +2020,8 @@ class FlexEPWorkspace:
                 dim=dim,
                 num_experts=num_experts,
                 top_k=top_k,
+                capacity_factor=capacity_factor,
+                debug_force_load_balance=debug_force_load_balance,
                 ep_group=ep_group,
             )
         return workspace
@@ -1606,6 +2037,8 @@ class FlexEPWorkspace:
         ep_rank: int,
         num_experts: int,
         top_k: int,
+        capacity_factor: float,
+        debug_force_load_balance: bool,
         device: torch.device,
         ep_group: Any,
     ) -> "FlexEPWorkspace":
@@ -1630,6 +2063,8 @@ class FlexEPWorkspace:
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
+            capacity_factor=capacity_factor,
+            debug_force_load_balance=debug_force_load_balance,
         )
         return workspace
 
@@ -1641,6 +2076,8 @@ class FlexEPWorkspace:
         dim: int,
         num_experts: int,
         top_k: int,
+        capacity_factor: float,
+        debug_force_load_balance: bool,
         ep_group: Any,
     ) -> None:
         raw, peer_buffers, buffers_cuda_ptrs = _allocate_workspace_storage(
@@ -1660,6 +2097,8 @@ class FlexEPWorkspace:
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
+            capacity_factor=capacity_factor,
+            debug_force_load_balance=debug_force_load_balance,
         )
 
     def _log_allocation(
@@ -1670,21 +2109,23 @@ class FlexEPWorkspace:
         dim: int,
         num_experts: int,
         top_k: int,
+        capacity_factor: float,
+        debug_force_load_balance: bool,
     ) -> None:
         local_experts = num_experts // self.ep_size
-        capacity_per_local_expert = (
-            _compute_max_tokens_recv(
-                max_tokens,
-                self.ep_size,
-                num_experts,
-                top_k,
-            )
-            // local_experts
+        max_recv_tokens = _compute_flex_ep_max_tokens_recv(
+            max_tokens,
+            self.ep_size,
+            num_experts,
+            top_k,
+            capacity_factor=capacity_factor,
+            debug_force_load_balance=debug_force_load_balance,
         )
         logger.info(
             "Allocated FlexEP workspace: size_bytes=%s device=%s ep_rank=%s "
             "ep_size=%s max_tokens=%s dim=%s num_experts=%s top_k=%s "
-            "local_experts=%s balanced_capacity_per_local_expert=%s",
+            "local_experts=%s capacity_mode=%s capacity_factor=%s "
+            "max_recv_tokens=%s",
             nvl_buffer_size,
             self.device,
             self.ep_rank,
@@ -1694,7 +2135,9 @@ class FlexEPWorkspace:
             num_experts,
             top_k,
             local_experts,
-            capacity_per_local_expert,
+            "balanced" if debug_force_load_balance else "factor",
+            capacity_factor,
+            max_recv_tokens,
         )
 
     def view(
@@ -1704,8 +2147,19 @@ class FlexEPWorkspace:
         dim: int,
         num_experts: int,
         top_k: int,
+        capacity_factor: float,
+        debug_force_load_balance: bool,
     ) -> NvlSharedBuffer:
-        view_key = (max_tokens, dim, self.ep_size, num_experts, top_k)
+        capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
+        view_key = (
+            max_tokens,
+            dim,
+            self.ep_size,
+            num_experts,
+            top_k,
+            debug_force_load_balance,
+            capacity_factor,
+        )
         view = self._views.get(view_key)
         if view is None:
             view = NvlSharedBuffer.view_from_buffer(
@@ -1715,6 +2169,8 @@ class FlexEPWorkspace:
                 ep_size=self.ep_size,
                 num_experts=num_experts,
                 top_k=top_k,
+                capacity_factor=capacity_factor,
+                debug_force_load_balance=debug_force_load_balance,
             )
             self._views[view_key] = view
         return view
@@ -1781,6 +2237,7 @@ def _allocate_workspace_storage(
         ep_size=ep_size,
         num_experts=ep_size,
         top_k=1,
+        debug_force_load_balance=True,
     )
     buffer.barrier_counter.zero_()
     buffers_cuda_ptrs = torch.tensor(
@@ -1940,7 +2397,9 @@ class FlexEPRouter:
         workspace: FlexEPWorkspace,
         num_ctas: int = DEFAULT_NUM_CTAS,
         debug_force_load_balance: bool = False,
+        capacity_factor: float = 1.0,
     ) -> None:
+        capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         self.max_tokens = max_tokens
         self.dim = dim
         self.num_experts = num_experts
@@ -1950,6 +2409,7 @@ class FlexEPRouter:
         self.num_ctas = num_ctas
         self.workspace = workspace
         self.debug_force_load_balance = debug_force_load_balance
+        self.capacity_factor = capacity_factor
         self._balanced_metadata = (
             _get_or_create_balanced_routing_metadata(
                 max_tokens=max_tokens,
@@ -1988,8 +2448,10 @@ class FlexEPRouter:
         ep_mesh: DeviceMesh | None,
         num_ctas: int = DEFAULT_NUM_CTAS,
         debug_force_load_balance: bool = False,
+        capacity_factor: float = 1.0,
     ) -> "FlexEPRouter":
         _ensure_flex_ep_imported()
+        capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         ep_size = 1 if ep_mesh is None else ep_mesh.size()
         ep_rank = 0 if ep_mesh is None else ep_mesh.get_local_rank()
         workspace = FlexEPWorkspace.get_or_create(
@@ -1999,6 +2461,8 @@ class FlexEPRouter:
             top_k=top_k,
             device=device,
             ep_mesh=ep_mesh,
+            capacity_factor=capacity_factor,
+            debug_force_load_balance=debug_force_load_balance,
         )
         return cls(
             max_tokens=max_tokens,
@@ -2010,6 +2474,7 @@ class FlexEPRouter:
             workspace=workspace,
             num_ctas=num_ctas,
             debug_force_load_balance=debug_force_load_balance,
+            capacity_factor=capacity_factor,
         )
 
     @property
@@ -2019,6 +2484,8 @@ class FlexEPRouter:
             dim=self.dim,
             num_experts=self.num_experts,
             top_k=self.top_k,
+            capacity_factor=self.capacity_factor,
+            debug_force_load_balance=self.debug_force_load_balance,
         )
         return (
             self.workspace.raw,
@@ -2043,15 +2510,19 @@ class FlexEPRouter:
             ep_size=self.ep_size,
             num_experts=self.num_experts,
             top_k=self.top_k,
+            capacity_factor=self.capacity_factor,
+            debug_force_load_balance=self.debug_force_load_balance,
         )
 
     def _make_router_fns(self) -> RouterFns:
         local_experts = self.num_experts // self.ep_size
-        max_recv_tokens = _compute_max_tokens_recv(
+        max_recv_tokens = _compute_flex_ep_max_tokens_recv(
             self.max_tokens,
             self.ep_size,
             self.num_experts,
             self.top_k,
+            capacity_factor=self.capacity_factor,
+            debug_force_load_balance=self.debug_force_load_balance,
         )
 
         def dispatch_fn(
@@ -2123,8 +2594,8 @@ class FlexEPRouter:
                 )
                 recv_x_u8 = torch.ops._flex_ep.zfill_ranges_inplace(
                     recv_x.view(torch.uint8),
-                    metadata.expert_begin_offset[:, -1],
-                    metadata.local_experts_start[1:],
+                    metadata.expert_begin_offset[:, -1].contiguous(),
+                    metadata.local_experts_start[1:].contiguous(),
                     TOKEN_ALIGNMENT,
                 )
                 recv_x = recv_x_u8.view(recv_x.dtype).view(recv_x.shape)
@@ -2196,9 +2667,10 @@ class FlexEPRouter:
                 local_experts,
                 TOKEN_ALIGNMENT,
             )
-            _validate_balanced_routing_capacity(
+            _validate_flex_ep_capacity(
                 local_experts_start,
                 max_recv_tokens,
+                capacity_factor=self.capacity_factor,
             )
             expert_begin_offset = all_offsets[ep_rank]
             recv_ofs = all_offsets[:, :, ep_rank].reshape(-1)
@@ -2244,8 +2716,8 @@ class FlexEPRouter:
             )
             recv_x_u8 = torch.ops._flex_ep.zfill_ranges_inplace(
                 recv_x.view(torch.uint8),
-                expert_begin_offset[:, -1],
-                local_experts_start[1:],
+                expert_begin_offset[:, -1].contiguous(),
+                local_experts_start[1:].contiguous(),
                 TOKEN_ALIGNMENT,
             )
             recv_x = recv_x_u8.view(recv_x.dtype).view(recv_x.shape)
@@ -2502,8 +2974,8 @@ class FlexEPRouter:
             )
             dy3_u8 = torch.ops._flex_ep.zfill_ranges_inplace(
                 dy3.view(torch.uint8),
-                expert_begin_offset_per_ep[:, -1],
-                local_experts_start[1:],
+                expert_begin_offset_per_ep[:, -1].contiguous(),
+                local_experts_start[1:].contiguous(),
                 TOKEN_ALIGNMENT,
             )
             dy3 = dy3_u8.view(dy3.dtype).view(dy3.shape)

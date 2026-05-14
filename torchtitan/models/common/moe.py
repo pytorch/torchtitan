@@ -164,6 +164,7 @@ class FlexGroupedExperts(Module):
         score_before_experts: bool = False
         use_grouped_mm: bool = True
         num_ctas: int = 1024
+        flex_ep_capacity_factor: float = 1.0
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
@@ -175,10 +176,16 @@ class FlexGroupedExperts(Module):
             )
         if not config.use_grouped_mm:
             raise ValueError("FlexGroupedExperts requires grouped GEMM kernels.")
+        if not 0 < config.flex_ep_capacity_factor <= 1.0:
+            raise ValueError(
+                "FlexGroupedExperts flex_ep_capacity_factor must satisfy "
+                "0 < flex_ep_capacity_factor <= 1.0."
+            )
 
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.num_ctas = config.num_ctas
+        self.flex_ep_capacity_factor = config.flex_ep_capacity_factor
         self._debug_force_load_balance = config._debug_force_load_balance
         self.w1 = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
@@ -195,7 +202,9 @@ class FlexGroupedExperts(Module):
         # CUDA buffers are available.
         self.ep_mesh: DeviceMesh | None = None
         self._router: Any | None = None
-        self._router_shape: tuple[int, int, torch.device, int, int, bool] | None = None
+        self._router_shape: tuple[
+            int, int, torch.device, int, int, bool, float
+        ] | None = None
 
     def _get_or_create_router(self, x: torch.Tensor) -> Any:
         if x.device.type != "cuda":
@@ -211,6 +220,7 @@ class FlexGroupedExperts(Module):
             ep_size,
             ep_rank,
             self._debug_force_load_balance,
+            self.flex_ep_capacity_factor,
         )
         if self._router is not None and self._router_shape == router_shape:
             return self._router
@@ -227,6 +237,7 @@ class FlexGroupedExperts(Module):
                 ep_mesh=self.ep_mesh,
                 num_ctas=self.num_ctas,
                 debug_force_load_balance=self._debug_force_load_balance,
+                capacity_factor=self.flex_ep_capacity_factor,
             )
         self._router = router
         self._router_shape = router_shape
