@@ -33,7 +33,7 @@ class TestFlexShardEagerRuntime(TestCase):
         with single_rank_cuda_mesh() as mesh:
             _, model = flex_shard_transformer_model(mesh)
 
-            with self.assertRaisesRegex(RuntimeError, "pre-gathered parameter data"):
+            with self.assertRaisesRegex(RuntimeError, "bucket unshard hook"):
                 _ = model.output.weight
 
     def test_torch_compile_forward_backward_on_cuda_mesh(self):

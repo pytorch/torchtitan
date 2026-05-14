@@ -40,6 +40,7 @@ from torchtitan.experiments.flex_shard import (
     LocalStorageLayout,
     Placement,
 )
+from torchtitan.experiments.flex_shard.example.owned import Owned
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
     BucketCommContext,
@@ -49,6 +50,7 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
     DStorage,
+    ParamInfo,
 )
 from torchtitan.experiments.flex_shard.flex_shard.param_access import (
     is_flex_shard_param,
@@ -140,8 +142,8 @@ class TestBucketCommScheduling(TestCase):
     def _context_with_reshard_flags(flags: list[bool]) -> BucketCommContext:
         context = BucketCommContext(
             device_handle=ModuleType("dummy_device_handle"),
-            all_gather_stream=cast(torch.Stream, object()),
-            reduce_scatter_stream=cast(torch.Stream, object()),
+            unshard_stream=cast(torch.Stream, object()),
+            reduce_grad_stream=cast(torch.Stream, object()),
         )
         context.buckets = [
             cast(
@@ -154,43 +156,43 @@ class TestBucketCommScheduling(TestCase):
         ]
         return context
 
-    def test_defer_reduce_scatter_for_previous_bucket_backward_all_gather(self):
+    def test_defer_reduce_grad_for_previous_bucket_backward_unshard(self):
         context = self._context_with_reshard_flags([True, True, True])
 
         self.assertFalse(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[0],
             )
         )
         self.assertIs(
-            context.next_backward_all_gather_bucket(context.buckets[1]),
+            context.next_backward_unshard_bucket(context.buckets[1]),
             context.buckets[0],
         )
         self.assertTrue(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[1],
             )
         )
         self.assertIs(
-            context.next_backward_all_gather_bucket(context.buckets[2]),
+            context.next_backward_unshard_bucket(context.buckets[2]),
             context.buckets[1],
         )
         self.assertTrue(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[2],
             )
         )
 
-    def test_reduce_scatter_defer_depends_on_previous_bucket_not_current_bucket(self):
+    def test_reduce_grad_defer_depends_on_previous_bucket_not_current_bucket(self):
         context = self._context_with_reshard_flags([True, False, True])
 
         self.assertTrue(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[1],
             )
         )
         self.assertFalse(
-            context.should_defer_reduce_scatter_for_backward_prefetch(
+            context.should_defer_reduce_grad_for_backward_prefetch(
                 context.buckets[2],
             )
         )
@@ -420,6 +422,43 @@ class TestBucketPlacementValidation(TestCase):
                     [("scalar", nn.Parameter(torch.empty(())))],
                     mesh,
                 )
+
+    def test_rejects_owned_owner_rank_out_of_range(self):
+        """Owned placement owner_rank must be valid for the mesh."""
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_placements,
+        )
+
+        with single_rank_cpu_mesh() as mesh:
+            with self.assertRaisesRegex(ValueError, "owner_rank"):
+                _validate_placements(
+                    {"weight": (Owned(1),)},
+                    [("weight", nn.Parameter(torch.empty(2, 2)))],
+                    mesh,
+                )
+
+    def test_owned_reduce_grad_single_rank(self):
+        """Owned placement can reduce gradients through its placement contract."""
+        with single_rank_cpu_mesh() as mesh:
+            placement = Owned(0)
+            global_shape = torch.Size([2, 2])
+            info = ParamInfo(
+                fqn="weight",
+                global_shape=global_shape,
+                global_stride=(2, 1),
+                dtype=torch.float32,
+                requires_grad=True,
+                placements=(placement,),
+                local_shape=global_shape,
+                local_numel=4,
+                global_numel=4,
+            )
+            grad = torch.ones(global_shape)
+
+            prepared = placement.prepare_reduce_grad([grad], [info], mesh, None)
+            result = placement.reduce_prepared_grad(prepared).sharded_grads[0]
+
+            self.assertEqual(result, grad)
 
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
@@ -687,6 +726,80 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             )
             self.assertEqual(param, expected)
             self.assertEqual(param, storage.get_local_view(fqn))
+
+    def test_owned_materialized_params_match_owner_rank(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+
+        class TinyModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.arange(6, dtype=torch.float32).view(3, 2)
+                )
+
+        def owned_rank0(named_params, mesh):
+            return {fqn: (Owned(0),) for fqn, _ in named_params}
+
+        model = TinyModule()
+        named_params = list(model.named_parameters())
+        placements = {fqn: (Owned(0),) for fqn, _ in named_params}
+        buckets = [
+            BucketSpec(
+                ["*"],
+                shard_placement_fn=owned_rank0,
+                reshard_after_forward=False,
+            )
+        ]
+
+        storages, _ = _materialize_bucket_storages(
+            model,
+            named_params,
+            [[fqn for fqn, _ in named_params]],
+            buckets,
+            placements,
+            mesh,
+            torch.device("cpu"),
+        )
+
+        storage = storages[0]
+        param = dict(model.named_parameters())["weight"]
+        if self.rank == 0:
+            self.assertEqual(param.shape, torch.Size([3, 2]))
+            self.assertEqual(param, named_params[0][1].detach())
+            self.assertEqual(storage.total_bytes, 6 * torch.float32.itemsize)
+        else:
+            self.assertEqual(param.shape, torch.Size([0, 0]))
+            self.assertEqual(param.numel(), 0)
+            self.assertEqual(storage.total_bytes, 0)
+
+    def test_owned_unshard_broadcasts_from_owner(self):
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        placement = Owned(0)
+        info = ParamInfo(
+            fqn="weight",
+            global_shape=torch.Size([2, 2]),
+            global_stride=(2, 1),
+            dtype=torch.float32,
+            requires_grad=True,
+            placements=(placement,),
+            local_shape=placement.compute_local_shape(
+                torch.Size([2, 2]),
+                self.rank,
+                self.world_size,
+            ),
+            local_numel=placement.compute_local_numel(
+                torch.Size([2, 2]),
+                self.rank,
+                self.world_size,
+            ),
+            global_numel=4,
+        )
+        expected = torch.arange(4, dtype=torch.float32).view(2, 2)
+        local = expected.clone() if self.rank == 0 else torch.empty(0)
+
+        result = placement.unshard_bucket([local], [info], mesh, None).full_params[0]
+
+        self.assertEqual(result, expected)
 
 
 # ---------------------------------------------------------------------------
