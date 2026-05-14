@@ -143,7 +143,6 @@ class AsyncUnshardResult(UnshardHandle):
     buffers: list[torch.Tensor]
     event: torch.Event | None
     device_handle: ModuleType
-    debug_fqn: str | None
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
@@ -221,7 +220,6 @@ def begin_bucket_unshard(
         buffers=result.buffers,
         event=event,
         device_handle=device_handle,
-        debug_fqn=debug_fqn,
     )
 
 
@@ -233,7 +231,6 @@ class AsyncReduceGradResult(ReduceGradHandle):
     event: torch.Event | None
     buffers: list[torch.Tensor]
     device_handle: ModuleType
-    debug_fqn: str | None
 
     def finish(self) -> list[torch.Tensor]:
         self.wait()
@@ -366,7 +363,6 @@ def launch_reduce_grad(
         event=event,
         buffers=[*prepared.prepared.buffers, *result.buffers],
         device_handle=prepared.device_handle,
-        debug_fqn=prepared.prepared.debug_fqn,
     )
 
 

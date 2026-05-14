@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import heapq
 import math
-from typing import TYPE_CHECKING
+
+from dataclasses import dataclass
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -28,6 +30,21 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from ..flex_shard.bucket_storage import ParamInfo
+
+
+@dataclass(frozen=True)
+class _OwnedUnshardState:
+    pg: Any
+    debug_fqn: str | None
+
+
+@dataclass(frozen=True)
+class _OwnedReduceGradState:
+    infos: list[ParamInfo]
+    rank: int
+    world_size: int
+    pg: Any
+    debug_fqn: str | None
 
 
 class Owned(Placement):
@@ -124,21 +141,31 @@ class Owned(Placement):
             full_params.append(full_param)
         return PlacementPreparedUnshard(
             placement=self,
-            infos=infos,
-            layout=None,
-            rank=rank,
-            world_size=mesh.size(),
-            pg=mesh.get_group(),
             buffers=full_params,
-            debug_fqn=debug_fqn,
+            placement_state=_OwnedUnshardState(
+                pg=mesh.get_group(),
+                debug_fqn=debug_fqn,
+            ),
         )
 
     @override
     def run_prepared_unshard(self, prepared: PlacementPreparedUnshard) -> None:
         """Broadcast prepared full-parameter buffers from the owner rank."""
+        if not isinstance(prepared.placement_state, _OwnedUnshardState):
+            raise AssertionError(
+                "Expected _OwnedUnshardState, "
+                f"got {type(prepared.placement_state).__name__}"
+            )
         for full_param in prepared.buffers:
-            with _record_comm_if_eager("FlexShard::broadcast", prepared.debug_fqn):
-                dist.broadcast(full_param, src=self.owner_rank, group=prepared.pg)
+            with _record_comm_if_eager(
+                "FlexShard::broadcast",
+                prepared.placement_state.debug_fqn,
+            ):
+                dist.broadcast(
+                    full_param,
+                    src=self.owner_rank,
+                    group=prepared.placement_state.pg,
+                )
 
     @override
     def finish_prepared_unshard(
@@ -162,13 +189,14 @@ class Owned(Placement):
             send_tensors = [tensor.contiguous() for tensor in tensors]
         return PlacementPreparedReduceGrad(
             placement=self,
-            infos=infos,
-            layout=None,
-            rank=mesh.get_local_rank(),
-            world_size=mesh.size(),
-            pg=mesh.get_group(),
             buffers=send_tensors,
-            debug_fqn=debug_fqn,
+            placement_state=_OwnedReduceGradState(
+                infos=infos,
+                rank=mesh.get_local_rank(),
+                world_size=mesh.size(),
+                pg=mesh.get_group(),
+                debug_fqn=debug_fqn,
+            ),
         )
 
     @override
@@ -177,29 +205,37 @@ class Owned(Placement):
         prepared: PlacementPreparedReduceGrad,
     ) -> PlacementReduceGradResult:
         """Reduce full gradients to the owner rank and return local owned grads."""
+        if not isinstance(prepared.placement_state, _OwnedReduceGradState):
+            raise AssertionError(
+                "Expected _OwnedReduceGradState, "
+                f"got {type(prepared.placement_state).__name__}"
+            )
         sharded_grads: list[torch.Tensor] = []
         for send_tensor, info in zip(
             prepared.buffers,
-            prepared.infos,
+            prepared.placement_state.infos,
             strict=True,
         ):
-            with _record_comm_if_eager("FlexShard::reduce", prepared.debug_fqn):
+            with _record_comm_if_eager(
+                "FlexShard::reduce",
+                prepared.placement_state.debug_fqn,
+            ):
                 dist.reduce(
                     send_tensor,
                     dst=self.owner_rank,
                     op=dist.ReduceOp.SUM,
-                    group=prepared.pg,
+                    group=prepared.placement_state.pg,
                 )
-            if prepared.rank == self.owner_rank:
-                send_tensor.div_(prepared.world_size)
+            if prepared.placement_state.rank == self.owner_rank:
+                send_tensor.div_(prepared.placement_state.world_size)
                 sharded_grads.append(send_tensor)
             else:
                 sharded_grads.append(
                     send_tensor.new_empty(
                         self.compute_local_shape(
                             info.global_shape,
-                            prepared.rank,
-                            prepared.world_size,
+                            prepared.placement_state.rank,
+                            prepared.placement_state.world_size,
                         )
                     )
                 )

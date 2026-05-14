@@ -32,16 +32,16 @@ class LocalStorageLayout:
 
 @dataclass
 class PlacementPreparedUnshard:
-    """Placement-owned prepared bucket unshard request."""
+    """Placement-owned prepared bucket unshard request.
+
+    ``buffers`` are tensors whose lifetime the bucket runtime owns.
+    ``placement_state`` is private metadata passed back to the same placement's
+    run/finish methods.
+    """
 
     placement: Placement
-    infos: list[ParamInfo]
-    layout: Any
-    rank: int
-    world_size: int
-    pg: Any
     buffers: list[torch.Tensor]
-    debug_fqn: str | None
+    placement_state: Any
 
 
 @dataclass
@@ -54,16 +54,16 @@ class PlacementUnshardResult:
 
 @dataclass
 class PlacementPreparedReduceGrad:
-    """Placement-owned packed gradient reduction request."""
+    """Placement-owned packed gradient reduction request.
+
+    ``buffers`` are tensors whose lifetime the bucket runtime owns.
+    ``placement_state`` is private metadata passed back to the same placement's
+    reduce method.
+    """
 
     placement: Placement
-    infos: list[ParamInfo]
-    layout: Any
-    rank: int
-    world_size: int
-    pg: Any
     buffers: list[torch.Tensor]
-    debug_fqn: str | None
+    placement_state: Any
 
 
 @dataclass
@@ -75,8 +75,22 @@ class PlacementReduceGradResult:
 
 
 @dataclass(frozen=True)
-class _AllGatherUnshardLayout:
+class _AllGatherUnshardState:
+    infos: list[ParamInfo]
+    world_size: int
+    pg: Any
+    debug_fqn: str | None
     per_rank_param_offsets: list[list[int]]
+
+
+@dataclass(frozen=True)
+class _ReduceScatterGradState:
+    infos: list[ParamInfo]
+    layout: Any
+    rank: int
+    world_size: int
+    pg: Any
+    debug_fqn: str | None
 
 
 class Placement:
@@ -226,13 +240,14 @@ class Placement:
 
         return PlacementPreparedUnshard(
             placement=self,
-            infos=infos,
-            layout=_AllGatherUnshardLayout(per_rank_param_offsets),
-            rank=mesh.get_local_rank(),
-            world_size=ws,
-            pg=pg,
             buffers=[send_buf, *gathered],
-            debug_fqn=debug_fqn,
+            placement_state=_AllGatherUnshardState(
+                infos=infos,
+                world_size=ws,
+                pg=pg,
+                debug_fqn=debug_fqn,
+                per_rank_param_offsets=per_rank_param_offsets,
+            ),
         )
 
     def run_prepared_unshard(
@@ -240,42 +255,51 @@ class Placement:
         prepared: PlacementPreparedUnshard,
     ) -> None:
         """Launch the placement's prepared unshard collective."""
+        if not isinstance(prepared.placement_state, _AllGatherUnshardState):
+            raise AssertionError(
+                "Expected _AllGatherUnshardState, "
+                f"got {type(prepared.placement_state).__name__}"
+            )
         send_buf = prepared.buffers[0]
         gathered = prepared.buffers[1:]
-        with _record_comm_if_eager("FlexShard::all_gather", prepared.debug_fqn):
-            dist.all_gather(gathered, send_buf, group=prepared.pg)
+        with _record_comm_if_eager(
+            "FlexShard::all_gather",
+            prepared.placement_state.debug_fqn,
+        ):
+            dist.all_gather(gathered, send_buf, group=prepared.placement_state.pg)
 
     def finish_prepared_unshard(
         self,
         prepared: PlacementPreparedUnshard,
     ) -> PlacementUnshardResult:
         """Finish the prepared unshard and return full parameters."""
-        if not isinstance(prepared.layout, _AllGatherUnshardLayout):
+        if not isinstance(prepared.placement_state, _AllGatherUnshardState):
             raise AssertionError(
-                f"Expected _AllGatherUnshardLayout, got {type(prepared.layout).__name__}"
+                "Expected _AllGatherUnshardState, "
+                f"got {type(prepared.placement_state).__name__}"
             )
         gathered = prepared.buffers[1:]
         device = prepared.buffers[0].device
         with _record_function_if_eager(
             "FlexShard::all_gather_copy_out",
-            prepared.debug_fqn,
+            prepared.placement_state.debug_fqn,
         ):
             full_params = []
-            for i, info in enumerate(prepared.infos):
+            for i, info in enumerate(prepared.placement_state.infos):
                 per_rank_shards: list[torch.Tensor] = []
-                for r in range(prepared.world_size):
+                for r in range(prepared.placement_state.world_size):
                     numel = self.compute_local_numel(
                         info.global_shape,
                         r,
-                        prepared.world_size,
+                        prepared.placement_state.world_size,
                     )
                     shape = self.compute_local_shape(
                         info.global_shape,
                         r,
-                        prepared.world_size,
+                        prepared.placement_state.world_size,
                     )
                     if numel > 0:
-                        offset = prepared.layout.per_rank_param_offsets[r][i]
+                        offset = prepared.placement_state.per_rank_param_offsets[r][i]
                         per_rank_shards.append(
                             gathered[r][offset : offset + numel].view(shape)
                         )
@@ -312,13 +336,15 @@ class Placement:
                 )
         return PlacementPreparedReduceGrad(
             placement=self,
-            infos=infos,
-            layout=layout,
-            rank=rank,
-            world_size=ws,
-            pg=pg,
             buffers=[send_buf],
-            debug_fqn=debug_fqn,
+            placement_state=_ReduceScatterGradState(
+                infos=infos,
+                layout=layout,
+                rank=rank,
+                world_size=ws,
+                pg=pg,
+                debug_fqn=debug_fqn,
+            ),
         )
 
     def reduce_prepared_grad(
@@ -326,13 +352,21 @@ class Placement:
         prepared: PlacementPreparedReduceGrad,
     ) -> PlacementReduceGradResult:
         """Reduce a prepared gradient request using reduce-scatter."""
+        if not isinstance(prepared.placement_state, _ReduceScatterGradState):
+            raise AssertionError(
+                "Expected _ReduceScatterGradState, "
+                f"got {type(prepared.placement_state).__name__}"
+            )
         send_buf = prepared.buffers[0]
         recv_buf = torch.empty(
-            send_buf.numel() // prepared.world_size,
+            send_buf.numel() // prepared.placement_state.world_size,
             dtype=send_buf.dtype,
             device=send_buf.device,
         )
-        with _record_comm_if_eager("FlexShard::reduce_scatter", prepared.debug_fqn):
+        with _record_comm_if_eager(
+            "FlexShard::reduce_scatter",
+            prepared.placement_state.debug_fqn,
+        ):
             # TODO: Plumb the reduction/scaling policy from SPMD gradient semantics.
             # AVG is a convenient default, but delayed grad scaling may need SUM
             # plus an explicit scale at a different point in the training step.
@@ -340,18 +374,18 @@ class Placement:
                 output=recv_buf,
                 input=send_buf,
                 op=dist.ReduceOp.AVG,
-                group=prepared.pg,
+                group=prepared.placement_state.pg,
             )
         with _record_function_if_eager(
             "FlexShard::reduce_scatter_copy_out",
-            prepared.debug_fqn,
+            prepared.placement_state.debug_fqn,
         ):
             sharded_grads = self.unpack_reduced_grad(
                 recv_buf,
-                prepared.infos,
-                prepared.layout,
-                prepared.rank,
-                prepared.world_size,
+                prepared.placement_state.infos,
+                prepared.placement_state.layout,
+                prepared.placement_state.rank,
+                prepared.placement_state.world_size,
             )
         return PlacementReduceGradResult(sharded_grads, [recv_buf])
 
