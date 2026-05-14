@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,12 @@ if TYPE_CHECKING:
 
     from .placement_contract import Placement
     from .reshard_after_forward import _ReshardAfterForwardRecomputeState
+
+
+PlacementFn = Callable[
+    [list[tuple[str, nn.Parameter]], "DeviceMesh"],
+    dict[str, tuple["Placement", ...]],
+]
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,9 @@ class BucketSpec:
     Args:
         patterns: fnmatch glob patterns matched against parameter FQNs.
             A parameter matches this bucket if its FQN matches any pattern.
+        shard_placement_fn: Required callable that maps this bucket's
+            ``(named_params, mesh)`` to per-parameter placements.
+            The minimal eager path expects one ``Placement`` per parameter.
         mp_policy: Mixed precision policy for this bucket. This currently
             covers parameter and gradient-reduction dtypes only.
             TODO: add module-boundary input/output casting separately from
@@ -81,6 +91,7 @@ class BucketSpec:
     """
 
     patterns: list[str]
+    shard_placement_fn: PlacementFn
     mp_policy: MixedPrecisionPolicy | None = None
     offload_policy: OffloadPolicy | None = None
     reshard_after_forward: bool = True
