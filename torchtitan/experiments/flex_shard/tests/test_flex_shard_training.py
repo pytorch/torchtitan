@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import importlib
+from unittest import mock
 
 import torch
 import torch.distributed as dist
@@ -37,6 +39,10 @@ from torchtitan.experiments.flex_shard.tests.common import (
 
 
 device_type = torch.device(get_devtype())
+bucket_runtime_module = importlib.import_module(
+    "torchtitan.experiments.flex_shard.flex_shard.bucket_runtime"
+)
+ROOT_REST_BUCKET_FQN = "norm, output, pos_embeddings, tok_embeddings"
 
 
 def _init_params_deterministically(model: torch.nn.Module) -> None:
@@ -273,7 +279,7 @@ class TestFlexShardTraining(FSDPTest):
         check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
 
     @skip_if_lt_x_gpu(2)
-    def test_reshard_after_forward_grouped_root_rest_bucket_unsupported(self):
+    def test_reshard_after_forward_grouped_root_rest_bucket(self):
         mesh = init_device_mesh(
             device_type.type,
             (self.world_size,),
@@ -281,18 +287,71 @@ class TestFlexShardTraining(FSDPTest):
         )
 
         args, model = make_transformer_model(device=device_type.type, n_layers=2)
+        _init_params_deterministically(model)
+        reference = copy.deepcopy(model)
         _checkpoint_transformer_execution_units(model)
+        _checkpoint_transformer_execution_units(reference)
 
-        with self.assertRaisesRegex(RuntimeError, "recomputation-safe"):
-            flex_shard(
-                model,
-                mesh,
-                shard_placement_fn=per_param_placements,
-                buckets=_layer_buckets_with_grouped_root_rest(
-                    args.n_layers,
-                    reshard_after_forward=True,
-                ),
-            )
+        flex_shard(
+            model,
+            mesh,
+            shard_placement_fn=per_param_placements,
+            buckets=_layer_buckets_with_grouped_root_rest(
+                args.n_layers,
+                reshard_after_forward=True,
+            ),
+        )
+
+        torch.manual_seed(42 + self.rank + 1)
+        x = transformer_inputs(args, batch_size=3, device=device_type)
+        optim = torch.optim.SGD(model.parameters(), lr=0.1)
+        ref_optim = torch.optim.SGD(reference.parameters(), lr=0.1)
+        num_root_rest_all_gathers = 0
+        num_root_rest_reduce_scatters = 0
+        begin_all_gather_unshard = bucket_runtime_module.begin_all_gather_unshard
+        prepare_reduce_scatter_grad = bucket_runtime_module.prepare_reduce_scatter_grad
+
+        def counted_begin_all_gather_unshard(*args, **kwargs):
+            nonlocal num_root_rest_all_gathers
+            if kwargs.get("debug_fqn") == ROOT_REST_BUCKET_FQN:
+                num_root_rest_all_gathers += 1
+            return begin_all_gather_unshard(*args, **kwargs)
+
+        def counted_prepare_reduce_scatter_grad(*args, **kwargs):
+            nonlocal num_root_rest_reduce_scatters
+            if kwargs.get("debug_fqn") == ROOT_REST_BUCKET_FQN:
+                num_root_rest_reduce_scatters += 1
+            return prepare_reduce_scatter_grad(*args, **kwargs)
+
+        optim.zero_grad(set_to_none=True)
+        ref_optim.zero_grad(set_to_none=True)
+        with (
+            mock.patch.object(
+                bucket_runtime_module,
+                "begin_all_gather_unshard",
+                side_effect=counted_begin_all_gather_unshard,
+            ),
+            mock.patch.object(
+                bucket_runtime_module,
+                "prepare_reduce_scatter_grad",
+                side_effect=counted_prepare_reduce_scatter_grad,
+            ),
+        ):
+            loss = model(x).sum()
+            ref_loss = reference(x).sum()
+            self.assertEqual(loss, ref_loss)
+            loss.backward()
+            ref_loss.backward()
+
+        self.assertEqual(num_root_rest_all_gathers, 2)
+        self.assertEqual(num_root_rest_reduce_scatters, 1)
+
+        _average_reference_grads(reference)
+        check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
+
+        optim.step()
+        ref_optim.step()
+        check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
 
 
 if __name__ == "__main__":
