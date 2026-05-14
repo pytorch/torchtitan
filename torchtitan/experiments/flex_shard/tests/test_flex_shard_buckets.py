@@ -66,10 +66,20 @@ device_type = torch.device(get_devtype())
 
 
 class _IncompletePlacement(Placement):
-    pass
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _IncompletePlacement)
+
+    def __hash__(self) -> int:
+        return hash(type(self))
 
 
 class _TestPlacement(Placement):
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _TestPlacement)
+
+    def __hash__(self) -> int:
+        return hash(type(self))
+
     def compute_local_shape(
         self, global_shape: torch.Size, rank: int, world_size: int
     ) -> torch.Size:
@@ -310,6 +320,14 @@ class TestBucketPlacementValidation(TestCase):
             )
             for fqn in ("a.weight", "b.weight")
         ]
+
+    def test_rejects_unhashable_placement_equality(self):
+        """Placement subclasses that override equality must remain hashable."""
+        with self.assertRaisesRegex(TypeError, "__hash__"):
+
+            class _UnhashablePlacement(Placement):
+                def __eq__(self, other: object) -> bool:
+                    return isinstance(other, _UnhashablePlacement)
 
     def test_rejects_missing_or_extra_placements(self):
         """Placement validation requires exact managed parameter coverage."""
