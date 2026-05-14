@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import _get_device_handle
 
+from .reshard_provenance import _flex_shard_all_gather_region
 from .utils import _record_function_if_eager, _with_fqn
 
 if TYPE_CHECKING:
@@ -253,7 +254,8 @@ def _run_all_gather(
     debug_fqn: str | None,
 ) -> None:
     with _record_comm_if_eager("FlexShard::all_gather", debug_fqn):
-        dist.all_gather(gathered, send_buf, group=pg)
+        with _flex_shard_all_gather_region():
+            dist.all_gather(gathered, send_buf, group=pg)
 
 
 def begin_all_gather_unshard(
