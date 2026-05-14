@@ -36,6 +36,9 @@ _REQUIRED_EP_BACKEND_OPS = (
     "flex_ep_barrier_wait",
     "flex_ep_swiglu_forward",
     "flex_ep_swiglu_backward",
+    "flex_ep_swiglu_forward_with_offsets",
+    "flex_ep_swiglu_backward_with_offsets",
+    "flex_ep_clone_valid_prefix",
     "flex_ep_weighted_sum_forward",
     "flex_ep_weighted_sum_backward",
     "flex_ep_zfill_ranges_inplace",
@@ -369,6 +372,69 @@ def _register_ep_backend_ops() -> None:
         dup = dy2 * silu_gate
         tl.store(dy1_ptr + y1_base + col, dgate, mask=mask)
         tl.store(dy1_ptr + y1_base + hidden_dim + col, dup, mask=mask)
+
+    @triton.jit
+    def _swiglu_forward_with_offsets_kernel(
+        y1_ptr,
+        token_end_ptr,
+        y2_ptr,
+        total,
+        hidden_dim: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        token_end = tl.load(token_end_ptr)
+        mask = (offs < total) & (offs < token_end * hidden_dim)
+        col = offs % hidden_dim
+        row = offs // hidden_dim
+        gate = tl.load(y1_ptr + row * hidden_dim * 2 + col, mask=mask).to(tl.float32)
+        up = tl.load(
+            y1_ptr + row * hidden_dim * 2 + hidden_dim + col,
+            mask=mask,
+        ).to(tl.float32)
+        y2 = gate * tl.sigmoid(gate) * up
+        tl.store(y2_ptr + offs, y2, mask=mask)
+
+    @triton.jit
+    def _swiglu_backward_with_offsets_kernel(
+        dy2_ptr,
+        y1_ptr,
+        token_end_ptr,
+        dy1_ptr,
+        total,
+        hidden_dim: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        token_end = tl.load(token_end_ptr)
+        mask = (offs < total) & (offs < token_end * hidden_dim)
+        col = offs % hidden_dim
+        row = offs // hidden_dim
+        y1_base = row * hidden_dim * 2
+        gate = tl.load(y1_ptr + y1_base + col, mask=mask).to(tl.float32)
+        up = tl.load(y1_ptr + y1_base + hidden_dim + col, mask=mask).to(tl.float32)
+        dy2 = tl.load(dy2_ptr + offs, mask=mask).to(tl.float32)
+        sig = tl.sigmoid(gate)
+        silu_gate = gate * sig
+        dgate = dy2 * up * sig * (1.0 + gate * (1.0 - sig))
+        dup = dy2 * silu_gate
+        tl.store(dy1_ptr + y1_base + col, dgate, mask=mask)
+        tl.store(dy1_ptr + y1_base + hidden_dim + col, dup, mask=mask)
+
+    @triton.jit
+    def _clone_valid_prefix_kernel(
+        input_ptr,
+        token_end_ptr,
+        out_ptr,
+        total,
+        row_width: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        token_end = tl.load(token_end_ptr)
+        mask = (offs < total) & (offs < token_end * row_width)
+        values = tl.load(input_ptr + offs, mask=mask)
+        tl.store(out_ptr + offs, values, mask=mask)
 
     @triton.jit
     def _weighted_sum_forward_kernel(
@@ -793,6 +859,15 @@ def _register_ep_backend_ops() -> None:
     _compute_dest_offsets_kernel_untyped = cast(Any, _compute_dest_offsets_kernel)
     _swiglu_forward_kernel_untyped = cast(Any, _swiglu_forward_kernel)
     _swiglu_backward_kernel_untyped = cast(Any, _swiglu_backward_kernel)
+    _swiglu_forward_with_offsets_kernel_untyped = cast(
+        Any,
+        _swiglu_forward_with_offsets_kernel,
+    )
+    _swiglu_backward_with_offsets_kernel_untyped = cast(
+        Any,
+        _swiglu_backward_with_offsets_kernel,
+    )
+    _clone_valid_prefix_kernel_untyped = cast(Any, _clone_valid_prefix_kernel)
     _weighted_sum_forward_kernel_untyped = cast(Any, _weighted_sum_forward_kernel)
     _weighted_sum_backward_kernel_untyped = cast(Any, _weighted_sum_backward_kernel)
     _router_dispatch_kernel_untyped = cast(Any, _router_dispatch_kernel)
@@ -1115,6 +1190,180 @@ def _register_ep_backend_ops() -> None:
         ) -> torch.Tensor:
             del dy2
             return torch.empty_like(y1)
+
+    if not hasattr(torch.ops.inductor, "flex_ep_swiglu_forward_with_offsets"):
+
+        @torch.library.custom_op(
+            "inductor::flex_ep_swiglu_forward_with_offsets",
+            mutates_args=(),
+        )
+        def _flex_ep_swiglu_forward_with_offsets(
+            y1: torch.Tensor,
+            token_end: torch.Tensor,
+        ) -> torch.Tensor:
+            if y1.dtype != torch.bfloat16:
+                raise ValueError(
+                    "flex_ep_swiglu_forward_with_offsets supports BF16 input only."
+                )
+            if token_end.dtype != torch.int64 or token_end.numel() != 1:
+                raise ValueError(
+                    "flex_ep_swiglu_forward_with_offsets expects token_end "
+                    "to be a single int64 tensor."
+                )
+            if y1.dim() != 2 or y1.shape[-1] % 2 != 0:
+                raise ValueError(
+                    "flex_ep_swiglu_forward_with_offsets expects "
+                    f"[tokens, 2 * hidden], got {y1.shape}."
+                )
+            if not y1.is_contiguous() or not token_end.is_contiguous():
+                raise ValueError(
+                    "flex_ep_swiglu_forward_with_offsets requires contiguous inputs."
+                )
+            hidden_dim = y1.shape[-1] // 2
+            y2 = torch.empty(
+                (y1.shape[0], hidden_dim),
+                device=y1.device,
+                dtype=y1.dtype,
+            )
+            total = y2.numel()
+            if total == 0:
+                return y2
+            block = 1024
+            _swiglu_forward_with_offsets_kernel_untyped[(triton.cdiv(total, block),)](
+                y1,
+                token_end,
+                y2,
+                total,
+                hidden_dim,
+                BLOCK=block,
+                num_warps=4,
+            )
+            return y2
+
+        @_flex_ep_swiglu_forward_with_offsets.register_fake
+        def _flex_ep_swiglu_forward_with_offsets_fake(
+            y1: torch.Tensor,
+            token_end: torch.Tensor,
+        ) -> torch.Tensor:
+            del token_end
+            return torch.empty(
+                (y1.shape[0], y1.shape[-1] // 2),
+                device=y1.device,
+                dtype=y1.dtype,
+            )
+
+    if not hasattr(torch.ops.inductor, "flex_ep_swiglu_backward_with_offsets"):
+
+        @torch.library.custom_op(
+            "inductor::flex_ep_swiglu_backward_with_offsets",
+            mutates_args=(),
+        )
+        def _flex_ep_swiglu_backward_with_offsets(
+            dy2: torch.Tensor,
+            y1: torch.Tensor,
+            token_end: torch.Tensor,
+        ) -> torch.Tensor:
+            if dy2.dtype != torch.bfloat16 or y1.dtype != torch.bfloat16:
+                raise ValueError(
+                    "flex_ep_swiglu_backward_with_offsets supports BF16 inputs only."
+                )
+            if token_end.dtype != torch.int64 or token_end.numel() != 1:
+                raise ValueError(
+                    "flex_ep_swiglu_backward_with_offsets expects token_end "
+                    "to be a single int64 tensor."
+                )
+            if y1.dim() != 2 or y1.shape[-1] % 2 != 0:
+                raise ValueError(
+                    "flex_ep_swiglu_backward_with_offsets expects y1 "
+                    f"[tokens, 2 * hidden], got {y1.shape}."
+                )
+            if dy2.shape != (y1.shape[0], y1.shape[-1] // 2):
+                raise ValueError(
+                    "flex_ep_swiglu_backward_with_offsets dy2 shape must match "
+                    f"[tokens, hidden], got dy2={dy2.shape}, y1={y1.shape}."
+                )
+            if (
+                not dy2.is_contiguous()
+                or not y1.is_contiguous()
+                or not token_end.is_contiguous()
+            ):
+                raise ValueError(
+                    "flex_ep_swiglu_backward_with_offsets requires contiguous inputs."
+                )
+            hidden_dim = dy2.shape[-1]
+            dy1 = torch.empty_like(y1)
+            total = dy2.numel()
+            if total == 0:
+                return dy1
+            block = 1024
+            _swiglu_backward_with_offsets_kernel_untyped[(triton.cdiv(total, block),)](
+                dy2,
+                y1,
+                token_end,
+                dy1,
+                total,
+                hidden_dim,
+                BLOCK=block,
+                num_warps=4,
+            )
+            return dy1
+
+        @_flex_ep_swiglu_backward_with_offsets.register_fake
+        def _flex_ep_swiglu_backward_with_offsets_fake(
+            dy2: torch.Tensor,
+            y1: torch.Tensor,
+            token_end: torch.Tensor,
+        ) -> torch.Tensor:
+            del dy2, token_end
+            return torch.empty_like(y1)
+
+    if not hasattr(torch.ops.inductor, "flex_ep_clone_valid_prefix"):
+
+        @torch.library.custom_op(
+            "inductor::flex_ep_clone_valid_prefix",
+            mutates_args=(),
+        )
+        def _flex_ep_clone_valid_prefix(
+            input: torch.Tensor,
+            token_end: torch.Tensor,
+        ) -> torch.Tensor:
+            if input.dim() < 1:
+                raise ValueError(
+                    "flex_ep_clone_valid_prefix expects at least 1D input."
+                )
+            if token_end.dtype != torch.int64 or token_end.numel() != 1:
+                raise ValueError(
+                    "flex_ep_clone_valid_prefix expects token_end to be a "
+                    "single int64 tensor."
+                )
+            if not input.is_contiguous() or not token_end.is_contiguous():
+                raise ValueError(
+                    "flex_ep_clone_valid_prefix requires contiguous inputs."
+                )
+            out = torch.empty_like(input)
+            total = input.numel()
+            if total == 0:
+                return out
+            row_width = total // input.shape[0]
+            block = 1024
+            _clone_valid_prefix_kernel_untyped[(triton.cdiv(total, block),)](
+                input,
+                token_end,
+                out,
+                total,
+                row_width,
+                BLOCK=block,
+                num_warps=4,
+            )
+            return out
+
+        @_flex_ep_clone_valid_prefix.register_fake
+        def _flex_ep_clone_valid_prefix_fake(
+            input: torch.Tensor,
+            token_end: torch.Tensor,
+        ) -> torch.Tensor:
+            del token_end
+            return torch.empty_like(input)
 
     if not hasattr(torch.ops.inductor, "flex_ep_weighted_sum_forward"):
 
@@ -2826,8 +3075,6 @@ class FlexEPRouter:
                 buffers_cuda_ptrs,
                 offs_barrier_counter,
             )
-            valid_send_tokens = recv_origin_global_token_id[: y3.shape[0]] >= 0
-            y3.masked_fill_(~valid_send_tokens.unsqueeze(-1), 0)
             (
                 combine_recv_buffer,
                 combine_recv_scale_factors,
@@ -3013,7 +3260,7 @@ class FlexEPRouter:
             ep_rank,
         ):
             del dest_ranks, dest_offsets, max_recv_tokens_tensor
-            del recv_total_tokens, local_experts_start
+            del recv_total_tokens
             del offs_dispatch_recv_buffer
             del offs_dispatch_recv_buffer_scaling_factors
             del offs_dispatch_recv_weights, offs_dispatch_recv_origin_global_token_id
@@ -3070,8 +3317,6 @@ class FlexEPRouter:
                 buffers_cuda_ptrs,
                 offs_barrier_counter,
             )
-            valid_send_tokens = recv_origin_global_token_id[: dx_recv.shape[0]] >= 0
-            dx_recv.masked_fill_(~valid_send_tokens.unsqueeze(-1), 0)
             (
                 combine_recv_buffer,
                 combine_recv_scale_factors,
@@ -3081,7 +3326,7 @@ class FlexEPRouter:
                 None,
                 None,
                 expert_begin_offset_per_ep,
-                expert_begin_offset_per_ep[:, -1].max().view(1).to(torch.int64),
+                local_experts_start[-1:].to(torch.int64),
                 recv_origin_global_token_id,
                 buffers_cuda_ptrs,
                 combine_recv_buffer,

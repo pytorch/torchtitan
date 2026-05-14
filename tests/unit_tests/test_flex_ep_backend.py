@@ -489,6 +489,164 @@ def test_flex_ep_weighted_sum_matches_reference_on_cpu():
     torch.testing.assert_close(top_scores.grad, top_scores_ref.grad)
 
 
+def test_flex_ep_offset_ops_cpu_fallbacks_match_full_reference():
+    flex_ep_mod._ensure_flex_ep_imported()
+    y1 = torch.randn(5, 8, dtype=torch.bfloat16)
+    dy2 = torch.randn(5, 4, dtype=torch.bfloat16)
+    token_end = torch.tensor([2], dtype=torch.int64)
+
+    out = torch.ops._flex_ep.swiglu_forward_with_offsets(y1, token_end)
+    gate, up = y1.chunk(2, dim=-1)
+    ref = torch.nn.functional.silu(gate) * up
+    torch.testing.assert_close(out, ref)
+
+    dy1 = torch.ops._flex_ep.swiglu_backward_with_offsets(dy2, y1, token_end)
+    sig = torch.sigmoid(gate)
+    ref_dgate = dy2 * up * sig * (1 + gate * (1 - sig))
+    ref_dup = dy2 * torch.nn.functional.silu(gate)
+    torch.testing.assert_close(dy1, torch.cat((ref_dgate, ref_dup), dim=-1))
+
+    cloned = torch.ops._flex_ep.clone_valid_prefix(y1, token_end)
+    torch.testing.assert_close(cloned, y1)
+
+
+def test_flex_ep_non_forced_combine_does_not_zero_capacity_tail(monkeypatch):
+    flex_ep_mod._ensure_flex_ep_imported()
+    router = flex_ep_mod.FlexEPRouter.create(
+        max_tokens=5,
+        dim=8,
+        num_experts=4,
+        top_k=2,
+        device=torch.device("cpu"),
+        ep_mesh=None,
+        debug_force_load_balance=False,
+    )
+    dispatch_fn, combine_fn, _, dispatch_bwd_fn = router.router_fns
+    x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
+    topk_idx = torch.tensor(
+        [
+            [0, 1],
+            [1, 2],
+            [2, 3],
+            [3, 0],
+            [1, 3],
+        ],
+        dtype=torch.int64,
+    )
+    recv_x, *tmi_flat = dispatch_fn(
+        x_expanded,
+        topk_idx,
+        *router.router_operands,
+    )
+    local_experts_start = tmi_flat[6]
+    token_end = int(local_experts_start[-1].item())
+    assert token_end < recv_x.shape[0]
+
+    sentinel = torch.tensor(-7.0, dtype=recv_x.dtype)
+    calls = []
+
+    def fake_router_combine(
+        send_tokens,
+        send_scale_factors,
+        send_weights,
+        expert_begin_offset_per_ep,
+        token_send_end,
+        send_origin_global_token_id,
+        buffers_cuda_ptrs,
+        combine_recv_buffer,
+        combine_recv_scale_factors,
+        combine_recv_weights,
+        *args,
+    ):
+        del (
+            send_scale_factors,
+            send_weights,
+            expert_begin_offset_per_ep,
+            send_origin_global_token_id,
+            buffers_cuda_ptrs,
+            args,
+        )
+        assert int(token_send_end.item()) == token_end
+        assert torch.all(send_tokens[token_end:] == sentinel).item()
+        calls.append(send_tokens.data_ptr())
+        return combine_recv_buffer, combine_recv_scale_factors, combine_recv_weights
+
+    monkeypatch.setattr(torch.ops._flex_ep, "router_combine", fake_router_combine)
+
+    y3 = torch.full_like(recv_x, -7.0)
+    combine_fn(y3, *tmi_flat, *router.router_operands)
+
+    dx_recv = torch.full_like(recv_x, -7.0)
+    dispatch_bwd_fn(dx_recv, *tmi_flat, *router.router_operands)
+
+    assert len(calls) == 2
+    assert torch.all(y3[token_end:] == sentinel).item()
+    assert torch.all(dx_recv[token_end:] == sentinel).item()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flex_ep_registered_offset_kernels_match_reference_prefix():
+    flex_ep_mod._ensure_flex_ep_imported()
+    try:
+        flex_ep_mod._register_ep_backend_ops()
+    except (ImportError, RuntimeError) as exc:
+        pytest.skip(str(exc))
+
+    device = torch.device("cuda")
+    tokens = 9
+    hidden = 16
+    token_end_value = 5
+    generator = torch.Generator(device=device).manual_seed(42)
+    token_end = torch.tensor([token_end_value], device=device, dtype=torch.int64)
+    y1 = torch.randn(
+        tokens,
+        2 * hidden,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+    dy2 = torch.randn(
+        tokens,
+        hidden,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=generator,
+    )
+
+    y2 = torch.ops.inductor.flex_ep_swiglu_forward_with_offsets(y1, token_end)
+    gate, up = y1[:token_end_value].chunk(2, dim=-1)
+    ref_y2 = (
+        torch.nn.functional.silu(gate.to(torch.float32)) * up.to(torch.float32)
+    ).to(torch.bfloat16)
+    torch.testing.assert_close(y2[:token_end_value], ref_y2)
+
+    dy1 = torch.ops.inductor.flex_ep_swiglu_backward_with_offsets(
+        dy2,
+        y1,
+        token_end,
+    )
+    dy2_prefix = dy2[:token_end_value].to(torch.float32)
+    gate_fp32 = gate.to(torch.float32)
+    up_fp32 = up.to(torch.float32)
+    sig = torch.sigmoid(gate_fp32)
+    ref_dgate = dy2_prefix * up_fp32 * sig * (1 + gate_fp32 * (1 - sig))
+    ref_dup = dy2_prefix * torch.nn.functional.silu(gate_fp32)
+    ref_dy1 = torch.cat((ref_dgate, ref_dup), dim=-1).to(torch.bfloat16)
+    torch.testing.assert_close(dy1[:token_end_value], ref_dy1)
+
+    input = (
+        torch.arange(
+            tokens * 7,
+            device=device,
+            dtype=torch.float32,
+        )
+        .view(tokens, 7)
+        .to(torch.bfloat16)
+    )
+    cloned = torch.ops.inductor.flex_ep_clone_valid_prefix(input, token_end)
+    torch.testing.assert_close(cloned[:token_end_value], input[:token_end_value])
+
+
 def test_flex_ep_balanced_metadata_matches_dynamic_expert_offsets():
     flex_ep_mod._ensure_flex_ep_imported()
     max_tokens = 11
