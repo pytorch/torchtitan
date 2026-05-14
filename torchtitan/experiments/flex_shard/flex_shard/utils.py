@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 
-from .param_access import _DSTORAGE_ATTR
 from .placement_contract import Placement
 
 if TYPE_CHECKING:
@@ -129,30 +128,15 @@ def _get_managed_named_params(
     module: nn.Module,
 ) -> list[tuple[str, nn.Parameter]]:
     """
-    Collect parameters that should be managed by this module's DStorage.
-
-    This excludes parameters from child modules that already have their own
-    DStorage (i.e., already wrapped with flex_shard).
-
-    Similar to FSDP2's _get_managed_modules/_get_managed_states pattern.
+    Collect parameters managed by this root-level flex_shard() call.
     """
     managed_params: list[tuple[str, nn.Parameter]] = []
 
-    # Find child modules that already have DStorage
-    wrapped_prefixes: set[str] = set()
-    for name, child in module.named_modules():
-        if name and getattr(child, _DSTORAGE_ATTR, None) is not None:
-            # This child is already wrapped; skip its parameters
-            wrapped_prefixes.add(name + ".")
-
     seen_params: dict[int, str] = {}
 
-    # Collect parameters not in wrapped submodules. Use remove_duplicate=False
-    # so shared parameters are rejected instead of leaving one alias unmanaged.
+    # Use remove_duplicate=False so shared parameters are rejected instead of
+    # leaving one alias unmanaged.
     for fqn, param in module.named_parameters(remove_duplicate=False):
-        is_wrapped = any(fqn.startswith(prefix) for prefix in wrapped_prefixes)
-        if is_wrapped:
-            continue
         param_id = id(param)
         if param_id in seen_params:
             raise ValueError(
@@ -234,8 +218,8 @@ def _validate_placements(
         if extra_fqns:
             msg_parts.append(f"unexpected placements for {sorted(extra_fqns)}")
         raise ValueError(
-            "shard_placement_fn must return placements for exactly the managed "
-            f"parameters; {', '.join(msg_parts)}."
+            "BucketSpec.shard_placement_fn must return placements for exactly the "
+            f"provided parameters; {', '.join(msg_parts)}."
         )
 
     rank = mesh.get_local_rank()
@@ -244,7 +228,7 @@ def _validate_placements(
         placement = _get_single_placement(placements)
         if not isinstance(placement, Placement):
             raise TypeError(
-                "shard_placement_fn must return Placement instances, but "
+                "BucketSpec.shard_placement_fn must return Placement instances, but "
                 f"{fqn!r} uses {type(placement).__name__}."
             )
         param = param_dict[fqn]

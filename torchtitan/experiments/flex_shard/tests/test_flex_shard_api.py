@@ -8,11 +8,7 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.flex_shard import (
-    BucketSpec,
-    flex_shard,
-    OffloadPolicy,
-)
+from torchtitan.experiments.flex_shard import BucketSpec, flex_shard, OffloadPolicy
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.param_access import (
     FlexShardModule,
@@ -63,7 +59,71 @@ class TestFlexShardAPI(TestCase):
                 flex_shard_cuda(
                     model,
                     mesh,
-                    buckets=[BucketSpec(["*"], reshard_after_forward=False)],
+                    buckets=[
+                        BucketSpec(
+                            ["*"],
+                            shard_placement_fn=per_param_placements,
+                            reshard_after_forward=False,
+                        )
+                    ],
+                )
+
+    def test_flex_shard_rejects_child_then_root_nested_wrapping(self):
+        with single_rank_cuda_mesh() as mesh:
+            model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
+
+            flex_shard(
+                model[0],
+                mesh,
+                buckets=[
+                    BucketSpec(
+                        ["*"],
+                        shard_placement_fn=per_param_placements,
+                        reshard_after_forward=False,
+                    )
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Nested flex_shard wrapping"):
+                flex_shard(
+                    model,
+                    mesh,
+                    buckets=[
+                        BucketSpec(
+                            ["*"],
+                            shard_placement_fn=per_param_placements,
+                            reshard_after_forward=False,
+                        )
+                    ],
+                )
+
+    def test_flex_shard_rejects_root_then_child_nested_wrapping(self):
+        with single_rank_cuda_mesh() as mesh:
+            model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
+
+            flex_shard(
+                model,
+                mesh,
+                buckets=[
+                    BucketSpec(
+                        ["*"],
+                        shard_placement_fn=per_param_placements,
+                        reshard_after_forward=False,
+                    )
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Nested flex_shard wrapping"):
+                flex_shard(
+                    model[0],
+                    mesh,
+                    buckets=[
+                        BucketSpec(
+                            ["*"],
+                            shard_placement_fn=per_param_placements,
+                            reshard_after_forward=False,
+                        )
+                    ],
                 )
 
     def test_metadata_helpers_on_managed_and_unmanaged_tensors(self):
@@ -93,6 +153,7 @@ class TestFlexShardAPI(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
+                            shard_placement_fn=per_param_placements,
                             offload_policy=OffloadPolicy(pin_memory=False),
                             reshard_after_forward=False,
                         )
@@ -107,8 +168,13 @@ class TestFlexShardAPI(TestCase):
                 flex_shard(
                     model,
                     mesh,
-                    shard_placement_fn=per_param_placements,
-                    buckets=[BucketSpec(["*"], reshard_after_forward=False)],
+                    buckets=[
+                        BucketSpec(
+                            ["*"],
+                            shard_placement_fn=per_param_placements,
+                            reshard_after_forward=False,
+                        )
+                    ],
                 )
 
     def test_reshard_after_forward_requires_replayable_bucket_hook(self):
@@ -119,8 +185,12 @@ class TestFlexShardAPI(TestCase):
                 flex_shard(
                     model,
                     mesh,
-                    shard_placement_fn=per_param_placements,
-                    buckets=[BucketSpec(["*"])],
+                    buckets=[
+                        BucketSpec(
+                            ["*"],
+                            shard_placement_fn=per_param_placements,
+                        )
+                    ],
                 )
 
 

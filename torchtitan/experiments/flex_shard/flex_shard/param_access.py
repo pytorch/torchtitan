@@ -178,12 +178,28 @@ class FlexShardModule:
 
 
 def _check_not_already_flex_sharded(module: nn.Module) -> None:
-    """Raise if FlexShard was already applied to this module."""
+    """Raise if applying FlexShard would create nested ownership."""
     if getattr(module, _DSTORAGES_ATTR, None) is not None:
         raise ValueError(
             f"Module {type(module).__name__} already has DStorage. "
             "Cannot apply flex_shard twice to the same module."
         )
+    for child_fqn, child in module.named_modules():
+        if child_fqn and getattr(child, _DSTORAGES_ATTR, None) is not None:
+            raise ValueError(
+                "Nested flex_shard wrapping is not supported. "
+                f"Child module {child_fqn!r} is already FlexSharded. "
+                "Apply flex_shard once at the root module and express bucket "
+                "boundaries with BucketSpec FQN patterns."
+            )
+    for param_fqn, param in module.named_parameters(remove_duplicate=False):
+        if is_flex_shard_param(param):
+            raise ValueError(
+                "Nested flex_shard wrapping is not supported. "
+                f"Parameter {param_fqn!r} is already managed by FlexShard. "
+                "Apply flex_shard once at the root module and express bucket "
+                "boundaries with BucketSpec FQN patterns."
+            )
 
 
 def _attach_flex_shard_module_state(

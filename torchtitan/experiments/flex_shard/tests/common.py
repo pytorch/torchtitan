@@ -77,11 +77,16 @@ def flex_shard_cuda(
 ) -> nn.Module:
     """Apply FlexShard with single-rank CUDA eager settings."""
     if buckets is None:
-        buckets = [BucketSpec(["*"], reshard_after_forward=False)]
+        buckets = [
+            BucketSpec(
+                ["*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=False,
+            )
+        ]
     return flex_shard(
         model,
         mesh,
-        shard_placement_fn=per_param_placements,
         buckets=buckets,
     )
 
@@ -202,22 +207,33 @@ def transformer_bucket_specs(
         [
             BucketSpec(
                 ["tok_embeddings.*"],
+                shard_placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             ),
             BucketSpec(
                 ["pos_embeddings.*"],
+                shard_placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             ),
         ]
         + [
             BucketSpec(
                 [f"layers.{idx}.*"],
+                shard_placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             )
             for idx in range(num_layers)
         ]
         + [
-            BucketSpec(["norm.*"], reshard_after_forward=reshard_after_forward),
-            BucketSpec(["output.*"], reshard_after_forward=reshard_after_forward),
+            BucketSpec(
+                ["norm.*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=reshard_after_forward,
+            ),
+            BucketSpec(
+                ["output.*"],
+                shard_placement_fn=per_param_placements,
+                reshard_after_forward=reshard_after_forward,
+            ),
         ]
     )

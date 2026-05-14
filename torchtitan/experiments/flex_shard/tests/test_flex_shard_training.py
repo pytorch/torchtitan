@@ -96,12 +96,14 @@ def _layer_buckets_with_grouped_root_rest(
         *[
             BucketSpec(
                 [f"layers.{idx}.*"],
+                shard_placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             )
             for idx in range(num_layers)
         ],
         BucketSpec(
             ["tok_embeddings.*", "pos_embeddings.*", "norm.*", "output.*"],
+            shard_placement_fn=per_param_placements,
             reshard_after_forward=reshard_after_forward,
         ),
     ]
@@ -126,7 +128,6 @@ class TestFlexShardTraining(FSDPTest):
         flex_shard(
             model,
             mesh,
-            shard_placement_fn=per_param_placements,
             buckets=transformer_bucket_specs(
                 args.n_layers,
                 reshard_after_forward=False,
@@ -173,10 +174,10 @@ class TestFlexShardTraining(FSDPTest):
         flex_shard(
             model,
             mesh,
-            shard_placement_fn=per_param_placements,
             buckets=[
                 BucketSpec(
                     ["tok_embeddings.*"],
+                    shard_placement_fn=per_param_placements,
                     mp_policy=MixedPrecisionPolicy(
                         param_dtype=torch.bfloat16,
                         reduce_dtype=torch.float32,
@@ -229,7 +230,6 @@ class TestFlexShardTraining(FSDPTest):
         flex_shard(
             model,
             mesh,
-            shard_placement_fn=per_param_placements,
             buckets=transformer_bucket_specs(
                 args.n_layers,
                 reshard_after_forward=True,
@@ -287,7 +287,6 @@ class TestFlexShardTraining(FSDPTest):
             flex_shard(
                 model,
                 mesh,
-                shard_placement_fn=per_param_placements,
                 buckets=_layer_buckets_with_grouped_root_rest(
                     args.n_layers,
                     reshard_after_forward=True,

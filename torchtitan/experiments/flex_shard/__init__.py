@@ -11,6 +11,7 @@ from .flex_shard import (
     MixedPrecisionPolicy,
     OffloadPolicy,
     Placement,
+    PlacementFn,
 )
 
 
@@ -21,4 +22,5 @@ __all__ = [
     "MixedPrecisionPolicy",
     "OffloadPolicy",
     "Placement",
+    "PlacementFn",
 ]

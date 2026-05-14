@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -46,12 +45,6 @@ __all__ = [
 ]
 
 
-PlacementFn = Callable[
-    [list[tuple[str, nn.Parameter]], "DeviceMesh"],
-    dict[str, tuple["Placement", ...]],
-]
-
-
 @dataclass(frozen=True)
 class PreparedFlexShardInputs:
     """Validated inputs and derived setup state for flex_shard()."""
@@ -63,10 +56,34 @@ class PreparedFlexShardInputs:
     bucket_assignments: list[list[str]]
 
 
+def _resolve_bucket_param_placements(
+    named_params: list[tuple[str, nn.Parameter]],
+    shard_mesh: DeviceMesh,
+    bucket_assignments: list[list[str]],
+    buckets: list[BucketSpec],
+) -> dict[str, tuple[Placement, ...]]:
+    """Call each bucket's placement function for the params assigned to it."""
+    named_params_dict = dict(named_params)
+    param_placements: dict[str, tuple[Placement, ...]] = {}
+
+    for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
+        if not bucket_fqns:
+            continue
+        bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
+        bucket_param_placements = buckets[bucket_idx].shard_placement_fn(
+            bucket_named_params,
+            shard_mesh,
+        )
+        _validate_placements(bucket_param_placements, bucket_named_params, shard_mesh)
+        param_placements.update(bucket_param_placements)
+
+    _validate_placements(param_placements, named_params, shard_mesh)
+    return param_placements
+
+
 def _prepare_flex_shard_inputs(
     module: nn.Module,
     mesh: DeviceMesh,
-    shard_placement_fn: PlacementFn,
     buckets: list[BucketSpec],
 ) -> PreparedFlexShardInputs:
     """Validate inputs and derive setup state for flex_shard()."""
@@ -79,6 +96,8 @@ def _prepare_flex_shard_inputs(
     if not all(isinstance(bucket, BucketSpec) for bucket in buckets):
         raise TypeError("flex_shard buckets must be a list of BucketSpec objects.")
     for bucket in buckets:
+        if not callable(bucket.shard_placement_fn):
+            raise TypeError("BucketSpec.shard_placement_fn must be callable.")
         if bucket.offload_policy is not None:
             raise NotImplementedError(
                 "FlexShard eager mode does not yet support BucketSpec.offload_policy."
@@ -106,11 +125,14 @@ def _prepare_flex_shard_inputs(
         expected_device=None if all_params_meta else device,
     )
 
-    param_placements = shard_placement_fn(named_params, shard_mesh)
-    _validate_placements(param_placements, named_params, shard_mesh)
-
     param_fqns = [fqn for fqn, _ in named_params]
     bucket_assignments = _assign_params_to_buckets(param_fqns, buckets)
+    param_placements = _resolve_bucket_param_placements(
+        named_params,
+        shard_mesh,
+        bucket_assignments,
+        buckets,
+    )
     _validate_bucket_placements(
         bucket_assignments,
         param_placements,
@@ -130,7 +152,6 @@ def _prepare_flex_shard_inputs(
 def flex_shard(
     module: nn.Module,
     mesh: DeviceMesh,
-    shard_placement_fn: PlacementFn,
     buckets: list[BucketSpec],
 ) -> FlexShardModule:
     """
@@ -147,21 +168,13 @@ def flex_shard(
     Each bucket gets its own byte buffer and DStorage, enabling independent
     all-gather operations per bucket.
 
-    Nested wrapping is supported: apply flex_shard to inner modules first,
-    then to outer modules. The outer module's storage will exclude parameters
-    from already-wrapped inner modules.
-
     Args:
         module: The module to shard. CPU modules are moved to the mesh's CUDA
             device before sharding. Meta parameters keep uninitialized storage.
         mesh: The 1D device mesh for sharding.
-        shard_placement_fn: Required callable that maps
-            ``(named_params, mesh)`` to per-parameter placements.
-            The minimal eager path expects one ``Placement`` per parameter.
-            Example ``Shard(0)`` placements are available under
-            ``torchtitan.experiments.flex_shard.example.shard``.
-        buckets: Required list of bucket specifications. A single
-            whole-module bucket can be expressed as ``[BucketSpec(["*"])]``.
+        buckets: Required list of bucket specifications. Each bucket owns its
+            placement function. A single whole-module bucket can be expressed as
+            ``[BucketSpec(["*"], shard_placement_fn=per_param_placements)]``.
             When ``reshard_after_forward=True``, FlexShard raises if bucket
             hooks cannot run in both the original forward and activation
             checkpoint recomputation.
@@ -177,15 +190,22 @@ def flex_shard(
         >>> flex_shard(
         ...     model,
         ...     mesh,
-        ...     shard_placement_fn=per_param_placements,
-        ...     buckets=[BucketSpec(["*"], reshard_after_forward=False)],
+        ...     buckets=[
+        ...         BucketSpec(
+        ...             ["*"],
+        ...             shard_placement_fn=per_param_placements,
+        ...             reshard_after_forward=False,
+        ...         )
+        ...     ],
         ... )
         >>> # Explicit buckets:
         >>> flex_shard(
         ...     model,
         ...     mesh,
-        ...     shard_placement_fn=per_param_placements,
-        ...     buckets=[BucketSpec(["attn.*"]), BucketSpec(["ffn.*"])],
+        ...     buckets=[
+        ...         BucketSpec(["attn.*"], shard_placement_fn=per_param_placements),
+        ...         BucketSpec(["ffn.*"], shard_placement_fn=per_param_placements),
+        ...     ],
         ... )
     Note:
         - Each parameter must have exactly one placement.
@@ -196,7 +216,6 @@ def flex_shard(
     inputs = _prepare_flex_shard_inputs(
         module,
         mesh,
-        shard_placement_fn,
         buckets,
     )
 
