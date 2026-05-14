@@ -310,21 +310,26 @@ def _reparametrize_train_state(
 ):
     """Reparametrize module and optimizer with explicit tensor state for tracing."""
     with contextlib.ExitStack() as stack:
-        if module is not None:
-            stack.enter_context(stateless._reparametrize_module(module, model_state))
         if optimizer is not None:
-            # swap_in_optimizer_params_and_state aligns swapin_parameters values
-            # with optimizer.param_groups by order, so pass only parameters (in
-            # module.named_parameters() order).
+            # swap_in pairs values positionally in optimizer.param_groups flat
+            # order, which differs from named_parameters() order for bucketed
+            # param_groups. Walk param_groups and resolve names by id() against
+            # the originals; must run before _reparametrize_module rebinds them.
+            id_to_name = {
+                id(p): n for n, p in module.named_parameters(remove_duplicate=False)
+            }
             params_for_optim = {
-                name: model_state[name]
-                for name, _ in module.named_parameters(remove_duplicate=False)
+                id_to_name[id(p)]: model_state[id_to_name[id(p)]]
+                for group in optimizer.param_groups
+                for p in group["params"]
             }
             stack.enter_context(
                 torch.optim.swap_in_optimizer_params_and_state(
                     optimizer, params_for_optim, optim_state
                 )
             )
+        if module is not None:
+            stack.enter_context(stateless._reparametrize_module(module, model_state))
         yield
 
 
