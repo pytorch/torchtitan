@@ -515,14 +515,16 @@ class BucketRuntime:
 
     def pre_forward_hook(self, mod, args) -> None:
         local_shards = self._local_shards(use_autograd=True)
-        prefetched_result = self.take_pending()
+        is_compiling = torch.compiler.is_compiling()
+        prefetched_result = None if is_compiling else self.take_pending()
         runtime = BucketAllGatherRuntime(
             bucket=self,
             prefetched_result=prefetched_result,
         )
         full_params = list(_BucketAllGather.apply(runtime, *local_shards))
-        self.prefetch_next()
-        self.context.flush_pending_reduce_scatter_launches(max_to_flush=1)
+        if not is_compiling:
+            self.prefetch_next()
+            self.context.flush_pending_reduce_scatter_launches(max_to_flush=1)
         for entry, full_param in zip(self.entries, full_params, strict=True):
             entry.access_state._pre_gathered = full_param
 
@@ -550,6 +552,7 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         ctx.runtime = runtime
         ctx.num_inputs = len(local_shards)
+        ctx.local_shard_dtypes = tuple(shard.dtype for shard in local_shards)
 
         result = runtime.prefetched_result
         runtime.prefetched_result = None
@@ -580,19 +583,44 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[Any, ...]:
         runtime: BucketAllGatherRuntime = ctx.runtime
         bucket = runtime.bucket
+        input_grads: list[torch.Tensor | None] = [None] * ctx.num_inputs
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
         valid_param_refs: list[ParamModuleInfo] = []
-        for grad, entry in zip(
-            full_param_grads,
-            bucket.entries,
-            strict=True,
+        valid_indices: list[int] = []
+        for idx, (grad, entry) in enumerate(
+            zip(
+                full_param_grads,
+                bucket.entries,
+                strict=True,
+            )
         ):
             if grad is None:
                 continue
+            valid_indices.append(idx)
             grads.append(grad.contiguous())
             valid_infos.append(entry.param_info)
             valid_param_refs.append(entry.module_info)
+
+        if grads and torch.compiler.is_compiling():
+            result = begin_reduce_scatter_grad(
+                grads,
+                valid_infos,
+                bucket.storage._mesh,
+                bucket.context.reduce_scatter_stream,
+                debug_fqn=bucket.debug_fqn,
+            )
+            sharded_grads = result.finish()
+            for input_idx, sharded_grad in zip(
+                valid_indices,
+                sharded_grads,
+                strict=True,
+            ):
+                input_dtype = ctx.local_shard_dtypes[input_idx]
+                if sharded_grad.dtype != input_dtype:
+                    sharded_grad = sharded_grad.to(input_dtype)
+                input_grads[input_idx] = sharded_grad
+            return (None, *input_grads)
 
         if grads:
             if bucket.storage._reshard_after_forward:

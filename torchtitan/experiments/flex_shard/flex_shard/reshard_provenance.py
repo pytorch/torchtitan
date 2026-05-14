@@ -60,11 +60,16 @@ def _is_flex_shard_alias_op(func: Any, args: Any, kwargs: Any) -> bool:
 
 
 def _in_flex_shard_all_gather() -> bool:
+    if torch.compiler.is_compiling():
+        return False
     return _flex_shard_all_gather_depth.get() > 0
 
 
 @contextmanager
 def _flex_shard_all_gather_region() -> Generator[None, None, None]:
+    if torch.compiler.is_compiling():
+        yield
+        return
     token = _flex_shard_all_gather_depth.set(_flex_shard_all_gather_depth.get() + 1)
     try:
         yield
