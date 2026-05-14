@@ -33,7 +33,13 @@ from .param_access import (
     EagerParamAccessState,
     ParamModuleInfo,
 )
-from .utils import _get_storage_debug_fqn, _record_function_if_eager
+from .utils import (
+    _get_storage_debug_fqn,
+    _module_path_common_prefix,
+    _record_function_if_eager,
+    _strip_checkpoint_wrapped_module_path,
+    _top_level_owner_path,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -87,7 +93,7 @@ class BucketCommContext:
     device_handle: ModuleType
     all_gather_stream: torch.Stream
     reduce_scatter_stream: torch.Stream
-    buckets: list[BucketRuntime] = field(default_factory=list)
+    buckets: list[BucketReplayFragment] = field(default_factory=list)
     pending: PendingAllGather | None = None
     pending_reduce_scatter_launches: list[PendingReduceScatterLaunch] = field(
         default_factory=list
@@ -240,6 +246,48 @@ class BucketAllGatherRuntime:
     prefetched_result: AllGatherUnshardHandle | None
 
 
+@dataclass
+class BucketGradAccumulator:
+    """Accumulate replay-fragment grads before one physical bucket RS."""
+
+    bucket: BucketRuntime
+    expected_indices: set[int]
+    received_indices: set[int] = field(default_factory=set)
+    grads_by_index: dict[int, torch.Tensor] = field(default_factory=dict)
+    launched: bool = False
+
+    def report(
+        self,
+        fragment: BucketReplayFragment,
+        full_param_grads: tuple[torch.Tensor | None, ...],
+    ) -> None:
+        for entry_idx, entry, grad in zip(
+            fragment.entry_indices,
+            fragment.entries,
+            full_param_grads,
+            strict=True,
+        ):
+            if not entry.param_info.requires_grad:
+                continue
+            if entry_idx in self.received_indices:
+                raise AssertionError(
+                    "Received duplicate full-parameter grad for "
+                    f"{entry.param_info.fqn!r} in bucket {self.bucket.debug_fqn!r}."
+                )
+            self.received_indices.add(entry_idx)
+            if grad is not None:
+                self.grads_by_index[entry_idx] = grad.contiguous()
+
+        if self.expected_indices.issubset(self.received_indices):
+            if self.launched:
+                raise AssertionError(
+                    f"Reduce-scatter for bucket {self.bucket.debug_fqn!r} "
+                    "was already launched."
+                )
+            self.launched = True
+            self.bucket.reduce_accumulated_grads(self.grads_by_index)
+
+
 def _accumulate_sharded_grads(
     param_refs: list[ParamModuleInfo],
     sharded_grads: list[torch.Tensor],
@@ -258,40 +306,106 @@ def _accumulate_sharded_grads(
     return stored_grads
 
 
+def _entry_owner_path(entry: ParamEntry) -> str:
+    """Return the module path that owns this parameter."""
+    fqn = entry.param_info.fqn
+    return _strip_checkpoint_wrapped_module_path(".".join(fqn.split(".")[:-1]))
+
+
+def _entry_belongs_to_module_path(entry: ParamEntry, module_path: str) -> bool:
+    """Return whether this entry is owned by the module path or its children."""
+    owner_path = _entry_owner_path(entry)
+    return owner_path == module_path or owner_path.startswith(module_path + ".")
+
+
 @dataclass
 class BucketRuntime:
-    """Runtime state and hooks for one FlexShard bucket."""
+    """Physical runtime state for one user FlexShard bucket."""
 
     storage: DStorage
     entries: list[ParamEntry]
     context: BucketCommContext
     debug_fqn: str | None
+    fragments: list[BucketReplayFragment] = field(default_factory=list)
+    active_full_params: tuple[torch.Tensor, ...] | None = None
+    active_recompute: bool | None = None
+    grad_accumulator: BucketGradAccumulator | None = None
 
     @classmethod
-    def from_storage(
+    def from_storage_fragments(
         cls,
         storage: DStorage,
         module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
         context: BucketCommContext | None = None,
-    ) -> BucketRuntime | None:
-        """Create runtime state for one storage bucket."""
+        *,
+        allow_root_fragmentation: bool,
+    ) -> list[BucketReplayFragment]:
+        """Create replay fragments backed by one physical storage bucket."""
         entries = cls._get_param_entries(storage, module_param_map)
         logger.debug(
             f"Batched hooks: {len(entries)}/{len(storage._param_infos)} params matched"
         )
         if not entries:
-            return None
+            return []
         if context is None:
             comm_device = cls._comm_device(storage, entries)
             context = BucketCommContext.get(storage._module, comm_device)
             if context is None:
                 context = BucketCommContext.create(storage._module, comm_device)
-        return cls(
+        runtime = cls(
             storage=storage,
             entries=entries,
             context=context,
             debug_fqn=_get_storage_debug_fqn(storage),
         )
+        fragment_paths = runtime._root_replay_fragment_paths(
+            allow_root_fragmentation=allow_root_fragmentation,
+        )
+        if not fragment_paths:
+            return [
+                runtime._create_fragment(
+                    entries=entries,
+                    entry_indices=list(range(len(entries))),
+                    debug_fqn=runtime.debug_fqn,
+                )
+            ]
+
+        fragments: list[BucketReplayFragment] = []
+        for path in fragment_paths:
+            indexed_entries = [
+                (idx, entry)
+                for idx, entry in enumerate(entries)
+                if _entry_belongs_to_module_path(entry, path)
+            ]
+            fragment_indices = [idx for idx, _ in indexed_entries]
+            fragment_entries = [entry for _, entry in indexed_entries]
+            if not fragment_entries:
+                raise AssertionError(
+                    f"Expected replay fragment {path!r} to own parameters."
+                )
+            fragments.append(
+                runtime._create_fragment(
+                    entries=fragment_entries,
+                    entry_indices=fragment_indices,
+                    debug_fqn=path,
+                )
+            )
+        return fragments
+
+    def _create_fragment(
+        self,
+        entries: list[ParamEntry],
+        entry_indices: list[int],
+        debug_fqn: str | None,
+    ) -> BucketReplayFragment:
+        fragment = BucketReplayFragment(
+            bucket=self,
+            entries=entries,
+            entry_indices=entry_indices,
+            debug_fqn=debug_fqn,
+        )
+        self.fragments.append(fragment)
+        return fragment
 
     @staticmethod
     def _get_param_entries(
@@ -328,6 +442,45 @@ class BucketRuntime:
                 return entry.access_state.compute_device
         return comm_device
 
+    def _root_replay_fragment_paths(
+        self,
+        *,
+        allow_root_fragmentation: bool,
+    ) -> list[str]:
+        """Return top-level replay fragments for a root-level bucket, if any."""
+        if not allow_root_fragmentation or not self.storage._reshard_after_forward:
+            return []
+        if self.bucket_module() is not self.storage._module:
+            return []
+        has_checkpointed_child = any(
+            hasattr(child, "_checkpoint_wrapped_module")
+            for child in self.storage._module.modules()
+            if child is not self.storage._module
+        )
+        if not has_checkpointed_child:
+            return []
+
+        owner_paths = [_entry_owner_path(entry) for entry in self.entries]
+        if not owner_paths or any(not path for path in owner_paths):
+            return []
+        if _module_path_common_prefix(owner_paths):
+            return []
+
+        fragment_paths = sorted(
+            {
+                _top_level_owner_path(self.storage._module, owner_path)
+                for owner_path in owner_paths
+            }
+        )
+        fragment_paths = [path for path in fragment_paths if path]
+        # Keep mixed root/layer buckets rejected for now. A ModuleList child
+        # such as layers.0 needs a replay fragment under a container, which
+        # has different ordering and prefetch tradeoffs from top-level
+        # root/rest fragments.
+        if len(fragment_paths) <= 1 or any("." in path for path in fragment_paths):
+            return []
+        return fragment_paths
+
     @property
     def infos(self) -> list[ParamInfo]:
         return [entry.param_info for entry in self.entries]
@@ -354,9 +507,11 @@ class BucketRuntime:
             local_shards.append(local_shard)
         return local_shards
 
-    def bucket_module(self) -> nn.Module:
+    def bucket_module(self, entries: list[ParamEntry] | None = None) -> nn.Module:
         """Find the deepest common ancestor module for this bucket's params."""
-        fqns = list(self.storage._param_infos.keys())
+        if entries is None:
+            entries = self.entries
+        fqns = [entry.param_info.fqn for entry in entries]
         prefixes = [".".join(fqn.split(".")[:-1]) for fqn in fqns]
         if not prefixes:
             return self.storage._module
@@ -378,13 +533,16 @@ class BucketRuntime:
             mod = getattr(mod, part)
         return mod
 
-    def resolve_bucket_forward_hook_module(self) -> nn.Module | None:
+    def resolve_bucket_forward_hook_module(
+        self,
+        entries: list[ParamEntry],
+    ) -> nn.Module | None:
         """Return the module whose forward should trigger this bucket."""
         # Register hooks on the deepest common ancestor module for the bucket's
         # params so one pre-forward all-gather covers their parameter accesses.
         # For example, a bucket with "layers.0.attn.weight" and
         # "layers.0.mlp.weight" hooks "layers.0".
-        target = self.bucket_module()
+        target = self.bucket_module(entries)
         # TODO: Avoid registering bucket hooks on passive containers such as
         # ModuleList or ModuleDict. Catch-all buckets can resolve to those
         # containers, whose hooks may never run when forward iterates children.
@@ -428,6 +586,16 @@ class BucketRuntime:
         result.wait()
         result.release_buffers()
 
+    def has_active_full_params_for(self, is_recompute: bool) -> bool:
+        return (
+            self.active_full_params is not None
+            and self.active_recompute == is_recompute
+        )
+
+    def release_active_full_params(self) -> None:
+        self.active_full_params = None
+        self.active_recompute = None
+
     def in_reshard_after_forward_recompute(self) -> bool:
         """Return whether this bucket is in reshard-after-forward recompute."""
         recompute_state = self.storage._reshard_after_forward_recompute_state
@@ -437,7 +605,7 @@ class BucketRuntime:
             and recompute_state.is_recomputing(id(self.storage))
         )
 
-    def prefetch_next(self) -> None:
+    def prefetch_next(self, current_fragment: BucketReplayFragment) -> None:
         """Start the next bucket's all-gather if no prefetch is in flight."""
         if self.context.pending is not None:
             return
@@ -445,15 +613,22 @@ class BucketRuntime:
         is_recompute = self.in_reshard_after_forward_recompute()
         if is_recompute:
             prefetch_order = prefetch_order[::-1]
-        for idx, bucket in enumerate(prefetch_order):
-            if bucket is self:
+        for idx, fragment in enumerate(prefetch_order):
+            if fragment is current_fragment:
                 break
         else:
             return
-        next_idx = idx + 1
-        if next_idx >= len(prefetch_order):
+        next_bucket: BucketRuntime | None = None
+        for next_fragment in prefetch_order[idx + 1 :]:
+            candidate = next_fragment.bucket
+            if candidate is self:
+                continue
+            if candidate.has_active_full_params_for(is_recompute):
+                continue
+            next_bucket = candidate
+            break
+        if next_bucket is None:
             return
-        next_bucket = prefetch_order[next_idx]
         self.context.pending = PendingAllGather(
             bucket=next_bucket,
             result=next_bucket.begin_unshard(),
@@ -474,6 +649,40 @@ class BucketRuntime:
         self.wait_pending(pending.result)
         self.context.pending = None
         return None
+
+    def materialize_full_params_for_fragment(
+        self,
+        fragment: BucketReplayFragment,
+    ) -> list[torch.Tensor]:
+        """Return fragment full params from this physical bucket's AG result."""
+        is_recompute = self.in_reshard_after_forward_recompute()
+        if self.active_full_params is not None and self.active_recompute != is_recompute:
+            self.release_active_full_params()
+
+        if self.active_full_params is None:
+            local_shards = self._local_shards(use_autograd=True)
+            prefetched_result = self.take_pending()
+            runtime = BucketAllGatherRuntime(
+                bucket=self,
+                prefetched_result=prefetched_result,
+            )
+            self.active_full_params = tuple(
+                _BucketAllGather.apply(runtime, *local_shards)
+            )
+            self.active_recompute = is_recompute
+
+        selected = [self.active_full_params[idx] for idx in fragment.entry_indices]
+        if self.storage._reshard_after_forward:
+            return list(_BucketFragmentAccess.apply(fragment, *selected))
+        return selected
+
+    def should_release_after_fragment(self, fragment: BucketReplayFragment) -> bool:
+        """Return whether this fragment ends the current bucket window."""
+        if len(self.fragments) == 1:
+            return True
+        if self.in_reshard_after_forward_recompute():
+            return fragment is self.fragments[0]
+        return fragment is self.fragments[-1]
 
     def reduce_grads(
         self,
@@ -509,18 +718,70 @@ class BucketRuntime:
             self.context.reduce_scatter_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_scatter_wait()
 
+    def report_fragment_grads(
+        self,
+        fragment: BucketReplayFragment,
+        full_param_grads: tuple[torch.Tensor | None, ...],
+    ) -> None:
+        """Accumulate fragment grads and launch one physical bucket RS."""
+        if self.grad_accumulator is None:
+            expected_indices = {
+                idx
+                for idx, entry in enumerate(self.entries)
+                if entry.param_info.requires_grad
+            }
+            self.grad_accumulator = BucketGradAccumulator(
+                bucket=self,
+                expected_indices=expected_indices,
+            )
+        self.grad_accumulator.report(fragment, full_param_grads)
+
+    def reduce_accumulated_grads(
+        self,
+        grads_by_index: dict[int, torch.Tensor],
+    ) -> None:
+        """Launch one reduce-scatter for accumulated physical bucket grads."""
+        grads: list[torch.Tensor] = []
+        valid_infos: list[ParamInfo] = []
+        valid_param_refs: list[ParamModuleInfo] = []
+        for idx, entry in enumerate(self.entries):
+            grad = grads_by_index.get(idx)
+            if grad is None:
+                continue
+            grads.append(grad)
+            valid_infos.append(entry.param_info)
+            valid_param_refs.append(entry.module_info)
+
+        if grads:
+            self.context.queue_reduce_scatter_launch(
+                self,
+                grads,
+                valid_infos,
+                valid_param_refs,
+            )
+        self.grad_accumulator = None
+        self.release_active_full_params()
+
+
+@dataclass
+class BucketReplayFragment:
+    """Replay-safe hook runtime for one execution unit in a physical bucket."""
+
+    bucket: BucketRuntime
+    entries: list[ParamEntry]
+    entry_indices: list[int]
+    debug_fqn: str | None
+    hook_module: nn.Module | None = None
+
+    def resolve_bucket_forward_hook_module(self) -> nn.Module | None:
+        return self.bucket.resolve_bucket_forward_hook_module(self.entries)
+
     def pre_forward_hook(self, mod, args) -> None:
         if torch.compiler.is_compiling():
             return
-        local_shards = self._local_shards(use_autograd=True)
-        prefetched_result = self.take_pending()
-        runtime = BucketAllGatherRuntime(
-            bucket=self,
-            prefetched_result=prefetched_result,
-        )
-        full_params = list(_BucketAllGather.apply(runtime, *local_shards))
-        self.prefetch_next()
-        self.context.flush_pending_reduce_scatter_launches(max_to_flush=1)
+        full_params = self.bucket.materialize_full_params_for_fragment(self)
+        self.bucket.prefetch_next(self)
+        self.bucket.context.flush_pending_reduce_scatter_launches(max_to_flush=1)
         for entry, full_param in zip(self.entries, full_params, strict=True):
             entry.access_state._pre_gathered = full_param
 
@@ -529,17 +790,48 @@ class BucketRuntime:
             return
         for entry in self.entries:
             entry.access_state._pre_gathered = None
+        if self.bucket.should_release_after_fragment(self):
+            self.bucket.release_active_full_params()
+
+
+class _BucketFragmentAccess(torch.autograd.Function):
+    """Autograd boundary for one replay fragment's parameter accesses."""
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        fragment: BucketReplayFragment,
+        *full_params: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        ctx.fragment = fragment
+        ctx.num_inputs = len(full_params)
+        frozen_params = [
+            full_param
+            for full_param, entry in zip(full_params, fragment.entries, strict=True)
+            if not entry.param_info.requires_grad
+        ]
+        if frozen_params:
+            ctx.mark_non_differentiable(*frozen_params)
+        return tuple(full_param.view_as(full_param) for full_param in full_params)
+
+    @staticmethod
+    def backward(
+        ctx: Any,
+        *full_param_grads: torch.Tensor | None,
+    ) -> tuple[Any, ...]:
+        fragment: BucketReplayFragment = ctx.fragment
+        fragment.bucket.report_fragment_grads(fragment, full_param_grads)
+        return (None, *([None] * ctx.num_inputs))
 
 
 class _BucketAllGather(torch.autograd.Function):
     """Autograd boundary for bucket all-gather.
 
     Forward consumes a raw all-gather result, either prefetched by the previous
-    bucket or launched on demand. Backward packs full-parameter gradients and
-    either launches or defers one explicit bucket reduce-scatter. The reduced
-    sharded grads are accumulated into the original sharded parameters
-    asynchronously instead of returned through autograd, so later backward
-    compute can overlap with the reduce-scatter.
+    bucket or launched on demand. For reshard_after_forward=False, backward
+    launches the bucket reduce-scatter directly. For reshard_after_forward=True,
+    replay-fragment access nodes aggregate grads into the physical bucket so one
+    reduce-scatter covers every fragment in the user bucket.
     """
 
     @staticmethod
@@ -592,16 +884,8 @@ class _BucketAllGather(torch.autograd.Function):
             valid_infos.append(entry.param_info)
             valid_param_refs.append(entry.module_info)
 
-        if grads:
-            if bucket.storage._reshard_after_forward:
-                bucket.context.queue_reduce_scatter_launch(
-                    bucket,
-                    grads,
-                    valid_infos,
-                    valid_param_refs,
-                )
-            else:
-                bucket.reduce_grads(grads, valid_infos, valid_param_refs)
+        if grads and not bucket.storage._reshard_after_forward:
+            bucket.reduce_grads(grads, valid_infos, valid_param_refs)
 
         return (None, *([None] * ctx.num_inputs))
 
@@ -616,6 +900,31 @@ def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
         "checkpoint recomputation. Split the bucket to match forward execution "
         "units, or set reshard_after_forward=False for this bucket."
     )
+
+
+def _sort_context_buckets_by_module_order(
+    root_module: nn.Module,
+    context: BucketCommContext,
+) -> None:
+    """Sort fragment prefetch order by registered hook module order."""
+    module_order = {id(module): idx for idx, module in enumerate(root_module.modules())}
+    indexed_fragments = list(enumerate(context.buckets))
+    indexed_fragments.sort(
+        key=lambda item: (
+            module_order.get(id(item[1].hook_module), len(module_order)),
+            item[0],
+        )
+    )
+    context.buckets[:] = [fragment for _, fragment in indexed_fragments]
+
+    fragments_by_bucket: dict[int, list[BucketReplayFragment]] = {}
+    physical_buckets: dict[int, BucketRuntime] = {}
+    for fragment in context.buckets:
+        bucket_id = id(fragment.bucket)
+        fragments_by_bucket.setdefault(bucket_id, []).append(fragment)
+        physical_buckets[bucket_id] = fragment.bucket
+    for bucket_id, fragments in fragments_by_bucket.items():
+        physical_buckets[bucket_id].fragments[:] = fragments
 
 
 def _create_eager_param_states(
@@ -661,29 +970,39 @@ def _install_batched_allgather_hooks(
 ) -> None:
     """Install pre/post forward hooks for batched per-bucket all-gather.
 
-    In eager mode, each DStorage's pre-forward hook starts a single batched
-    all-gather unshard call (one collective per bucket), then sets
-    _pre_gathered on each parameter access state so the property getter can
-    return the hook-provided tensor.
+    In eager mode, a bucket's pre-forward hook starts a batched all-gather and
+    sets _pre_gathered on each parameter access state so the property getter can
+    return the hook-provided tensor. A root-level bucket with disjoint top-level
+    execution units may expand into multiple replay fragments, but the physical
+    bucket still owns one all-gather/reduce-scatter contract.
     """
+    contexts_by_id: dict[int, BucketCommContext] = {}
+    allow_root_fragmentation = len(storages) > 1
     for storage in storages:
         if not storage._param_infos:
             raise AssertionError("Expected FlexShard bucket storage to own parameters.")
         if storage.byte_storage.device.type != "cuda":
             raise AssertionError("Expected FlexShard bucket storage to be on CUDA.")
 
-        bucket_runtime = BucketRuntime.from_storage(
+        bucket_fragments = BucketRuntime.from_storage_fragments(
             storage=storage,
             module_param_map=module_param_map,
+            allow_root_fragmentation=allow_root_fragmentation,
         )
-        if bucket_runtime is None:
+        if not bucket_fragments:
             continue
 
-        target = bucket_runtime.resolve_bucket_forward_hook_module()
-        if target is None:
-            _raise_unreplayable_reshard_hook(storage)
-        target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
-        target.register_forward_hook(bucket_runtime.post_forward_hook)
-        bucket_runtime.context.buckets.append(bucket_runtime)
-        for entry in bucket_runtime.entries:
-            setattr(entry.access_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
+        for fragment in bucket_fragments:
+            target = fragment.resolve_bucket_forward_hook_module()
+            if target is None:
+                _raise_unreplayable_reshard_hook(storage)
+            target.register_forward_pre_hook(fragment.pre_forward_hook)
+            target.register_forward_hook(fragment.post_forward_hook)
+            fragment.hook_module = target
+            fragment.bucket.context.buckets.append(fragment)
+            contexts_by_id[id(fragment.bucket.context)] = fragment.bucket.context
+            for entry in fragment.entries:
+                setattr(entry.access_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
+
+    for context in contexts_by_id.values():
+        _sort_context_buckets_by_module_order(storages[0]._module, context)
