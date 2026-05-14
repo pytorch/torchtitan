@@ -19,24 +19,44 @@ from .bucket_collectives import (
     AllGatherUnshardHandle,
     begin_all_gather_unshard,
     begin_reduce_scatter_grad,
+    launch_reduce_scatter_grad,
+    prepare_reduce_scatter_grad,
+    PreparedReduceScatterGrad,
     ReduceScatterGradHandle,
 )
 from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .param_access import (
     _BUCKET_FQN_ATTR,
-    _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
     _EAGER_BATCHED_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
     EagerParamAccessState,
     ParamModuleInfo,
 )
+from .reshard_provenance import (
+    _flex_shard_all_gather_region,
+    _mark_flex_shard_recompute_tensors,
+)
 from .utils import _get_storage_debug_fqn, _record_function_if_eager
 
 
 logger = logging.getLogger(__name__)
 
-ParamEntry = tuple[ParamModuleInfo, EagerParamAccessState, ParamInfo]
+
+@dataclass(frozen=True)
+class ParamEntry:
+    """Per-parameter bucket runtime state.
+
+    module_info locates the live nn.Parameter for local shard reads and grad
+    writes. access_state holds mutable forward/backward parameter access state.
+    param_info carries immutable storage and placement metadata for collectives.
+    Keeping them together preserves bucket order and avoids repeated FQN
+    resolution in hooks.
+    """
+
+    module_info: ParamModuleInfo
+    access_state: EagerParamAccessState
+    param_info: ParamInfo
 
 
 @dataclass
@@ -56,19 +76,42 @@ class PendingReduceGrad:
 
 
 @dataclass
+class PendingReduceScatterLaunch:
+    """One packed reduce-grad request waiting for an all-gather to launch first."""
+
+    bucket: BucketRuntime
+    prepared: PreparedReduceScatterGrad
+    param_refs: list[ParamModuleInfo]
+
+
+@dataclass
 class BucketCommContext:
-    """Communication streams for batched collectives."""
+    """Communication streams shared by buckets on one root module/device."""
 
     device_handle: ModuleType
     all_gather_stream: torch.Stream
     reduce_scatter_stream: torch.Stream
     buckets: list[BucketRuntime] = field(default_factory=list)
     pending: PendingAllGather | None = None
+    pending_reduce_scatter_launches: list[PendingReduceScatterLaunch] = field(
+        default_factory=list
+    )
     reduce_scatter_states: list[PendingReduceGrad] = field(default_factory=list)
     reduce_scatter_callback_queued: bool = False
 
     @classmethod
-    def get_or_create(
+    def get(
+        cls,
+        root_module: nn.Module,
+        device: torch.device,
+    ) -> BucketCommContext | None:
+        contexts = getattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, None)
+        if contexts is None:
+            return None
+        return contexts.get(device)
+
+    @classmethod
+    def create(
         cls,
         root_module: nn.Module,
         device: torch.device,
@@ -77,16 +120,18 @@ class BucketCommContext:
         if contexts is None:
             contexts = {}
             setattr(root_module, _EAGER_COMM_CONTEXTS_ATTR, contexts)
-
-        context = contexts.get(device)
-        if context is None:
-            device_handle = _get_device_handle(device.type)
-            context = cls(
-                device_handle=device_handle,
-                all_gather_stream=device_handle.Stream(priority=-1),
-                reduce_scatter_stream=device_handle.Stream(priority=-1),
+        if device in contexts:
+            raise AssertionError(
+                f"Communication context for device {device} already exists."
             )
-            contexts[device] = context
+
+        device_handle = _get_device_handle(device.type)
+        context = cls(
+            device_handle=device_handle,
+            all_gather_stream=device_handle.Stream(priority=-1),
+            reduce_scatter_stream=device_handle.Stream(priority=-1),
+        )
+        contexts[device] = context
         return context
 
     def queue_reduce_scatter_wait(self) -> None:
@@ -97,6 +142,7 @@ class BucketCommContext:
 
         def _wait_for_reduce_scatter() -> None:
             try:
+                self.flush_pending_reduce_scatter_launches(max_to_flush=None)
                 for pending in self.reduce_scatter_states:
                     pending.result.wait()
                     pending.result.release_buffers(
@@ -104,6 +150,7 @@ class BucketCommContext:
                     )
             finally:
                 self.reduce_scatter_states.clear()
+                self.pending_reduce_scatter_launches.clear()
                 self.reduce_scatter_callback_queued = False
 
         torch.autograd.Variable._execution_engine.queue_callback(
@@ -125,10 +172,73 @@ class BucketCommContext:
                 )
             self.reduce_scatter_states.clear()
 
+    def _launch_pending_reduce_scatter(
+        self,
+        pending: PendingReduceScatterLaunch,
+    ) -> None:
+        bucket = pending.bucket
+        self.wait_and_clear_reduce_scatter_states(bucket.debug_fqn)
+        result = launch_reduce_scatter_grad(
+            pending.prepared,
+            self.reduce_scatter_stream,
+        )
+        with self.device_handle.stream(self.reduce_scatter_stream):
+            sharded_grads = result.finish()
+            result.record_sharded_grads(
+                _accumulate_sharded_grads(
+                    pending.param_refs,
+                    sharded_grads,
+                ),
+                self.reduce_scatter_stream,
+            )
+        self.reduce_scatter_states.append(PendingReduceGrad(result))
+
+    def queue_reduce_scatter_launch(
+        self,
+        bucket: BucketRuntime,
+        grads: list[torch.Tensor],
+        infos: list[ParamInfo],
+        param_refs: list[ParamModuleInfo],
+    ) -> None:
+        """Pack reduce-scatter input and delay NCCL launch until after next all-gather."""
+        if not grads:
+            return
+        with torch.no_grad():
+            prepared = prepare_reduce_scatter_grad(
+                grads,
+                infos,
+                bucket.storage._mesh,
+                debug_fqn=bucket.debug_fqn,
+            )
+        self.pending_reduce_scatter_launches.append(
+            PendingReduceScatterLaunch(
+                bucket=bucket,
+                prepared=prepared,
+                param_refs=param_refs,
+            )
+        )
+        self.queue_reduce_scatter_wait()
+
+    def flush_pending_reduce_scatter_launches(
+        self,
+        max_to_flush: int | None,
+    ) -> None:
+        """Launch deferred reduce-scatters after all-gather prefetch has priority."""
+        num_flushed = 0
+        while self.pending_reduce_scatter_launches and (
+            max_to_flush is None or num_flushed < max_to_flush
+        ):
+            pending = self.pending_reduce_scatter_launches.pop(0)
+            with torch.no_grad():
+                self._launch_pending_reduce_scatter(pending)
+            num_flushed += 1
+        if num_flushed:
+            self.queue_reduce_scatter_wait()
+
 
 @dataclass
 class BucketAllGatherRuntime:
-    """Runtime metadata passed to reshard-after-forward bucket autograd."""
+    """Runtime metadata passed to bucket all-gather autograd."""
 
     bucket: BucketRuntime
     prefetched_result: AllGatherUnshardHandle | None
@@ -160,8 +270,6 @@ class BucketRuntime:
     entries: list[ParamEntry]
     context: BucketCommContext
     debug_fqn: str | None
-    use_autograd_unshard: bool
-    collected_grads: dict[int, torch.Tensor] = field(default_factory=dict)
 
     @classmethod
     def from_storage(
@@ -178,16 +286,15 @@ class BucketRuntime:
         if not entries:
             return None
         if context is None:
-            context = BucketCommContext.get_or_create(
-                storage._module,
-                cls._comm_device(storage, entries),
-            )
+            comm_device = cls._comm_device(storage, entries)
+            context = BucketCommContext.get(storage._module, comm_device)
+            if context is None:
+                context = BucketCommContext.create(storage._module, comm_device)
         return cls(
             storage=storage,
             entries=entries,
             context=context,
             debug_fqn=_get_storage_debug_fqn(storage),
-            use_autograd_unshard=_storage_uses_bucket_autograd_unshard(storage),
         )
 
     @staticmethod
@@ -204,7 +311,13 @@ class BucketRuntime:
                     module_info.param_name
                 )
                 if param_state is not None:
-                    param_entries.append((module_info, param_state, info))
+                    param_entries.append(
+                        ParamEntry(
+                            module_info=module_info,
+                            access_state=param_state,
+                            param_info=info,
+                        )
+                    )
         return param_entries
 
     @staticmethod
@@ -214,22 +327,24 @@ class BucketRuntime:
     ) -> torch.device:
         """Return the device used for this bucket's collectives."""
         comm_device = storage.byte_storage.device
-        for _, param_state, _ in entries:
-            if param_state.compute_device is not None:
-                return param_state.compute_device
+        for entry in entries:
+            if entry.access_state.compute_device is not None:
+                return entry.access_state.compute_device
         return comm_device
 
     @property
     def infos(self) -> list[ParamInfo]:
-        return [info for _, _, info in self.entries]
+        return [entry.param_info for entry in self.entries]
 
     @property
     def param_refs(self) -> list[ParamModuleInfo]:
-        return [module_info for module_info, _, _ in self.entries]
+        return [entry.module_info for entry in self.entries]
 
-    def _local_shards(self, use_autograd: bool) -> list[torch.Tensor]:
+    def _local_shards(self, *, use_autograd: bool) -> list[torch.Tensor]:
         local_shards: list[torch.Tensor] = []
-        for module_info, param_state, _ in self.entries:
+        for entry in self.entries:
+            module_info = entry.module_info
+            param_state = entry.access_state
             param = module_info.module._parameters[module_info.param_name]
             local_shard = param if use_autograd else param.data
             if (
@@ -267,12 +382,25 @@ class BucketRuntime:
             mod = getattr(mod, part)
         return mod
 
-    def hook_target_module(self) -> nn.Module | None:
+    def resolve_bucket_forward_hook_module(self) -> nn.Module | None:
         """Return the module whose forward should trigger this bucket."""
+        # Register hooks on the deepest common ancestor module for the bucket's
+        # params so one pre-forward all-gather covers their parameter accesses.
+        # For example, a bucket with "layers.0.attn.weight" and
+        # "layers.0.mlp.weight" hooks "layers.0".
         target = self.bucket_module()
         # TODO: Avoid registering bucket hooks on passive containers such as
         # ModuleList or ModuleDict. Catch-all buckets can resolve to those
         # containers, whose hooks may never run when forward iterates children.
+        # Reshard-after-forward needs the bucket hook to rerun during activation
+        # checkpoint recompute. For example, a bucket like
+        # ["embed.*", "layers.1.*", "output.*"] resolves to the root module. If
+        # "layers.1" is checkpoint-wrapped, backward recompute calls only the
+        # layer, not the root module's __call__, so a root hook would not
+        # re-all-gather the layer params after post-forward resharding.
+        # Grouped root/rest buckets need replay fragments that share one
+        # physical bucket all-gather/reduce-scatter, so reject them until that
+        # support exists instead of silently installing an unreplayable hook.
         if (
             self.storage._reshard_after_forward
             and target is self.storage._module
@@ -385,108 +513,37 @@ class BucketRuntime:
             self.context.reduce_scatter_states.append(PendingReduceGrad(result))
             self.context.queue_reduce_scatter_wait()
 
-    def reduce_grads_to_shards(
-        self,
-        grads: list[torch.Tensor],
-        infos: list[ParamInfo],
-    ) -> list[torch.Tensor]:
-        """Reduce full-parameter grads and return local sharded grads."""
-        if not grads:
-            return []
-        with torch.no_grad():
-            result = begin_reduce_scatter_grad(
-                grads,
-                infos,
-                self.storage._mesh,
-                self.context.reduce_scatter_stream,
-                debug_fqn=self.debug_fqn,
-            )
-            sharded_grads = result.finish()
-            result.release_buffers(release_sharded_grads=False)
-            return sharded_grads
-
-    def _reduce_collected_grads(self) -> None:
-        grads: list[torch.Tensor] = []
-        infos: list[ParamInfo] = []
-        param_refs: list[ParamModuleInfo] = []
-        for idx, (module_info, param_state, info) in enumerate(self.entries):
-            grad = self.collected_grads.pop(idx, None)
-            if grad is not None:
-                grads.append(grad)
-                infos.append(info)
-                param_refs.append(module_info)
-            param_state._unsharded_for_reduce = None
-        self.reduce_grads(grads, infos, param_refs)
-
     def pre_forward_hook(self, mod, args) -> None:
         if torch.compiler.is_compiling():
             return
-        local_shards = self._local_shards(use_autograd=self.use_autograd_unshard)
-        if self.use_autograd_unshard:
-            prefetched_result = self.take_pending()
-            runtime = BucketAllGatherRuntime(
-                bucket=self,
-                prefetched_result=prefetched_result,
-            )
-            full_params = list(_BucketAllGather.apply(runtime, *local_shards))
-            self.prefetch_next()
-        else:
-            with torch.no_grad():
-                result = self.take_pending()
-                if result is None:
-                    result = begin_all_gather_unshard(
-                        local_shards,
-                        self.infos,
-                        self.storage._mesh,
-                        self.context.all_gather_stream,
-                        debug_fqn=self.debug_fqn,
-                    )
-                full_params = result.finish()
-                self.prefetch_next()
-        for (_, param_state, _), full_param in zip(
-            self.entries, full_params, strict=True
-        ):
-            param_state._pre_gathered = full_param
+        local_shards = self._local_shards(use_autograd=True)
+        prefetched_result = self.take_pending()
+        runtime = BucketAllGatherRuntime(
+            bucket=self,
+            prefetched_result=prefetched_result,
+        )
+        full_params = list(_BucketAllGather.apply(runtime, *local_shards))
+        self.prefetch_next()
+        self.context.flush_pending_reduce_scatter_launches(max_to_flush=1)
+        for entry, full_param in zip(self.entries, full_params, strict=True):
+            entry.access_state._pre_gathered = full_param
 
     def post_forward_hook(self, mod, args, output) -> None:
         if torch.compiler.is_compiling():
             return
-        for _, param_state, _ in self.entries:
-            param_state._pre_gathered = None
-        if self.use_autograd_unshard:
-            return
-
-        if torch.is_grad_enabled():
-            self.collected_grads.clear()
-            leaf_indices = []
-            for idx, (_, param_state, _) in enumerate(self.entries):
-                leaf = param_state._unsharded_for_reduce
-                if leaf is not None and leaf.requires_grad:
-                    leaf_indices.append((idx, leaf))
-
-            if leaf_indices:
-                indices = [idx for idx, _ in leaf_indices]
-                leaves = [leaf for _, leaf in leaf_indices]
-
-                def _on_grads(grads):
-                    self.collected_grads.clear()
-                    for idx, grad in zip(indices, grads, strict=True):
-                        if grad is not None:
-                            self.collected_grads[idx] = grad
-                    self._reduce_collected_grads()
-
-                torch.autograd.graph.register_multi_grad_hook(
-                    leaves,
-                    _on_grads,
-                )
+        for entry in self.entries:
+            entry.access_state._pre_gathered = None
 
 
 class _BucketAllGather(torch.autograd.Function):
-    """Autograd boundary for reshard-after-forward bucket all-gather.
+    """Autograd boundary for bucket all-gather.
 
     Forward consumes a raw all-gather result, either prefetched by the previous
     bucket or launched on demand. Backward packs full-parameter gradients and
-    launches one explicit bucket reduce-scatter.
+    either launches or defers one explicit bucket reduce-scatter. The reduced
+    sharded grads are accumulated into the original sharded parameters
+    asynchronously instead of returned through autograd, so later backward
+    compute can overlap with the reduce-scatter.
     """
 
     @staticmethod
@@ -497,7 +554,6 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         ctx.runtime = runtime
         ctx.num_inputs = len(local_shards)
-        ctx.local_shard_dtypes = tuple(shard.dtype for shard in local_shards)
 
         result = runtime.prefetched_result
         runtime.prefetched_result = None
@@ -509,7 +565,16 @@ class _BucketAllGather(torch.autograd.Function):
                 runtime.bucket.context.all_gather_stream,
                 debug_fqn=runtime.bucket.debug_fqn,
             )
-        full_params = result.finish()
+        with _flex_shard_all_gather_region():
+            full_params = result.finish()
+        _mark_flex_shard_recompute_tensors(full_params)
+        frozen_params = [
+            full_param
+            for full_param, info in zip(full_params, runtime.bucket.infos, strict=True)
+            if not info.requires_grad
+        ]
+        if frozen_params:
+            ctx.mark_non_differentiable(*frozen_params)
         return tuple(full_params)
 
     @staticmethod
@@ -519,70 +584,32 @@ class _BucketAllGather(torch.autograd.Function):
     ) -> tuple[Any, ...]:
         runtime: BucketAllGatherRuntime = ctx.runtime
         bucket = runtime.bucket
-        input_grads: list[torch.Tensor | None] = [None] * ctx.num_inputs
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
-        valid_indices: list[int] = []
-        for idx, (grad, info) in enumerate(
-            zip(full_param_grads, bucket.infos, strict=True)
+        valid_param_refs: list[ParamModuleInfo] = []
+        for grad, entry in zip(
+            full_param_grads,
+            bucket.entries,
+            strict=True,
         ):
             if grad is None:
                 continue
-            valid_indices.append(idx)
             grads.append(grad.contiguous())
-            valid_infos.append(info)
+            valid_infos.append(entry.param_info)
+            valid_param_refs.append(entry.module_info)
 
         if grads:
-            sharded_grads = bucket.reduce_grads_to_shards(grads, valid_infos)
-            for input_idx, sharded_grad in zip(
-                valid_indices,
-                sharded_grads,
-                strict=True,
-            ):
-                input_dtype = ctx.local_shard_dtypes[input_idx]
-                if sharded_grad.dtype != input_dtype:
-                    sharded_grad = sharded_grad.to(input_dtype)
-                input_grads[input_idx] = sharded_grad
+            if bucket.storage._reshard_after_forward:
+                bucket.context.queue_reduce_scatter_launch(
+                    bucket,
+                    grads,
+                    valid_infos,
+                    valid_param_refs,
+                )
+            else:
+                bucket.reduce_grads(grads, valid_infos, valid_param_refs)
 
-        return (None, *input_grads)
-
-
-def _storage_requires_batched_unshard(storage: DStorage) -> bool:
-    """Return whether parameter access must use hook-provided tensors."""
-    return bool(storage._param_infos)
-
-
-def _storage_uses_bucket_autograd_unshard(storage: DStorage) -> bool:
-    """Return whether reshard-after-forward should use the custom bucket autograd path."""
-    if not storage._reshard_after_forward:
-        return False
-    if not storage._param_infos:
-        return False
-    return _get_bucket_autograd_unshard_unsupported_reason(storage) is None
-
-
-def _get_bucket_autograd_unshard_unsupported_reason(
-    storage: DStorage,
-) -> str | None:
-    """Return why a reshard-after-forward bucket cannot use the custom autograd path."""
-    infos = list(storage._param_infos.values())
-    if not infos:
-        return None
-    if storage.byte_storage.device.type != "cuda":
-        return f"storage is on {storage.byte_storage.device.type}"
-    return None
-
-
-def _raise_unsupported_bucket_autograd_unshard(storage: DStorage) -> None:
-    reason = _get_bucket_autograd_unshard_unsupported_reason(storage)
-    bucket_fqn = _get_storage_debug_fqn(storage)
-    bucket_msg = f" for bucket {bucket_fqn!r}" if bucket_fqn else ""
-    raise NotImplementedError(
-        "FlexShard eager reshard_after_forward requires placement support "
-        f"for the custom autograd bucket path{bucket_msg}; "
-        f"{reason}. Use reshard_after_forward=False for this bucket or add "
-        "support for this placement before using eager reshard-after-forward."
-    )
+        return (None, *([None] * ctx.num_inputs))
 
 
 def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
@@ -607,7 +634,6 @@ def _create_eager_param_states(
     module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]] = {}
 
     for storage in storages:
-        uses_bucket_autograd_unshard = _storage_uses_bucket_autograd_unshard(storage)
         bucket_fqn = _get_storage_debug_fqn(storage)
         for fqn, info in storage._param_infos.items():
             bucket_spec = fqn_to_bucket_spec[fqn]
@@ -618,17 +644,11 @@ def _create_eager_param_states(
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
             param_state = EagerParamAccessState(
-                requires_grad=info.requires_grad,
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
             )
 
-            setattr(
-                param_state,
-                _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR,
-                uses_bucket_autograd_unshard,
-            )
             setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, False)
             setattr(param_state, _PARAM_FQN_ATTR, fqn)
             setattr(param_state, _BUCKET_FQN_ATTR, bucket_fqn)
@@ -651,18 +671,12 @@ def _install_batched_allgather_hooks(
     all-gather unshard call (one collective per bucket), then sets
     _pre_gathered on each parameter access state so the property getter can
     return the hook-provided tensor.
-
-    Skipped under graph capture. FlexShard currently supports eager execution
-    only, so parameter access will raise before collectives are emitted.
     """
     for storage in storages:
-        if not _storage_requires_batched_unshard(storage):
-            continue
-        if (
-            storage._reshard_after_forward
-            and not _storage_uses_bucket_autograd_unshard(storage)
-        ):
-            _raise_unsupported_bucket_autograd_unshard(storage)
+        if not storage._param_infos:
+            raise AssertionError("Expected FlexShard bucket storage to own parameters.")
+        if storage.byte_storage.device.type != "cuda":
+            raise AssertionError("Expected FlexShard bucket storage to be on CUDA.")
 
         bucket_runtime = BucketRuntime.from_storage(
             storage=storage,
@@ -671,11 +685,11 @@ def _install_batched_allgather_hooks(
         if bucket_runtime is None:
             continue
 
-        target = bucket_runtime.hook_target_module()
+        target = bucket_runtime.resolve_bucket_forward_hook_module()
         if target is None:
             _raise_unreplayable_reshard_hook(storage)
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
         target.register_forward_hook(bucket_runtime.post_forward_hook)
         bucket_runtime.context.buckets.append(bucket_runtime)
-        for _, param_state, _ in bucket_runtime.entries:
-            setattr(param_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)
+        for entry in bucket_runtime.entries:
+            setattr(entry.access_state, _EAGER_BATCHED_HOOK_REGISTERED_ATTR, True)

@@ -27,6 +27,10 @@ from torchtitan.experiments.flex_shard import (
     MixedPrecisionPolicy,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements
+from torchtitan.experiments.flex_shard.flex_shard.reshard_provenance import (
+    _is_flex_shard_recompute_tensor,
+    _mark_flex_shard_recompute_tensors,
+)
 from torchtitan.experiments.flex_shard.tests.common import (
     check_flex_shard_parity,
     expected_shard,
@@ -85,6 +89,26 @@ def _checkpoint_transformer_execution_units(model: torch.nn.Module) -> None:
         model.output,
         context_fn=_prefer_recompute_context_fn,
     )
+
+
+def _layer_buckets_with_grouped_root_rest(
+    num_layers: int,
+    *,
+    reshard_after_forward: bool,
+) -> list[BucketSpec]:
+    return [
+        *[
+            BucketSpec(
+                [f"layers.{idx}.*"],
+                reshard_after_forward=reshard_after_forward,
+            )
+            for idx in range(num_layers)
+        ],
+        BucketSpec(
+            ["tok_embeddings.*", "pos_embeddings.*", "norm.*", "output.*"],
+            reshard_after_forward=reshard_after_forward,
+        ),
+    ]
 
 
 class TestFlexShardTraining(FSDPTest):
@@ -225,8 +249,24 @@ class TestFlexShardTraining(FSDPTest):
                 None,
                 torch.ops._c10d_functional.all_gather_into_tensor.default,
             ),
+            CheckpointPolicy.PREFER_RECOMPUTE,
+        )
+        full_param = torch.ones(2, 2, device=device_type)
+        _mark_flex_shard_recompute_tensors(full_param)
+        full_param_view = full_param.t()
+
+        class PolicyContext:
+            op_output = full_param_view
+
+        self.assertEqual(
+            forward_ctx.policy_fn(
+                PolicyContext(),
+                torch.ops.aten.t.default,
+                full_param,
+            ),
             CheckpointPolicy.MUST_RECOMPUTE,
         )
+        self.assertTrue(_is_flex_shard_recompute_tensor(full_param_view))
         self.assertEqual(
             forward_ctx.policy_fn(None, torch.ops.aten.mm.default),
             CheckpointPolicy.PREFER_RECOMPUTE,
@@ -251,6 +291,28 @@ class TestFlexShardTraining(FSDPTest):
         optim.step()
         ref_optim.step()
         check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
+
+    @skip_if_lt_x_gpu(2)
+    def test_reshard_after_forward_grouped_root_rest_bucket_unsupported(self):
+        mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+
+        args, model = make_transformer_model(device=device_type.type, n_layers=2)
+        _checkpoint_transformer_execution_units(model)
+
+        with self.assertRaisesRegex(RuntimeError, "recomputation-safe"):
+            flex_shard(
+                model,
+                mesh,
+                shard_placement_fn=per_param_placements,
+                buckets=_layer_buckets_with_grouped_root_rest(
+                    args.n_layers,
+                    reshard_after_forward=True,
+                ),
+            )
 
 
 if __name__ == "__main__":

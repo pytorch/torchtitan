@@ -13,6 +13,11 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from .reshard_provenance import (
+    _is_flex_shard_recompute_tensor,
+    _mark_flex_shard_recompute_tensors,
+)
+
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
@@ -33,7 +38,6 @@ _EAGER_BATCHED_HOOK_REGISTERED_ATTR = "_flex_shard_eager_batched_hook_registered
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
 _PARAM_FQN_ATTR = "_flex_shard_param_fqn"
 _BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
-_EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR = "_flex_shard_eager_autograd_bucket_unshard"
 
 
 def set_sharding_info(
@@ -155,49 +159,31 @@ class ParamModuleInfo:
 class EagerParamAccessState:
     """Mutable state for eager-only FlexShard parameter access."""
 
-    requires_grad: bool = True
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
     compute_device: torch.device | None = None
     _pre_gathered: torch.Tensor | None = None
-    _unsharded_for_reduce: torch.Tensor | None = None
 
     def consume_pre_gathered_param(self) -> torch.Tensor:
         """Return the hook-provided full param or raise for unsupported access."""
         # In eager mode, _pre_gathered is set by the batched all-gather
-        # pre-forward hook. This PR intentionally has no per-parameter
-        # all-gather fallback. TODO: later compile support should add a
-        # separate graph-safe parametrization or graph path, with tests
-        # proving graph capture behavior.
+        # pre-forward hook so parameter reads preserve bucketed collectives.
         pre = self._pre_gathered
         if pre is not None:
             # TODO: Keep this cache valid for the whole forward. Clearing it
             # here breaks legal modules that read the same parameter more than
             # once, and the post-forward hook already owns cleanup.
             self._pre_gathered = None
-            if getattr(self, _EAGER_AUTOGRAD_BUCKET_UNSHARD_ATTR, False):
-                if self.param_dtype is not None or self.reduce_dtype is not None:
-                    pre = _MixedPrecisionCast.apply(
-                        pre,
-                        self.param_dtype,
-                        self.reduce_dtype,
-                    )
-                return pre
-
-            if self.param_dtype is not None and pre.dtype != self.param_dtype:
-                pre = pre.to(self.param_dtype)
-            unsharded = pre.detach().requires_grad_(self.requires_grad)
-            if (
-                torch.is_grad_enabled()
-                and self.requires_grad
-                and self._unsharded_for_reduce is None
-            ):
-                # TODO: Track a reduction leaf per forward instead of only the
-                # first leaf. Multiple forwards before one backward currently
-                # register later bucket hooks against this stale leaf and can
-                # reduce gradients into the wrong shard.
-                self._unsharded_for_reduce = unsharded
-            return unsharded
+            flex_shard_recompute = _is_flex_shard_recompute_tensor(pre)
+            if self.param_dtype is not None or self.reduce_dtype is not None:
+                pre = _MixedPrecisionCast.apply(
+                    pre,
+                    self.param_dtype,
+                    self.reduce_dtype,
+                )
+                if flex_shard_recompute:
+                    _mark_flex_shard_recompute_tensors(pre)
+            return pre
 
         if _is_graph_capture_active():
             _raise_graph_capture_unsupported()
