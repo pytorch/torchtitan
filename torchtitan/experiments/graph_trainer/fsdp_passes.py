@@ -170,41 +170,41 @@ def overlap_fsdp_ag_rs_pass(
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
     """
-    Reassign FSDP all-gather nodes to extra NCCL process groups for
+    Reassign FSDP all-gather nodes to an extra NCCL process group for
     AG/RS overlap in backward.
 
-    Discovers all distinct FSDP PGs by inspecting the graph (e.g. one for
-    FSDP, another for expert-FSDP), creates an extra NCCL PG over the same
-    ranks for each (giving it a separate CUDA stream), and rewrites every
-    all-gather to the corresponding extra PG. This separates all-gathers
-    from reduce-scatters onto different streams, enabling AG/RS overlap in
-    backward.
+    Discovers the FSDP PG by inspecting the graph, creates an extra
+    NCCL PG over the same ranks (giving it a separate CUDA stream),
+    and rewrites every all-gather using that source PG to the extra PG.
+    This separates all-gathers from reduce-scatters onto different streams,
+    enabling AG/RS overlap in backward.
 
     No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
     bucketing passes so bucketed all-gathers inherit the new PG name.
     """
-    source_pg_names: OrderedSet[str] = OrderedSet()
+    source_pg_name: str | None = None
     for node in gm.graph.nodes:
         if is_wait_tensor_from_fsdp(node):
             ag_node = node.args[0]
-            source_pg_names.add(ag_node.args[2])
+            source_pg_name = ag_node.args[2]
+            break
 
-    if not source_pg_names:
+    if source_pg_name is None:
         return gm
 
-    pg_mapping: dict[str, str] = {
-        pg: _get_or_create_extra_fsdp_pg(pg) for pg in source_pg_names
-    }
+    target_pg_name = _get_or_create_extra_fsdp_pg(source_pg_name)
 
     count = 0
     for node in gm.graph.nodes:
-        if is_all_gather(node) and node.args[2] in pg_mapping:
+        if is_all_gather(node) and node.args[2] == source_pg_name:
             # AG args: (input_tensor, group_size, group_name)
-            node.args = (node.args[0], node.args[1], pg_mapping[node.args[2]])
+            node.args = (node.args[0], node.args[1], target_pg_name)
             count += 1
     if count > 0:
-        for source, target in pg_mapping.items():
-            logger.info(f"Rewrote all-gather node(s) from PG {source} to PG {target}")
+        logger.info(
+            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
+            f"to PG {target_pg_name}"
+        )
     gm.recompile()
     return gm
 
