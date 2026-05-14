@@ -24,6 +24,41 @@ from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
 log = logging.getLogger(__name__)
 
 
+def _retrace_node_val(
+    node: fx.Node, fake_mode: torch._subclasses.fake_tensor.FakeTensorMode
+) -> None:
+    """Re-execute a node's op to produce a fresh ``meta["val"]`` with
+    independent storage.
+
+    ``graph.node_copy`` shallow-copies ``meta``, so the duplicate's
+    ``meta["val"]`` is the exact same FakeTensor (same storage ``_cdata``)
+    as the original.  Downstream passes (e.g., ``MemoryTracker`` in
+    overlap scheduling) rely on distinct storages to track allocations;
+    shared storages between forward and recomputed nodes cause assertion
+    failures when the scheduler reorders across them.
+
+    Re-executing the op (rather than ``empty_like``) correctly preserves
+    aliasing for view ops (reshape, transpose, split, etc.) whose output
+    must share storage with their input.
+    """
+    if node.op != "call_function" or "val" not in node.meta:
+        return
+
+    from torch._dispatch.python import enable_python_dispatcher
+
+    def get_val(x: object) -> object:
+        if isinstance(x, fx.Node):
+            return x.meta.get("val")
+        return x
+
+    fake_args = torch.fx.map_arg(node.args, get_val)
+    fake_kwargs = torch.fx.map_arg(node.kwargs, get_val)
+
+    with fake_mode, enable_python_dispatcher():
+        result = node.target(*fake_args, **fake_kwargs)
+    node.meta["val"] = result
+
+
 def _collect_backward_regions(
     gm: fx.GraphModule,
 ) -> list[tuple[int, int, bool]]:
@@ -91,6 +126,12 @@ def selective_activation_remat_pass(
             "in recompute regions. Please move RNG operations outside "
             "of recompute regions, or use joint graph mode (where partitioner handles RNG)."
         )
+
+    from torch._dynamo.utils import detect_fake_mode
+
+    fake_mode = detect_fake_mode(
+        tuple(node.meta.get("val") for node in gm.graph.find_nodes(op="placeholder"))
+    )
 
     regions = _collect_backward_regions(gm)
     if not regions:
@@ -287,6 +328,7 @@ def selective_activation_remat_pass(
             dup = gm.graph.node_copy(fwd_node, remat_input)
         dup.name = fwd_node.name + "_recomputed"
         dup.meta["autograd_backward"] = True
+        _retrace_node_val(dup, fake_mode)
         recomputed_nodes[fwd_node] = dup
         log.debug(
             "Recomputing %s before backward node %s", fwd_node.name, bwd_target.name
