@@ -30,32 +30,29 @@ if TYPE_CHECKING:
     from ..flex_shard.bucket_storage import ParamInfo
 
 
-@dataclass(frozen=True)
-class _ShardReduceGradLayout:
-    padded_sizes: list[torch.Size]
-
-
-@dataclass(frozen=True)
-class _ShardAllGatherUnshardState:
-    infos: list[ParamInfo]
-    world_size: int
-    pg: Any
-    debug_fqn: str | None
-    per_rank_param_offsets: list[list[int]]
-
-
-@dataclass(frozen=True)
-class _ShardReduceScatterGradState:
-    infos: list[ParamInfo]
-    layout: _ShardReduceGradLayout
-    rank: int
-    world_size: int
-    pg: Any
-    debug_fqn: str | None
-
-
 class Shard(Placement):
     """Symmetric sharding — parameter split along dim across all ranks."""
+
+    @dataclass(frozen=True)
+    class _ReduceGradLayout:
+        padded_sizes: list[torch.Size]
+
+    @dataclass(frozen=True)
+    class _UnshardState:
+        infos: list[ParamInfo]
+        world_size: int
+        pg: Any
+        debug_fqn: str | None
+        per_rank_param_offsets: list[list[int]]
+
+    @dataclass(frozen=True)
+    class _ReduceGradState:
+        infos: list[ParamInfo]
+        layout: Shard._ReduceGradLayout
+        rank: int
+        world_size: int
+        pg: Any
+        debug_fqn: str | None
 
     def __init__(self, dim: int = 0):
         self.dim = dim
@@ -143,7 +140,7 @@ class Shard(Placement):
         return PlacementPreparedUnshard(
             placement=self,
             buffers=[send_buf, *gathered],
-            placement_state=_ShardAllGatherUnshardState(
+            placement_state=Shard._UnshardState(
                 infos=infos,
                 world_size=ws,
                 pg=mesh.get_group(),
@@ -155,9 +152,9 @@ class Shard(Placement):
     @override
     def run_prepared_unshard(self, prepared: PlacementPreparedUnshard) -> None:
         """Launch the prepared bucket all-gather."""
-        if not isinstance(prepared.placement_state, _ShardAllGatherUnshardState):
+        if not isinstance(prepared.placement_state, Shard._UnshardState):
             raise AssertionError(
-                "Expected _ShardAllGatherUnshardState, "
+                "Expected Shard._UnshardState, "
                 f"got {type(prepared.placement_state).__name__}"
             )
         send_buf = prepared.buffers[0]
@@ -174,9 +171,9 @@ class Shard(Placement):
         prepared: PlacementPreparedUnshard,
     ) -> PlacementUnshardResult:
         """Finish the prepared bucket all-gather and assemble full parameters."""
-        if not isinstance(prepared.placement_state, _ShardAllGatherUnshardState):
+        if not isinstance(prepared.placement_state, Shard._UnshardState):
             raise AssertionError(
-                "Expected _ShardAllGatherUnshardState, "
+                "Expected Shard._UnshardState, "
                 f"got {type(prepared.placement_state).__name__}"
             )
         gathered = prepared.buffers[1:]
@@ -222,7 +219,7 @@ class Shard(Placement):
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
         world_size: int,
-    ) -> tuple[torch.Tensor, _ShardReduceGradLayout]:
+    ) -> tuple[torch.Tensor, Shard._ReduceGradLayout]:
         dtype = tensors[0].dtype
         device = tensors[0].device
         padded_sizes: list[torch.Size] = []
@@ -237,13 +234,13 @@ class Shard(Placement):
         send_buf = torch.empty(input_numel, dtype=dtype, device=device)
         send_buf_2d = send_buf.view(world_size, -1)
         torch._chunk_cat(tensors, dim=self.dim, num_chunks=world_size, out=send_buf_2d)
-        return send_buf, _ShardReduceGradLayout(padded_sizes)
+        return send_buf, Shard._ReduceGradLayout(padded_sizes)
 
     def _unpack_reduce_scatter_grad(
         self,
         recv_buf: torch.Tensor,
         infos: list[ParamInfo],
-        layout: _ShardReduceGradLayout,
+        layout: Shard._ReduceGradLayout,
         rank: int,
         world_size: int,
     ) -> list[torch.Tensor]:
@@ -284,7 +281,7 @@ class Shard(Placement):
         return PlacementPreparedReduceGrad(
             placement=self,
             buffers=[send_buf],
-            placement_state=_ShardReduceScatterGradState(
+            placement_state=Shard._ReduceGradState(
                 infos=infos,
                 layout=layout,
                 rank=mesh.get_local_rank(),
@@ -300,9 +297,9 @@ class Shard(Placement):
         prepared: PlacementPreparedReduceGrad,
     ) -> PlacementReduceGradResult:
         """Reduce a prepared gradient request using reduce-scatter."""
-        if not isinstance(prepared.placement_state, _ShardReduceScatterGradState):
+        if not isinstance(prepared.placement_state, Shard._ReduceGradState):
             raise AssertionError(
-                "Expected _ShardReduceScatterGradState, "
+                "Expected Shard._ReduceGradState, "
                 f"got {type(prepared.placement_state).__name__}"
             )
         send_buf = prepared.buffers[0]
