@@ -87,6 +87,26 @@ def _checkpoint_transformer_execution_units(model: torch.nn.Module) -> None:
     )
 
 
+def _layer_buckets_with_grouped_root_rest(
+    num_layers: int,
+    *,
+    reshard_after_forward: bool,
+) -> list[BucketSpec]:
+    return [
+        *[
+            BucketSpec(
+                [f"layers.{idx}.*"],
+                reshard_after_forward=reshard_after_forward,
+            )
+            for idx in range(num_layers)
+        ],
+        BucketSpec(
+            ["tok_embeddings.*", "pos_embeddings.*", "norm.*", "output.*"],
+            reshard_after_forward=reshard_after_forward,
+        ),
+    ]
+
+
 class TestFlexShardTraining(FSDPTest):
     @property
     def world_size(self) -> int:
@@ -251,6 +271,28 @@ class TestFlexShardTraining(FSDPTest):
         optim.step()
         ref_optim.step()
         check_flex_shard_parity(self, reference, model, self.rank, self.world_size)
+
+    @skip_if_lt_x_gpu(2)
+    def test_reshard_after_forward_grouped_root_rest_bucket_unsupported(self):
+        mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+
+        args, model = make_transformer_model(device=device_type.type, n_layers=2)
+        _checkpoint_transformer_execution_units(model)
+
+        with self.assertRaisesRegex(RuntimeError, "recomputation-safe"):
+            flex_shard(
+                model,
+                mesh,
+                shard_placement_fn=per_param_placements,
+                buckets=_layer_buckets_with_grouped_root_rest(
+                    args.n_layers,
+                    reshard_after_forward=True,
+                ),
+            )
 
 
 if __name__ == "__main__":

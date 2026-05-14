@@ -394,6 +394,9 @@ class BucketRuntime:
         # "layers.1" is checkpoint-wrapped, backward recompute calls only the
         # layer, not the root module's __call__, so a root hook would not
         # re-all-gather the layer params after post-forward resharding.
+        # Grouped root/rest buckets need replay fragments that share one
+        # physical bucket all-gather/reduce-scatter, so reject them until that
+        # support exists instead of silently installing an unreplayable hook.
         if (
             self.storage._reshard_after_forward
             and target is self.storage._module
