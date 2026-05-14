@@ -7,18 +7,27 @@
 import torch
 import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
-
-from torchtitan.experiments.flex_shard import (
-    BucketSpec,
-    flex_shard,
-    OffloadPolicy,
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    create_selective_checkpoint_contexts,
 )
+
+from torchtitan.experiments.flex_shard import BucketSpec, flex_shard, OffloadPolicy
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.param_access import (
     FlexShardModule,
     get_global_shape,
     get_placements,
     is_flex_shard_param,
+)
+from torchtitan.experiments.flex_shard.flex_shard.reshard_after_forward import (
+    _compose_with_ac_policy,
+    _ReshardAfterForwardRecomputeState,
+)
+from torchtitan.experiments.flex_shard.flex_shard.reshard_provenance import (
+    _flex_shard_all_gather_region,
+    _is_flex_shard_recompute_tensor,
+    _mark_flex_shard_recompute_tensors,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cuda,
@@ -122,6 +131,61 @@ class TestFlexShardAPI(TestCase):
                     shard_placement_fn=per_param_placements,
                     buckets=[BucketSpec(["*"])],
                 )
+
+    def test_reshard_policy_only_forces_flex_shard_derived_tensors(self):
+        def must_save_context_fn():
+            def must_save_policy(ctx, func, *args, **kwargs):
+                return CheckpointPolicy.MUST_SAVE
+
+            return create_selective_checkpoint_contexts(must_save_policy)
+
+        context_fn = _compose_with_ac_policy(
+            must_save_context_fn,
+            _ReshardAfterForwardRecomputeState(),
+            frozenset({0}),
+        )
+        forward_ctx, _ = context_fn()
+        all_gather = torch.ops._c10d_functional.all_gather_into_tensor.default
+        self.assertEqual(
+            forward_ctx.policy_fn(None, all_gather),
+            CheckpointPolicy.MUST_SAVE,
+        )
+
+        all_gather_output = torch.ones(2, 2)
+
+        class AllGatherContext:
+            op_output = all_gather_output
+
+        with _flex_shard_all_gather_region():
+            self.assertEqual(
+                forward_ctx.policy_fn(AllGatherContext(), all_gather),
+                CheckpointPolicy.MUST_RECOMPUTE,
+            )
+        self.assertTrue(_is_flex_shard_recompute_tensor(all_gather_output))
+
+        full_param = torch.ones(2, 2)
+        _mark_flex_shard_recompute_tensors(full_param)
+        full_param_view = full_param.t()
+
+        class ViewContext:
+            op_output = full_param_view
+
+        self.assertEqual(
+            forward_ctx.policy_fn(
+                ViewContext(),
+                torch.ops.aten.t.default,
+                full_param,
+            ),
+            CheckpointPolicy.MUST_RECOMPUTE,
+        )
+        self.assertTrue(_is_flex_shard_recompute_tensor(full_param_view))
+
+        forward_ctx, _ = context_fn()
+        chained_view_param = torch.ones(2, 2)
+        _mark_flex_shard_recompute_tensors(chained_view_param)
+        with forward_ctx:
+            chained_view = chained_view_param.t().narrow(0, 0, 1)
+        self.assertTrue(_is_flex_shard_recompute_tensor(chained_view))
 
 
 if __name__ == "__main__":
