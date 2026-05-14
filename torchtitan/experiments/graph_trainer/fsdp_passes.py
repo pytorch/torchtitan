@@ -279,14 +279,11 @@ class JointManualOverlapScheduler:
         bucket_mode = bucket_mode or "custom_ops"
 
         self.nodes: list[fx.Node] = list(self.graph.nodes)
-        self.node_idx: dict[fx.Node, int] = {n: i for i, n in enumerate(self.nodes)}
         self.node_ancestors: dict[
             fx.Node, OrderedSet[fx.Node]
         ] = self._collect_node_ancestors()
 
         self.collective_info: dict[fx.Node, CollectiveInfo] = {}
-        self.wait_to_start: dict[fx.Node, fx.Node] = {}
-        self.unscheduled_collectives: OrderedSet[fx.Node] = OrderedSet()
         self._identify_collectives()
 
         self.in_degree: Counter[fx.Node] = Counter(
@@ -315,16 +312,13 @@ class JointManualOverlapScheduler:
         for node in self.nodes:
             if _schedulable_wait_node(node):
                 start = node.args[0]
-                info = CollectiveInfo(
+                self.collective_info[start] = CollectiveInfo(
                     start_node=start,
                     wait_node=node,
                     size_bytes=0,
                     estimated_time_ms=0,
                     exposed_time_ms=0,
                 )
-                self.collective_info[start] = info
-                self.wait_to_start[node] = start
-                self.unscheduled_collectives.add(start)
 
     def _obtain_nodes_in_subgraph(self) -> None:
         graph_view = make_graph_view(self.graph, self.module_stack_fn)
