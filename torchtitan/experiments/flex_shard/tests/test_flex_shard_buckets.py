@@ -49,9 +49,12 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
 )
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
-    _materialize_bucket_storages,
     ParamInfo,
     ShardedBucketStorage,
+)
+from torchtitan.experiments.flex_shard.flex_shard.flex_shard import (
+    _materialize_bucket_storages,
+    PreparedFlexShardInputs,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,
@@ -504,7 +507,7 @@ class TestBucketPlacementValidation(TestCase):
     def test_rejects_mixed_dtypes(self):
         """Parameters in one bucket must share the same storage dtype."""
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_bucket_placements,
+            _validate_bucket_uniform_dtype_and_placement,
         )
 
         assignments = [["a.weight", "b.weight"]]
@@ -520,7 +523,7 @@ class TestBucketPlacementValidation(TestCase):
             )
         ]
         with self.assertRaisesRegex(ValueError, "mixed parameter dtypes"):
-            _validate_bucket_placements(
+            _validate_bucket_uniform_dtype_and_placement(
                 assignments,
                 placements,
                 buckets,
@@ -530,7 +533,7 @@ class TestBucketPlacementValidation(TestCase):
     def test_rejects_mixed_placements_in_one_bucket(self):
         """A bucket collective uses one placement layout for all params."""
         from torchtitan.experiments.flex_shard.flex_shard.utils import (
-            _validate_bucket_placements,
+            _validate_bucket_uniform_dtype_and_placement,
         )
 
         assignments = [["a.weight", "b.weight"]]
@@ -546,7 +549,7 @@ class TestBucketPlacementValidation(TestCase):
             )
         ]
         with self.assertRaisesRegex(ValueError, "mixed placements"):
-            _validate_bucket_placements(
+            _validate_bucket_uniform_dtype_and_placement(
                 assignments,
                 placements,
                 buckets,
@@ -689,14 +692,17 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             buckets,
         )
 
+        inputs = PreparedFlexShardInputs(
+            named_params=named_params,
+            shard_mesh=mesh,
+            device=torch.device("cpu"),
+            param_placements=placements,
+            bucket_assignments=assignments,
+        )
         bucket_storages, fqn_to_bucket_spec = _materialize_bucket_storages(
             model,
-            named_params,
-            assignments,
+            inputs,
             buckets,
-            placements,
-            mesh,
-            torch.device("cpu"),
         )
 
         self.assertEqual(len(bucket_storages), len(buckets))
@@ -744,14 +750,17 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         ]
         assignments = [[fqn for fqn, _ in named_params]]
 
+        inputs = PreparedFlexShardInputs(
+            named_params=named_params,
+            shard_mesh=mesh,
+            device=torch.device("cpu"),
+            param_placements=placements,
+            bucket_assignments=assignments,
+        )
         bucket_storages, _ = _materialize_bucket_storages(
             model,
-            named_params,
-            assignments,
+            inputs,
             buckets,
-            placements,
-            mesh,
-            torch.device("cpu"),
         )
 
         bucket_storage = bucket_storages[0]
@@ -796,14 +805,17 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             )
         ]
 
+        inputs = PreparedFlexShardInputs(
+            named_params=named_params,
+            shard_mesh=mesh,
+            device=torch.device("cpu"),
+            param_placements=placements,
+            bucket_assignments=[[fqn for fqn, _ in named_params]],
+        )
         bucket_storages, _ = _materialize_bucket_storages(
             model,
-            named_params,
-            [[fqn for fqn, _ in named_params]],
+            inputs,
             buckets,
-            placements,
-            mesh,
-            torch.device("cpu"),
         )
 
         bucket_storage = bucket_storages[0]
