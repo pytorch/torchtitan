@@ -348,7 +348,7 @@
 
 - ~~Idea: Float8 rowwise_with_gw_hp memory-budget 0.9~~
   - Current best source commit: `90b4c8b6`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
-  - Source: manager lower-side activation-budget retune after recipe change.
+  - Source: already-active run discovered during the 1.0 handoff; it superseded the pending 1.0 command for this iteration.
   - Expected mechanism for improving reported tokens/sec: The recipe change slightly raised peak memory and changed casting overhead, so rechecking budget 0.9 tests whether a lower compiler activation budget can recover throughput while keeping the new Float8 recipe.
   - Supporting evidence: The current best and repeat both used 145.05GiB at budget 0.95, while older rowwise budget 0.9 evidence is stale because it used a different Float8 recipe.
   - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.

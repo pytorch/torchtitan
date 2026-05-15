@@ -285,6 +285,8 @@ The `rowwise_with_gw_hp` recipe changed the performance surface enough that the 
 
 ## Experiment Review: rowwise_with_gw_hp Memory Budget 0.9
 
+The handoff requested a budget 1.0 command, but an already-active run in the checkout was using `--activation_checkpoint.memory_budget=0.9`. Per worker coordination, that actual active 0.9 command was finalized instead of starting another run, so it superseded the pending 1.0 handoff for this iteration while leaving the 1.0 idea pending.
+
 The lower-side `rowwise_with_gw_hp` memory-budget 0.9 retune is a discard. The command completed with the current high-precision grad-weight Float8 source, no-reshard 8-way FSDP, and model-only compile, but loss rose from 12.59183 to 16.25217 instead of falling.
 
 Throughput reached only 4,888 tps with 145.05GiB peak memory, far below both the 9,229 tps budget 0.95 best and its 9,213 tps repeat. The lower budget did not reduce peak memory relative to 0.95 in this run and made both throughput and loss trend worse, so keep memory-budget 0.95 as the active `rowwise_with_gw_hp` setting.
