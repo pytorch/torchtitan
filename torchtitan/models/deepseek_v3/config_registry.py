@@ -129,6 +129,14 @@ def deepseek_v3_16b_flex_ep() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_16b_deepep() -> Trainer.Config:
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry(
+        "16B", attn_backend="flex", moe_comm_backend="deepep"
+    )
+    return config
+
+
 def _keep_first_16b_half_layers(config: Trainer.Config) -> None:
     if config.model_spec is None:
         raise RuntimeError("DeepSeek V3 16B config must define model_spec.")

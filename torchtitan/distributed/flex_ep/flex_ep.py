@@ -1846,6 +1846,80 @@ def _scale_dim(dim: int) -> int:
     return max(1, dim // 16)
 
 
+@dataclass(frozen=True)
+class FlexEPDispatchPlan:
+    recv_origin_global_token_id: torch.Tensor
+    expert_begin_offset_per_ep: torch.Tensor
+    dest_ranks: torch.Tensor
+    dest_offsets: torch.Tensor
+    local_experts_start: torch.Tensor
+    max_recv_tokens: torch.Tensor
+    recv_total_tokens: torch.Tensor
+    overflow: torch.Tensor
+
+    @staticmethod
+    def field_names() -> tuple[str, ...]:
+        return (
+            "recv_origin_global_token_id",
+            "expert_begin_offset_per_ep",
+            "dest_ranks",
+            "dest_offsets",
+            "local_experts_start",
+            "max_recv_tokens",
+            "recv_total_tokens",
+            "overflow",
+        )
+
+    def flatten(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.recv_origin_global_token_id,
+            self.expert_begin_offset_per_ep,
+            self.dest_ranks,
+            self.dest_offsets,
+            self.local_experts_start,
+            self.max_recv_tokens,
+            self.recv_total_tokens,
+            self.overflow,
+        )
+
+    @classmethod
+    def from_flat(cls, plan_flat: tuple[Any, ...]) -> "FlexEPDispatchPlan":
+        if len(plan_flat) != len(cls.field_names()):
+            raise ValueError(
+                f"FlexEPDispatchPlan expects {len(cls.field_names())} values, "
+                f"got {len(plan_flat)}."
+            )
+        for name, value in zip(cls.field_names(), plan_flat):
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(
+                    f"FlexEPDispatchPlan field {name} must be a torch.Tensor, "
+                    f"got {type(value).__name__}."
+                )
+        return cls(*cast(tuple[torch.Tensor, ...], plan_flat))
+
+
+torch.utils._pytree.register_dataclass(FlexEPDispatchPlan)
+
+
+@dataclass(frozen=True)
+class FlexEPRouterOperands:
+    raw: torch.Tensor
+    buffers_cuda_ptrs: torch.Tensor
+    offs_barrier_counter: int
+    offs_dispatch_recv_buffer: int
+    offs_dispatch_recv_buffer_scaling_factors: int
+    offs_dispatch_recv_weights: int
+    offs_dispatch_recv_origin_global_token_id: int
+    offs_combine_recv_buffer: int
+    offs_combine_recv_scale_factors: int
+    offs_combine_recv_weights: int
+    offs_allgather_expert_counts: int
+    ep_rank: int
+
+
+torch.utils._pytree.register_dataclass(FlexEPRouterOperands)
+
+
 @dataclass
 class NvlSharedBuffer:
     raw: torch.Tensor
@@ -2398,6 +2472,7 @@ def flex_ep_weighted_sum(
 
 
 RouterFns = tuple[
+    Callable[..., FlexEPDispatchPlan],
     Callable[..., Any],
     Callable[..., torch.Tensor],
     Callable[..., torch.Tensor],
@@ -2482,7 +2557,7 @@ class FlexEPRouter:
         )
 
     @property
-    def router_operands(self) -> tuple[Any, ...]:
+    def router_operands(self) -> FlexEPRouterOperands:
         buffer = self.workspace.view(
             max_tokens=self.max_tokens,
             dim=self.dim,
@@ -2490,7 +2565,7 @@ class FlexEPRouter:
             top_k=self.top_k,
             capacity_factor=self.capacity_factor,
         )
-        return (
+        return FlexEPRouterOperands(
             self.workspace.raw,
             self.workspace.buffers_cuda_ptrs,
             buffer.offset_of("barrier_counter"),
@@ -2526,32 +2601,12 @@ class FlexEPRouter:
             capacity_factor=self.capacity_factor,
         )
 
-        def dispatch_fn(
-            x_expanded,
+        def build_dispatch_plan_fn(
             topk_idx,
-            raw,
-            buffers_cuda_ptrs,
-            offs_barrier_counter,
-            offs_dispatch_recv_buffer,
-            offs_dispatch_recv_buffer_scaling_factors,
-            offs_dispatch_recv_weights,
-            offs_dispatch_recv_origin_global_token_id,
-            offs_combine_recv_buffer,
-            offs_combine_recv_scale_factors,
-            offs_combine_recv_weights,
-            offs_allgather_expert_counts,
-            ep_rank,
+            operands,
         ):
-            del offs_combine_recv_buffer
-            del offs_combine_recv_scale_factors, offs_combine_recv_weights
-
-            buffer = self._view_buffer(raw)
+            buffer = self._view_buffer(operands.raw)
             barrier_counter = buffer.barrier_counter
-            dispatch_recv_buffer = buffer.dispatch_recv_buffer
-            dispatch_recv_buffer_scaling_factors = (
-                buffer.dispatch_recv_buffer_scaling_factors
-            )
-            dispatch_recv_weights = buffer.dispatch_recv_weights
             dispatch_recv_origin_global_token_id = (
                 buffer.dispatch_recv_origin_global_token_id
             )
@@ -2560,8 +2615,8 @@ class FlexEPRouter:
             dispatch_recv_origin_global_token_id = _router_barrier(
                 dispatch_recv_origin_global_token_id,
                 barrier_counter,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
             )
 
             dispatch_recv_origin_global_token_id = torch.ops._flex_ep.fill_i64_inplace(
@@ -2571,7 +2626,7 @@ class FlexEPRouter:
             expert_count_buffer = torch.zeros(
                 self.num_experts,
                 dtype=torch.int64,
-                device=x_expanded.device,
+                device=topk_idx.device,
             )
             expert_count_buffer.scatter_(
                 0,
@@ -2582,15 +2637,15 @@ class FlexEPRouter:
             allgather_expert_counts = torch.ops._flex_ep.ep_allgather(
                 allgather_expert_counts,
                 expert_count_buffer,
-                buffers_cuda_ptrs,
-                offs_allgather_expert_counts,
-                ep_rank,
+                operands.buffers_cuda_ptrs,
+                operands.offs_allgather_expert_counts,
+                operands.ep_rank,
             )
             allgather_expert_counts = _router_barrier(
                 allgather_expert_counts,
                 barrier_counter,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
                 nonce=1,
                 clone_result=True,
             )
@@ -2601,7 +2656,7 @@ class FlexEPRouter:
                 local_experts_start,
             ) = torch.ops._flex_ep.router_compute_all_expert_offsets(
                 allgather_expert_counts,
-                ep_rank,
+                operands.ep_rank,
                 local_experts,
                 TOKEN_ALIGNMENT,
             )
@@ -2610,18 +2665,54 @@ class FlexEPRouter:
                 max_recv_tokens,
                 capacity_factor=self.capacity_factor,
             )
-            expert_begin_offset = all_offsets[ep_rank]
-            recv_ofs = all_offsets[:, :, ep_rank].reshape(-1)
+            expert_begin_offset = all_offsets[operands.ep_rank]
+            recv_ofs = all_offsets[:, :, operands.ep_rank].reshape(-1)
             dest_ranks, dest_offsets = torch.ops._flex_ep.router_compute_dest_offsets(
                 topk_idx,
                 recv_ofs,
                 self.ep_size,
             )
+            max_recv_tokens_tensor = torch.full(
+                (),
+                max_recv_tokens,
+                device=topk_idx.device,
+                dtype=torch.int32,
+            )
+            overflow = local_experts_start[-1] > max_recv_tokens_tensor
+            return FlexEPDispatchPlan(
+                dispatch_recv_origin_global_token_id[:max_recv_tokens],
+                expert_begin_offset,
+                dest_ranks,
+                dest_offsets,
+                local_experts_start,
+                max_recv_tokens_tensor,
+                recv_total_tokens,
+                overflow,
+            )
+
+        def dispatch_fn(
+            x_expanded,
+            plan,
+            operands,
+        ):
+            recv_origin_global_token_id = plan.recv_origin_global_token_id
+            expert_begin_offset_per_ep = plan.expert_begin_offset_per_ep
+            dest_ranks = plan.dest_ranks
+            dest_offsets = plan.dest_offsets
+            local_experts_start = plan.local_experts_start
+
+            buffer = self._view_buffer(operands.raw)
+            barrier_counter = buffer.barrier_counter
+            dispatch_recv_buffer = buffer.dispatch_recv_buffer
+            dispatch_recv_buffer_scaling_factors = (
+                buffer.dispatch_recv_buffer_scaling_factors
+            )
+            dispatch_recv_weights = buffer.dispatch_recv_weights
 
             (
                 dispatch_recv_buffer,
                 dispatch_recv_buffer_scaling_factors,
-                dispatch_recv_origin_global_token_id,
+                recv_origin_global_token_id,
                 dispatch_recv_weights,
             ) = torch.ops._flex_ep.router_dispatch(
                 x_expanded,
@@ -2629,16 +2720,16 @@ class FlexEPRouter:
                 None,
                 dest_ranks,
                 dest_offsets,
-                buffers_cuda_ptrs,
+                operands.buffers_cuda_ptrs,
                 dispatch_recv_buffer,
                 dispatch_recv_buffer_scaling_factors,
-                dispatch_recv_origin_global_token_id,
+                recv_origin_global_token_id,
                 dispatch_recv_weights,
-                offs_dispatch_recv_buffer,
-                offs_dispatch_recv_buffer_scaling_factors,
-                offs_dispatch_recv_weights,
-                offs_dispatch_recv_origin_global_token_id,
-                ep_rank,
+                operands.offs_dispatch_recv_buffer,
+                operands.offs_dispatch_recv_buffer_scaling_factors,
+                operands.offs_dispatch_recv_weights,
+                operands.offs_dispatch_recv_origin_global_token_id,
+                operands.ep_rank,
                 self.num_ctas,
                 self.max_tokens,
             )
@@ -2654,66 +2745,31 @@ class FlexEPRouter:
             )
             recv_x_u8 = torch.ops._flex_ep.zfill_ranges_inplace(
                 recv_x.view(torch.uint8),
-                expert_begin_offset[:, -1].contiguous(),
+                expert_begin_offset_per_ep[:, -1].contiguous(),
                 local_experts_start[1:].contiguous(),
                 TOKEN_ALIGNMENT,
             )
             recv_x = recv_x_u8.view(recv_x.dtype).view(recv_x.shape)
             recv_x_u8 = torch.ops._flex_ep.barrier_wait_no_clone(
                 recv_x_u8,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
                 barrier,
                 EP_TIMEOUT_SECONDS,
             )
             recv_x = recv_x_u8.view(recv_x.dtype).view(recv_x.shape)
-            return (
-                recv_x,
-                dispatch_recv_origin_global_token_id[:max_recv_tokens].clone(),
-                expert_begin_offset,
-                dest_ranks,
-                dest_offsets,
-                torch.full(
-                    (),
-                    max_recv_tokens,
-                    device=x_expanded.device,
-                    dtype=torch.int32,
-                ),
-                recv_total_tokens,
-                local_experts_start,
-                self.max_tokens,
-            )
+            return recv_x
 
         def combine_fn(
             y3,
-            recv_origin_global_token_id,
-            expert_begin_offset_per_ep,
-            dest_ranks,
-            dest_offsets,
-            max_recv_tokens_tensor,
-            recv_total_tokens,
-            local_experts_start,
-            batch_size,
-            raw,
-            buffers_cuda_ptrs,
-            offs_barrier_counter,
-            offs_dispatch_recv_buffer,
-            offs_dispatch_recv_buffer_scaling_factors,
-            offs_dispatch_recv_weights,
-            offs_dispatch_recv_origin_global_token_id,
-            offs_combine_recv_buffer,
-            offs_combine_recv_scale_factors,
-            offs_combine_recv_weights,
-            offs_allgather_expert_counts,
-            ep_rank,
+            plan,
+            operands,
         ):
-            del dest_ranks, dest_offsets, max_recv_tokens_tensor
-            del recv_total_tokens, offs_dispatch_recv_buffer
-            del offs_dispatch_recv_buffer_scaling_factors
-            del offs_dispatch_recv_weights, offs_dispatch_recv_origin_global_token_id
-            del offs_allgather_expert_counts
+            recv_origin_global_token_id = plan.recv_origin_global_token_id
+            expert_begin_offset_per_ep = plan.expert_begin_offset_per_ep
+            local_experts_start = plan.local_experts_start
 
-            buffer = self._view_buffer(raw)
+            buffer = self._view_buffer(operands.raw)
             barrier_counter = buffer.barrier_counter
             combine_recv_buffer = buffer.combine_recv_buffer
             combine_recv_scale_factors = buffer.combine_recv_scale_factors
@@ -2722,8 +2778,8 @@ class FlexEPRouter:
             combine_recv_buffer = _router_barrier(
                 combine_recv_buffer,
                 barrier_counter,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
             )
             (
                 combine_recv_buffer,
@@ -2736,15 +2792,15 @@ class FlexEPRouter:
                 expert_begin_offset_per_ep,
                 local_experts_start[-1:].to(torch.int64),
                 recv_origin_global_token_id,
-                buffers_cuda_ptrs,
+                operands.buffers_cuda_ptrs,
                 combine_recv_buffer,
                 combine_recv_scale_factors,
                 combine_recv_weights,
-                offs_combine_recv_buffer,
-                offs_combine_recv_scale_factors,
-                offs_combine_recv_weights,
-                ep_rank,
-                batch_size,
+                operands.offs_combine_recv_buffer,
+                operands.offs_combine_recv_scale_factors,
+                operands.offs_combine_recv_weights,
+                operands.ep_rank,
+                self.max_tokens,
                 self.top_k,
                 self.num_ctas,
                 self.max_tokens,
@@ -2752,46 +2808,27 @@ class FlexEPRouter:
             combine_recv_buffer = _router_barrier(
                 combine_recv_buffer,
                 barrier_counter,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
                 nonce=1,
             )
             return _view_beginning_as(
                 combine_recv_buffer,
-                (batch_size, self.top_k, y3.shape[-1]),
+                (self.max_tokens, self.top_k, y3.shape[-1]),
                 y3.dtype,
             )
 
         def combine_bwd_fn(
             dy,
-            recv_origin_global_token_id,
-            expert_begin_offset_per_ep,
-            dest_ranks,
-            dest_offsets,
-            max_recv_tokens_tensor,
-            recv_total_tokens,
-            local_experts_start,
-            batch_size,
-            raw,
-            buffers_cuda_ptrs,
-            offs_barrier_counter,
-            offs_dispatch_recv_buffer,
-            offs_dispatch_recv_buffer_scaling_factors,
-            offs_dispatch_recv_weights,
-            offs_dispatch_recv_origin_global_token_id,
-            offs_combine_recv_buffer,
-            offs_combine_recv_scale_factors,
-            offs_combine_recv_weights,
-            offs_allgather_expert_counts,
-            ep_rank,
+            plan,
+            operands,
         ):
-            del recv_origin_global_token_id
-            del max_recv_tokens_tensor, recv_total_tokens
-            del offs_combine_recv_buffer
-            del offs_combine_recv_scale_factors, offs_combine_recv_weights
-            del offs_allgather_expert_counts
+            expert_begin_offset_per_ep = plan.expert_begin_offset_per_ep
+            dest_ranks = plan.dest_ranks
+            dest_offsets = plan.dest_offsets
+            local_experts_start = plan.local_experts_start
 
-            buffer = self._view_buffer(raw)
+            buffer = self._view_buffer(operands.raw)
             barrier_counter = buffer.barrier_counter
             dispatch_recv_buffer = buffer.dispatch_recv_buffer
             dispatch_recv_buffer_scaling_factors = (
@@ -2805,8 +2842,8 @@ class FlexEPRouter:
             dispatch_recv_buffer = _router_barrier(
                 dispatch_recv_buffer,
                 barrier_counter,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
             )
             (
                 dispatch_recv_buffer,
@@ -2819,16 +2856,16 @@ class FlexEPRouter:
                 None,
                 dest_ranks,
                 dest_offsets,
-                buffers_cuda_ptrs,
+                operands.buffers_cuda_ptrs,
                 dispatch_recv_buffer,
                 dispatch_recv_buffer_scaling_factors,
                 dispatch_recv_origin_global_token_id,
                 dispatch_recv_weights,
-                offs_dispatch_recv_buffer,
-                offs_dispatch_recv_buffer_scaling_factors,
-                offs_dispatch_recv_weights,
+                operands.offs_dispatch_recv_buffer,
+                operands.offs_dispatch_recv_buffer_scaling_factors,
+                operands.offs_dispatch_recv_weights,
                 -1,
-                ep_rank,
+                operands.ep_rank,
                 self.num_ctas,
                 self.max_tokens,
             )
@@ -2851,8 +2888,8 @@ class FlexEPRouter:
             dy3 = dy3_u8.view(dy3.dtype).view(dy3.shape)
             dy3_u8 = torch.ops._flex_ep.barrier_wait_no_clone(
                 dy3_u8,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
                 barrier,
                 EP_TIMEOUT_SECONDS,
             )
@@ -2861,35 +2898,14 @@ class FlexEPRouter:
 
         def dispatch_bwd_fn(
             dx_recv,
-            recv_origin_global_token_id,
-            expert_begin_offset_per_ep,
-            dest_ranks,
-            dest_offsets,
-            max_recv_tokens_tensor,
-            recv_total_tokens,
-            local_experts_start,
-            batch_size,
-            raw,
-            buffers_cuda_ptrs,
-            offs_barrier_counter,
-            offs_dispatch_recv_buffer,
-            offs_dispatch_recv_buffer_scaling_factors,
-            offs_dispatch_recv_weights,
-            offs_dispatch_recv_origin_global_token_id,
-            offs_combine_recv_buffer,
-            offs_combine_recv_scale_factors,
-            offs_combine_recv_weights,
-            offs_allgather_expert_counts,
-            ep_rank,
+            plan,
+            operands,
         ):
-            del dest_ranks, dest_offsets, max_recv_tokens_tensor
-            del recv_total_tokens
-            del offs_dispatch_recv_buffer
-            del offs_dispatch_recv_buffer_scaling_factors
-            del offs_dispatch_recv_weights, offs_dispatch_recv_origin_global_token_id
-            del offs_allgather_expert_counts
+            recv_origin_global_token_id = plan.recv_origin_global_token_id
+            expert_begin_offset_per_ep = plan.expert_begin_offset_per_ep
+            local_experts_start = plan.local_experts_start
 
-            buffer = self._view_buffer(raw)
+            buffer = self._view_buffer(operands.raw)
             barrier_counter = buffer.barrier_counter
             combine_recv_buffer = buffer.combine_recv_buffer
             combine_recv_scale_factors = buffer.combine_recv_scale_factors
@@ -2898,8 +2914,8 @@ class FlexEPRouter:
             combine_recv_buffer = _router_barrier(
                 combine_recv_buffer,
                 barrier_counter,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
             )
             (
                 combine_recv_buffer,
@@ -2912,15 +2928,15 @@ class FlexEPRouter:
                 expert_begin_offset_per_ep,
                 local_experts_start[-1:].to(torch.int64),
                 recv_origin_global_token_id,
-                buffers_cuda_ptrs,
+                operands.buffers_cuda_ptrs,
                 combine_recv_buffer,
                 combine_recv_scale_factors,
                 combine_recv_weights,
-                offs_combine_recv_buffer,
-                offs_combine_recv_scale_factors,
-                offs_combine_recv_weights,
-                ep_rank,
-                batch_size,
+                operands.offs_combine_recv_buffer,
+                operands.offs_combine_recv_scale_factors,
+                operands.offs_combine_recv_weights,
+                operands.ep_rank,
+                self.max_tokens,
                 self.top_k,
                 self.num_ctas,
                 self.max_tokens,
@@ -2928,14 +2944,20 @@ class FlexEPRouter:
             combine_recv_buffer = _router_barrier(
                 combine_recv_buffer,
                 barrier_counter,
-                buffers_cuda_ptrs,
-                offs_barrier_counter,
+                operands.buffers_cuda_ptrs,
+                operands.offs_barrier_counter,
                 nonce=1,
             )
             return _view_beginning_as(
                 combine_recv_buffer,
-                (batch_size, self.top_k, dx_recv.shape[-1]),
+                (self.max_tokens, self.top_k, dx_recv.shape[-1]),
                 dx_recv.dtype,
             )
 
-        return dispatch_fn, combine_fn, combine_bwd_fn, dispatch_bwd_fn
+        return (
+            build_dispatch_plan_fn,
+            dispatch_fn,
+            combine_fn,
+            combine_bwd_fn,
+            dispatch_bwd_fn,
+        )

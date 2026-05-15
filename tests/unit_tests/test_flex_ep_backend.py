@@ -356,7 +356,7 @@ def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch):
         device=torch.device("cpu"),
         ep_mesh=None,
     )
-    dispatch_fn = router.router_fns[0]
+    build_dispatch_plan_fn, dispatch_fn = router.router_fns[:2]
     x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
     topk_idx = torch.tensor(
         [
@@ -369,7 +369,8 @@ def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch):
         dtype=torch.int64,
     )
 
-    dispatch_fn(x_expanded, topk_idx, *router.router_operands)
+    plan = build_dispatch_plan_fn(topk_idx, router.router_operands)
+    dispatch_fn(x_expanded, plan, router.router_operands)
 
     assert zfill_calls
     assert all(begin and end for begin, end in zfill_calls)
@@ -446,7 +447,9 @@ def test_flex_ep_combine_does_not_zero_capacity_tail(monkeypatch):
         device=torch.device("cpu"),
         ep_mesh=None,
     )
-    dispatch_fn, combine_fn, _, dispatch_bwd_fn = router.router_fns
+    build_dispatch_plan_fn, dispatch_fn, combine_fn, _, dispatch_bwd_fn = (
+        router.router_fns
+    )
     x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
     topk_idx = torch.tensor(
         [
@@ -458,12 +461,9 @@ def test_flex_ep_combine_does_not_zero_capacity_tail(monkeypatch):
         ],
         dtype=torch.int64,
     )
-    recv_x, *tmi_flat = dispatch_fn(
-        x_expanded,
-        topk_idx,
-        *router.router_operands,
-    )
-    local_experts_start = tmi_flat[6]
+    plan = build_dispatch_plan_fn(topk_idx, router.router_operands)
+    recv_x = dispatch_fn(x_expanded, plan, router.router_operands)
+    local_experts_start = plan.local_experts_start
     token_end = int(local_experts_start[-1].item())
     assert token_end < recv_x.shape[0]
 
@@ -499,10 +499,10 @@ def test_flex_ep_combine_does_not_zero_capacity_tail(monkeypatch):
     monkeypatch.setattr(torch.ops._flex_ep, "router_combine", fake_router_combine)
 
     y3 = torch.full_like(recv_x, -7.0)
-    combine_fn(y3, *tmi_flat, *router.router_operands)
+    combine_fn(y3, plan, router.router_operands)
 
     dx_recv = torch.full_like(recv_x, -7.0)
-    dispatch_bwd_fn(dx_recv, *tmi_flat, *router.router_operands)
+    dispatch_bwd_fn(dx_recv, plan, router.router_operands)
 
     assert len(calls) == 2
     assert torch.all(y3[token_end:] == sentinel).item()

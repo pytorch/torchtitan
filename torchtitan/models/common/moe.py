@@ -297,7 +297,7 @@ class FlexGroupedExperts(Module):
             _pack_flex_ep_w13(w1, w3).to(torch.bfloat16),
             w2.contiguous().to(torch.bfloat16),
             *router.router_fns,
-            *router.router_operands,
+            router.router_operands,
             num_experts=self.num_experts,
             ep_rank=router.ep_rank,
             ep_size=router.ep_size,

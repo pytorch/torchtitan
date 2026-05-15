@@ -8,9 +8,18 @@
 
 from torchtitan.distributed.flex_ep.flex_ep import (
     flex_ep_weighted_sum,
+    FlexEPDispatchPlan,
+    FlexEPRouterOperands,
     FlexEPRouter,
     FlexEPWorkspace,
     NvlSharedBuffer,
 )
 
-__all__ = ["FlexEPRouter", "FlexEPWorkspace", "NvlSharedBuffer", "flex_ep_weighted_sum"]
+__all__ = [
+    "FlexEPDispatchPlan",
+    "FlexEPRouterOperands",
+    "FlexEPRouter",
+    "FlexEPWorkspace",
+    "NvlSharedBuffer",
+    "flex_ep_weighted_sum",
+]
