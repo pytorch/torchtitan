@@ -15,7 +15,6 @@ import torch.nn as nn
 from .bucket_runtime import _create_unsharded_param_slots, _install_bucket_unshard_hooks
 from .bucket_storage import (
     _assign_params_to_buckets,
-    _materialize_bucket_storages,
     BucketParamFQNsByIndex,
     BucketSpec,
     ShardedBucketStorage,
@@ -26,7 +25,7 @@ from .unsharded_param_getters import _install_unsharded_param_getters
 from .utils import (
     _get_device_from_mesh,
     _get_managed_named_params,
-    _validate_bucket_placements,
+    _validate_bucket_uniform_dtype_and_placement,
     _validate_eager_params,
     _validate_flex_shard_mesh,
     _validate_placements,
@@ -128,12 +127,8 @@ def flex_shard(
 
     bucket_storages, fqn_to_bucket_spec = _materialize_bucket_storages(
         module,
-        inputs.named_params,
-        inputs.bucket_assignments,
+        inputs,
         buckets,
-        inputs.param_placements,
-        inputs.shard_mesh,
-        inputs.device,
     )
 
     _attach_flex_shard_module_state(module, bucket_storages)
@@ -209,6 +204,40 @@ class PreparedFlexShardInputs:
     device: torch.device
     param_placements: dict[str, tuple[Placement, ...]]
     bucket_assignments: BucketParamFQNsByIndex
+
+
+def _materialize_bucket_storages(
+    module: nn.Module,
+    inputs: PreparedFlexShardInputs,
+    buckets: list[BucketSpec],
+) -> tuple[list[ShardedBucketStorage], dict[str, BucketSpec]]:
+    """Create ShardedBucketStorage objects and install sharded parameters."""
+    named_params_dict = dict(inputs.named_params)
+    bucket_storages: list[ShardedBucketStorage] = []
+    fqn_to_bucket_spec: dict[str, BucketSpec] = {}
+
+    for bucket_idx, bucket_fqns in enumerate(inputs.bucket_assignments):
+        if not bucket_fqns:
+            continue
+
+        bucket_spec = buckets[bucket_idx]
+        for fqn in bucket_fqns:
+            fqn_to_bucket_spec[fqn] = bucket_spec
+
+        bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
+        bucket_placements = {fqn: inputs.param_placements[fqn] for fqn in bucket_fqns}
+        bucket_storages.append(
+            ShardedBucketStorage.from_bucket(
+                module,
+                bucket_named_params,
+                bucket_placements,
+                inputs.shard_mesh,
+                inputs.device,
+                bucket_spec,
+            )
+        )
+
+    return bucket_storages, fqn_to_bucket_spec
 
 
 def _resolve_bucket_param_placements(
@@ -288,7 +317,7 @@ def _prepare_flex_shard_inputs(
         bucket_assignments,
         buckets,
     )
-    _validate_bucket_placements(
+    _validate_bucket_uniform_dtype_and_placement(
         bucket_assignments,
         param_placements,
         buckets,
