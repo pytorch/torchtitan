@@ -9,8 +9,17 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 from torch.distributed._functional_collectives import all_to_all_single_autograd
+from torch.utils._mode_utils import no_dispatch
 
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
+
+
+def _splits_to_list(splits: torch.Tensor) -> list[int]:
+    # The split lists are metadata required by all_to_all_single_autograd. Keep
+    # this CUDA-to-CPU conversion out of SAC's _to_copy cache so it cannot be
+    # replayed into later HF routing dtype casts during recompute.
+    with no_dispatch():
+        return splits.int().tolist()
 
 
 class HFTokenDispatcher(LocalTokenDispatcher):
@@ -119,8 +128,8 @@ class HFTokenDispatcher(LocalTokenDispatcher):
             torch.distributed.all_to_all_single(
                 output_splits_t, input_splits_t, group=ep_group
             )
-            self._input_splits = input_splits_t.int().tolist()
-            self._output_splits = output_splits_t.int().tolist()
+            self._input_splits = _splits_to_list(input_splits_t)
+            self._output_splits = _splits_to_list(output_splits_t)
 
         # Dispatch tokens
         dispatched = all_to_all_single_autograd(
