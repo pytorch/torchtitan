@@ -207,6 +207,7 @@ def qwen3_14b() -> Trainer.Config:
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=4,
+            mixed_precision_reduce="bfloat16",
             seq_len=4096,
             steps=3000,
         ),
