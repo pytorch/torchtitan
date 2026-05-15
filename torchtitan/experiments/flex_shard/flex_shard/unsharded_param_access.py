@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .sharded_param_metadata import is_flex_shard_param
+from .sharded_param import is_flex_shard_param
 
 if TYPE_CHECKING:
     from .bucket_storage import DStorage
@@ -23,19 +23,17 @@ if TYPE_CHECKING:
 _DSTORAGE_ATTR = "_dstorage"
 _DSTORAGES_ATTR = "_dstorages"
 
-_EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR = (
-    "_flex_shard_eager_bucket_unshard_hook_registered"
-)
+_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR = "_flex_shard_bucket_unshard_hook_registered"
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
 _PARAM_FQN_ATTR = "_flex_shard_param_fqn"
 _BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
 
 
-def _raise_missing_eager_bucket_unshard(param_state: Any) -> None:
-    param_fqn = getattr(param_state, _PARAM_FQN_ATTR, "<unknown>")
-    bucket_fqn = getattr(param_state, _BUCKET_FQN_ATTR, None)
+def _raise_missing_eager_bucket_unshard(accessor_state: Any) -> None:
+    param_fqn = getattr(accessor_state, _PARAM_FQN_ATTR, "<unknown>")
+    bucket_fqn = getattr(accessor_state, _BUCKET_FQN_ATTR, None)
     hook_registered = getattr(
-        param_state, _EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False
+        accessor_state, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False
     )
     bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
     hook_msg = (
@@ -76,14 +74,14 @@ class _MixedPrecisionCast(torch.autograd.Function):
 
 
 @dataclass
-class ParamModuleInfo:
+class ParamModuleRef:
     """Owning module and local parameter name for a managed parameter."""
 
     module: nn.Module
     param_name: str
 
     @classmethod
-    def resolve(cls, root_module: nn.Module, fqn: str) -> ParamModuleInfo:
+    def resolve(cls, root_module: nn.Module, fqn: str) -> ParamModuleRef:
         """Resolve a parameter FQN from root, unwrapping checkpoint wrappers."""
         parts = fqn.split(".")
         leaf_module = root_module
@@ -115,25 +113,25 @@ class ParamAccessorState:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
     compute_device: torch.device | None = None
-    _pre_unsharded: torch.Tensor | None = None
+    _current_unsharded_param: torch.Tensor | None = None
 
-    def consume_pre_unsharded_param(self) -> torch.Tensor:
+    def consume_unsharded_param(self) -> torch.Tensor:
         """Return the hook-provided full param or raise for unsupported access."""
-        # _pre_unsharded is set by the bucket unshard pre-forward hook so
+        # _current_unsharded_param is set by the bucket unshard pre-forward hook so
         # parameter reads preserve bucketed collectives.
-        pre = self._pre_unsharded
-        if pre is not None:
+        current = self._current_unsharded_param
+        if current is not None:
             # TODO: Keep this cache valid for the whole forward. Clearing it
             # here breaks legal modules that read the same parameter more than
             # once, and the post-forward hook already owns cleanup.
-            self._pre_unsharded = None
+            self._current_unsharded_param = None
             if self.param_dtype is not None or self.reduce_dtype is not None:
-                pre = _MixedPrecisionCast.apply(
-                    pre,
+                current = _MixedPrecisionCast.apply(
+                    current,
                     self.param_dtype,
                     self.reduce_dtype,
                 )
-            return pre
+            return current
 
         _raise_missing_eager_bucket_unshard(self)
 
@@ -196,7 +194,7 @@ _parametrized_module_class_counter = 0
 
 def _register_param_accessors(
     module: nn.Module,
-    param_states: dict[str, ParamAccessorState],
+    accessor_states: dict[str, ParamAccessorState],
 ) -> None:
     """Register per-parameter property getters that read accessor state.
 
@@ -206,20 +204,20 @@ def _register_param_accessors(
 
     Args:
         module: The leaf module owning the parameters.
-        param_states: Maps parameter name to its accessor state.
+        accessor_states: Maps parameter name to its accessor state.
     """
     global _parametrized_module_class_counter
     _parametrized_module_class_counter += 1
 
-    def _make_flex_shard_param_getter(param_state: ParamAccessorState):
+    def _make_flex_shard_param_getter(accessor_state: ParamAccessorState):
         def get_flex_shard_param(self):
-            return param_state.consume_pre_unsharded_param()
+            return accessor_state.consume_unsharded_param()
 
         return get_flex_shard_param
 
     param_name_to_property = {
         param_name: property(_make_flex_shard_param_getter(state))
-        for param_name, state in param_states.items()
+        for param_name, state in accessor_states.items()
     }
     module_cls = type(
         f"FlexShard{module.__class__.__name__}_{_parametrized_module_class_counter}",

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .bucket_runtime import _create_eager_param_states, _install_bucket_unshard_hooks
+from .bucket_runtime import _create_param_accessor_states, _install_bucket_unshard_hooks
 from .bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
@@ -70,7 +70,7 @@ def _resolve_bucket_param_placements(
         if not bucket_fqns:
             continue
         bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
-        bucket_param_placements = buckets[bucket_idx].shard_placement_fn(
+        bucket_param_placements = buckets[bucket_idx].placement_fn(
             bucket_named_params,
             shard_mesh,
         )
@@ -96,8 +96,8 @@ def _prepare_flex_shard_inputs(
     if not all(isinstance(bucket, BucketSpec) for bucket in buckets):
         raise TypeError("flex_shard buckets must be a list of BucketSpec objects.")
     for bucket in buckets:
-        if not callable(bucket.shard_placement_fn):
-            raise TypeError("BucketSpec.shard_placement_fn must be callable.")
+        if not callable(bucket.placement_fn):
+            raise TypeError("BucketSpec.placement_fn must be callable.")
         if bucket.offload_policy is not None:
             raise NotImplementedError(
                 "FlexShard eager mode does not yet support BucketSpec.offload_policy."
@@ -158,7 +158,7 @@ def flex_shard(
     Apply flat-storage FSDP sharding to a module.
 
     This function:
-    1. Collects parameters from the module (excluding already-wrapped submodules)
+    1. Collects parameters from the module
     2. Groups parameters into communication buckets (one per bucket, or all in one)
     3. Creates a unified byte buffer per bucket for all its parameters
     4. Replaces each parameter with a plain tensor annotated with placement metadata
@@ -174,7 +174,7 @@ def flex_shard(
         mesh: The 1D device mesh for sharding.
         buckets: Required list of bucket specifications. Each bucket owns its
             placement function. A single whole-module bucket can be expressed as
-            ``[BucketSpec(["*"], shard_placement_fn=per_param_placements)]``.
+            ``[BucketSpec(["*"], placement_fn=per_param_placements)]``.
             When ``reshard_after_forward=True``, FlexShard raises if bucket
             hooks cannot run in both the original forward and activation
             checkpoint recomputation.
@@ -193,7 +193,7 @@ def flex_shard(
         ...     buckets=[
         ...         BucketSpec(
         ...             ["*"],
-        ...             shard_placement_fn=per_param_placements,
+        ...             placement_fn=per_param_placements,
         ...             reshard_after_forward=False,
         ...         )
         ...     ],
@@ -203,8 +203,8 @@ def flex_shard(
         ...     model,
         ...     mesh,
         ...     buckets=[
-        ...         BucketSpec(["attn.*"], shard_placement_fn=per_param_placements),
-        ...         BucketSpec(["ffn.*"], shard_placement_fn=per_param_placements),
+        ...         BucketSpec(["attn.*"], placement_fn=per_param_placements),
+        ...         BucketSpec(["ffn.*"], placement_fn=per_param_placements),
         ...     ],
         ... )
     Note:
@@ -231,7 +231,7 @@ def flex_shard(
 
     _attach_flex_shard_module_state(module, storages)
 
-    module_param_map = _create_eager_param_states(
+    module_param_map = _create_param_accessor_states(
         module,
         storages,
         fqn_to_bucket_spec,
