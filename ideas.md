@@ -344,7 +344,7 @@
   - Supporting evidence: The `rowwise_with_gw_hp` 0.95 repeat was stable at 9,213-9,229 tps and used 145.05GiB, leaving headroom below the rough 95% B200 memory risk line. The old rowwise 1.0 row used 154.35GiB and did not beat rowwise 0.95, but that evidence is stale after the recipe changed the kernel mix.
   - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=1.0 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Discarded at `294dca9d`; the run completed but loss rose from 12.14356 to 17.49169, throughput fell to 1,014 tps, peak memory reached 176.49GiB, and the allocator reported 13 memory allocation retries.
+  - Success criteria and expected risk: Discarded at `ff585c4e`; the run completed but loss rose from 12.14356 to 17.49169, throughput fell to 1,014 tps, peak memory reached 176.49GiB, and the allocator reported 13 memory allocation retries.
 
 - ~~Idea: Float8 rowwise_with_gw_hp memory-budget 0.9~~
   - Current best source commit: `90b4c8b6`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
