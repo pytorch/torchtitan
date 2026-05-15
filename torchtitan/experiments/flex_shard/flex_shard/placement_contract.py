@@ -28,50 +28,6 @@ class LocalStorageLayout:
     storage_nbytes: int
 
 
-@dataclass
-class PlacementPreparedUnshard:
-    """Placement-owned prepared bucket unshard request.
-
-    ``buffers`` are tensors whose lifetime the bucket runtime owns.
-    ``placement_state`` is private metadata passed back to the same placement's
-    run/finish methods.
-    """
-
-    placement: Placement
-    buffers: list[torch.Tensor]
-    placement_state: Any
-
-
-@dataclass
-class PlacementUnshardResult:
-    """Placement-owned unshard result and temporary buffers."""
-
-    full_params: list[torch.Tensor]
-    buffers: list[torch.Tensor] = field(default_factory=list)
-
-
-@dataclass
-class PlacementPreparedReduceGrad:
-    """Placement-owned packed gradient reduction request.
-
-    ``buffers`` are tensors whose lifetime the bucket runtime owns.
-    ``placement_state`` is private metadata passed back to the same placement's
-    reduce method.
-    """
-
-    placement: Placement
-    buffers: list[torch.Tensor]
-    placement_state: Any
-
-
-@dataclass
-class PlacementReduceGradResult:
-    """Placement-owned reduced local gradients and temporary buffers."""
-
-    sharded_grads: list[torch.Tensor]
-    buffers: list[torch.Tensor] = field(default_factory=list)
-
-
 class Placement(ABC):
     """Base class for FlexShard placement strategies.
 
@@ -217,6 +173,50 @@ class Placement(ABC):
     ) -> PlacementReduceGradResult:
         """Reduce prepared full gradients and return local gradient shards."""
         raise NotImplementedError
+
+
+@dataclass
+class PlacementPreparedUnshard:
+    """Placement-owned prepared bucket unshard request.
+
+    ``buffers`` are tensors whose lifetime the bucket runtime owns.
+    ``placement_state`` is private metadata passed back to the same placement's
+    run/finish methods.
+    """
+
+    placement: Placement
+    buffers: list[torch.Tensor]
+    placement_state: Any
+
+
+@dataclass
+class PlacementUnshardResult:
+    """Placement-owned unshard result and temporary buffers."""
+
+    full_params: list[torch.Tensor]
+    buffers: list[torch.Tensor] = field(default_factory=list)
+
+
+@dataclass
+class PlacementPreparedReduceGrad:
+    """Placement-owned packed gradient reduction request.
+
+    ``buffers`` are tensors whose lifetime the bucket runtime owns.
+    ``placement_state`` is private metadata passed back to the same placement's
+    reduce method.
+    """
+
+    placement: Placement
+    buffers: list[torch.Tensor]
+    placement_state: Any
+
+
+@dataclass
+class PlacementReduceGradResult:
+    """Placement-owned reduced local gradients and temporary buffers."""
+
+    sharded_grads: list[torch.Tensor]
+    buffers: list[torch.Tensor] = field(default_factory=list)
 
 
 __all__ = [

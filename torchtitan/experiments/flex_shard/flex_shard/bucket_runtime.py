@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import _get_device_handle
 
-from .bucket_collectives import (
+from .bucket_comm import (
     begin_bucket_unshard,
     begin_reduce_grad,
     launch_reduce_grad,
@@ -25,7 +25,7 @@ from .bucket_collectives import (
     UnshardHandle,
 )
 from .bucket_storage import BucketSpec, ParamInfo, ShardedBucketStorage
-from .unsharded_param_access import ParamOwnerRef, UnshardedParamSlot
+from .unsharded_param_getters import UnshardedParamSlot
 from .utils import _get_bucket_storage_debug_fqn, _record_function_if_eager
 
 
@@ -33,6 +33,33 @@ logger = logging.getLogger(__name__)
 
 
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
+
+
+@dataclass
+class ParamOwnerRef:
+    """Owning module and local parameter name for a managed parameter."""
+
+    module: nn.Module
+    param_name: str
+
+    @classmethod
+    def resolve(cls, root_module: nn.Module, fqn: str) -> ParamOwnerRef:
+        """Resolve a parameter FQN from root, unwrapping checkpoint wrappers."""
+        parts = fqn.split(".")
+        leaf_module = root_module
+        for part in parts[:-1]:
+            child = getattr(leaf_module, part, None)
+            if child is None:
+                wrapped = getattr(leaf_module, "_checkpoint_wrapped_module", None)
+                if wrapped is not None:
+                    leaf_module = getattr(wrapped, part)
+                else:
+                    leaf_module = getattr(leaf_module, part)
+            else:
+                leaf_module = child
+        if hasattr(leaf_module, "_checkpoint_wrapped_module"):
+            leaf_module = leaf_module._checkpoint_wrapped_module
+        return cls(leaf_module, parts[-1])
 
 
 @dataclass(frozen=True)
@@ -269,24 +296,6 @@ class BucketUnshardRuntime:
 
     bucket: BucketRuntime
     prefetched_result: UnshardHandle | None
-
-
-def _accumulate_sharded_grads(
-    param_owners: list[ParamOwnerRef],
-    sharded_grads: list[torch.Tensor],
-) -> list[torch.Tensor]:
-    """Cast sharded grads to local param dtype and accumulate into .grad."""
-    stored_grads: list[torch.Tensor] = []
-    for param_owner, grad in zip(param_owners, sharded_grads, strict=True):
-        param = param_owner.module._parameters[param_owner.param_name]
-        if grad.dtype != param.dtype:
-            grad = grad.to(param.dtype)
-        stored_grads.append(grad)
-        if param.grad is None:
-            param.grad = grad
-        else:
-            param.grad += grad
-    return stored_grads
 
 
 @dataclass
@@ -635,6 +644,24 @@ class _BucketUnshard(torch.autograd.Function):
                 bucket.reduce_grads(grads, valid_infos, valid_param_owners)
 
         return (None, *([None] * ctx.num_inputs))
+
+
+def _accumulate_sharded_grads(
+    param_owners: list[ParamOwnerRef],
+    sharded_grads: list[torch.Tensor],
+) -> list[torch.Tensor]:
+    """Cast sharded grads to local param dtype and accumulate into .grad."""
+    stored_grads: list[torch.Tensor] = []
+    for param_owner, grad in zip(param_owners, sharded_grads, strict=True):
+        param = param_owner.module._parameters[param_owner.param_name]
+        if grad.dtype != param.dtype:
+            grad = grad.to(param.dtype)
+        stored_grads.append(grad)
+        if param.grad is None:
+            param.grad = grad
+        else:
+            param.grad += grad
+    return stored_grads
 
 
 def _raise_unreplayable_reshard_hook(bucket_storage: ShardedBucketStorage) -> None:
