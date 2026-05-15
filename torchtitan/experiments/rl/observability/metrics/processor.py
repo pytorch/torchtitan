@@ -23,7 +23,7 @@ from torchtitan.components.metrics import (
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger, warn_once
 
-from .metric_console_logging import log_to_console
+from .console import log_to_console
 from .types import Metric, MetricValue
 
 
@@ -129,12 +129,12 @@ class MetricsProcessor(Configurable):
             MetricsProcessor._aggregate_metrics(records)
             # {"reward/mean": 3.0, "reward/max": 3.0}
         """
-        groupped_metrics: dict[tuple[str, type], list[MetricValue]] = defaultdict(list)
+        grouped_metrics: dict[tuple[str, type], list[MetricValue]] = defaultdict(list)
         for record in metrics:
-            groupped_metrics[(record.key, type(record.value))].append(record.value)
+            grouped_metrics[(record.key, type(record.value))].append(record.value)
 
         reduced_metrics: dict[str, float] = {}
-        for (key, value_cls), values in groupped_metrics.items():
+        for (key, value_cls), values in grouped_metrics.items():
             reduced_outputs = value_cls.reduce(values)
             # A reduction can emit multiple outputs (e.g. SummaryStats).
             for output_suffix, value in reduced_outputs.items():

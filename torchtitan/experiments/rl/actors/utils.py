@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-
 from torchtitan.observability import structured_logger as sl
 
 
@@ -27,6 +26,8 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
     # code (gather with plain-tensor indices, slicing per-sample) expects a
     # plain tensor - materialize once here.
     if isinstance(logits, DTensor):
+        # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
+        # contract explicit (see .claude/rules/distributed.md).
         logits = logits.to_local()
     shift_logits = logits[:, :-1, :].float()
     shift_targets = token_ids[:, 1:]
@@ -56,9 +57,14 @@ def extract_response_logprobs(
 
 
 @dataclass(frozen=True, slots=True)
-class LogprobVerificationOutput:
-    """Generator vs trainer drift metrics normalized by `num_global_valid_tokens`,
-    so trainer can sum all-reduce them."""
+class PartialLogprobDrift:
+    """Per-rank generator-vs-trainer logprob drift awaiting reduction across the loss-mesh.
+
+    Args:
+        logprob_diff_mean: Scalar tensor; To be sum-reduced.
+        logprob_diff_max: Scalar tensor; To be max-reduced.
+        ratio_tokens_different: Scalar tensor; To be sum-reduced.
+    """
 
     logprob_diff_mean: torch.Tensor
     logprob_diff_max: torch.Tensor
@@ -73,19 +79,21 @@ def verify_logprob_identity(
     *,
     num_global_valid_tokens: torch.Tensor,
     device: torch.device,
-) -> LogprobVerificationOutput:
-    """Compare generator and trainer response-token logprobs.
+) -> PartialLogprobDrift:
+    """Compute per-rank drift between generator and trainer logprobs.
 
     Args:
-        vllm_token_log_probs: Per-token log probs from vLLM (generator)
-        batch_token_log_probs: Per-token log probs computed by the trainer model
-        num_global_valid_tokens: Number of valid tokens in the batch, summed
-            across all ranks. Used to normalize the output metrics.
+        generator_token_logprobs (list[list[float]]): generator-side per-token logprobs, shaped
+            `[num_episodes_local][response_len_i]`.
+        trainer_token_logprobs (list[torch.Tensor]): Trainer-side per-token logprobs, one
+            GPU tensor per episode, each of shape `[response_len_i]`.
+        num_global_valid_tokens (torch.Tensor): Scalar tensor holding global token count
+             across DP ranks. Used to normalize the output metrics.
         device: Device to use for tensor allocation, so metrics are ready for
-            reduction across ranks.
+            reduction across loss_mesh.
 
     Returns:
-        metrics pre-normalized by num_global_valid_tokens for later reduction.
+        PartialLogprobDrift.
     """
     # Each tensor has a different number of tokens, so we flatten them.
     generator_flat = torch.as_tensor(
@@ -99,10 +107,10 @@ def verify_logprob_identity(
 
     if generator_flat.numel() == 0:
         zero = torch.zeros((), dtype=torch.float32, device=device)
-        return LogprobVerificationOutput(zero, zero, zero)
+        return PartialLogprobDrift(zero, zero, zero)
 
     diff = trainer_flat - generator_flat
-    return LogprobVerificationOutput(
+    return PartialLogprobDrift(
         logprob_diff_mean=diff.sum() / num_global_valid_tokens,
         logprob_diff_max=diff.abs().max(),
         ratio_tokens_different=(

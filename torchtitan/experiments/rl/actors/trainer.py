@@ -20,7 +20,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -38,10 +37,10 @@ from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
     extract_response_logprobs,
-    LogprobVerificationOutput,
+    PartialLogprobDrift,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.types import TrainBatch
+from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -49,20 +48,6 @@ from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class OptimStepOutput:
-    """Return type for PolicyTrainer.optim_step.
-
-    Args:
-        policy_version: Updated policy version after the optimizer step.
-            Forwarded to the generator's weight-sync call as control state.
-        metrics: Already reduced scalars, ready for logging.
-    """
-
-    policy_version: int
-    metrics: dict[str, float]
 
 
 class PolicyTrainer(Actor, Configurable):
@@ -289,18 +274,6 @@ class PolicyTrainer(Actor, Configurable):
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
-    def _reduce_valid_tokens(
-        self, num_local_valid_tokens: torch.Tensor
-    ) -> torch.Tensor:
-        """SUM-reduce local valid tokens across the loss mesh."""
-        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
-        num_global = num_local_valid_tokens.to(torch.float32)
-        if loss_mesh is not None:
-            num_global = funcol.all_reduce(
-                num_global, reduceOp=c10d.ReduceOp.SUM.name, group=loss_mesh
-            )
-        return num_global.clamp(min=1.0)
-
     def reduce_forward_backward_metrics(
         self,
         *,
@@ -337,12 +310,20 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     @sl.log_trace_span("forward_backward")
-    async def forward_backward(self, train_data: list[TrainBatch]) -> dict[str, float]:
+    async def forward_backward(
+        self,
+        train_data: list[TrainingBatch],
+        *,
+        num_global_valid_tokens: int,
+    ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            train_data: List of TrainBatch, one per DP rank. Local rank
+            train_data: List of TrainingBatch, one per DP rank. Local rank
                 picks train_data[self.dp_rank].
+            num_global_valid_tokens: Total response tokens across all DP
+                ranks for this step. The controller computes this before
+                sharding episodes.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -380,12 +361,11 @@ class PolicyTrainer(Actor, Configurable):
                 f"generation max_tokens."
             )
 
-        # Compute global valid tokens BEFORE forward, so the loss
-        # and metrics can be scaled with (n * local_tokens)/global_tokens.
-        num_local_valid_tokens = torch.tensor(
-            sum(response_lens), device=device, dtype=torch.float32
+        num_global_valid_tokens: torch.Tensor = torch.tensor(
+            float(max(num_global_valid_tokens, 1)),
+            device=device,
+            dtype=torch.float32,
         )
-        num_global_valid_tokens = self._reduce_valid_tokens(num_local_valid_tokens)
 
         positions = torch.cat(
             [torch.arange(l, device=device) for l in seq_lens]
@@ -413,7 +393,7 @@ class PolicyTrainer(Actor, Configurable):
             loss.backward()
 
         # Metrics for bitwise verification of policy logprobs.
-        verification: LogprobVerificationOutput = verify_logprob_identity(
+        verification: PartialLogprobDrift = verify_logprob_identity(
             generator_token_logprobs=local_batch.token_logprobs,
             trainer_token_logprobs=policy_logprobs,
             num_global_valid_tokens=num_global_valid_tokens,

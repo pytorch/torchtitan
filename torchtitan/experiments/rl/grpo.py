@@ -38,7 +38,6 @@ import torch
 import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
-
 from torchtitan.config import (
     CompileConfig,
     ConfigManager,
@@ -51,8 +50,7 @@ from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import (
     Completion,
     Episode,
-    Step,
-    TrainBatch,
+    TrainingBatch,
     Trajectory,
 )
 from torchtitan.observability import structured_logger as sl
@@ -187,17 +185,27 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
 
 def _build_reward_metrics(
     prefix: str,
-    reward_dicts: list[dict[str, float]],
+    trajectories: list[Trajectory],
 ) -> list[m.Metric]:
-    """One `Mean` metric per observed reward component.
+    """One ``Mean`` metric per observed reward component across trajectories.
 
-    Components missing from a step are not zero-filled - the Mean is over
-    the steps where the component appears.
+    Example::
+
+        trajectories = [
+            Trajectory(sample_idx=0, transitions=[(c0, Step(rewards={"correctness": 1.0, "format": 0.5}, done=True))]),
+            Trajectory(sample_idx=1, transitions=[(c1, Step(rewards={"correctness": 0.0},               done=True))]),
+        ]
+        _build_reward_metrics("reward/component", trajectories)
+        # -> [
+        #      Metric("reward/component/correctness", Mean(sum=1.0, count=2)),  # 0.5
+        #      Metric("reward/component/format",      Mean(sum=0.5, count=1)),  # 0.5 - "format" only in trajectory 0
+        #    ]
     """
     values_by_name: dict[str, list[float]] = defaultdict(list)
-    for rewards in reward_dicts:
-        for name, value in rewards.items():
-            values_by_name[name].append(float(value))
+    for trajectory in trajectories:
+        for _completion, step in trajectory.transitions:
+            for name, value in step.rewards.items():
+                values_by_name[name].append(float(value))
     return [
         m.Metric(f"{prefix}/{name}", m.Mean.from_list(values))
         for name, values in sorted(values_by_name.items())
@@ -352,8 +360,8 @@ class RLTrainer(Configurable):
 
     @staticmethod
     @sl.log_trace_span("_collate_episodes")
-    def _collate_episodes(episodes: list[Episode]) -> TrainBatch:
-        """Pack episodes into a single varlen-packed TrainBatch."""
+    def _collate_episodes(episodes: list[Episode]) -> TrainingBatch:
+        """Pack episodes into a single varlen-packed TrainingBatch."""
         all_ids: list[int] = []
         prompt_lens: list[int] = []
         response_lens: list[int] = []
@@ -363,7 +371,7 @@ class RLTrainer(Configurable):
             prompt_lens.append(len(ep.prompt_token_ids))
             response_lens.append(len(ep.token_ids))
 
-        return TrainBatch(
+        return TrainingBatch(
             token_ids=torch.tensor([all_ids], dtype=torch.long),
             prompt_lens=prompt_lens,
             response_lens=response_lens,
@@ -551,11 +559,9 @@ class RLTrainer(Configurable):
         )
 
         trajectories: list[Trajectory] = []
-        steps: list[Step] = []
         with sl.log_trace_span("score"):
             for c in completions:
                 step_result = envs[c.prompt_idx].step(c.text)
-                steps.append(step_result)
                 trajectories.append(
                     Trajectory(sample_idx=c.prompt_idx, transitions=[(c, step_result)])
                 )
@@ -573,8 +579,7 @@ class RLTrainer(Configurable):
             m.Metric("rollout/truncation_rate", m.Mean.from_list(truncated)),
         ]
         rollout_metrics += _build_reward_metrics(
-            prefix="reward/component",
-            reward_dicts=[step_result.rewards for step_result in steps],
+            prefix="reward/component", trajectories=trajectories
         )
         return trajectories, rollout_metrics
 
@@ -669,7 +674,10 @@ class RLTrainer(Configurable):
             ).get()
         )
 
-        steps = [env.step(completions[i].text) for i, env in enumerate(envs)]
+        trajectories = [
+            Trajectory(sample_idx=i, transitions=[(c, envs[i].step(c.text))])
+            for i, c in enumerate(completions)
+        ]
 
         if self.config.log_samples:
             _log_samples(completions)
@@ -677,17 +685,16 @@ class RLTrainer(Configurable):
         validation_metrics: list[m.Metric] = [
             m.Metric(
                 "validation/reward",
-                m.SummaryStats.from_list([s.reward for s in steps]),
+                m.SummaryStats.from_list([t.total_reward for t in trajectories]),
             ),
             m.Metric(
                 "validation/response_length",
                 m.Mean.from_list([len(c.token_ids) for c in completions]),
             ),
-            m.Metric("validation/num_samples", m.NoReduce(float(len(steps)))),
+            m.Metric("validation/num_samples", m.NoReduce(float(len(trajectories)))),
         ]
         validation_metrics += _build_reward_metrics(
-            prefix="validation/reward/component",
-            reward_dicts=[step_result.rewards for step_result in steps],
+            prefix="validation/reward/component", trajectories=trajectories
         )
 
         t_validate_s = time.perf_counter() - t_validate_start
@@ -740,9 +747,15 @@ class RLTrainer(Configurable):
                 self._collate_episodes(per_rank_episodes)
                 for per_rank_episodes in self._shard_episodes(episodes)
             ]
+            # Controller has all episodes pre-shard, so it computes
+            # the global response-token count instead of an all-reduce.
+            num_global_valid_tokens = sum(len(ep.token_ids) for ep in episodes)
             with sl.log_trace_span("trainer_forward_backward_call"):
-                fwd_metrics = self._get_rank_0_value(
-                    self.trainer.forward_backward.call(batches).get()
+                fwd_bwd_metrics = self._get_rank_0_value(
+                    self.trainer.forward_backward.call(
+                        batches,
+                        num_global_valid_tokens=num_global_valid_tokens,
+                    ).get()
                 )
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim_output = self._get_rank_0_value(
@@ -764,7 +777,7 @@ class RLTrainer(Configurable):
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
             # --- divergence check before any logging ---
-            if not math.isfinite(fwd_metrics["loss/mean"]):
+            if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
 
@@ -779,7 +792,9 @@ class RLTrainer(Configurable):
             step_metrics += episode_metrics
 
             # Actor metrics are already globally reduced; NoReduce passes them through.
-            step_metrics += [m.Metric(k, m.NoReduce(v)) for k, v in fwd_metrics.items()]
+            step_metrics += [
+                m.Metric(k, m.NoReduce(v)) for k, v in fwd_bwd_metrics.items()
+            ]
             step_metrics += [
                 m.Metric(k, m.NoReduce(v)) for k, v in optimizer_metrics.items()
             ]

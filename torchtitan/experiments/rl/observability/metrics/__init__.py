@@ -6,8 +6,8 @@
 
 """Typed metrics for torchtitan RL. Check README.md for details."""
 
-from .metric_console_logging import log_to_console
-from .metric_logging import MetricBackend, MetricsProcessor
+from .console import log_to_console
+from .processor import MetricBackend, MetricsProcessor
 from .types import Max, Mean, Metric, MetricValue, Min, NoReduce, Std, Sum, SummaryStats
 
 

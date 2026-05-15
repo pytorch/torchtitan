@@ -26,7 +26,7 @@ from torchtitan.experiments.rl.types import Completion, Step, Trajectory
 
 
 # ---------------------------------------------------------------------------
-# build_reward_component_metrics
+# _build_reward_metrics
 # ---------------------------------------------------------------------------
 
 
@@ -34,13 +34,28 @@ def _step(rewards: dict[str, float]) -> Step:
     return Step(rewards=rewards, done=True)
 
 
+def _reward_trajectory(rewards: dict[str, float], sample_idx: int = 0) -> Trajectory:
+    """Single-turn trajectory with a fake completion + the given rewards."""
+    fake_completion = Completion(
+        policy_version=0,
+        prompt_idx=sample_idx,
+        prompt_token_ids=[],
+        text="",
+        token_ids=[],
+        token_logprobs=[],
+    )
+    return Trajectory(
+        sample_idx=sample_idx, transitions=[(fake_completion, _step(rewards))]
+    )
+
+
 class TestBuildRewardMetrics:
     def test_one_metric_per_observed_name(self) -> None:
-        reward_dicts = [
-            {"correctness": 1.0, "format": 0.5},
-            {"correctness": 0.0, "format": 1.0},
+        trajectories = [
+            _reward_trajectory({"correctness": 1.0, "format": 0.5}, sample_idx=0),
+            _reward_trajectory({"correctness": 0.0, "format": 1.0}, sample_idx=1),
         ]
-        metrics = _build_reward_metrics("reward/component", reward_dicts)
+        metrics = _build_reward_metrics("reward/component", trajectories)
         keys = {entry.key for entry in metrics}
         assert keys == {
             "reward/component/correctness",
@@ -49,11 +64,14 @@ class TestBuildRewardMetrics:
         for entry in metrics:
             assert isinstance(entry.value, m.Mean)
 
-    def test_components_observed_in_some_steps_only(self) -> None:
-        # `format` only appears in step #2 — it should average over that
-        # one step (no zero-fill).
-        reward_dicts = [{"correctness": 1.0}, {"format": 0.5}]
-        metrics = _build_reward_metrics("reward/component", reward_dicts)
+    def test_components_observed_in_some_trajectories_only(self) -> None:
+        # `format` only appears in the second trajectory — it should
+        # average over that one entry (no zero-fill).
+        trajectories = [
+            _reward_trajectory({"correctness": 1.0}, sample_idx=0),
+            _reward_trajectory({"format": 0.5}, sample_idx=1),
+        ]
+        metrics = _build_reward_metrics("reward/component", trajectories)
         agg = m.MetricsProcessor._aggregate_metrics(metrics)
         assert agg["reward/component/correctness/mean"] == 1.0
         assert agg["reward/component/format/mean"] == 0.5
@@ -62,9 +80,8 @@ class TestBuildRewardMetrics:
         assert _build_reward_metrics("reward/component", []) == []
 
     def test_prefix_controls_namespace(self) -> None:
-        metrics = _build_reward_metrics(
-            "validation/reward/component", [{"correctness": 1.0}]
-        )
+        trajectories = [_reward_trajectory({"correctness": 1.0}, sample_idx=0)]
+        metrics = _build_reward_metrics("validation/reward/component", trajectories)
         assert metrics[0].key == "validation/reward/component/correctness"
 
 
@@ -423,8 +440,10 @@ class TestGRPOLossBridge:
         )
         ratio = torch.exp(per_sample_mean_logprobs)
         clipped_ratio = torch.clamp(ratio, 1 - 0.2, 1 + 0.2)
-        sample_pg_losses = -torch.min(ratio * advantages, clipped_ratio * advantages)
-        unweighted_sample_mean = float(sample_pg_losses.mean().item())
+        sample_policy_gradient_losses = -torch.min(
+            ratio * advantages, clipped_ratio * advantages
+        )
+        unweighted_sample_mean = float(sample_policy_gradient_losses.mean().item())
         assert not math.isclose(
             loss.item(), unweighted_sample_mean, rel_tol=1e-4, abs_tol=1e-6
         )
@@ -601,27 +620,3 @@ class TestReducerFastPaths:
                 max_reduced_metrics={},
             )
         assert out == {}
-
-
-class TestReduceValidTokens:
-    def test_no_loss_mesh_returns_local(self) -> None:
-        trainer = _stub_trainer_for_reducers(dp_size=1)
-        out = trainer._reduce_valid_tokens(torch.tensor(7.0))
-        assert out.item() == pytest.approx(7.0)
-
-    def test_clamp_min_one(self) -> None:
-        """A degenerate batch with zero local valid tokens still produces a
-        non-zero denominator so downstream divisions don't NaN."""
-        trainer = _stub_trainer_for_reducers(dp_size=1)
-        out = trainer._reduce_valid_tokens(torch.tensor(0.0))
-        assert out.item() == pytest.approx(1.0)
-
-    def test_with_mesh_sums_across_ranks(self) -> None:
-        trainer = _stub_trainer_for_reducers(dp_size=2)
-        trainer.parallel_dims.get_optional_mesh = MagicMock(return_value="loss")
-        with patch(
-            "torchtitan.experiments.rl.actors.trainer.funcol.all_reduce",
-            side_effect=lambda t, *, reduceOp, group: t * 3,
-        ):
-            out = trainer._reduce_valid_tokens(torch.tensor(5.0))
-        assert out.item() == pytest.approx(15.0)
