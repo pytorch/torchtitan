@@ -50,16 +50,10 @@ def _get_save_ops() -> set:
         (torch.ops, "torch_attn._varlen_attn.default"),
     ]
 
-    # Communication ops whose outputs should be saved to avoid re-communication.
+    # Save non-EP communication outputs. EP dispatch/combine outputs are left to
+    # recompute so FlexEP and non-FlexEP SAC policies have comparable behavior.
     comm_ops = [
         torch.ops._c10d_functional.reduce_scatter_tensor.default,
-        torch.ops._c10d_functional.all_to_all_single.default,
-        # DeepEP (available when deepep is installed)
-        (torch.ops, "deepep.dispatch.default"),
-        (torch.ops, "deepep.combine.default"),
-        # HybridEP (available when hybridep is installed)
-        (torch.ops, "hybridep.dispatch.default"),
-        (torch.ops, "hybridep.combine.default"),
     ]
 
     def _resolve_ops(op_specs: list) -> dict:

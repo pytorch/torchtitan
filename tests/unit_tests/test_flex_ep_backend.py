@@ -167,7 +167,7 @@ def test_deepseek_v3_flex_ep_config_rejects_tp_cp_pp(parallelism_field):
         config.model_spec.model.update_from_config(trainer_config=config)
 
 
-def test_deepseek_v3_flex_ep_config_sets_balanced_expert_fast_path():
+def test_deepseek_v3_flex_ep_config_sets_router_force_load_balance_only():
     config = deepseek_v3_debugmodel_flex_ep()
     config.debug.moe_force_load_balance = True
 
@@ -178,7 +178,7 @@ def test_deepseek_v3_flex_ep_config_sets_balanced_expert_fast_path():
 
     assert moe_config.router._debug_force_load_balance
     assert isinstance(moe_config.experts, FlexGroupedExperts.Config)
-    assert moe_config.experts._debug_force_load_balance
+    assert not hasattr(moe_config.experts, "_debug_force_load_balance")
 
 
 def test_flex_w13_pack_helper():
@@ -216,36 +216,27 @@ def test_flex_ep_routers_reuse_ep1_workspace(monkeypatch):
     assert router1.raw.data_ptr() == router2.raw.data_ptr()
 
 
-def test_flex_ep_normal_routing_uses_factor_capacity():
+def test_flex_ep_routing_uses_factor_capacity():
     max_tokens = 8 * 2048
     ep_size = 2
     num_experts = 8
     top_k = 3
     local_experts = num_experts // ep_size
 
-    balanced_capacity = flex_ep_mod._compute_max_tokens_recv(
+    capacity = flex_ep_mod._compute_max_tokens_recv(
         max_tokens=max_tokens,
         ep_size=ep_size,
         num_experts=num_experts,
         top_k=top_k,
     )
-    factor_capacity = flex_ep_mod._compute_max_tokens_recv(
-        max_tokens=max_tokens,
-        ep_size=ep_size,
-        num_experts=num_experts,
-        top_k=top_k,
-        capacity_factor=1.0,
-        debug_force_load_balance=False,
-    )
-    half_factor_capacity = flex_ep_mod._compute_max_tokens_recv(
+    half_capacity = flex_ep_mod._compute_max_tokens_recv(
         max_tokens=max_tokens,
         ep_size=ep_size,
         num_experts=num_experts,
         top_k=top_k,
         capacity_factor=0.5,
-        debug_force_load_balance=False,
     )
-    expected_factor_capacity = (
+    expected_capacity = (
         flex_ep_mod._align_up(
             max_tokens * ep_size * min(local_experts, top_k),
             flex_ep_mod.TOKEN_ALIGNMENT,
@@ -260,59 +251,16 @@ def test_flex_ep_normal_routing_uses_factor_capacity():
         + flex_ep_mod.TOKEN_ALIGNMENT * local_experts
     )
 
-    assert balanced_capacity == 49152
-    assert factor_capacity == expected_factor_capacity
-    assert half_factor_capacity == expected_half_factor_capacity
-    assert balanced_capacity < factor_capacity
+    assert capacity == expected_capacity
+    assert half_capacity == expected_half_factor_capacity
     assert (
         flex_ep_mod._compute_dispatch_recv_weights_numel(
             max_tokens,
-            balanced_capacity,
+            capacity,
             top_k,
         )
-        == 98304
+        == capacity
     )
-
-
-def test_flex_ep_forced_routing_uses_balanced_capacity(monkeypatch):
-    monkeypatch.setattr(flex_ep_mod, "_ensure_flex_ep_imported", lambda: None)
-    max_tokens = 8 * 2048
-    kwargs = {
-        "max_tokens": max_tokens,
-        "dim": 8,
-        "num_experts": 8,
-        "top_k": 3,
-        "device": torch.device("cpu"),
-        "ep_mesh": None,
-        "debug_force_load_balance": True,
-        "capacity_factor": 1.0,
-    }
-
-    router = flex_ep_mod.FlexEPRouter.create(**kwargs)
-    forced_size = router.raw.numel()
-    balanced_size = flex_ep_mod.NvlSharedBuffer.get_buffer_size_bytes(
-        max_tokens=max_tokens,
-        dim=8,
-        ep_size=1,
-        num_experts=8,
-        top_k=3,
-        debug_force_load_balance=True,
-        capacity_factor=1.0,
-    )
-    factor_size = flex_ep_mod.NvlSharedBuffer.get_buffer_size_bytes(
-        max_tokens=max_tokens,
-        dim=8,
-        ep_size=1,
-        num_experts=8,
-        top_k=3,
-        debug_force_load_balance=False,
-        capacity_factor=1.0,
-    )
-
-    assert router.debug_force_load_balance
-    assert router._balanced_metadata is not None
-    assert forced_size == balanced_size
-    assert forced_size < factor_size
 
 
 def test_nvl_shared_buffer_accepts_larger_buffer_and_rejects_too_small():
@@ -366,15 +314,9 @@ def test_flex_ep_workspace_cache_and_views_include_capacity_factor(monkeypatch):
     router1 = flex_ep_mod.FlexEPRouter.create(**kwargs, capacity_factor=1.0)
     router2 = flex_ep_mod.FlexEPRouter.create(**kwargs, capacity_factor=0.5)
     router3 = flex_ep_mod.FlexEPRouter.create(**kwargs, capacity_factor=1.0)
-    forced_router = flex_ep_mod.FlexEPRouter.create(
-        **kwargs,
-        capacity_factor=1.0,
-        debug_force_load_balance=True,
-    )
 
     assert router1.workspace is router3.workspace
     assert router1.workspace is not router2.workspace
-    assert router1.workspace is not forced_router.workspace
 
     view1 = router1.workspace.view(
         max_tokens=kwargs["max_tokens"],
@@ -382,7 +324,6 @@ def test_flex_ep_workspace_cache_and_views_include_capacity_factor(monkeypatch):
         num_experts=kwargs["num_experts"],
         top_k=kwargs["top_k"],
         capacity_factor=1.0,
-        debug_force_load_balance=False,
     )
     view2 = router1.workspace.view(
         max_tokens=kwargs["max_tokens"],
@@ -390,27 +331,13 @@ def test_flex_ep_workspace_cache_and_views_include_capacity_factor(monkeypatch):
         num_experts=kwargs["num_experts"],
         top_k=kwargs["top_k"],
         capacity_factor=0.5,
-        debug_force_load_balance=False,
-    )
-    forced_view = router1.workspace.view(
-        max_tokens=kwargs["max_tokens"],
-        dim=kwargs["dim"],
-        num_experts=kwargs["num_experts"],
-        top_k=kwargs["top_k"],
-        capacity_factor=1.0,
-        debug_force_load_balance=True,
     )
 
     assert view1 is not view2
-    assert view1 is not forced_view
     assert view1.dispatch_recv_buffer.shape[0] != view2.dispatch_recv_buffer.shape[0]
-    assert (
-        view1.dispatch_recv_buffer.shape[0] != forced_view.dispatch_recv_buffer.shape[0]
-    )
 
 
-@pytest.mark.parametrize("debug_force_load_balance", (False, True))
-def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch, debug_force_load_balance):
+def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch):
     import torch._higher_order_ops.flex_ep  # noqa: F401
 
     zfill_calls = []
@@ -428,7 +355,6 @@ def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch, debug_force_load_bala
         top_k=2,
         device=torch.device("cpu"),
         ep_mesh=None,
-        debug_force_load_balance=debug_force_load_balance,
     )
     dispatch_fn = router.router_fns[0]
     x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
@@ -510,7 +436,7 @@ def test_flex_ep_offset_ops_cpu_fallbacks_match_full_reference():
     torch.testing.assert_close(cloned, y1)
 
 
-def test_flex_ep_non_forced_combine_does_not_zero_capacity_tail(monkeypatch):
+def test_flex_ep_combine_does_not_zero_capacity_tail(monkeypatch):
     flex_ep_mod._ensure_flex_ep_imported()
     router = flex_ep_mod.FlexEPRouter.create(
         max_tokens=5,
@@ -519,7 +445,6 @@ def test_flex_ep_non_forced_combine_does_not_zero_capacity_tail(monkeypatch):
         top_k=2,
         device=torch.device("cpu"),
         ep_mesh=None,
-        debug_force_load_balance=False,
     )
     dispatch_fn, combine_fn, _, dispatch_bwd_fn = router.router_fns
     x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
@@ -645,79 +570,6 @@ def test_flex_ep_registered_offset_kernels_match_reference_prefix():
     )
     cloned = torch.ops.inductor.flex_ep_clone_valid_prefix(input, token_end)
     torch.testing.assert_close(cloned[:token_end_value], input[:token_end_value])
-
-
-def test_flex_ep_balanced_metadata_matches_dynamic_expert_offsets():
-    flex_ep_mod._ensure_flex_ep_imported()
-    max_tokens = 11
-    ep_rank = 1
-    ep_size = 3
-    num_experts = 6
-    top_k = 4
-    local_experts = num_experts // ep_size
-    device = torch.device("cpu")
-
-    metadata = flex_ep_mod._compute_balanced_routing_metadata(
-        max_tokens=max_tokens,
-        ep_rank=ep_rank,
-        ep_size=ep_size,
-        num_experts=num_experts,
-        top_k=top_k,
-        device=device,
-    )
-    counts = flex_ep_mod._balanced_expert_counts(
-        max_tokens=max_tokens,
-        num_experts=num_experts,
-        top_k=top_k,
-        device=device,
-    )
-    all_expert_counts = counts.repeat(ep_size, 1)
-    (
-        all_offsets,
-        recv_total_tokens,
-        local_experts_start,
-    ) = torch.ops._flex_ep.router_compute_all_expert_offsets(
-        all_expert_counts,
-        ep_rank,
-        local_experts,
-        flex_ep_mod.TOKEN_ALIGNMENT,
-    )
-    topk_idx = (
-        torch.arange(max_tokens * top_k, dtype=torch.int64, device=device).view(
-            max_tokens,
-            top_k,
-        )
-        % num_experts
-    )
-    recv_ofs = all_offsets[:, :, ep_rank].reshape(-1)
-    dest_ranks, dest_offsets = torch.ops._flex_ep.router_compute_dest_offsets(
-        topk_idx,
-        recv_ofs,
-        ep_size,
-    )
-    torch.testing.assert_close(metadata.expert_begin_offset, all_offsets[ep_rank])
-    torch.testing.assert_close(metadata.recv_total_tokens, recv_total_tokens)
-    torch.testing.assert_close(metadata.local_experts_start, local_experts_start)
-    assert metadata.recv_origin_global_token_id.shape == (
-        flex_ep_mod._compute_max_tokens_recv(
-            max_tokens=max_tokens,
-            ep_size=ep_size,
-            num_experts=num_experts,
-            top_k=top_k,
-        ),
-    )
-    assert metadata.recv_origin_global_token_id.dtype == torch.int64
-    assert (metadata.recv_origin_global_token_id >= 0).sum() == recv_total_tokens
-    torch.testing.assert_close(metadata.dest_ranks, dest_ranks)
-    torch.testing.assert_close(metadata.dest_offsets, dest_offsets)
-    assert metadata.dest_ranks.shape == (max_tokens, top_k)
-    assert metadata.dest_ranks.dtype == torch.int32
-    assert metadata.dest_offsets.shape == (max_tokens, top_k)
-    assert metadata.dest_offsets.dtype == torch.int64
-    assert metadata.combine_dest_ranks.shape == (0,)
-    assert metadata.combine_dest_ranks.dtype == torch.int32
-    assert metadata.combine_dest_offsets.shape == (0,)
-    assert metadata.combine_dest_offsets.dtype == torch.int64
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

@@ -165,7 +165,6 @@ class FlexGroupedExperts(Module):
         use_grouped_mm: bool = True
         num_ctas: int = 1024
         flex_ep_capacity_factor: float = 1.0
-        _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -186,7 +185,6 @@ class FlexGroupedExperts(Module):
         self.top_k = config.top_k
         self.num_ctas = config.num_ctas
         self.flex_ep_capacity_factor = config.flex_ep_capacity_factor
-        self._debug_force_load_balance = config._debug_force_load_balance
         self.w1 = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
@@ -202,9 +200,7 @@ class FlexGroupedExperts(Module):
         # CUDA buffers are available.
         self.ep_mesh: DeviceMesh | None = None
         self._router: Any | None = None
-        self._router_shape: tuple[
-            int, int, torch.device, int, int, bool, float
-        ] | None = None
+        self._router_shape: tuple[int, int, torch.device, int, int, float] | None = None
 
     def _get_or_create_router(self, x: torch.Tensor) -> Any:
         if x.device.type != "cuda":
@@ -219,7 +215,6 @@ class FlexGroupedExperts(Module):
             x.device,
             ep_size,
             ep_rank,
-            self._debug_force_load_balance,
             self.flex_ep_capacity_factor,
         )
         if self._router is not None and self._router_shape == router_shape:
@@ -236,7 +231,6 @@ class FlexGroupedExperts(Module):
                 device=x.device,
                 ep_mesh=self.ep_mesh,
                 num_ctas=self.num_ctas,
-                debug_force_load_balance=self._debug_force_load_balance,
                 capacity_factor=self.flex_ep_capacity_factor,
             )
         self._router = router

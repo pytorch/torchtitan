@@ -1751,20 +1751,6 @@ def _validate_flex_ep_capacity_factor(capacity_factor: float) -> float:
     return float(capacity_factor)
 
 
-def _compute_balanced_max_tokens_recv(
-    max_tokens: int,
-    ep_size: int,
-    num_experts: int,
-    top_k: int,
-) -> int:
-    local_experts = num_experts // ep_size
-    capacity_per_local_expert = _align_up(
-        ep_size * ((max_tokens * top_k + num_experts - 1) // num_experts),
-        TOKEN_ALIGNMENT,
-    )
-    return capacity_per_local_expert * local_experts
-
-
 def _compute_capacity_factor_max_tokens_recv(
     max_tokens: int,
     ep_size: int,
@@ -1790,16 +1776,7 @@ def _compute_flex_ep_max_tokens_recv(
     top_k: int,
     *,
     capacity_factor: float,
-    debug_force_load_balance: bool,
 ) -> int:
-    capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
-    if debug_force_load_balance:
-        return _compute_balanced_max_tokens_recv(
-            max_tokens,
-            ep_size,
-            num_experts,
-            top_k,
-        )
     return _compute_capacity_factor_max_tokens_recv(
         max_tokens,
         ep_size,
@@ -1816,7 +1793,6 @@ def _compute_max_tokens_recv(
     top_k: int,
     *,
     capacity_factor: float = 1.0,
-    debug_force_load_balance: bool = True,
 ) -> int:
     return _compute_flex_ep_max_tokens_recv(
         max_tokens,
@@ -1824,7 +1800,6 @@ def _compute_max_tokens_recv(
         num_experts,
         top_k,
         capacity_factor=capacity_factor,
-        debug_force_load_balance=debug_force_load_balance,
     )
 
 
@@ -1851,189 +1826,6 @@ def _validate_flex_ep_capacity(
     num_recv_tokens = int(local_experts_start[-1].item())
     if num_recv_tokens > max_recv_tokens:
         raise ValueError(f"{error_msg} Received {num_recv_tokens} local expert tokens.")
-
-
-@dataclass(frozen=True)
-class _BalancedRoutingMetadata:
-    recv_origin_global_token_id: torch.Tensor
-    expert_begin_offset: torch.Tensor
-    dest_ranks: torch.Tensor
-    dest_offsets: torch.Tensor
-    combine_dest_ranks: torch.Tensor
-    combine_dest_offsets: torch.Tensor
-    max_recv_tokens_tensor: torch.Tensor
-    recv_total_tokens: torch.Tensor
-    local_experts_start: torch.Tensor
-
-
-_BalancedRoutingMetadataCacheKey = tuple[
-    str,
-    int | None,
-    int,
-    int,
-    int,
-    int,
-    int,
-]
-_BALANCED_ROUTING_METADATA_CACHE: dict[
-    _BalancedRoutingMetadataCacheKey, _BalancedRoutingMetadata
-] = {}
-
-
-def _balanced_expert_counts(
-    *,
-    max_tokens: int,
-    num_experts: int,
-    top_k: int,
-    device: torch.device,
-) -> torch.Tensor:
-    total_copies = max_tokens * top_k
-    base_count = total_copies // num_experts
-    extra_experts = total_copies % num_experts
-    counts = torch.full(
-        (num_experts,),
-        base_count,
-        dtype=torch.int64,
-        device=device,
-    )
-    if extra_experts:
-        counts[:extra_experts] += 1
-    return counts
-
-
-def _compute_balanced_routing_metadata(
-    *,
-    max_tokens: int,
-    ep_rank: int,
-    ep_size: int,
-    num_experts: int,
-    top_k: int,
-    device: torch.device,
-) -> _BalancedRoutingMetadata:
-    if num_experts % ep_size != 0:
-        raise ValueError(
-            f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})."
-        )
-
-    local_experts = num_experts // ep_size
-    max_recv_tokens = _compute_balanced_max_tokens_recv(
-        max_tokens,
-        ep_size,
-        num_experts,
-        top_k,
-    )
-    counts = _balanced_expert_counts(
-        max_tokens=max_tokens,
-        num_experts=num_experts,
-        top_k=top_k,
-        device=device,
-    )
-    counts_by_dest = counts.view(ep_size, local_experts)
-    total_per_local_expert = counts_by_dest * ep_size
-    aligned_per_local_expert = (
-        (total_per_local_expert + TOKEN_ALIGNMENT - 1) // TOKEN_ALIGNMENT
-    ) * TOKEN_ALIGNMENT
-    starts_by_dest = torch.cat(
-        (
-            torch.zeros((ep_size, 1), dtype=torch.int64, device=device),
-            aligned_per_local_expert.cumsum(dim=1),
-        ),
-        dim=1,
-    )
-
-    source_ranks = torch.arange(ep_size + 1, dtype=torch.int64, device=device)
-    expert_begin_offset = (
-        starts_by_dest[ep_rank, :-1].unsqueeze(1)
-        + counts_by_dest[ep_rank].unsqueeze(1) * source_ranks
-    ).to(torch.int32)
-    local_experts_start = starts_by_dest[ep_rank].to(torch.int32)
-    _validate_flex_ep_capacity(
-        local_experts_start,
-        max_recv_tokens,
-        capacity_factor=1.0,
-    )
-
-    total_copies = max_tokens * top_k
-    copy_ids = torch.arange(total_copies, dtype=torch.int64, device=device)
-    expert_ids = copy_ids % num_experts
-    dest_ranks_i64 = expert_ids // local_experts
-    local_expert_ids = expert_ids - dest_ranks_i64 * local_experts
-    rank_in_expert = copy_ids // num_experts
-    counts_for_copy = counts[expert_ids]
-    expert_start = starts_by_dest[dest_ranks_i64, local_expert_ids]
-    dest_offsets = expert_start + counts_for_copy * ep_rank + rank_in_expert
-
-    recv_origin_global_token_id = torch.full(
-        (max_recv_tokens,),
-        -1,
-        dtype=torch.int64,
-        device=device,
-    )
-    for local_expert_id in range(local_experts):
-        expert_id = ep_rank * local_experts + local_expert_id
-        count = int(counts[expert_id].item())
-        if count == 0:
-            continue
-        expert_start_offset = int(starts_by_dest[ep_rank, local_expert_id].item())
-        local_rank_in_expert = torch.arange(count, dtype=torch.int64, device=device)
-        local_copy_ids = local_rank_in_expert * num_experts + expert_id
-        for source_rank in range(ep_size):
-            recv_offsets = (
-                expert_start_offset + count * source_rank + local_rank_in_expert
-            )
-            recv_origin_global_token_id[recv_offsets] = (
-                source_rank * total_copies + local_copy_ids
-            )
-
-    return _BalancedRoutingMetadata(
-        recv_origin_global_token_id=recv_origin_global_token_id,
-        expert_begin_offset=expert_begin_offset,
-        dest_ranks=dest_ranks_i64.to(torch.int32).view(max_tokens, top_k),
-        dest_offsets=dest_offsets.view(max_tokens, top_k),
-        combine_dest_ranks=torch.empty((0,), dtype=torch.int32, device=device),
-        combine_dest_offsets=torch.empty((0,), dtype=torch.int64, device=device),
-        max_recv_tokens_tensor=torch.full(
-            (),
-            max_recv_tokens,
-            device=device,
-            dtype=torch.int32,
-        ),
-        recv_total_tokens=total_per_local_expert[ep_rank].sum().clone(),
-        local_experts_start=local_experts_start,
-    )
-
-
-def _get_or_create_balanced_routing_metadata(
-    *,
-    max_tokens: int,
-    ep_rank: int,
-    ep_size: int,
-    num_experts: int,
-    top_k: int,
-    device: torch.device,
-) -> _BalancedRoutingMetadata:
-    device_type, device_index = _device_cache_key(device)
-    cache_key = (
-        device_type,
-        device_index,
-        max_tokens,
-        ep_rank,
-        ep_size,
-        num_experts,
-        top_k,
-    )
-    metadata = _BALANCED_ROUTING_METADATA_CACHE.get(cache_key)
-    if metadata is None:
-        metadata = _compute_balanced_routing_metadata(
-            max_tokens=max_tokens,
-            ep_rank=ep_rank,
-            ep_size=ep_size,
-            num_experts=num_experts,
-            top_k=top_k,
-            device=device,
-        )
-        _BALANCED_ROUTING_METADATA_CACHE[cache_key] = metadata
-    return metadata
 
 
 def _compute_dispatch_recv_weights_numel(
@@ -2076,7 +1868,6 @@ class NvlSharedBuffer:
         num_experts: int,
         top_k: int,
         capacity_factor: float = 1.0,
-        debug_force_load_balance: bool = False,
     ) -> tuple[tuple[str, tuple[int, ...], torch.dtype], ...]:
         if num_experts % ep_size != 0:
             raise ValueError(
@@ -2089,7 +1880,6 @@ class NvlSharedBuffer:
             num_experts,
             top_k,
             capacity_factor=capacity_factor,
-            debug_force_load_balance=debug_force_load_balance,
         )
         dispatch_recv_weights_numel = _compute_dispatch_recv_weights_numel(
             max_tokens,
@@ -2168,7 +1958,7 @@ class NvlSharedBuffer:
         return getattr(self, name).data_ptr() - self.raw.data_ptr()
 
 
-_WorkspaceCacheKey = tuple[str, int | None, int | None, int, int, bool, float]
+_WorkspaceCacheKey = tuple[str, int | None, int | None, int, int, float]
 _FLEX_EP_WORKSPACE_CACHE: dict[_WorkspaceCacheKey, "FlexEPWorkspace"] = {}
 
 
@@ -2182,7 +1972,6 @@ def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
 
 def _clear_flex_ep_workspace_cache() -> None:
     _FLEX_EP_WORKSPACE_CACHE.clear()
-    _BALANCED_ROUTING_METADATA_CACHE.clear()
 
 
 @dataclass
@@ -2193,7 +1982,7 @@ class FlexEPWorkspace:
     raw: torch.Tensor
     peer_buffers: tuple[torch.Tensor, ...]
     buffers_cuda_ptrs: torch.Tensor
-    _views: dict[tuple[int, int, int, int, int, bool, float], NvlSharedBuffer] = field(
+    _views: dict[tuple[int, int, int, int, int, float], NvlSharedBuffer] = field(
         default_factory=dict
     )
 
@@ -2208,7 +1997,6 @@ class FlexEPWorkspace:
         device: torch.device,
         ep_mesh: DeviceMesh | None,
         capacity_factor: float,
-        debug_force_load_balance: bool,
     ) -> "FlexEPWorkspace":
         capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         ep_size = 1 if ep_mesh is None else ep_mesh.size()
@@ -2234,7 +2022,6 @@ class FlexEPWorkspace:
             ep_group_key,
             ep_rank,
             ep_size,
-            debug_force_load_balance,
             capacity_factor,
         )
         nvl_buffer_size = NvlSharedBuffer.get_buffer_size_bytes(
@@ -2244,7 +2031,6 @@ class FlexEPWorkspace:
             num_experts=num_experts,
             top_k=top_k,
             capacity_factor=capacity_factor,
-            debug_force_load_balance=debug_force_load_balance,
         )
         workspace = _FLEX_EP_WORKSPACE_CACHE.get(cache_key)
         if workspace is None:
@@ -2257,7 +2043,6 @@ class FlexEPWorkspace:
                 num_experts=num_experts,
                 top_k=top_k,
                 capacity_factor=capacity_factor,
-                debug_force_load_balance=debug_force_load_balance,
                 device=device,
                 ep_group=ep_group,
             )
@@ -2270,7 +2055,6 @@ class FlexEPWorkspace:
                 num_experts=num_experts,
                 top_k=top_k,
                 capacity_factor=capacity_factor,
-                debug_force_load_balance=debug_force_load_balance,
                 ep_group=ep_group,
             )
         return workspace
@@ -2287,7 +2071,6 @@ class FlexEPWorkspace:
         num_experts: int,
         top_k: int,
         capacity_factor: float,
-        debug_force_load_balance: bool,
         device: torch.device,
         ep_group: Any,
     ) -> "FlexEPWorkspace":
@@ -2313,7 +2096,6 @@ class FlexEPWorkspace:
             num_experts=num_experts,
             top_k=top_k,
             capacity_factor=capacity_factor,
-            debug_force_load_balance=debug_force_load_balance,
         )
         return workspace
 
@@ -2326,7 +2108,6 @@ class FlexEPWorkspace:
         num_experts: int,
         top_k: int,
         capacity_factor: float,
-        debug_force_load_balance: bool,
         ep_group: Any,
     ) -> None:
         raw, peer_buffers, buffers_cuda_ptrs = _allocate_workspace_storage(
@@ -2347,7 +2128,6 @@ class FlexEPWorkspace:
             num_experts=num_experts,
             top_k=top_k,
             capacity_factor=capacity_factor,
-            debug_force_load_balance=debug_force_load_balance,
         )
 
     def _log_allocation(
@@ -2359,7 +2139,6 @@ class FlexEPWorkspace:
         num_experts: int,
         top_k: int,
         capacity_factor: float,
-        debug_force_load_balance: bool,
     ) -> None:
         local_experts = num_experts // self.ep_size
         max_recv_tokens = _compute_flex_ep_max_tokens_recv(
@@ -2368,13 +2147,11 @@ class FlexEPWorkspace:
             num_experts,
             top_k,
             capacity_factor=capacity_factor,
-            debug_force_load_balance=debug_force_load_balance,
         )
         logger.info(
             "Allocated FlexEP workspace: size_bytes=%s device=%s ep_rank=%s "
             "ep_size=%s max_tokens=%s dim=%s num_experts=%s top_k=%s "
-            "local_experts=%s capacity_mode=%s capacity_factor=%s "
-            "max_recv_tokens=%s",
+            "local_experts=%s capacity_factor=%s max_recv_tokens=%s",
             nvl_buffer_size,
             self.device,
             self.ep_rank,
@@ -2384,7 +2161,6 @@ class FlexEPWorkspace:
             num_experts,
             top_k,
             local_experts,
-            "balanced" if debug_force_load_balance else "factor",
             capacity_factor,
             max_recv_tokens,
         )
@@ -2397,7 +2173,6 @@ class FlexEPWorkspace:
         num_experts: int,
         top_k: int,
         capacity_factor: float,
-        debug_force_load_balance: bool,
     ) -> NvlSharedBuffer:
         capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         view_key = (
@@ -2406,7 +2181,6 @@ class FlexEPWorkspace:
             self.ep_size,
             num_experts,
             top_k,
-            debug_force_load_balance,
             capacity_factor,
         )
         view = self._views.get(view_key)
@@ -2419,7 +2193,6 @@ class FlexEPWorkspace:
                 num_experts=num_experts,
                 top_k=top_k,
                 capacity_factor=capacity_factor,
-                debug_force_load_balance=debug_force_load_balance,
             )
             self._views[view_key] = view
         return view
@@ -2486,7 +2259,6 @@ def _allocate_workspace_storage(
         ep_size=ep_size,
         num_experts=ep_size,
         top_k=1,
-        debug_force_load_balance=True,
     )
     buffer.barrier_counter.zero_()
     buffers_cuda_ptrs = torch.tensor(
@@ -2645,7 +2417,6 @@ class FlexEPRouter:
         ep_size: int,
         workspace: FlexEPWorkspace,
         num_ctas: int = DEFAULT_NUM_CTAS,
-        debug_force_load_balance: bool = False,
         capacity_factor: float = 1.0,
     ) -> None:
         capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
@@ -2657,20 +2428,7 @@ class FlexEPRouter:
         self.ep_size = ep_size
         self.num_ctas = num_ctas
         self.workspace = workspace
-        self.debug_force_load_balance = debug_force_load_balance
         self.capacity_factor = capacity_factor
-        self._balanced_metadata = (
-            _get_or_create_balanced_routing_metadata(
-                max_tokens=max_tokens,
-                ep_rank=ep_rank,
-                ep_size=ep_size,
-                num_experts=num_experts,
-                top_k=top_k,
-                device=workspace.device,
-            )
-            if debug_force_load_balance
-            else None
-        )
         self.router_fns = self._make_router_fns()
 
     @property
@@ -2696,7 +2454,6 @@ class FlexEPRouter:
         device: torch.device,
         ep_mesh: DeviceMesh | None,
         num_ctas: int = DEFAULT_NUM_CTAS,
-        debug_force_load_balance: bool = False,
         capacity_factor: float = 1.0,
     ) -> "FlexEPRouter":
         _ensure_flex_ep_imported()
@@ -2711,7 +2468,6 @@ class FlexEPRouter:
             device=device,
             ep_mesh=ep_mesh,
             capacity_factor=capacity_factor,
-            debug_force_load_balance=debug_force_load_balance,
         )
         return cls(
             max_tokens=max_tokens,
@@ -2722,7 +2478,6 @@ class FlexEPRouter:
             ep_size=ep_size,
             workspace=workspace,
             num_ctas=num_ctas,
-            debug_force_load_balance=debug_force_load_balance,
             capacity_factor=capacity_factor,
         )
 
@@ -2734,7 +2489,6 @@ class FlexEPRouter:
             num_experts=self.num_experts,
             top_k=self.top_k,
             capacity_factor=self.capacity_factor,
-            debug_force_load_balance=self.debug_force_load_balance,
         )
         return (
             self.workspace.raw,
@@ -2760,7 +2514,6 @@ class FlexEPRouter:
             num_experts=self.num_experts,
             top_k=self.top_k,
             capacity_factor=self.capacity_factor,
-            debug_force_load_balance=self.debug_force_load_balance,
         )
 
     def _make_router_fns(self) -> RouterFns:
@@ -2771,7 +2524,6 @@ class FlexEPRouter:
             self.num_experts,
             self.top_k,
             capacity_factor=self.capacity_factor,
-            debug_force_load_balance=self.debug_force_load_balance,
         )
 
         def dispatch_fn(
@@ -2804,69 +2556,6 @@ class FlexEPRouter:
                 buffer.dispatch_recv_origin_global_token_id
             )
             allgather_expert_counts = buffer.allgather_expert_counts
-
-            if self._balanced_metadata is not None:
-                metadata = self._balanced_metadata
-                (
-                    dispatch_recv_buffer,
-                    dispatch_recv_buffer_scaling_factors,
-                    dispatch_recv_origin_global_token_id,
-                    dispatch_recv_weights,
-                ) = torch.ops._flex_ep.router_dispatch(
-                    x_expanded,
-                    None,
-                    None,
-                    metadata.dest_ranks,
-                    metadata.dest_offsets,
-                    buffers_cuda_ptrs,
-                    dispatch_recv_buffer,
-                    dispatch_recv_buffer_scaling_factors,
-                    metadata.recv_origin_global_token_id,
-                    dispatch_recv_weights,
-                    offs_dispatch_recv_buffer,
-                    offs_dispatch_recv_buffer_scaling_factors,
-                    offs_dispatch_recv_weights,
-                    -1,
-                    ep_rank,
-                    self.num_ctas,
-                    self.max_tokens,
-                )
-                barrier = torch.ops._flex_ep.barrier_arrive(
-                    barrier_counter[:1],
-                    dispatch_recv_buffer,
-                    2,
-                )
-                recv_x = _view_beginning_as(
-                    dispatch_recv_buffer,
-                    (max_recv_tokens, x_expanded.shape[-1]),
-                    x_expanded.dtype,
-                )
-                recv_x_u8 = torch.ops._flex_ep.zfill_ranges_inplace(
-                    recv_x.view(torch.uint8),
-                    metadata.expert_begin_offset[:, -1].contiguous(),
-                    metadata.local_experts_start[1:].contiguous(),
-                    TOKEN_ALIGNMENT,
-                )
-                recv_x = recv_x_u8.view(recv_x.dtype).view(recv_x.shape)
-                recv_x_u8 = torch.ops._flex_ep.barrier_wait_no_clone(
-                    recv_x_u8,
-                    buffers_cuda_ptrs,
-                    offs_barrier_counter,
-                    barrier,
-                    EP_TIMEOUT_SECONDS,
-                )
-                recv_x = recv_x_u8.view(recv_x.dtype).view(recv_x.shape)
-                return (
-                    recv_x,
-                    metadata.recv_origin_global_token_id,
-                    metadata.expert_begin_offset,
-                    metadata.dest_ranks,
-                    metadata.dest_offsets,
-                    metadata.max_recv_tokens_tensor,
-                    metadata.recv_total_tokens,
-                    metadata.local_experts_start,
-                    self.max_tokens,
-                )
 
             dispatch_recv_origin_global_token_id = _router_barrier(
                 dispatch_recv_origin_global_token_id,
@@ -3030,45 +2719,6 @@ class FlexEPRouter:
             combine_recv_scale_factors = buffer.combine_recv_scale_factors
             combine_recv_weights = buffer.combine_recv_weights
 
-            if self._balanced_metadata is not None:
-                metadata = self._balanced_metadata
-                (
-                    combine_recv_buffer,
-                    combine_recv_scale_factors,
-                    combine_recv_weights,
-                ) = torch.ops._flex_ep.router_combine(
-                    y3.contiguous(),
-                    None,
-                    None,
-                    metadata.expert_begin_offset,
-                    metadata.local_experts_start[-1:].to(torch.int64),
-                    metadata.recv_origin_global_token_id,
-                    buffers_cuda_ptrs,
-                    combine_recv_buffer,
-                    combine_recv_scale_factors,
-                    combine_recv_weights,
-                    offs_combine_recv_buffer,
-                    offs_combine_recv_scale_factors,
-                    offs_combine_recv_weights,
-                    ep_rank,
-                    batch_size,
-                    self.top_k,
-                    self.num_ctas,
-                    self.max_tokens,
-                )
-                combine_recv_buffer = _router_barrier(
-                    combine_recv_buffer,
-                    barrier_counter,
-                    buffers_cuda_ptrs,
-                    offs_barrier_counter,
-                    nonce=1,
-                )
-                return _view_beginning_as(
-                    combine_recv_buffer,
-                    (batch_size, self.top_k, y3.shape[-1]),
-                    y3.dtype,
-                )
-
             combine_recv_buffer = _router_barrier(
                 combine_recv_buffer,
                 barrier_counter,
@@ -3152,63 +2802,36 @@ class FlexEPRouter:
                 buffer.dispatch_recv_origin_global_token_id
             )
 
-            if self._balanced_metadata is not None:
-                metadata = self._balanced_metadata
-                (
-                    dispatch_recv_buffer,
-                    dispatch_recv_buffer_scaling_factors,
-                    dispatch_recv_origin_global_token_id,
-                    dispatch_recv_weights,
-                ) = torch.ops._flex_ep.router_dispatch(
-                    dy.contiguous(),
-                    None,
-                    None,
-                    metadata.dest_ranks,
-                    metadata.dest_offsets,
-                    buffers_cuda_ptrs,
-                    dispatch_recv_buffer,
-                    dispatch_recv_buffer_scaling_factors,
-                    metadata.recv_origin_global_token_id,
-                    dispatch_recv_weights,
-                    offs_dispatch_recv_buffer,
-                    offs_dispatch_recv_buffer_scaling_factors,
-                    offs_dispatch_recv_weights,
-                    -1,
-                    ep_rank,
-                    self.num_ctas,
-                    self.max_tokens,
-                )
-            else:
-                dispatch_recv_buffer = _router_barrier(
-                    dispatch_recv_buffer,
-                    barrier_counter,
-                    buffers_cuda_ptrs,
-                    offs_barrier_counter,
-                )
-                (
-                    dispatch_recv_buffer,
-                    dispatch_recv_buffer_scaling_factors,
-                    dispatch_recv_origin_global_token_id,
-                    dispatch_recv_weights,
-                ) = torch.ops._flex_ep.router_dispatch(
-                    dy.contiguous(),
-                    None,
-                    None,
-                    dest_ranks,
-                    dest_offsets,
-                    buffers_cuda_ptrs,
-                    dispatch_recv_buffer,
-                    dispatch_recv_buffer_scaling_factors,
-                    dispatch_recv_origin_global_token_id,
-                    dispatch_recv_weights,
-                    offs_dispatch_recv_buffer,
-                    offs_dispatch_recv_buffer_scaling_factors,
-                    offs_dispatch_recv_weights,
-                    -1,
-                    ep_rank,
-                    self.num_ctas,
-                    self.max_tokens,
-                )
+            dispatch_recv_buffer = _router_barrier(
+                dispatch_recv_buffer,
+                barrier_counter,
+                buffers_cuda_ptrs,
+                offs_barrier_counter,
+            )
+            (
+                dispatch_recv_buffer,
+                dispatch_recv_buffer_scaling_factors,
+                dispatch_recv_origin_global_token_id,
+                dispatch_recv_weights,
+            ) = torch.ops._flex_ep.router_dispatch(
+                dy.contiguous(),
+                None,
+                None,
+                dest_ranks,
+                dest_offsets,
+                buffers_cuda_ptrs,
+                dispatch_recv_buffer,
+                dispatch_recv_buffer_scaling_factors,
+                dispatch_recv_origin_global_token_id,
+                dispatch_recv_weights,
+                offs_dispatch_recv_buffer,
+                offs_dispatch_recv_buffer_scaling_factors,
+                offs_dispatch_recv_weights,
+                -1,
+                ep_rank,
+                self.num_ctas,
+                self.max_tokens,
+            )
             barrier = torch.ops._flex_ep.barrier_arrive(
                 barrier_counter[:1],
                 dispatch_recv_buffer,
@@ -3271,45 +2894,6 @@ class FlexEPRouter:
             combine_recv_buffer = buffer.combine_recv_buffer
             combine_recv_scale_factors = buffer.combine_recv_scale_factors
             combine_recv_weights = buffer.combine_recv_weights
-
-            if self._balanced_metadata is not None:
-                metadata = self._balanced_metadata
-                (
-                    combine_recv_buffer,
-                    combine_recv_scale_factors,
-                    combine_recv_weights,
-                ) = torch.ops._flex_ep.router_combine(
-                    dx_recv.contiguous(),
-                    None,
-                    None,
-                    metadata.expert_begin_offset,
-                    metadata.local_experts_start[-1:].to(torch.int64),
-                    metadata.recv_origin_global_token_id,
-                    buffers_cuda_ptrs,
-                    combine_recv_buffer,
-                    combine_recv_scale_factors,
-                    combine_recv_weights,
-                    offs_combine_recv_buffer,
-                    offs_combine_recv_scale_factors,
-                    offs_combine_recv_weights,
-                    ep_rank,
-                    batch_size,
-                    self.top_k,
-                    self.num_ctas,
-                    self.max_tokens,
-                )
-                combine_recv_buffer = _router_barrier(
-                    combine_recv_buffer,
-                    barrier_counter,
-                    buffers_cuda_ptrs,
-                    offs_barrier_counter,
-                    nonce=1,
-                )
-                return _view_beginning_as(
-                    combine_recv_buffer,
-                    (batch_size, self.top_k, dx_recv.shape[-1]),
-                    dx_recv.dtype,
-                )
 
             combine_recv_buffer = _router_barrier(
                 combine_recv_buffer,
