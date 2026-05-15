@@ -63,7 +63,7 @@ class ParamOwnerRef:
 
 
 @dataclass(frozen=True)
-class ParamEntry:
+class BucketParam:
     """Per-parameter bucket runtime state.
 
     param_owner locates the live nn.Parameter for local shard reads and grad
@@ -303,7 +303,7 @@ class BucketRuntime:
     """Runtime state and hooks for one FlexShard bucket."""
 
     bucket_storage: ShardedBucketStorage
-    entries: list[ParamEntry]
+    bucket_params: list[BucketParam]
     context: BucketCommContext
     debug_fqn: str | None
 
@@ -315,31 +315,31 @@ class BucketRuntime:
         context: BucketCommContext | None = None,
     ) -> BucketRuntime | None:
         """Create runtime state for one bucket storage."""
-        entries = cls._get_param_entries(bucket_storage, module_param_slots)
+        bucket_params = cls._get_bucket_params(bucket_storage, module_param_slots)
         logger.debug(
-            f"Batched hooks: {len(entries)}/{len(bucket_storage._param_infos)} params matched"
+            f"Batched hooks: {len(bucket_params)}/{len(bucket_storage._param_infos)} params matched"
         )
-        if not entries:
+        if not bucket_params:
             return None
         if context is None:
-            comm_device = cls._comm_device(bucket_storage, entries)
+            comm_device = cls._comm_device(bucket_storage, bucket_params)
             context = BucketCommContext.get(bucket_storage._module, comm_device)
             if context is None:
                 context = BucketCommContext.create(bucket_storage._module, comm_device)
         return cls(
             bucket_storage=bucket_storage,
-            entries=entries,
+            bucket_params=bucket_params,
             context=context,
             debug_fqn=_get_bucket_storage_debug_fqn(bucket_storage),
         )
 
     @staticmethod
-    def _get_param_entries(
+    def _get_bucket_params(
         bucket_storage: ShardedBucketStorage,
         module_param_slots: dict[nn.Module, dict[str, UnshardedParamSlot]],
-    ) -> list[ParamEntry]:
+    ) -> list[BucketParam]:
         """Return params in a bucket with owning module refs and unsharded slots."""
-        param_entries: list[ParamEntry] = []
+        bucket_params: list[BucketParam] = []
         for info in bucket_storage._param_infos.values():
             param_owner = ParamOwnerRef.resolve(bucket_storage._module, info.fqn)
             if param_owner.module in module_param_slots:
@@ -347,40 +347,40 @@ class BucketRuntime:
                     param_owner.param_name
                 )
                 if unsharded_param_slot is not None:
-                    param_entries.append(
-                        ParamEntry(
+                    bucket_params.append(
+                        BucketParam(
                             param_owner=param_owner,
                             unsharded_param_slot=unsharded_param_slot,
                             param_info=info,
                         )
                     )
-        return param_entries
+        return bucket_params
 
     @staticmethod
     def _comm_device(
         bucket_storage: ShardedBucketStorage,
-        entries: list[ParamEntry],
+        bucket_params: list[BucketParam],
     ) -> torch.device:
         """Return the device used for this bucket's collectives."""
         comm_device = bucket_storage.byte_storage.device
-        for entry in entries:
-            if entry.unsharded_param_slot.compute_device is not None:
-                return entry.unsharded_param_slot.compute_device
+        for bucket_param in bucket_params:
+            if bucket_param.unsharded_param_slot.compute_device is not None:
+                return bucket_param.unsharded_param_slot.compute_device
         return comm_device
 
     @property
     def infos(self) -> list[ParamInfo]:
-        return [entry.param_info for entry in self.entries]
+        return [bucket_param.param_info for bucket_param in self.bucket_params]
 
     @property
     def param_owners(self) -> list[ParamOwnerRef]:
-        return [entry.param_owner for entry in self.entries]
+        return [bucket_param.param_owner for bucket_param in self.bucket_params]
 
     def _local_shards(self, *, use_autograd: bool) -> list[torch.Tensor]:
         local_shards: list[torch.Tensor] = []
-        for entry in self.entries:
-            param_owner = entry.param_owner
-            unsharded_param_slot = entry.unsharded_param_slot
+        for bucket_param in self.bucket_params:
+            param_owner = bucket_param.param_owner
+            unsharded_param_slot = bucket_param.unsharded_param_slot
             param = param_owner.module._parameters[param_owner.param_name]
             local_shard = param if use_autograd else param.data
             if (
@@ -561,12 +561,14 @@ class BucketRuntime:
         if not is_compiling:
             self.prefetch_next()
             self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
-        for entry, full_param in zip(self.entries, full_params, strict=True):
-            entry.unsharded_param_slot._current_unsharded_param = full_param
+        for bucket_param, full_param in zip(
+            self.bucket_params, full_params, strict=True
+        ):
+            bucket_param.unsharded_param_slot._current_unsharded_param = full_param
 
     def post_forward_hook(self, mod, args, output) -> None:
-        for entry in self.entries:
-            entry.unsharded_param_slot._current_unsharded_param = None
+        for bucket_param in self.bucket_params:
+            bucket_param.unsharded_param_slot._current_unsharded_param = None
 
 
 class _BucketUnshard(torch.autograd.Function):
@@ -622,10 +624,10 @@ class _BucketUnshard(torch.autograd.Function):
         valid_infos: list[ParamInfo] = []
         valid_param_owners: list[ParamOwnerRef] = []
         valid_indices: list[int] = []
-        for idx, (grad, entry) in enumerate(
+        for idx, (grad, bucket_param) in enumerate(
             zip(
                 full_param_grads,
-                bucket.entries,
+                bucket.bucket_params,
                 strict=True,
             )
         ):
@@ -633,8 +635,8 @@ class _BucketUnshard(torch.autograd.Function):
                 continue
             valid_indices.append(idx)
             grads.append(grad.contiguous())
-            valid_infos.append(entry.param_info)
-            valid_param_owners.append(entry.param_owner)
+            valid_infos.append(bucket_param.param_info)
+            valid_param_owners.append(bucket_param.param_owner)
 
         if grads and torch.compiler.is_compiling():
             result = begin_reduce_grad(
@@ -768,5 +770,5 @@ def _install_bucket_unshard_hooks(
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
         target.register_forward_hook(bucket_runtime.post_forward_hook)
         bucket_runtime.context.buckets.append(bucket_runtime)
-        for entry in bucket_runtime.entries:
-            entry.unsharded_param_slot.bucket_unshard_hook_registered = True
+        for bucket_param in bucket_runtime.bucket_params:
+            bucket_param.unsharded_param_slot.bucket_unshard_hook_registered = True
