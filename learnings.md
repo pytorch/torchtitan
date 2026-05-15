@@ -454,3 +454,11 @@ This is another case where the highest-tps row fails the short-run loss trend ga
 ## Next Diagnostic Profile: Fused Optimizer-State Best
 
 Profile the confirmed fused optimizer-state best before trying more throughput knobs. The last profile was non-fused and showed reduce-scatter, dense GEMM/scaled-mm, and flash attention as the main buckets; the fused optimizer path reduced memory but may not have changed the kernel-time bottleneck. A diagnostic profile should determine whether communication is still the main target.
+
+## Experiment Review: Fused Optimizer-State Current-Best Profile
+
+The diagnostic profile of the fused optimizer-state best completed with loss falling from 12.18422 to 10.30645, peak memory 137.47GiB, MFU `N/A`, and 8,705 profiled tps. The trace was written under `outputs/profiling/traces/iteration_10`; it remains uncommitted.
+
+Rank 0 kernel buckets were dense GEMM/scaled-mm 1.091s / 38.1%, NCCL reduce-scatter 0.604s / 21.1%, flash attention 0.582s / 20.3%, Float8 scale/cast/fused elementwise 0.256s / 8.9%, NCCL all-gather 0.101s / 3.5%, and optimizer kernels 0.037s / 1.3%. All-rank means were dense GEMM 1.090s, reduce-scatter 0.649s, flash attention 0.595s, Float8 scale/cast 0.250s, and all-gather 0.169s.
+
+Compared with the non-fused profile, optimizer-state bf16 mainly lowers memory and the collective buckets are smaller, but reduce-scatter remains the largest single communication bucket and the second-largest broad bucket after dense GEMM. The next evidence-backed throughput idea is a bounded HSDP 2x4 revisit on top of fused optimizer states, because the prior HSDP discard predates the new memory headroom.
