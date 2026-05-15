@@ -12,13 +12,6 @@ from typing import Any
 import torch
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
-from torch.distributed.checkpoint.state_dict import (
-    get_model_state_dict,
-    set_model_state_dict,
-    StateDictOptions,
-)
-
-from monarch.actor import Actor, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer

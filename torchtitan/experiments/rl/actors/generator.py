@@ -12,8 +12,6 @@ from dataclasses import dataclass, field
 import torch
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
-
-from monarch.actor import Actor, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     CompileConfig,
