@@ -308,3 +308,12 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model`
   - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 8,897 tps. Discard if it only confirms the plateau or shows the instability seen at adjacent budget values.
   - Worker note: This handoff's requested 0.925 command was not started because an already-active `--activation_checkpoint.memory_budget=0.95 --training.local_batch_size=5` run in this checkout superseded it. Preserve this 0.925 idea as pending for now; the actual completed run is recorded below.
+
+- ~~Idea: Default compile components with Float8 memory-budget 0.95~~
+  - Current best source commit: `0b83acb6`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95 and model-only compile.
+  - Source: manager compile-components revisit after the current Float8 memory-budget best.
+  - Expected mechanism for improving reported tokens/sec: Earlier model-plus-loss compile was slower before Float8 and memory-budget activation checkpointing. Re-running without `--compile.components model` tests whether compiling the loss function now helps or remains overhead on the current best stack.
+  - Supporting evidence: The current best uses model-only compile, while the default compile configuration logs `Compiling the loss function with torch.compile` in addition to compiling TransformerBlocks.
+  - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable`
+  - Success criteria and expected risk: Discarded at `0b83acb6`; the run completed with finite/falling loss from 12.46363 to 7.79407 and acceptable 141.93GiB peak memory, but throughput reached only 8,882 tps, below the 8,897 tps model-only compile best.

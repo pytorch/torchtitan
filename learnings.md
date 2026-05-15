@@ -246,3 +246,9 @@ Throughput reached only 5,924 tps, far below the 8,897 tps best at local batch s
 ## Next Memory-Budget Center Probe
 
 The memory-budget search is now nearly exhausted. Budget 0.95 has the best row at 8,897 tps and a repeat at 8,891 tps, both with 143.96GiB peak memory. Budget 0.9 is slightly behind at 8,877 tps with the same memory region, while 0.85 used less memory but failed loss trend and 0.975 was much slower. A final 0.925 command-only probe is reasonable because it sits inside the stable 0.9-0.95 band. If it does not beat 8,897 tps with falling loss, treat memory-budget tuning as saturated.
+
+## Experiment Review: Default Compile Components
+
+Default compile components remain a discard on the current best stack. Running Float8 rowwise, no-reshard 8-way FSDP, memory-budget 0.95, and `--compile.enable` without `--compile.components model` compiled the loss function as well as each TransformerBlock. The run completed with loss falling from 12.46363 to 7.79407, peak memory 141.93GiB, and 8,882 tps.
+
+This is below the 8,897 tps model-only compile best and below the 8,891 tps 0.95 repeat, so loss compilation still does not pay for itself here. Keep `--compile.components model` as part of the current best command.
