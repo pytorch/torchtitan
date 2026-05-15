@@ -16,11 +16,21 @@ To register TorchTitan models with vLLM:
     )
 """
 
-from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
-from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
-
-
 __all__ = [
     "VLLMModelWrapper",
-    "registry_to_vllm",  # Export register function for manual use
+    "registry_to_vllm",
 ]
+
+
+# Lazy imports: defer loading GPU/vLLM dependencies until actually used.
+# This allows CPU-only unit tests to import RL utilities without failing.
+def __getattr__(name):
+    if name == "VLLMModelWrapper":
+        from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
+
+        return VLLMModelWrapper
+    elif name == "registry_to_vllm":
+        from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+
+        return registry_to_vllm
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
