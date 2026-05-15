@@ -17,7 +17,7 @@ from torch.distributed.device_mesh import _get_device_handle
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .bucket_storage import BucketParamFQNsByIndex, DStorage
+    from .bucket_storage import BucketParamFQNsByIndex, ShardedBucketStorage
     from .placement_contract import Placement
 
 
@@ -96,12 +96,14 @@ def _top_level_owner_path(module: nn.Module, owner_path: str) -> str:
     return parts[0]
 
 
-def _get_storage_debug_fqn(storage: DStorage) -> str | None:
+def _get_bucket_storage_debug_fqn(
+    bucket_storage: ShardedBucketStorage,
+) -> str | None:
     """Return a concise module/bucket FQN for profiler annotations."""
     owner_paths = sorted(
         {
             _strip_checkpoint_wrapped_module_path(".".join(fqn.split(".")[:-1]))
-            for fqn in storage._param_infos
+            for fqn in bucket_storage._param_infos
         }
     )
     if not owner_paths:
@@ -111,7 +113,7 @@ def _get_storage_debug_fqn(storage: DStorage) -> str | None:
         return common
     top_level_paths = sorted(
         {
-            _top_level_owner_path(storage._module, owner_path)
+            _top_level_owner_path(bucket_storage._module, owner_path)
             for owner_path in owner_paths
         }
     )
@@ -289,7 +291,7 @@ def _validate_bucket_placements(
                     f"{buckets[bucket_idx].patterns} "
                     f"has mixed parameter dtypes: {fqns[0]!r} uses "
                     f"{reference_dtype} but {fqn!r} uses {dtype}. "
-                    "All params in a FlexShard storage must share the same "
+                    "All params in a FlexShard bucket storage must share the same "
                     "dtype."
                 )
             placements = param_placements[fqn]

@@ -37,6 +37,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.experiments.flex_shard import (
     BucketSpec,
     flex_shard,
+    is_flex_shard_param,
     LocalStorageLayout,
     Placement,
 )
@@ -49,11 +50,8 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_runtime import (
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
-    DStorage,
     ParamInfo,
-)
-from torchtitan.experiments.flex_shard.flex_shard.sharded_param import (
-    is_flex_shard_param,
+    ShardedBucketStorage,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
     make_transformer_model,
@@ -133,7 +131,7 @@ class TestBucketCommScheduling(TestCase):
             cast(
                 BucketRuntime,
                 SimpleNamespace(
-                    storage=SimpleNamespace(_reshard_after_forward=flag),
+                    bucket_storage=SimpleNamespace(_reshard_after_forward=flag),
                 ),
             )
             for flag in flags
@@ -584,7 +582,7 @@ class TestBucketPlacementValidation(TestCase):
                         )
                     ],
                 )
-            self.assertFalse(hasattr(model, "_dstorages"))
+            self.assertFalse(hasattr(model, "_sharded_bucket_storages"))
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +591,7 @@ class TestBucketPlacementValidation(TestCase):
 
 
 class TestBucketStorageLayout(FSDPTestMultiThread):
-    """Test ParamInfo and DStorage layout for bucket materialization."""
+    """Test ParamInfo and ShardedBucketStorage layout for bucket materialization."""
 
     @property
     def world_size(self) -> int:
@@ -608,7 +606,9 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         ]
         placements = {fqn: (Shard(0),) for fqn, _ in named_params}
 
-        infos, total_bytes = DStorage.create_param_infos(named_params, mesh, placements)
+        infos, total_bytes = ShardedBucketStorage.create_param_infos(
+            named_params, mesh, placements
+        )
 
         tok_embeddings = infos["tok_embeddings.weight"]
         pos_embeddings = infos["pos_embeddings.weight"]
@@ -650,7 +650,9 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         padding_nbytes = 16
         placements = {fqn: (_PaddedShard(padding_nbytes),) for fqn, _ in named_params}
 
-        infos, total_bytes = DStorage.create_param_infos(named_params, mesh, placements)
+        infos, total_bytes = ShardedBucketStorage.create_param_infos(
+            named_params, mesh, placements
+        )
 
         tok_embeddings = infos["tok_embeddings.weight"]
         pos_embeddings = infos["pos_embeddings.weight"]
@@ -687,7 +689,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             buckets,
         )
 
-        storages, fqn_to_bucket_spec = _materialize_bucket_storages(
+        bucket_storages, fqn_to_bucket_spec = _materialize_bucket_storages(
             model,
             named_params,
             assignments,
@@ -697,16 +699,16 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             torch.device("cpu"),
         )
 
-        self.assertEqual(len(storages), len(buckets))
+        self.assertEqual(len(bucket_storages), len(buckets))
         self.assertIs(fqn_to_bucket_spec["tok_embeddings.weight"], buckets[0])
         self.assertIs(fqn_to_bucket_spec["output.weight"], buckets[-1])
 
         current_params = dict(model.named_parameters())
-        for storage in storages:
-            storage_ptr = storage.byte_storage.untyped_storage().data_ptr()
-            for fqn, info in storage.param_infos.items():
+        for bucket_storage in bucket_storages:
+            storage_ptr = bucket_storage.byte_storage.untyped_storage().data_ptr()
+            for fqn, info in bucket_storage.param_infos.items():
                 param = current_params[fqn]
-                local_view = storage.get_local_view(fqn)
+                local_view = bucket_storage.get_local_view(fqn)
 
                 self.assertEqual(param.shape, info.local_shape)
                 self.assertEqual(
@@ -742,7 +744,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         ]
         assignments = [[fqn for fqn, _ in named_params]]
 
-        storages, _ = _materialize_bucket_storages(
+        bucket_storages, _ = _materialize_bucket_storages(
             model,
             named_params,
             assignments,
@@ -752,10 +754,10 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             torch.device("cpu"),
         )
 
-        storage = storages[0]
+        bucket_storage = bucket_storages[0]
         current_params = dict(model.named_parameters())
         original_params = dict(named_params)
-        for fqn, info in storage.param_infos.items():
+        for fqn, info in bucket_storage.param_infos.items():
             param = current_params[fqn]
             expected = Shard(0).extract_local_shard(
                 original_params[fqn].detach(),
@@ -768,7 +770,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
                 expected.numel() * expected.dtype.itemsize + padding_nbytes,
             )
             self.assertEqual(param, expected)
-            self.assertEqual(param, storage.get_local_view(fqn))
+            self.assertEqual(param, bucket_storage.get_local_view(fqn))
 
     def test_owned_materialized_params_match_owner_rank(self):
         mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
@@ -794,7 +796,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             )
         ]
 
-        storages, _ = _materialize_bucket_storages(
+        bucket_storages, _ = _materialize_bucket_storages(
             model,
             named_params,
             [[fqn for fqn, _ in named_params]],
@@ -804,16 +806,16 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
             torch.device("cpu"),
         )
 
-        storage = storages[0]
+        bucket_storage = bucket_storages[0]
         param = dict(model.named_parameters())["weight"]
         if self.rank == 0:
             self.assertEqual(param.shape, torch.Size([3, 2]))
             self.assertEqual(param, named_params[0][1].detach())
-            self.assertEqual(storage.total_bytes, 6 * torch.float32.itemsize)
+            self.assertEqual(bucket_storage.total_bytes, 6 * torch.float32.itemsize)
         else:
             self.assertEqual(param.shape, torch.Size([0, 0]))
             self.assertEqual(param.numel(), 0)
-            self.assertEqual(storage.total_bytes, 0)
+            self.assertEqual(bucket_storage.total_bytes, 0)
 
     def test_owned_unshard_broadcasts_from_owner(self):
         mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
@@ -848,7 +850,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
 
 
 # ---------------------------------------------------------------------------
-# Distributed per-bucket DStorage tests (torchrun only)
+# Distributed per-bucket ShardedBucketStorage tests (torchrun only)
 # ---------------------------------------------------------------------------
 
 
@@ -912,8 +914,7 @@ class TestDistributedBuckets(FSDPTest):
             ),
         )
 
-        self.assertEqual(len(model.dstorages), 5)
-        self.assertIs(model.dstorage, model.dstorages[0])
+        self.assertEqual(len(model.sharded_bucket_storages), 5)
         output = model(x)
         self.assertEqual(output, ref_output)
 
