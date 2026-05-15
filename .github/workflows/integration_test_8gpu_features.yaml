@@ -76,6 +76,12 @@ jobs:
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+
+                  
+          export HIPBLASLT_LOG_LEVEL=5
+          export HIPBLASLT_LOG_MASK=0xFFFFFFFF
+          export TENSILE_LOG_LEVEL=1
+          echo "Enabled hipBLASLt kernel logging: LOG_LEVEL=5, LOG_MASK=0xFFFFFFFF"
         fi
 
         start=$(date +%s)
