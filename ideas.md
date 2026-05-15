@@ -299,15 +299,14 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --training.local_batch_size=5`
   - Success criteria and expected risk: Discarded at `3cde416b`; the run completed with finite/falling loss from 12.55001 to 8.61428 and stayed below the rough memory risk line at 164.84GiB, but throughput reached only 5,924 tps, far below the 8,897 tps local-batch-size 4 best.
 
-- Idea: Float8 memory-budget activation checkpointing at 0.925
+- ~~Idea: Float8 memory-budget activation checkpointing at 0.925~~
   - Current best source commit: `3cde416b`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95.
   - Source: manager centered plateau probe.
   - Expected mechanism for improving reported tokens/sec: Budget 0.9 and 0.95 both use the high-throughput 144GiB memory region, and a repeat of 0.95 confirmed the setting at 8,891 tps. Budget 0.925 may select the same activation partition while avoiding the bad high-side 0.975 behavior.
   - Supporting evidence: The useful rows are tightly clustered at 0.9 and 0.95, while 0.85 used less memory and failed the loss trend check, and 0.975 used the same memory but was much slower. A centered point is the last cheap way to test whether 0.95 is truly the local optimum.
   - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 8,897 tps. Discard if it only confirms the plateau or shows the instability seen at adjacent budget values.
-  - Worker note: This handoff's requested 0.925 command was not started because an already-active `--activation_checkpoint.memory_budget=0.95 --training.local_batch_size=5` run in this checkout superseded it. Preserve this 0.925 idea as pending for now; the actual completed run is recorded below.
+  - Success criteria and expected risk: Discarded at `460ce52c`; the run completed with finite/falling loss from 12.39717 to 9.11266, MFU `N/A`, and 143.96GiB peak memory, but reached only 8,718 tps versus the 8,897 tps 0.95 best.
 
 - ~~Idea: Default compile components with Float8 memory-budget 0.95~~
   - Current best source commit: `0b83acb6`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95 and model-only compile.

@@ -252,3 +252,9 @@ The memory-budget search is now nearly exhausted. Budget 0.95 has the best row a
 Default compile components remain a discard on the current best stack. Running Float8 rowwise, no-reshard 8-way FSDP, memory-budget 0.95, and `--compile.enable` without `--compile.components model` compiled the loss function as well as each TransformerBlock. The run completed with loss falling from 12.46363 to 7.79407, peak memory 141.93GiB, and 8,882 tps.
 
 This is below the 8,897 tps model-only compile best and below the 8,891 tps 0.95 repeat, so loss compilation still does not pay for itself here. Keep `--compile.components model` as part of the current best command.
+
+## Experiment Review: Float8 Memory Budget 0.925
+
+The centered 0.925 memory-budget probe completed normally but did not improve the current best. On the current Float8 rowwise source with model-only compile and no-reshard 8-way FSDP, loss fell from 12.39717 to 9.11266, peak memory matched the 0.95 plateau at 143.96GiB, and throughput reached 8,718 tps with MFU `N/A`.
+
+This is a discard against the 8,897 tps 0.95 best. Since 0.9, 0.925, 0.95, and 0.975 all sit in roughly the same memory region but vary widely in throughput, memory-budget tuning looks saturated and noisy rather than smoothly optimizable.
