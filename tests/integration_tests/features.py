@@ -634,6 +634,106 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=1,
             timeout=30,
         ),
+        # ---- spmd_types integration tests ----
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP (no/global typecheck)",
+            "spmd_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types DDP (no/global typecheck)",
+            "spmd_ddp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types HSDP (no/global typecheck)",
+            "spmd_hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--compile.enable",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP + compile",
+            "spmd_fsdp_compile",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                    "--compile.enable",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types DDP + compile",
+            "spmd_ddp_compile",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--compile.enable",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types HSDP + compile",
+            "spmd_hsdp_compile",
+            ngpu=4,
+        ),
     ]
 
     return integration_tests_flavors

@@ -4,8 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
@@ -27,8 +28,28 @@ from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan.protocols.sharding import NamedPlacement, SpmdInputConfig
+from torchtitan.protocols.types import MeshAxisName
 
 __all__ = ["Decoder", "TransformerBlock"]
+
+
+def _decoder_token_placement(*, tp_type: spmd.PerMeshAxisSpmdType) -> NamedPlacement:
+    return {
+        MeshAxisName.DP: spmd.S(0),
+        MeshAxisName.CP: spmd.S(1),
+        MeshAxisName.TP: tp_type,
+    }
+
+
+def _decoder_spmd_input_config() -> SpmdInputConfig:
+    inputs = _decoder_token_placement(tp_type=spmd.R)
+    labels = _decoder_token_placement(tp_type=spmd.I)
+    return SpmdInputConfig(
+        inputs=inputs,
+        labels=labels,
+        extra_kwargs={"positions": inputs},
+    )
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -79,6 +100,9 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+        spmd_input_config: SpmdInputConfig = field(
+            default_factory=_decoder_spmd_input_config
+        )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

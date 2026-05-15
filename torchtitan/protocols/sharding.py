@@ -109,3 +109,16 @@ class ShardingConfig:
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""
         return {"repr": repr(self)}
+
+
+@dataclass(kw_only=True, slots=True)
+class SpmdInputConfig:
+    """Model-owned trainer input annotations for the SPMD path."""
+
+    inputs: NamedPlacement | None = None
+    labels: NamedPlacement | None = None
+    extra_inputs: dict[str, NamedPlacement] = field(default_factory=dict)
+    extra_kwargs: dict[str, NamedPlacement] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {"repr": repr(self)}
