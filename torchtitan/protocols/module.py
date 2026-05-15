@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import distribute_tensor, DTensor
 
@@ -22,6 +23,7 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_state import (
     current_mesh,
+    is_spmd_active,
     set_current_mesh,
 )
 from torchtitan.protocols.sharding import (
@@ -314,6 +316,9 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
 
+            if sharding_config.state_tp_ir:
+                self._install_spmd_tp_ir_param_hook(sharding_config.state_tp_ir)
+
             self._cache_pos_arg_names()
 
             fn = self.forward
@@ -327,6 +332,49 @@ class Module(nn.Module, Configurable):
                 return self._shard_outputs(outputs)
 
         self.forward = with_redistribution
+
+    def _install_spmd_tp_ir_param_hook(self, param_names: set[str]) -> None:
+        """Convert configured I@tp params to R@tp for forward compute."""
+        if not is_spmd_active():
+            return
+        mesh = current_mesh()
+        assert mesh is not None
+        if "tp" not in mesh.mesh_dim_names:
+            return
+        tp_pg = mesh.get_group("tp")
+        if dist.get_world_size(tp_pg) == 1:
+            return
+
+        param_names = set(param_names)
+        original_params: dict[str, torch.Tensor] = {}
+
+        def pre_hook(module, args):
+            original_params.clear()
+            for name in param_names:
+                param = module._parameters[name]
+                original_params[name] = param
+                device_type = param.device.type
+                op_dtype = (
+                    torch.get_autocast_dtype(device_type)
+                    if torch.is_autocast_enabled(device_type)
+                    else param.dtype
+                )
+                bwd = {"op_dtype": op_dtype, "out_dtype": param.dtype}
+                module._parameters[name] = spmd.convert(
+                    param,
+                    tp_pg,
+                    src=spmd.I,
+                    dst=spmd.R,
+                    backward_options=bwd,
+                )
+
+        def post_hook(module, args, output):
+            for name, param in original_params.items():
+                module._parameters[name] = param
+            original_params.clear()
+
+        self.register_forward_pre_hook(pre_hook, with_kwargs=False)
+        self.register_forward_hook(post_hook, always_call=True)
 
     def distribute_state(
         self,
