@@ -136,3 +136,12 @@
   - Planned source/config changes: In `qwen3_14b()`, set `model_spec=model_registry("14B", attn_backend="flex")`.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded from the observed run in `run.log`; it completed with finite loss dropping from 12.46586 to 11.08583, but only reached 5,101 tps and 21.31% MFU, far below the 7,898 tps SDPA current best. The source should be restored to default SDPA.
+
+- Idea: Float8 rowwise linear converter with model-only compile
+  - Current best source commit: a68a3c
+  - Source: compiled profile and quantization follow-up after MXFP8 crash
+  - Expected mechanism for improving reported tokens/sec: The current best compiled profile is dominated by dense linear GEMMs and flash attention. Float8 rowwise training can accelerate large linear layers on SM89+ hardware, and unlike the failed MXFP8 path it uses the more established `Float8LinearConverter` implementation.
+  - Supporting evidence: B200 supports float8 tensor cores; TorchTitan's Llama configs already use `Float8LinearConverter` with model compile. Qwen3 14B's repeated FFN and attention projections are all dimensions divisible by 16. The small combined KV projection (`5120 x 1024`) and LM head are higher-risk/less-obvious wins, so filter them out and allow torchao's `auto_filter_small_kn` to skip any additional small shapes.
+  - Planned source/config changes: In `qwen3_14b()` only, locally import `Float8LinearConverter` and set `model_spec=model_registry("14B", converters=[Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["lm_head", "attention.qkv_linear.wkv", "auto_filter_small_kn"], model_compile_enabled=True)])`.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 7,898 tps. Risks are compile/codegen incompatibility, extra scaling overhead outweighing FP8 matmul speedups at local batch size 4, memory increase, or loss instability from dynamic float8.
