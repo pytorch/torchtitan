@@ -200,3 +200,13 @@ It is still a discard for performance: 7,017 tps is below the 8,877 tps 8-way FS
 The Float8 tensorwise recipe is not useful under the current memory-budget best stack. Changing only `qwen3_14b()` from `recipe_name="rowwise"` to `recipe_name="tensorwise"` and running the 8-way FSDP no-reshard, model-only compile, memory-budget 0.9 command completed, but loss rose from 12.28795 to 15.71423. Throughput reached only 5,000 tps with MFU `N/A`, far below the 8,877 tps rowwise best, and peak memory was 145.67GiB.
 
 This rules out the simple tensorwise scaling swap for the current large-linear Float8 subset. It did not crash or fail config validation, but it was both numerically worse over 10 steps and much slower than rowwise. The `qwen3_14b()` source change was reverted, so the active best remains rowwise Float8 with `lm_head` and `attention.qkv_linear.wkv` filtered.
+
+## Next Memory-Budget Probe
+
+The remaining low-risk command space is a fine sweep around the current memory-budget plateau. Budget 0.9 is the best observed result at 8,877 tps and 144.0GiB, but its duplicate run history shows meaningful variance. Budget 1.0 increased memory to 154.35GiB and was slightly slower at 8,851 tps. A 0.95 probe is a narrow command-only test between those two settings; it should be accepted only if it beats 8,877 tps with finite/falling loss, otherwise the memory-budget lever should be treated as saturated.
+
+## Experiment Review: Float8 Memory Budget 0.95
+
+Memory budget 0.95 is the new best, but only by a narrow margin. On the current Float8 rowwise source with model-only compile and no-reshard 8-way FSDP, the 10-step command completed with loss falling from 12.28270 to 9.57252, peak memory 143.96GiB, and 8,897 tps. MFU remains `N/A` for this quantized path.
+
+This beats the prior 0.9 best by 20 tps with essentially the same memory, while 1.0 was slower and used about 10GiB more memory. Treat 0.95 as the current best row, but the gain is within the observed memory-budget noise band, so future candidates should clear 8,897 tps rather than reading this as a large activation-policy breakthrough.

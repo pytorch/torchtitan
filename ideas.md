@@ -253,3 +253,12 @@
   - Planned source/config changes: Reapply the Qwen3 TP2 source/sharding patch from `e67f61c6`, keep HSDP disabled, and keep compile before TP wrapping as the least-bad ordering from the memory-budget attempt.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded at `05a39792`; the run completed with finite/falling loss from 3.06316 to 2.32347 and 72.00GiB peak memory, but reached only 7,017 tps, below the 8,877 tps current best. TP+compile is runnable with selective AC, so the prior crash is specific to the memory-budget path, but TP remains slower here. The TP source was reverted.
+
+- ~~Idea: Float8 memory-budget activation checkpointing at 0.95~~
+  - Current best source commit: `524fe989`; current best result row: 8,877 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.9.
+  - Source: manager memory-budget sweep follow-up.
+  - Expected mechanism for improving reported tokens/sec: Budget 0.9 is the best observed row but noisy, while budget 1.0 used 154.35GiB and was slightly slower. A 0.95 budget may retain more activations than 0.9 without taking the full extra memory/runtime cost of 1.0.
+  - Supporting evidence: The 0.75, 0.9, and 1.0 rows are tightly clustered at 8,821, 8,877, and 8,851 tps, so the best point may sit between the measured 0.9 and 1.0 settings. The 1.0 run stayed below the rough memory risk line, so 0.95 is unlikely to OOM.
+  - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Kept at `524fe989`; the run completed with finite/falling loss from 12.28270 to 9.57252, 143.96GiB peak memory, and 8,897 tps. This narrowly beats the prior 8,877 tps memory-budget 0.9 best without increasing memory materially.
