@@ -52,6 +52,9 @@ from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
 from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
+from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
+    ep_overlap_schedule_pass,
+)
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
     overlap_fsdp_ag_rs_pass,
@@ -212,6 +215,17 @@ def compile_time_passes(
             ),
         ]
     )
+    if "ep_overlap" in config.compile.passes:
+        _overlap_dim, _chunk_strategy, module_fqn = validate_ep_overlap_config(
+            config.compile
+        )
+        passes.append(
+            functools.partial(
+                ep_overlap_schedule_pass,
+                module_pattern=module_fqn,
+                require_all_to_all=False,
+            )
+        )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
