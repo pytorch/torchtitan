@@ -278,6 +278,9 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             {key: float} after collective reduction.
         """
+        # TODO: switch from plain tensors to DTensor / spmd_types so the
+        # reduction op is encoded in the placement instead of split across
+        # `sum_reduced_metrics` / `max_reduced_metrics` dicts.
         loss_mesh = self.parallel_dims.get_optional_mesh("loss")
 
         out: dict[str, float] = {}
