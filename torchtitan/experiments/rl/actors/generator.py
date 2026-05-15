@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import torch
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
-
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     CompileConfig,
     Configurable,
@@ -141,6 +141,14 @@ class VLLMGenerator(Actor, Configurable):
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
+        checkpoint: CheckpointManager.Config = field(
+            default_factory=CheckpointManager.Config
+        )
+        """Controls whether the vLLM wrapper loads initial HF weights.
+        In the RL loop this should stay disabled (default ``enable=False``)
+        because weights arrive from TorchStore. For standalone inference,
+        set ``enable=True`` and ``initial_load_in_hf=True``."""
+
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
@@ -215,6 +223,7 @@ class VLLMGenerator(Actor, Configurable):
             model_spec,
             parallelism=config.parallelism,
             compile_config=compile_config,
+            checkpoint_config=config.checkpoint,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
