@@ -102,6 +102,14 @@ def log_to_console(
 ) -> None:
     """Print one console metric line.
 
+    Args:
+        step: Step number to display.
+        metrics: Reduced metrics dict.
+        allow_list: Regex search patterns. None prints all keys; [] prints
+            nothing; a list prints matching keys in pattern order.
+        console_prefix: Text rendered before the step, e.g. "Train" or
+            "Validation".
+
     Example:
         log_to_console(
             step=5,
@@ -110,14 +118,6 @@ def log_to_console(
             console_prefix="Train",
         )
         # Logs: Train | Step:  5  loss/mean: 0.42
-
-    Args:
-        step: Step number to display.
-        metrics: Reduced metrics dict.
-        allow_list: Regex search patterns. None prints all keys; [] prints
-            nothing; a list prints matching keys in pattern order.
-        console_prefix: Text rendered before the step, e.g. "Train" or
-            "Validation".
     """
     keys = _filter_allow_list(metrics, allow_list)
     if not keys:
