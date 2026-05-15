@@ -99,59 +99,6 @@ class BucketSpec:
     reshard_after_forward: bool = True
 
 
-def _assign_params_to_buckets(
-    param_fqns: list[str],
-    buckets: list[BucketSpec],
-) -> BucketParamFQNsByIndex:
-    """Assign each param FQN to exactly one bucket via fnmatch.
-
-    Returns:
-        A list aligned with ``buckets``: result[bucket_idx] is the ordered list
-        of parameter FQNs assigned to ``buckets[bucket_idx]``.
-
-    Raises:
-        ValueError: if any param matches zero or multiple buckets.
-    """
-    param_to_buckets: dict[str, list[int]] = {fqn: [] for fqn in param_fqns}
-    for bucket_idx, bucket in enumerate(buckets):
-        for fqn in param_fqns:
-            for pattern in bucket.patterns:
-                if fnmatch.fnmatch(fqn, pattern):
-                    param_to_buckets[fqn].append(bucket_idx)
-                    break  # one match per bucket is enough
-
-    # Check for orphans
-    orphans = [fqn for fqn, idxs in param_to_buckets.items() if len(idxs) == 0]
-    if orphans:
-        orphan_list = "\n  ".join(orphans)
-        raise ValueError(
-            f"flex_shard: {len(orphans)} parameters not covered by any bucket:\n"
-            f"  {orphan_list}\n"
-            'Add these to an existing bucket or add a catch-all bucket: ["*"]'
-        )
-
-    # Check for overlaps
-    overlaps = {fqn: idxs for fqn, idxs in param_to_buckets.items() if len(idxs) > 1}
-    if overlaps:
-        lines = []
-        for fqn, idxs in overlaps.items():
-            bucket_descs = ", ".join(f"bucket {i} {buckets[i].patterns}" for i in idxs)
-            lines.append(f"  {fqn} -> {bucket_descs}")
-        overlap_list = "\n".join(lines)
-        raise ValueError(
-            f"flex_shard: {len(overlaps)} parameters matched multiple buckets:\n"
-            f"{overlap_list}\n"
-            "Ensure each parameter matches exactly one bucket."
-        )
-
-    # Build assignments
-    assignments: BucketParamFQNsByIndex = [[] for _ in buckets]
-    for fqn, idxs in param_to_buckets.items():
-        assignments[idxs[0]].append(fqn)
-
-    return assignments
-
-
 @dataclass
 class ParamInfo:
     """Metadata for a parameter in chunked storage."""
@@ -427,3 +374,56 @@ def _materialize_bucket_storages(
         )
 
     return bucket_storages, fqn_to_bucket_spec
+
+
+def _assign_params_to_buckets(
+    param_fqns: list[str],
+    buckets: list[BucketSpec],
+) -> BucketParamFQNsByIndex:
+    """Assign each param FQN to exactly one bucket via fnmatch.
+
+    Returns:
+        A list aligned with ``buckets``: result[bucket_idx] is the ordered list
+        of parameter FQNs assigned to ``buckets[bucket_idx]``.
+
+    Raises:
+        ValueError: if any param matches zero or multiple buckets.
+    """
+    param_to_buckets: dict[str, list[int]] = {fqn: [] for fqn in param_fqns}
+    for bucket_idx, bucket in enumerate(buckets):
+        for fqn in param_fqns:
+            for pattern in bucket.patterns:
+                if fnmatch.fnmatch(fqn, pattern):
+                    param_to_buckets[fqn].append(bucket_idx)
+                    break  # one match per bucket is enough
+
+    # Check for orphans
+    orphans = [fqn for fqn, idxs in param_to_buckets.items() if len(idxs) == 0]
+    if orphans:
+        orphan_list = "\n  ".join(orphans)
+        raise ValueError(
+            f"flex_shard: {len(orphans)} parameters not covered by any bucket:\n"
+            f"  {orphan_list}\n"
+            'Add these to an existing bucket or add a catch-all bucket: ["*"]'
+        )
+
+    # Check for overlaps
+    overlaps = {fqn: idxs for fqn, idxs in param_to_buckets.items() if len(idxs) > 1}
+    if overlaps:
+        lines = []
+        for fqn, idxs in overlaps.items():
+            bucket_descs = ", ".join(f"bucket {i} {buckets[i].patterns}" for i in idxs)
+            lines.append(f"  {fqn} -> {bucket_descs}")
+        overlap_list = "\n".join(lines)
+        raise ValueError(
+            f"flex_shard: {len(overlaps)} parameters matched multiple buckets:\n"
+            f"{overlap_list}\n"
+            "Ensure each parameter matches exactly one bucket."
+        )
+
+    # Build assignments
+    assignments: BucketParamFQNsByIndex = [[] for _ in buckets]
+    for fqn, idxs in param_to_buckets.items():
+        assignments[idxs[0]].append(fqn)
+
+    return assignments

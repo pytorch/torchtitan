@@ -23,20 +23,6 @@ _GLOBAL_STRIDE_ATTR = "_global_stride"
 _MESH_ATTR = "_mesh"
 
 
-def set_sharding_info(
-    tensor: torch.Tensor,
-    placements: tuple[Placement, ...],
-    global_shape: torch.Size,
-    global_stride: tuple[int, ...],
-    mesh: DeviceMesh,
-) -> None:
-    """Annotate a local parameter tensor with its global FlexShard metadata."""
-    setattr(tensor, _PLACEMENTS_ATTR, placements)
-    setattr(tensor, _GLOBAL_SHAPE_ATTR, global_shape)
-    setattr(tensor, _GLOBAL_STRIDE_ATTR, global_stride)
-    setattr(tensor, _MESH_ATTR, mesh)
-
-
 def get_placements(tensor: torch.Tensor) -> tuple[Placement, ...] | None:
     """Get FlexShard placements from a tensor, or None if not annotated."""
     return getattr(tensor, _PLACEMENTS_ATTR, None)
@@ -50,6 +36,20 @@ def get_global_shape(tensor: torch.Tensor) -> torch.Size | None:
 def is_flex_shard_param(tensor: torch.Tensor) -> bool:
     """Return whether a tensor represents a FlexShard-managed parameter."""
     return hasattr(tensor, _PLACEMENTS_ATTR)
+
+
+def set_sharding_info(
+    tensor: torch.Tensor,
+    placements: tuple[Placement, ...],
+    global_shape: torch.Size,
+    global_stride: tuple[int, ...],
+    mesh: DeviceMesh,
+) -> None:
+    """Annotate a local parameter tensor with its global FlexShard metadata."""
+    setattr(tensor, _PLACEMENTS_ATTR, placements)
+    setattr(tensor, _GLOBAL_SHAPE_ATTR, global_shape)
+    setattr(tensor, _GLOBAL_STRIDE_ATTR, global_stride)
+    setattr(tensor, _MESH_ATTR, mesh)
 
 
 __all__ = [
