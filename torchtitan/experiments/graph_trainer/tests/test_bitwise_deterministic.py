@@ -14,7 +14,6 @@ Requires a CUDA GPU. Run with:
 """
 
 import copy
-import tempfile
 import unittest
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -143,6 +142,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
         trainer_cls: type,
         *,
         enable_passes: bool = True,
+        compile_passes: list[str] | None = None,
+        compile_ep_overlap_chunk_dim: str = "batch",
+        compile_ep_overlap_module_fqn: str = "layers.*",
         numerics_changing_optim: bool = False,
     ) -> tuple[torch.Tensor, str, str]:
         """Run forward-backward-optimizer steps using the given trainer class."""
@@ -154,6 +156,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.model_config,
             trainer_cls,
             compile_enable_passes=enable_passes,
+            compile_passes=compile_passes,
+            compile_ep_overlap_chunk_dim=compile_ep_overlap_chunk_dim,
+            compile_ep_overlap_module_fqn=compile_ep_overlap_module_fqn,
             compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         )
@@ -380,6 +385,63 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_deepseekv3)
 
+    def _wrap_forward_with_eager_chunking(self, module: nn.Module, *, dim: int) -> None:
+        inner_forward = module.forward
+
+        def chunked_forward(*args, **kwargs):
+            if not args or not isinstance(args[0], torch.Tensor):
+                raise AssertionError("chunked module forward expects tensor arg0")
+            full_size = args[0].shape[dim]
+            split_size = full_size // 2
+
+            def maybe_split(value):
+                if (
+                    isinstance(value, torch.Tensor)
+                    and value.dim() > dim
+                    and value.shape[dim] == full_size
+                ):
+                    return [
+                        chunk.contiguous() for chunk in value.split(split_size, dim=dim)
+                    ]
+                return [value, value]
+
+            split_args = [maybe_split(arg) for arg in args]
+            split_kwargs = {key: maybe_split(value) for key, value in kwargs.items()}
+            outputs = []
+            for chunk_id in (0, 1):
+                outputs.append(
+                    inner_forward(
+                        *(arg_chunks[chunk_id] for arg_chunks in split_args),
+                        **{
+                            key: value_chunks[chunk_id]
+                            for key, value_chunks in split_kwargs.items()
+                        },
+                    )
+                )
+            return torch.cat(outputs, dim=dim)
+
+        module.forward = chunked_forward
+
+    def _wrap_ep_chunk_eager_baseline(self, model: nn.Module, case: str) -> None:
+        if case == "transformer_batch":
+            modules = [layer for layer in model.layers.values() if layer.moe_enabled]
+            dim = 0
+        elif case == "moe_batch":
+            modules = [
+                layer.moe for layer in model.layers.values() if layer.moe_enabled
+            ]
+            dim = 0
+        elif case == "moe_seq":
+            modules = [
+                layer.moe for layer in model.layers.values() if layer.moe_enabled
+            ]
+            dim = 1
+        else:
+            raise AssertionError(f"unknown EP chunk case {case}")
+        self.assertGreater(len(modules), 0, case)
+        for module in modules:
+            self._wrap_forward_with_eager_chunking(module, dim=dim)
+
     @unittest.skipUnless(
         has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
     )
@@ -429,6 +491,43 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         )
 
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
+
+    @unittest.skipUnless(
+        has_cuda_capability(9, 0), "Numerics only match on H100 (sm_90+)"
+    )
+    def test_ep_chunk_matches_eager_chunking_bitwise(self):
+        """Fast single-GPU prerequisite for EP chunking distributed numerics.
+
+        This validates chunking logic, pass composability, and eager-chunked vs.
+        graph-chunked numerics. It does not exercise real EP all-to-all
+        communication, distributed sharding, or overlap behavior; the
+        distributed DSV3 numerics tests provide that end-to-end coverage.
+        """
+        cases = [
+            ("transformer_batch", "batch", "layers.*"),
+            ("moe_batch", "batch", "layers.*.moe"),
+            ("moe_seq", "seq", "layers.*.moe"),
+        ]
+        for case, mode, modules in cases:
+            with self.subTest(case=case):
+                eager_model = copy.deepcopy(self.model)
+                graph_model = copy.deepcopy(self.model)
+                self._wrap_ep_chunk_eager_baseline(eager_model, case)
+
+                run_eager = self._run_steps(eager_model, Trainer)
+                run_traced = self._run_steps(
+                    graph_model,
+                    GraphTrainer,
+                    compile_passes=["ep_overlap"],
+                    compile_ep_overlap_chunk_dim=mode,
+                    compile_ep_overlap_module_fqn=modules,
+                )
+
+                self._assert_runs_match(
+                    run_eager,
+                    run_traced,
+                    f"eager chunk vs ep_chunk {case}: ",
+                )
 
 
 # TODO: All FlexAttn bitwise deterministic tests disabled due to upstream
