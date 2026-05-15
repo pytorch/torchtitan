@@ -420,3 +420,13 @@ The throughput gain over the prior 9,364 tps max is narrow, but the memory drop 
 The exact repeat of the fused bfloat16 optimizer-state command is a discard. It completed, but loss rose from 12.51469 to 14.71142, peak memory stayed at 137.47GiB, MFU was `N/A`, and throughput reached only 9,332 tps.
 
 This fails the loss trend gate and lands below both the 9,382 tps fused row and the 9,364 tps non-fused max. Flag the 9,382 tps fused optimizer-state row as suspect; do not spend its freed memory headroom on follow-up batch or activation-budget probes unless another clean fused repeat restores falling loss. The best clean non-fused max remains 9,364 tps at memory-budget 0.925.
+
+## Active Run: Second Fused Optimizer-State Repeat
+
+Another exact fused optimizer-state command is already active. Finalize it before deciding whether to abandon fused optimizer states: if it has falling loss and beats 9,382 tps, the fused path can remain the current best; if it rises in loss or falls below the non-fused 9,364 tps max, treat the fused optimizer-state win as a one-off and return to the non-fused current best for future ideas.
+
+## Experiment Review: Second Fused Optimizer-State Repeat
+
+The second exact fused bfloat16 optimizer-state repeat restores confidence in the fused path. It completed with loss falling from 12.47566 to 10.07680, peak memory 137.47GiB, MFU `N/A`, and 9,384 tps.
+
+This beats both the prior 9,382 tps fused max and the 9,364 tps non-fused max, so keep fused optimizer states as the current best command. The earlier rising-loss repeat remains a caution: fused optimizer-state short-run loss is not perfectly stable, but there are now two valid falling-loss fused runs and the memory reduction is consistent.

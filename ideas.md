@@ -480,3 +480,12 @@
   - Planned source/config changes: None; exact repeat on the current kept source and command.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
   - Success criteria and expected risk: Discarded at `32af3b81`; the repeat completed but loss rose from 12.51469 to 14.71142, throughput reached only 9,332 tps, and peak memory remained 137.47GiB. This flags the 9,382 tps fused optimizer-state row as suspect rather than confirmed.
+
+- ~~Idea: Second repeat-confirm fused bfloat16 optimizer-state run~~
+  - Current best source commit: `6252b73c`; current best clean row remains 9,364 tps without fused optimizer states, while the fused optimizer-state max is 9,382 tps but failed exact repeat loss trend.
+  - Source: already-active run discovered after the first fused optimizer-state repeat discard.
+  - Expected mechanism for improving reported tokens/sec: A second exact fused repeat can determine whether the first repeat's rising loss was variance or whether bfloat16 optimizer states are too unstable for this 10-step correctness gate.
+  - Supporting evidence: The original fused run had falling loss and lower 137.47GiB memory, but the first repeat rose in loss. Since the same command is already running, finalize it before abandoning or building on fused optimizer states.
+  - Planned source/config changes: None; exact repeat on the fused optimizer-state command.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
+  - Success criteria and expected risk: Kept at `ab6f0226`; the second repeat completed with loss falling from 12.47566 to 10.07680, peak memory 137.47GiB, MFU `N/A`, and 9,384 tps. This is a new observed max and gives fused optimizer states two valid falling-loss runs versus one rising-loss repeat.
