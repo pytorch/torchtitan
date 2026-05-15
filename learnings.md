@@ -430,3 +430,7 @@ Another exact fused optimizer-state command is already active. Finalize it befor
 The second exact fused bfloat16 optimizer-state repeat restores confidence in the fused path. It completed with loss falling from 12.47566 to 10.07680, peak memory 137.47GiB, MFU `N/A`, and 9,384 tps.
 
 This beats both the prior 9,382 tps fused max and the 9,364 tps non-fused max, so keep fused optimizer states as the current best command. The earlier rising-loss repeat remains a caution: fused optimizer-state short-run loss is not perfectly stable, but there are now two valid falling-loss fused runs and the memory reduction is consistent.
+
+## Next Runtime-Overhead Revisit
+
+Revisit `--debug.no-enable-structured-logging` on top of the fused optimizer-state current best. The previous no-structured-logging run beat its baseline on throughput but failed the loss trend gate; because the flag only disables structured trace calls, one bounded retry on the newer command is reasonable. Keep it only if it beats 9,384 tps with finite/falling loss.

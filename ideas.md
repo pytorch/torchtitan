@@ -489,3 +489,12 @@
   - Planned source/config changes: None; exact repeat on the fused optimizer-state command.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
   - Success criteria and expected risk: Kept at `ab6f0226`; the second repeat completed with loss falling from 12.47566 to 10.07680, peak memory 137.47GiB, MFU `N/A`, and 9,384 tps. This is a new observed max and gives fused optimizer states two valid falling-loss runs versus one rising-loss repeat.
+
+- Idea: Disable structured logging on fused optimizer-state current best
+  - Current best result row: 9,384 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, fused bfloat16 optimizer states, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: manager runtime-overhead revisit after fused optimizer states became the current best.
+  - Expected mechanism for improving reported tokens/sec: Disabling structured trace logging removes per-step `log_trace_span`, `log_trace_instant`, and `log_trace_scalar` JSONL overhead while preserving normal stdout metrics. This may improve the short 10-step objective now that the current command has lower optimizer-state memory and a slightly different runtime mix.
+  - Supporting evidence: The earlier structured-logging-disabled run reached 9,355 tps, above its then-current 9,332 tps baseline, but was discarded because loss rose. Structured logging should not change model math, so the loss failure may have been ordinary run variance; this is a bounded retry on the newer fused best.
+  - Planned source/config changes: None; command-only candidate on the current kept source and fused optimizer command.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16 --debug.no-enable-structured-logging`
+  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 9,384 tps. Main risk is repeating the earlier rising-loss discard despite the knob not intentionally changing model math.
