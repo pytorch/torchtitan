@@ -286,6 +286,10 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
@@ -335,6 +339,10 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
