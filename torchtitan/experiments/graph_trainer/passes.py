@@ -41,6 +41,12 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
 )
+from torchtitan.experiments.graph_trainer.configs import (
+    validate_ep_overlap_config,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    import_eager_chunk_metadata_pass,
+)
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
     overlap_fsdp_ag_rs_pass,
@@ -155,22 +161,32 @@ def compile_time_passes(
         remove_identity_view_pass,
         remove_identity_slice_pass,
         normalize_view_ops_as_reshape,
-        functools.partial(
-            tag_with_memory_policy_pass,
-            config=config,
-        ),
-        functools.partial(
-            apply_cpu_offload_pass,
-            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
-            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
-        ),
-        selective_activation_remat_pass,
-        overlap_fsdp_ag_rs_pass,
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=get_default_transformer_block_buckets(n_layers),
-        ),
     ]
+    if "ep_overlap" in config.compile.passes:
+        _overlap_dim, chunk_strategy, _module_fqn = validate_ep_overlap_config(
+            config.compile
+        )
+        if chunk_strategy == "eager":
+            passes.append(import_eager_chunk_metadata_pass)
+    passes.extend(
+        [
+            functools.partial(
+                tag_with_memory_policy_pass,
+                config=config,
+            ),
+            functools.partial(
+                apply_cpu_offload_pass,
+                prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+                defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+            ),
+            selective_activation_remat_pass,
+            overlap_fsdp_ag_rs_pass,
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+            ),
+        ]
+    )
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
