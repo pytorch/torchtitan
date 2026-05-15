@@ -188,3 +188,9 @@ This closes the narrow KV coverage candidate for now. The extra small-projection
 The remaining in-scope search space is mostly narrow quantization/config tuning. Mesh changes are either slower (HSDP) or compiler-blocked under the current best stack (TP=2), and converting additional smaller linears to Float8 was slower. The next bounded candidate is to change the Float8 scaling recipe for the same large-linear subset: installed TorchAO supports `Float8LinearConfig.from_recipe_name("tensorwise")`, which may reduce axiswise scaling overhead at the cost of higher numerical risk.
 
 Next TP root-cause step: switch only activation checkpointing from memory-budget to selective while keeping TP=2, Float8 rowwise, model-only compile, and no-reshard FSDP. This isolates whether the previous TP crash was specifically the memory-budget min-cut partitioner or a broader TP/compile incompatibility.
+
+## Experiment Review: Float8 Tensorwise Recipe
+
+The Float8 tensorwise recipe is not useful under the current memory-budget best stack. Changing only `qwen3_14b()` from `recipe_name="rowwise"` to `recipe_name="tensorwise"` and running the 8-way FSDP no-reshard, model-only compile, memory-budget 0.9 command completed, but loss rose from 12.28795 to 15.71423. Throughput reached only 5,000 tps with MFU `N/A`, far below the 8,877 tps rowwise best, and peak memory was 145.67GiB.
+
+This rules out the simple tensorwise scaling swap for the current large-linear Float8 subset. It did not crash or fail config validation, but it was both numerically worse over 10 steps and much slower than rowwise. The `qwen3_14b()` source change was reverted, so the active best remains rowwise Float8 with `lm_head` and `attention.qkv_linear.wkv` filtered.

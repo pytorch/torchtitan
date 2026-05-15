@@ -236,14 +236,14 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded; the 10-step run completed with finite/falling loss from 12.53812 to 7.92596, MFU `N/A`, and 137.35GiB peak memory, but throughput was only 8,190 tps versus the 8,877 tps best. The `qwen3_14b()` Float8 filter source change was reverted.
 
-- Idea: Float8 tensorwise recipe with current memory-budget best
+- ~~Idea: Float8 tensorwise recipe with current memory-budget best~~
   - Current best source commit: `0f036086`; current best result row: 8,877 tps from rowwise Float8, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.9.
   - Source: Float8 profile, KV coverage result, and TorchAO recipe inspection.
   - Expected mechanism for improving reported tokens/sec: The current rowwise recipe adds many axiswise scaling/casting kernels. TorchAO's `Float8LinearConfig.from_recipe_name("tensorwise")` is present in the installed environment and uses tensorwise dynamic scales, which may reduce scale-reduction overhead and improve compile/runtime efficiency on the large repeated FFN and attention projection linears.
   - Supporting evidence: The Float8 profiles show visible scale/cast kernels alongside NCCL, and expanding Float8 to smaller KV projections was slower, so the next narrow quantization lever should change scaling overhead for the already-good large-linears subset rather than convert more linears. Tensorwise is riskier numerically than rowwise but still keeps communication in high precision and leaves `lm_head` and `attention.qkv_linear.wkv` filtered.
   - Planned source/config changes: In `qwen3_14b()` only, change `Float8LinearConverter.Config(recipe_name="rowwise", ...)` to `recipe_name="tensorwise"` while keeping the existing filter list and `model_compile_enabled=True`.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and exceeds 8,877 tps. Risks are unsupported TorchTitan config typing, worse loss from tensorwise scaling, or slower tensorwise kernels; revert the source change if discarded.
+  - Success criteria and expected risk: Discarded; the 10-step run completed but loss rose from 12.28795 to 15.71423, throughput reached only 5,000 tps versus the 8,877 tps best, MFU was `N/A`, and peak memory was 145.67GiB. The `qwen3_14b()` Float8 recipe source change was reverted.
 
 - Idea: TP=2 root-cause with selective AC
   - Current best source commit: `0f036086`; current best result row: 8,877 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.9.
