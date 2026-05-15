@@ -444,3 +444,12 @@
   - Planned source/config changes: None; command-only candidate on the current kept bfloat16-reduce source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model`
   - Success criteria and expected risk: Kept at `14e2361c`; the active run completed with finite/falling loss from 12.38271 to 9.11822, MFU `N/A`, 145.48GiB peak memory, and 9,364 tps, beating the 9,332 tps bf16-reduce budget 0.95 best.
+
+- ~~Idea: Repeat-confirm bfloat16-reduce memory-budget 0.925~~
+  - Current best source commit: `ef51a052`; current best result row: 9,364 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: manager repeat-confirmation request after the 0.925 budget narrowly beat the 0.95 setting.
+  - Expected mechanism for improving reported tokens/sec: Re-running the exact current-best command checks whether the 0.925 activation-budget win is reproducible or just short-run throughput noise.
+  - Supporting evidence: The 0.925 row beat the 0.95 max by only 32 tps, and nearby activation-budget runs have shown variance, so a clean repeat is needed before using 0.925 as a strong baseline for later command-only probes.
+  - Planned source/config changes: None; exact repeat on the current kept bfloat16-reduce source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded as repeat diagnostic at `ad4926b0`; the run completed with finite/falling loss from 12.29194 to 6.69980, MFU `N/A`, and 145.48GiB peak memory, but reached only 9,233 tps versus the 9,364 tps best.

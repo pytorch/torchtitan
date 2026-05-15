@@ -388,3 +388,9 @@ An already-active command is running the bf16-reduce current-best source at memo
 The centered lower memory-budget retune on the confirmed bf16-reduce source is the new best. Running `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925 completed with loss falling from 12.38271 to 9.11822, peak memory 145.48GiB, MFU `N/A`, and 9,364 tps.
 
 This beats the 9,332 tps memory-budget 0.95 max and the 9,315 tps repeat while using the same peak memory. Keep budget 0.925 as the active activation-checkpoint setting for the bf16-reduce stack, and use 9,364 tps as the next comparison threshold.
+
+## Experiment Review: bfloat16 Reduce Memory Budget 0.925 Repeat
+
+The exact repeat of the 0.925 budget current-best command is a discard diagnostic. It completed with loss falling from 12.29194 to 6.69980, peak memory 145.48GiB, MFU `N/A`, and 9,233 tps.
+
+This does not reproduce the 9,364 tps max and lands below the 9,315 tps 0.95 repeat, though loss is cleanly falling and memory is unchanged. Keep 9,364 tps as the observed max/current best for the autoresearch objective, but treat the 0.925-over-0.95 advantage as noisy rather than robust.
