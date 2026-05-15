@@ -96,22 +96,8 @@ class Owned(Placement):
     ) -> torch.Tensor:
         self._validate_owner_rank(world_size)
         if rank == self.owner_rank:
-            return param.contiguous()
+            return param
         return param.new_empty(0)
-
-    @override
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        if self.owner_rank >= len(per_rank_shards):
-            raise AssertionError(
-                f"Owned({self.owner_rank}) cannot assemble from "
-                f"{len(per_rank_shards)} rank shards."
-            )
-        return per_rank_shards[self.owner_rank].view(global_shape)
 
     @override
     def prepare_unshard_bucket(
