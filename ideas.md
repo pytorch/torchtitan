@@ -281,11 +281,11 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded as repeat diagnostic at `0c612874`; the run completed with finite/falling loss from 12.49943 to 7.65341 and 143.96GiB peak memory, but reached 8,891 tps, slightly below the 8,897 tps best.
 
-- Idea: Float8 memory-budget activation checkpointing at 0.85
+- ~~Idea: Float8 memory-budget activation checkpointing at 0.85~~
   - Current best source commit: `0c612874`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95.
   - Source: manager lower-side memory-budget plateau probe.
   - Expected mechanism for improving reported tokens/sec: The 0.75 row used 129.9GiB and reached 8,821 tps, while 0.9 and 0.95 used about 144GiB and reached 8,877-8,897 tps. A 0.85 budget may select the same useful activation-save partition as 0.9/0.95, or a slightly cheaper one, without moving into the high-side instability seen at 0.975.
   - Supporting evidence: The 0.975 run kept the same 143.96GiB peak memory as 0.95 but collapsed to 5,453 tps, so high-side budgets are not reliably better. Testing 0.85 checks whether the current best partition starts below 0.9 and whether the lower side has less variance.
   - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.85 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 8,897 tps. Discard if it stays near the 0.75/0.9 rows without improving or shows the same severe runtime variance as 0.975.
+  - Success criteria and expected risk: Discarded at `0c612874`; the run completed with finite but rising loss from 12.52796 to 17.56807, reached 8,834 tps with MFU `N/A`, and used 136.50GiB peak memory. It did not beat the 8,897 tps 0.95 best and failed the falling-loss sanity check.

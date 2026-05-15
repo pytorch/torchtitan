@@ -230,3 +230,9 @@ Record this repeat as a discard diagnostic rather than a new best. Future candid
 ## Next Memory-Budget Lower-Side Probe
 
 The high-side 0.975 result argues against spending more runs above 0.95 for now. It used the same 143.96GiB peak memory as 0.95 but fell to 5,453 tps, so the budget value is not a smooth proxy for useful saved activations or runtime. The lower side is still under-sampled: 0.75 used 129.9GiB and 0.9 used 144.0GiB. A 0.85 run can show whether the current 144GiB partition starts below 0.9 or whether there is a cheaper stable point that can match or beat the 8,897 tps best.
+
+## Experiment Review: Float8 Memory Budget 0.85
+
+Memory budget 0.85 did not improve the current best. The command completed on the current Float8 rowwise source with model-only compile and no-reshard 8-way FSDP, but loss rose from 12.52796 to 17.56807. Peak memory was 136.50GiB, between the 0.75 and 0.9/0.95 rows, and throughput reached 8,834 tps with MFU `N/A`.
+
+This is a discard. It is below the 8,897 tps 0.95 best and fails the falling-loss sanity check, so the lower-side memory-budget probe does not provide a better stable point.
