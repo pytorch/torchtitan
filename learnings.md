@@ -290,3 +290,9 @@ The handoff requested a budget 1.0 command, but an already-active run in the che
 The lower-side `rowwise_with_gw_hp` memory-budget 0.9 retune is a discard. The command completed with the current high-precision grad-weight Float8 source, no-reshard 8-way FSDP, and model-only compile, but loss rose from 12.59183 to 16.25217 instead of falling.
 
 Throughput reached only 4,888 tps with 145.05GiB peak memory, far below both the 9,229 tps budget 0.95 best and its 9,213 tps repeat. The lower budget did not reduce peak memory relative to 0.95 in this run and made both throughput and loss trend worse, so keep memory-budget 0.95 as the active `rowwise_with_gw_hp` setting.
+
+## Experiment Review: rowwise_with_gw_hp Memory Budget 1.0
+
+The high-side `rowwise_with_gw_hp` memory-budget 1.0 probe is a discard. It completed the 10-step command, but step 1 already used 163.86GiB and the allocator repeatedly warned that expandable segment mappings failed with OOM-level free memory.
+
+Step 10 reached only 1,014 tps with peak memory 176.49GiB, 13 CUDA allocation retries, and loss rising from 12.14356 to 17.49169. Budget 1.0 is both slower and too close to the B200 memory ceiling, so the activation-budget retune is closed with 0.95 as the active setting for `rowwise_with_gw_hp`.
