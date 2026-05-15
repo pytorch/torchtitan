@@ -278,3 +278,13 @@ An identical `rowwise_with_gw_hp` memory-budget 0.95 command is already active a
 The exact `rowwise_with_gw_hp` current-best command repeated successfully and supports the new recipe as a real improvement, but it did not set a new best. The run completed with finite loss falling from 12.37330 to 7.53270, peak memory matching the prior row at 145.05GiB, MFU `N/A`, and 9,213 tps.
 
 Record this as a discard diagnostic because it is 16 tps below the 9,229 tps best. The repeat is still close enough to confirm that `rowwise_with_gw_hp` is consistently in the 9.2k tps range on this stack, rather than only a one-off spike.
+
+## Next GW-HP Memory Budget Probe
+
+The `rowwise_with_gw_hp` recipe changed the performance surface enough that the old rowwise memory-budget sweep should not be treated as final. The new best uses 145.05GiB at budget 0.95 and repeats within 16 tps of the max. A budget 1.0 probe is safe enough on B200 memory and tests whether the reduced Float8 scaling overhead makes additional activation retention useful. If it does not beat 9,229 tps, the next retune point should be lower-side 0.9 rather than further high-side budget sweeps.
+
+## Experiment Review: rowwise_with_gw_hp Memory Budget 0.9
+
+The lower-side `rowwise_with_gw_hp` memory-budget 0.9 retune is a discard. The command completed with the current high-precision grad-weight Float8 source, no-reshard 8-way FSDP, and model-only compile, but loss rose from 12.59183 to 16.25217 instead of falling.
+
+Throughput reached only 4,888 tps with 145.05GiB peak memory, far below both the 9,229 tps budget 0.95 best and its 9,213 tps repeat. The lower budget did not reduce peak memory relative to 0.95 in this run and made both throughput and loss trend worse, so keep memory-budget 0.95 as the active `rowwise_with_gw_hp` setting.

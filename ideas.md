@@ -336,3 +336,21 @@
   - Planned source/config changes: None; repeat on the current kept `rowwise_with_gw_hp` source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded as repeat diagnostic at `a1f59bf`; the run completed with finite/falling loss from 12.37330 to 7.53270, MFU `N/A`, and the same 145.05GiB peak memory, but reached 9,213 tps versus the 9,229 tps best.
+
+- Idea: Float8 rowwise_with_gw_hp memory-budget 1.0
+  - Current best source commit: `90b4c8b6`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: manager activation-budget retune after recipe change.
+  - Expected mechanism for improving reported tokens/sec: The high-precision grad-weight recipe reduced Float8 scaling/casting overhead and shifted the current best to 9.2k tps. With that overhead reduced, spending more activation memory at budget 1.0 may reduce recompute enough to beat the 0.95 rows.
+  - Supporting evidence: The `rowwise_with_gw_hp` 0.95 repeat was stable at 9,213-9,229 tps and used 145.05GiB, leaving headroom below the rough 95% B200 memory risk line. The old rowwise 1.0 row used 154.35GiB and did not beat rowwise 0.95, but that evidence is stale after the recipe changed the kernel mix.
+  - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=1.0 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 9,229 tps. Discard if it only raises memory without throughput gain or weakens the loss trend.
+
+- ~~Idea: Float8 rowwise_with_gw_hp memory-budget 0.9~~
+  - Current best source commit: `90b4c8b6`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: manager lower-side activation-budget retune after recipe change.
+  - Expected mechanism for improving reported tokens/sec: The recipe change slightly raised peak memory and changed casting overhead, so rechecking budget 0.9 tests whether a lower compiler activation budget can recover throughput while keeping the new Float8 recipe.
+  - Supporting evidence: The current best and repeat both used 145.05GiB at budget 0.95, while older rowwise budget 0.9 evidence is stale because it used a different Float8 recipe.
+  - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded at `90b4c8b6`; loss rose from 12.59183 to 16.25217 and throughput fell to 4,888 tps at 145.05GiB peak memory, so 0.95 remains the best `rowwise_with_gw_hp` budget.
