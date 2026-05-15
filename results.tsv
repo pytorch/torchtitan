@@ -5,3 +5,4 @@ e67f61c	4971	20.77	39.5	discard	TP=2 shared decoder sharding with sequence paral
 9db79f7	5872	24.53	72.2	keep	FSDP reshard_after_forward never	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never
 dfac656	5873	24.54	84.5	discard	local batch size 8 with no-reshard; loss increased	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --training.local_batch_size=8
 0b0796f	6808	28.45	113.7	keep	selective activation checkpointing with no-reshard	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective
+dc56c35	0	0.00	0.0	crash	no activation checkpointing with no-reshard OOM	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=none
