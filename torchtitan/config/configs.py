@@ -346,6 +346,10 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
+    spmd_typechecking: str | None = None
+    """SPMD type checking mode. None: no type checking.
+    "global": global mode (every Varying axis must have a PartitionSpec)."""
+
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
 

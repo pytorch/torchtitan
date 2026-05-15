@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -29,6 +30,7 @@ class ParallelDims:
     world_size: int
 
     _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
+    _global_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
 
     @classmethod
@@ -124,13 +126,13 @@ class ParallelDims:
             world_mesh: DeviceMesh,
             dim_names: tuple[str, ...],
             dim_degrees: tuple[int, ...],
-        ):
+        ) -> DeviceMesh:
             """Unflatten the world mesh to create the required mesh dimensions.
 
             Uses fake backend for dimensions with degree 1 or for 'batch' dimension
             to avoid unnecessary process group creation.
             """
-            backend_override = {}
+            backend_override: dict[str, str] = {}
             for name, degree in zip(dim_names, dim_degrees, strict=True):
                 if not self._mesh_exist(name, degree):
                     backend_override[name] = "fake"
@@ -163,6 +165,11 @@ class ParallelDims:
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
         dense_mesh = unflatten_mesh(
             self._world_mesh,
+            ("pp", "dp", "cp", "tp"),
+            (self.pp, batch, self.cp, self.tp),
+        )
+        fsdp_mesh = unflatten_mesh(
+            self._world_mesh,
             ("pp", "dp_replicate", "fsdp", "tp"),
             (self.pp, self.dp_replicate, fsdp, self.tp),
         )
@@ -176,6 +183,7 @@ class ParallelDims:
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
             "dense": dense_mesh,
+            "fsdp": fsdp_mesh,
             "sparse": sparse_mesh,
         }
 
@@ -183,12 +191,13 @@ class ParallelDims:
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
-            "dp_replicate": dense_mesh["dp_replicate"],
-            "fsdp": dense_mesh["fsdp"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
+            "dp_replicate": fsdp_mesh["dp_replicate"],
+            "fsdp": fsdp_mesh["fsdp"],
+            "dp": dense_mesh["dp"],
         }
 
         # Validate mesh sizes
@@ -213,6 +222,7 @@ class ParallelDims:
             "tp": self.tp,
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
+            "dp": self.dp_replicate * self.dp_shard,
         }
 
         for mesh_name, expected_size in expected_sizes.items():
@@ -291,6 +301,39 @@ class ParallelDims:
                 f"Ensure the corresponding parallelism dimension is {enabled_str}."
             )
         return mesh
+
+    def resolve_mesh(self, axes: Iterable[str]) -> DeviceMesh | None:
+        """Resolve model sharding axes to one SPMD compute mesh.
+
+        Config-based SPMD modules execute under either the dense model mesh
+        (``dp/cp/tp``) or sparse expert mesh (``dp_replicate/efsdp/ep``). A
+        config with no axes has no mesh-local work. A config whose axes cannot
+        live on exactly one model mesh is invalid and should be split.
+        """
+        axes = set(axes)
+        if not axes:
+            return None
+        if not self._global_meshes:
+            self.build_mesh()
+
+        candidates: list[DeviceMesh] = []
+        for mesh_name in ("dense", "sparse"):
+            mesh = self._global_meshes[mesh_name]
+            mesh_axis_names = mesh.mesh_dim_names
+            assert mesh_axis_names is not None
+            if axes.issubset(set(mesh_axis_names)):
+                candidates.append(mesh)
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Model sharding axes {sorted(axes)} resolve to multiple meshes. "
+                "Use placements that identify either the dense or sparse mesh."
+            )
+        raise ValueError(
+            f"Model sharding axes {sorted(axes)} do not fit a single model mesh."
+        )
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
