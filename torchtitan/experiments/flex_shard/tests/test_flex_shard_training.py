@@ -96,14 +96,14 @@ def _layer_buckets_with_grouped_root_rest(
         *[
             BucketSpec(
                 [f"layers.{idx}.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             )
             for idx in range(num_layers)
         ],
         BucketSpec(
             ["tok_embeddings.*", "pos_embeddings.*", "norm.*", "output.*"],
-            shard_placement_fn=per_param_placements,
+            placement_fn=per_param_placements,
             reshard_after_forward=reshard_after_forward,
         ),
     ]
@@ -177,7 +177,7 @@ class TestFlexShardTraining(FSDPTest):
             buckets=[
                 BucketSpec(
                     ["tok_embeddings.*"],
-                    shard_placement_fn=per_param_placements,
+                    placement_fn=per_param_placements,
                     mp_policy=MixedPrecisionPolicy(
                         param_dtype=torch.bfloat16,
                         reduce_dtype=torch.float32,

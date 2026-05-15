@@ -228,7 +228,7 @@ def _validate_placements(
         if extra_fqns:
             msg_parts.append(f"unexpected placements for {sorted(extra_fqns)}")
         raise ValueError(
-            "BucketSpec.shard_placement_fn must return placements for exactly the "
+            "BucketSpec.placement_fn must return placements for exactly the "
             f"provided parameters; {', '.join(msg_parts)}."
         )
 
@@ -240,7 +240,7 @@ def _validate_placements(
         placement = _get_single_placement(placements)
         if not isinstance(placement, Placement):
             raise TypeError(
-                "BucketSpec.shard_placement_fn must return Placement instances, but "
+                "BucketSpec.placement_fn must return Placement instances, but "
                 f"{fqn!r} uses {type(placement).__name__}."
             )
         param = param_dict[fqn]

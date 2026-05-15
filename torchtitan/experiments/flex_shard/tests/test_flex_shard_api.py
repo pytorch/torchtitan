@@ -10,7 +10,7 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import BucketSpec, flex_shard, OffloadPolicy
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
-from torchtitan.experiments.flex_shard.flex_shard.sharded_param_metadata import (
+from torchtitan.experiments.flex_shard.flex_shard.sharded_param import (
     get_global_shape,
     get_placements,
     is_flex_shard_param,
@@ -64,7 +64,7 @@ class TestFlexShardAPI(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
-                            shard_placement_fn=per_param_placements,
+                            placement_fn=per_param_placements,
                             reshard_after_forward=False,
                         )
                     ],
@@ -80,7 +80,7 @@ class TestFlexShardAPI(TestCase):
                 buckets=[
                     BucketSpec(
                         ["*"],
-                        shard_placement_fn=per_param_placements,
+                        placement_fn=per_param_placements,
                         reshard_after_forward=False,
                     )
                 ],
@@ -93,7 +93,7 @@ class TestFlexShardAPI(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
-                            shard_placement_fn=per_param_placements,
+                            placement_fn=per_param_placements,
                             reshard_after_forward=False,
                         )
                     ],
@@ -109,7 +109,7 @@ class TestFlexShardAPI(TestCase):
                 buckets=[
                     BucketSpec(
                         ["*"],
-                        shard_placement_fn=per_param_placements,
+                        placement_fn=per_param_placements,
                         reshard_after_forward=False,
                     )
                 ],
@@ -122,7 +122,7 @@ class TestFlexShardAPI(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
-                            shard_placement_fn=per_param_placements,
+                            placement_fn=per_param_placements,
                             reshard_after_forward=False,
                         )
                     ],
@@ -155,7 +155,7 @@ class TestFlexShardAPI(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
-                            shard_placement_fn=per_param_placements,
+                            placement_fn=per_param_placements,
                             offload_policy=OffloadPolicy(pin_memory=False),
                             reshard_after_forward=False,
                         )
@@ -173,7 +173,7 @@ class TestFlexShardAPI(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
-                            shard_placement_fn=per_param_placements,
+                            placement_fn=per_param_placements,
                             reshard_after_forward=False,
                         )
                     ],
@@ -190,7 +190,7 @@ class TestFlexShardAPI(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
-                            shard_placement_fn=per_param_placements,
+                            placement_fn=per_param_placements,
                         )
                     ],
                 )

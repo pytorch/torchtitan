@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 
-from .sharded_param_metadata import set_sharding_info
+from .sharded_param import set_sharding_info
 from .utils import _get_single_placement, _set_param_on_module
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ class BucketSpec:
     Args:
         patterns: fnmatch glob patterns matched against parameter FQNs.
             A parameter matches this bucket if its FQN matches any pattern.
-        shard_placement_fn: Required callable that maps this bucket's
+        placement_fn: Required callable that maps this bucket's
             ``(named_params, mesh)`` to per-parameter placements.
             The minimal eager path expects one ``Placement`` per parameter.
         mp_policy: Mixed precision policy for this bucket. This currently
@@ -91,7 +91,7 @@ class BucketSpec:
     """
 
     patterns: list[str]
-    shard_placement_fn: PlacementFn
+    placement_fn: PlacementFn
     mp_policy: MixedPrecisionPolicy | None = None
     offload_policy: OffloadPolicy | None = None
     reshard_after_forward: bool = True

@@ -27,11 +27,11 @@ from .bucket_collectives import (
 from .bucket_storage import BucketSpec, DStorage, ParamInfo
 from .unsharded_param_access import (
     _BUCKET_FQN_ATTR,
-    _EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR,
+    _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
     ParamAccessorState,
-    ParamModuleInfo,
+    ParamModuleRef,
 )
 from .utils import _get_storage_debug_fqn, _record_function_if_eager
 
@@ -43,15 +43,15 @@ logger = logging.getLogger(__name__)
 class ParamEntry:
     """Per-parameter bucket runtime state.
 
-    module_info locates the live nn.Parameter for local shard reads and grad
-    writes. access_state holds mutable forward/backward parameter access state.
+    module_ref locates the live nn.Parameter for local shard reads and grad
+    writes. accessor_state holds mutable forward/backward parameter accessor state.
     param_info carries immutable storage and placement metadata for collectives.
     Keeping them together preserves bucket order and avoids repeated FQN
     resolution in hooks.
     """
 
-    module_info: ParamModuleInfo
-    access_state: ParamAccessorState
+    module_ref: ParamModuleRef
+    accessor_state: ParamAccessorState
     param_info: ParamInfo
 
 
@@ -77,7 +77,7 @@ class PendingReduceGradLaunch:
 
     bucket: BucketRuntime
     prepared: PreparedReduceGrad
-    param_refs: list[ParamModuleInfo]
+    param_refs: list[ParamModuleRef]
 
 
 @dataclass
@@ -228,7 +228,7 @@ class BucketCommContext:
         bucket: BucketRuntime,
         grads: list[torch.Tensor],
         infos: list[ParamInfo],
-        param_refs: list[ParamModuleInfo],
+        param_refs: list[ParamModuleRef],
     ) -> None:
         """Pack reduce-grad input and delay launch until after next unshard."""
         if not grads:
@@ -275,13 +275,13 @@ class BucketUnshardRuntime:
 
 
 def _accumulate_sharded_grads(
-    param_refs: list[ParamModuleInfo],
+    param_refs: list[ParamModuleRef],
     sharded_grads: list[torch.Tensor],
 ) -> list[torch.Tensor]:
     """Cast sharded grads to local param dtype and accumulate into .grad."""
     stored_grads: list[torch.Tensor] = []
-    for module_info, grad in zip(param_refs, sharded_grads, strict=True):
-        param = module_info.module._parameters[module_info.param_name]
+    for module_ref, grad in zip(param_refs, sharded_grads, strict=True):
+        param = module_ref.module._parameters[module_ref.param_name]
         if grad.dtype != param.dtype:
             grad = grad.to(param.dtype)
         stored_grads.append(grad)
@@ -335,16 +335,16 @@ class BucketRuntime:
         """Return params in a bucket with their owning module and access state."""
         param_entries: list[ParamEntry] = []
         for info in storage._param_infos.values():
-            module_info = ParamModuleInfo.resolve(storage._module, info.fqn)
-            if module_info.module in module_param_map:
-                param_state = module_param_map[module_info.module].get(
-                    module_info.param_name
+            module_ref = ParamModuleRef.resolve(storage._module, info.fqn)
+            if module_ref.module in module_param_map:
+                accessor_state = module_param_map[module_ref.module].get(
+                    module_ref.param_name
                 )
-                if param_state is not None:
+                if accessor_state is not None:
                     param_entries.append(
                         ParamEntry(
-                            module_info=module_info,
-                            access_state=param_state,
+                            module_ref=module_ref,
+                            accessor_state=accessor_state,
                             param_info=info,
                         )
                     )
@@ -358,8 +358,8 @@ class BucketRuntime:
         """Return the device used for this bucket's collectives."""
         comm_device = storage.byte_storage.device
         for entry in entries:
-            if entry.access_state.compute_device is not None:
-                return entry.access_state.compute_device
+            if entry.accessor_state.compute_device is not None:
+                return entry.accessor_state.compute_device
         return comm_device
 
     @property
@@ -367,22 +367,22 @@ class BucketRuntime:
         return [entry.param_info for entry in self.entries]
 
     @property
-    def param_refs(self) -> list[ParamModuleInfo]:
-        return [entry.module_info for entry in self.entries]
+    def param_refs(self) -> list[ParamModuleRef]:
+        return [entry.module_ref for entry in self.entries]
 
     def _local_shards(self, *, use_autograd: bool) -> list[torch.Tensor]:
         local_shards: list[torch.Tensor] = []
         for entry in self.entries:
-            module_info = entry.module_info
-            param_state = entry.access_state
-            param = module_info.module._parameters[module_info.param_name]
+            module_ref = entry.module_ref
+            accessor_state = entry.accessor_state
+            param = module_ref.module._parameters[module_ref.param_name]
             local_shard = param if use_autograd else param.data
             if (
-                param_state.compute_device is not None
-                and local_shard.device != param_state.compute_device
+                accessor_state.compute_device is not None
+                and local_shard.device != accessor_state.compute_device
             ):
                 local_shard = local_shard.to(
-                    param_state.compute_device,
+                    accessor_state.compute_device,
                     non_blocking=True,
                 )
             local_shards.append(local_shard)
@@ -513,7 +513,7 @@ class BucketRuntime:
         self,
         grads: list[torch.Tensor],
         infos: list[ParamInfo],
-        param_refs: list[ParamModuleInfo],
+        param_refs: list[ParamModuleRef],
     ) -> None:
         """Reduce full-parameter grads and accumulate local sharded grads."""
         if not grads:
@@ -556,13 +556,13 @@ class BucketRuntime:
         self.prefetch_next()
         self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
         for entry, full_param in zip(self.entries, full_params, strict=True):
-            entry.access_state._pre_unsharded = full_param
+            entry.accessor_state._current_unsharded_param = full_param
 
     def post_forward_hook(self, mod, args, output) -> None:
         if torch.compiler.is_compiling():
             return
         for entry in self.entries:
-            entry.access_state._pre_unsharded = None
+            entry.accessor_state._current_unsharded_param = None
 
 
 class _BucketUnshard(torch.autograd.Function):
@@ -614,7 +614,7 @@ class _BucketUnshard(torch.autograd.Function):
         bucket = runtime.bucket
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
-        valid_param_refs: list[ParamModuleInfo] = []
+        valid_param_refs: list[ParamModuleRef] = []
         for grad, entry in zip(
             full_param_grads,
             bucket.entries,
@@ -624,7 +624,7 @@ class _BucketUnshard(torch.autograd.Function):
                 continue
             grads.append(grad.contiguous())
             valid_infos.append(entry.param_info)
-            valid_param_refs.append(entry.module_info)
+            valid_param_refs.append(entry.module_ref)
 
         if grads:
             if bucket.context.should_defer_reduce_grad_for_backward_prefetch(bucket):
@@ -652,13 +652,13 @@ def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
     )
 
 
-def _create_eager_param_states(
+def _create_param_accessor_states(
     module: nn.Module,
     storages: list[DStorage],
     fqn_to_bucket_spec: dict[str, BucketSpec],
     device: torch.device,
 ) -> dict[nn.Module, dict[str, ParamAccessorState]]:
-    """Create eager parameter access state grouped by owning leaf module."""
+    """Create parameter accessor state grouped by owning leaf module."""
     module_param_map: dict[nn.Module, dict[str, ParamAccessorState]] = {}
 
     for storage in storages:
@@ -671,20 +671,20 @@ def _create_eager_param_states(
             compute_device = (
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
-            param_state = ParamAccessorState(
+            accessor_state = ParamAccessorState(
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
             )
 
-            setattr(param_state, _EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False)
-            setattr(param_state, _PARAM_FQN_ATTR, fqn)
-            setattr(param_state, _BUCKET_FQN_ATTR, bucket_fqn)
+            setattr(accessor_state, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False)
+            setattr(accessor_state, _PARAM_FQN_ATTR, fqn)
+            setattr(accessor_state, _BUCKET_FQN_ATTR, bucket_fqn)
 
-            module_info = ParamModuleInfo.resolve(module, fqn)
-            module_param_map.setdefault(module_info.module, {})[
-                module_info.param_name
-            ] = param_state
+            module_ref = ParamModuleRef.resolve(module, fqn)
+            module_param_map.setdefault(module_ref.module, {})[
+                module_ref.param_name
+            ] = accessor_state
 
     return module_param_map
 
@@ -697,8 +697,8 @@ def _install_bucket_unshard_hooks(
 
     In eager mode, each DStorage's pre-forward hook starts a single bucket
     unshard call (one collective per bucket), then sets
-    _pre_unsharded on each parameter access state so the property getter can
-    return the hook-provided tensor.
+    _current_unsharded_param on each parameter accessor state so the property
+    getter can return the hook-provided tensor.
     """
     for storage in storages:
         if not storage._param_infos:
@@ -720,6 +720,4 @@ def _install_bucket_unshard_hooks(
         target.register_forward_hook(bucket_runtime.post_forward_hook)
         bucket_runtime.context.buckets.append(bucket_runtime)
         for entry in bucket_runtime.entries:
-            setattr(
-                entry.access_state, _EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, True
-            )
+            setattr(entry.accessor_state, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, True)
