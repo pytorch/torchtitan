@@ -13,6 +13,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
+    apply_cp_to_attention,
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -52,6 +53,9 @@ def parallelize_llama(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+
+    if parallel_dims.cp_enabled:
+        apply_cp_to_attention(model, parallel_dims)
 
     annotate_llama(model)
 

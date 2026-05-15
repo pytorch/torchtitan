@@ -39,7 +39,6 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
-    _is_recomputed_node,
     _MODULE_FQN,
 )
 from torchtitan.tools.logging import logger
@@ -70,6 +69,13 @@ def annotate_fsdp_all_gather(
     graph = gm.graph
 
     def force_recompute_node(node):
+        # Respect MUST_CPU_OFFLOAD set by ``tag_all_offloadable_activations``:
+        # the offload chain already keeps the activation off-GPU between
+        # forward and backward, so re-tagging as MUST_RECOMPUTE/MUST_SAVE
+        # would either undo the offload selection or re-save GPU memory we
+        # just freed.
+        if node.meta.get("recompute") == CheckpointPolicy.MUST_CPU_OFFLOAD:
+            return
         if reshard_after_forward:
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
         else:
@@ -160,41 +166,41 @@ def overlap_fsdp_ag_rs_pass(
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
     """
-    Reassign FSDP all-gather nodes to an extra NCCL process group for
+    Reassign FSDP all-gather nodes to extra NCCL process groups for
     AG/RS overlap in backward.
 
-    Discovers the FSDP PG by inspecting the graph, creates an extra
-    NCCL PG over the same ranks (giving it a separate CUDA stream),
-    and rewrites every all-gather using that source PG to the extra PG.
-    This separates all-gathers from reduce-scatters onto different streams,
-    enabling AG/RS overlap in backward.
+    Discovers all distinct FSDP PGs by inspecting the graph (e.g. one for
+    FSDP, another for expert-FSDP), creates an extra NCCL PG over the same
+    ranks for each (giving it a separate CUDA stream), and rewrites every
+    all-gather to the corresponding extra PG. This separates all-gathers
+    from reduce-scatters onto different streams, enabling AG/RS overlap in
+    backward.
 
     No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
     bucketing passes so bucketed all-gathers inherit the new PG name.
     """
-    source_pg_name: str | None = None
+    source_pg_names: OrderedSet[str] = OrderedSet()
     for node in gm.graph.nodes:
         if is_wait_tensor_from_fsdp(node):
             ag_node = node.args[0]
-            source_pg_name = ag_node.args[2]
-            break
+            source_pg_names.add(ag_node.args[2])
 
-    if source_pg_name is None:
+    if not source_pg_names:
         return gm
 
-    target_pg_name = _get_or_create_extra_fsdp_pg(source_pg_name)
+    pg_mapping: dict[str, str] = {
+        pg: _get_or_create_extra_fsdp_pg(pg) for pg in source_pg_names
+    }
 
     count = 0
     for node in gm.graph.nodes:
-        if is_all_gather(node) and node.args[2] == source_pg_name:
+        if is_all_gather(node) and node.args[2] in pg_mapping:
             # AG args: (input_tensor, group_size, group_name)
-            node.args = (node.args[0], node.args[1], target_pg_name)
+            node.args = (node.args[0], node.args[1], pg_mapping[node.args[2]])
             count += 1
     if count > 0:
-        logger.info(
-            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
-            f"to PG {target_pg_name}"
-        )
+        for source, target in pg_mapping.items():
+            logger.info(f"Rewrote all-gather node(s) from PG {source} to PG {target}")
     gm.recompile()
     return gm
 
@@ -448,9 +454,6 @@ def joint_transformer_block_bucketing_reordering_pass(
             defaults to ``"custom_ops"`` via the parent class.
     """
 
-    def _is_backward(node: torch.fx.Node) -> bool:
-        return _is_backward_node(node) or _is_recomputed_node(node)
-
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
         if not fqn:
@@ -461,7 +464,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         gm,
         module_bucket_plans,
         insert_overlap_deps,
-        is_backward_fn=_is_backward,
+        is_backward_fn=_is_backward_node,
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
     ).run()

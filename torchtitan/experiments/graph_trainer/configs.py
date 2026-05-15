@@ -17,12 +17,11 @@ from torchtitan.trainer import Trainer
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot", "aot_fx_trace"] | None = "aot_fx_trace"
+    mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
     """
     Compilation mode. Options:
         aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
         jit: standard torch.compile() with custom backend (deprecated)
-        aot: explicit joint graph export + custom graph passes (deprecated)
     """
 
     backend: str = "aot_eager"
@@ -31,29 +30,33 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
     Compiler pass names to apply.
     In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
-    In AOT mode: applied to the partitioned forward/backward graphs
     """
-
-    joint_passes: list[str] = field(default_factory=list)
-    """Joint graph pass names to apply on the joint forward-backward
-    graph before partitioning. Only used in AOT mode."""
 
     enable_passes: bool = True
     """When False, skip all graph passes (both default and user-configured)."""
 
+    disable_passes: list[str] = field(default_factory=list)
+    """Pass names to selectively disable for debugging and ablation
+    studies. A pass is skipped if its name exactly matches any entry.
+    Example: --compile.disable_passes custom_codegen_pass,cudagraph_pass"""
+
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "eager", "budget_limited_offload"] = "default"
+    memory_policy: Literal["default", "eager", "sac_and_offload"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         eager: SAC alternating mm ops between save/recompute, matching the
             eager AC policy in torchtitan.distributed.activation_checkpoint.
-        budget_limited_offload: SAC + CPU offload — apply default SAC first,
+        sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
     """
+
+    pass_pipeline: str = "default"
+    """Pass pipeline selection. Controls which graph pass pipeline, post-init
+    hooks, and pre-train-step hooks are activated."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
@@ -68,9 +71,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     numerics_changing_optim: bool = False
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
-
-    enable_cudagraph: bool = True
-    """When False, skip the cudagraph pass even if the graph is compatible."""
 
     cpu_offload_prefetch_n_layers: int = 1
     """Prefetch reloads this many layers ahead in the backward graph
@@ -91,6 +91,20 @@ class GraphTrainerCompileConfig(CompileConfig):
     here to skip compilation. For multi-node setups use a shared filesystem
     path.
     """
+
+    enable_autoparallel: bool = False
+    """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
+    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
+
+
+def validate_autoparallel_config(
+    compile_config: GraphTrainerCompileConfig,
+) -> None:
+    if compile_config.enable_autoparallel and compile_config.mode != "aot_fx_trace":
+        raise ValueError(
+            "AutoParallel graph_trainer integration only supports "
+            "--compile.mode aot_fx_trace"
+        )
 
 
 def to_graph_trainer_config(

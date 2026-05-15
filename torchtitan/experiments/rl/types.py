@@ -46,6 +46,8 @@ class Completion:
     text: str
     token_ids: list[int]
     token_logprobs: list[float]
+    finish_reason: str | None = None
+    """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -84,7 +86,7 @@ class Episode:
 
 
 @dataclass(kw_only=True, slots=True)
-class TrainBatch:
+class TrainingBatch:
     token_ids: torch.Tensor  # [1, total_tokens]
     prompt_lens: list[int]  # [num_episodes]
     response_lens: list[int]  # [num_episodes]
@@ -93,3 +95,11 @@ class TrainBatch:
     token_logprobs: list[
         list[float]
     ]  # [num_episodes][response_len_i] per-token logprobs from rollout
+
+
+@dataclass(frozen=True, slots=True)
+class OptimStepOutput:
+    """Result returned by ``PolicyTrainer.optim_step`` to the controller."""
+
+    policy_version: int
+    metrics: dict[str, float]

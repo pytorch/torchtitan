@@ -25,7 +25,7 @@ from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
-from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
@@ -184,8 +184,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         torchrun training with --compile.precompile_artifact_dir.
         """
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-            run_traced_train_step,
-            trace_train_step,
+            minimal_fx_tracer,
+            run_traced,
         )
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
@@ -200,8 +200,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)
-        loss_fn = cross_entropy_loss
-        fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+        loss_fn = CrossEntropyLoss.Config().build()
+        fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
@@ -214,8 +214,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         maybe_register_blockmask_pytree_node()
 
         # Step 1: Trace the graph
-        traced_result = trace_train_step(fwd_bwd_fn)(
-            model,
+        traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
             self.inputs,
             self.labels,
             global_valid_tokens,
@@ -263,7 +262,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 compile=SimpleNamespace(
                     precompile_artifact_dir="precompiled",
                     inductor_compilation="regional",
-                    enable_cudagraph=True,
+                    disable_passes=[],
                 ),
             )
             passes = construct_default_graph_passes(loaded_result, load_config)
@@ -277,9 +276,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
-            outputs = run_traced_train_step(
-                loaded_result,
-                model,
+            outputs = run_traced(loaded_result, module=model)(
                 self.inputs,
                 self.labels,
                 global_valid_tokens,
@@ -434,6 +431,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
+# TODO: All FlexAttn bitwise deterministic tests disabled due to upstream
+# PyTorch nightly regression in dev20260508. TransformGetItemToIndex mode
+# has no dispatch for torch.ops.higher_order.flex_attention.
+# Re-enable once the upstream fix lands.
+@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
@@ -496,6 +498,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
+@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
@@ -632,6 +635,7 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
+@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE with FlexAttention.
 
