@@ -54,6 +54,16 @@ def compute_config_fingerprint(
     h.update(f"compile:mode:{compile_config.mode}\n".encode())
     h.update(f"compile:backend:{compile_config.backend}\n".encode())
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
+    h.update(
+        f"compile:ep_overlap_chunk_dim:{compile_config.ep_overlap_chunk_dim}\n".encode()
+    )
+    h.update(
+        "compile:ep_overlap_chunk_strategy:"
+        f"{compile_config.ep_overlap_chunk_strategy}\n".encode()
+    )
+    h.update(
+        f"compile:ep_overlap_module_fqn:{compile_config.ep_overlap_module_fqn}\n".encode()
+    )
 
     h.update(f"torch_version:{torch.__version__}\n".encode())
 

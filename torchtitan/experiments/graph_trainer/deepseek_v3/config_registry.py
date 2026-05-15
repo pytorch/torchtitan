@@ -46,7 +46,7 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> (GraphTrainer.Config):
+def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel_flex_attn(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
