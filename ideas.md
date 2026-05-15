@@ -1,30 +1,39 @@
 ## Human Generated Ideas
 
-- Idea: Bootstrap runnable Qwen3 14B DP-sharded run
+- ~~Idea: Bootstrap runnable Qwen3 14B DP-sharded run~~
   - Current best source commit: 68f86f1
   - Source: human/setup
   - Expected mechanism for improving reported tokens/sec: The target command currently selects `dp_shard=-1` on 8 GPUs, but `parallelize_qwen3()` only applies replicated DDP and does not apply FSDP for the active `fsdp` mesh. A narrow bootstrap should make the inferred target command run correctly by applying TorchTitan FSDP on the configured shard mesh.
   - Supporting evidence: `qwen3_14b()` sets `data_parallel_shard_degree=-1`, which resolves to `dp_shard=8` for `NGPU=8`; the Qwen3 scaffold rejects TP/CP/PP/EP and otherwise only calls `replicate()` when `dp_enabled`.
   - Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, replace the DP-only replicated wrapper for the active DP-shard case with the minimal FSDP wrapping needed for Qwen3 14B.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10`
-  - Success criteria and expected risk: The 10-step run completes, logs finite losses and reported `tps`; risk is incorrect wrapper order or insufficient wrapping granularity causing OOM or slow all-gathers.
+  - Success criteria and expected risk: Kept at `fc6629b` with 5,774 tps; later command-only no-reshard improved to 5,872 tps.
 
 ## Manager Generated Ideas
 
-- Idea: Profile current best after first runnable result
+- ~~Idea: Profile current best after first runnable result~~
   - Current best source commit: TBD after bootstrap
   - Source: agent-generated
   - Expected mechanism for improving reported tokens/sec: Use a profiled 10-step run to distinguish compute, HBM, communication, launch, and data-loading bottlenecks before changing TP/CP/PP or activation checkpointing.
   - Supporting evidence: No Qwen3 14B 8xB200 result has been measured yet on this branch.
   - Planned source/config changes: None for the profiling run.
   - Planned command or config overrides: Add TorchTitan profiler flags to the same 10-step command.
-  - Success criteria and expected risk: A trace and structured metrics identify the next narrow hypothesis; profiling overhead means the profiled `tps` should not be ranked against unprofiled candidates.
+  - Success criteria and expected risk: Completed at `3037e26`; rank 0 trace shows FSDP collectives are material, with reduce-scatter the largest kernel bucket in the captured step.
 
-- Idea: TP=2 with shared decoder sharding helpers
+- ~~Idea: TP=2 with shared decoder sharding helpers~~
   - Current best source commit: TBD after bootstrap
   - Source: manager research
   - Expected mechanism for improving reported tokens/sec: Qwen3 14B has 40 attention heads and 8 KV heads, so TP=2 divides both cleanly and should reduce per-rank dense matmul/state memory while keeping TP collectives within the B200 NVLink domain. Enabling sequence parallel should keep post-attention and FFN activations sharded over sequence positions and may convert freed memory into a larger follow-up batch or lower recompute pressure.
   - Supporting evidence: `Qwen3Model.Config.update_from_config()` validates that TP divides `n_heads` and `n_kv_heads`; the 14B flavor satisfies this for TP=2. `torchtitan.models.common.decoder_sharding` already provides `set_decoder_sharding_config`, `set_gqa_attention_sharding`, `set_gqa_inner_attention_local_map`, `set_dense_ffn_sharding`, and norm placement helpers for GQA+dense-FFN decoder blocks, which match the Qwen3 14B non-MoE structure.
   - Planned source/config changes: In `set_qwen3_sharding_config()`, call shared decoder/root helpers and walk Qwen3 layers to set attention, inner-attention local-map, q/k norm, FFN, and block norm sharding. In `parallelize_qwen3()`, call `model.parallelize(tp_mesh)` when TP is enabled before FSDP wrapping. Keep the diff limited to the active dense Qwen3 path.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.enable_sequence_parallel`
-  - Success criteria and expected risk: The run completes with finite losses and improves steady-state `tps` over the DP-sharded baseline. Risks are QK norm placement mistakes, an inner-attention local-map mismatch, or TP collectives outweighing smaller matmuls at this batch/sequence shape.
+  - Success criteria and expected risk: Discarded at `e67f61c`; it ran correctly but fell to 4,971 tps, so TP collectives and smaller local matmuls outweighed the memory savings for this shape.
+
+- Idea: Local batch size 8 with FSDP no-reshard
+  - Current best source commit: 9db79f7 result row / current source after TP revert
+  - Source: profile and memory-headroom analysis
+  - Expected mechanism for improving reported tokens/sec: The best run keeps FSDP parameters unresharded after forward and reaches only 72.2GiB peak on a 178.35GiB B200. Doubling local batch size should increase useful tokens per optimizer step and per FSDP collective while staying below the memory risk threshold.
+  - Supporting evidence: Baseline profile rank 0 showed NCCL reduce-scatter as the largest kernel bucket at about 0.86s in the captured step and all-gather around 0.23s. The no-reshard candidate improved tps from 5,774 to 5,872 while using 40.49% memory, leaving room to increase batch before considering more mesh complexity.
+  - Planned source/config changes: None; command-only candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --training.local_batch_size=8`
+  - Success criteria and expected risk: Keep if finite loss and steady-state tps exceed 5,872 with peak memory below roughly 95% of available GPU memory. Risk is OOM or lower efficiency from longer step time outweighing larger batch.
