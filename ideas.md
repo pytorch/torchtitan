@@ -499,11 +499,20 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16 --debug.no-enable-structured-logging`
   - Success criteria and expected risk: Discarded at `37bee59`; the run completed but loss rose from 12.56440 to 19.02411, throughput reached only 9,363 tps, and peak memory stayed at 137.47GiB. Close structured-logging disablement for this stack.
 
-- Idea: Fused optimizer states with memory-budget 0.9375
+- ~~Idea: Fused optimizer states with memory-budget 0.9375~~
   - Current best result row: 9,384 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, fused bfloat16 optimizer states, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
   - Source: manager activation-budget retune after optimizer-state memory savings.
   - Expected mechanism for improving reported tokens/sec: Fused bfloat16 optimizer states lowered peak memory from 145.48GiB to 137.47GiB. Raising compiler memory budget from 0.925 to 0.9375 may spend some freed memory on saved activations and reduce recompute while staying well below prior risky memory points.
   - Supporting evidence: Before fused optimizer states, memory-budget 0.9375 reached 9,354 tps with falling loss, close to the 0.925 max. The fused optimizer-state path changed memory pressure and now has two falling-loss best rows, so a single adjacent budget probe is a bounded way to see if the optimizer memory savings can be converted into throughput.
   - Planned source/config changes: None; command-only candidate on the current kept source and fused optimizer command.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9375 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
-  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 9,384 tps. Risk is ordinary activation-budget variance; if it fails, return to memory-budget 0.925.
+  - Success criteria and expected risk: Discarded at `fac529ed`; the run reached 9,393 tps and 137.47GiB peak memory, but loss rose from 12.45222 to 17.76889, so it fails the loss trend gate. Return to memory-budget 0.925 for the fused optimizer-state best.
+
+- Idea: Profile fused optimizer-state current best
+  - Current best result row: 9,384 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, fused bfloat16 optimizer states, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: current-best profile gap after optimizer-state change.
+  - Expected mechanism for improving reported tokens/sec: Profiling does not compete for best throughput, but it should show whether the fused optimizer-state command changed the remaining bottleneck mix or simply reduced memory. This can guide whether the next real candidate should target communication, attention/GEMM, activation policy, or optimizer/runtime overhead.
+  - Supporting evidence: The latest non-fused profile still had reduce-scatter at 26.2% of rank-0 kernel time, while optimizer kernels were only about 1.0%. Fused optimizer states changed peak memory and produced the current best, so a fresh diagnostic profile is the safest next evidence step.
+  - Planned source/config changes: None; diagnostic command-only profile on the current kept fused optimizer-state command.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
+  - Success criteria and expected risk: Record as diagnostic discard regardless of tps. Use the trace buckets to choose the next bounded throughput candidate.

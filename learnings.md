@@ -444,3 +444,13 @@ This is the second no-structured-logging experiment that failed the loss trend g
 ## Next Activation-Budget Probe with Fused Optimizer States
 
 The fused optimizer-state path consistently lowers peak memory to 137.47GiB on valid runs. Try one adjacent activation-budget retune at 0.9375 with fused optimizer states. Before fused optimizer states, 0.9375 was close to the best but did not win; with lower optimizer-state memory, it may reduce recompute or variance enough to beat 9,384 tps while staying below the previous 145.48GiB memory plateau.
+
+## Experiment Review: Fused Optimizer States Memory Budget 0.9375
+
+The fused optimizer-state activation-budget 0.9375 probe is a discard. It reached 9,393 tps with peak memory still at 137.47GiB, but loss rose from 12.45222 to 17.76889.
+
+This is another case where the highest-tps row fails the short-run loss trend gate. Keep the fused optimizer-state memory-budget 0.925 command as the current best at 9,384 tps, and do not spend the optimizer-state memory savings on a higher activation budget without fresh evidence.
+
+## Next Diagnostic Profile: Fused Optimizer-State Best
+
+Profile the confirmed fused optimizer-state best before trying more throughput knobs. The last profile was non-fused and showed reduce-scatter, dense GEMM/scaled-mm, and flash attention as the main buckets; the fused optimizer path reduced memory but may not have changed the kernel-time bottleneck. A diagnostic profile should determine whether communication is still the main target.
