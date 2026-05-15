@@ -18,7 +18,6 @@ from .bucket_storage import (
     _materialize_bucket_storages,
     BucketParamFQNsByIndex,
     BucketSpec,
-    ParamFQN,
 )
 from .reshard_after_forward import _apply_reshard_after_forward
 from .unsharded_param_access import (
@@ -51,22 +50,22 @@ __all__ = [
 class PreparedFlexShardInputs:
     """Validated inputs and derived setup state for flex_shard()."""
 
-    named_params: list[tuple[ParamFQN, nn.Parameter]]
+    named_params: list[tuple[str, nn.Parameter]]
     shard_mesh: DeviceMesh
     device: torch.device
-    param_placements: dict[ParamFQN, tuple[Placement, ...]]
+    param_placements: dict[str, tuple[Placement, ...]]
     bucket_assignments: BucketParamFQNsByIndex
 
 
 def _resolve_bucket_param_placements(
-    named_params: list[tuple[ParamFQN, nn.Parameter]],
+    named_params: list[tuple[str, nn.Parameter]],
     shard_mesh: DeviceMesh,
     bucket_assignments: BucketParamFQNsByIndex,
     buckets: list[BucketSpec],
-) -> dict[ParamFQN, tuple[Placement, ...]]:
+) -> dict[str, tuple[Placement, ...]]:
     """Call each bucket's placement function for the params assigned to it."""
     named_params_dict = dict(named_params)
-    param_placements: dict[ParamFQN, tuple[Placement, ...]] = {}
+    param_placements: dict[str, tuple[Placement, ...]] = {}
 
     for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
         if not bucket_fqns:
