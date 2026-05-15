@@ -161,12 +161,18 @@ Do not run a separate short correctness job followed by a separate performance
 job unless the human explicitly asks for it or the candidate is failing before
 the train loop and needs a small diagnostic rerun.
 
+Each experiment-loop training run is capped at exactly 20 training steps. Add a
+command-line override such as `--training.steps=20` to every candidate command,
+regardless of the default configured in `qwen3_1_7b()`. If a candidate changes
+`training.steps` in config, the executed experiment command must still run 20
+steps unless the human explicitly changes this program.
+
 At minimum:
 
 1. Python import/syntax succeeds.
 2. The model builds on meta and reaches `parallelize_qwen3`.
-3. The redirected training run completes forward/backward and logs enough steps
-   to judge both convergence and steady-state MFU.
+3. The redirected 20-step training run completes forward/backward and logs
+   enough steps to judge both convergence and steady-state MFU.
 4. Use the early logged steps from that same run as the convergence sanity
    check. The loss must stay finite and should trend downward. A candidate that
    is fast but produces NaNs, exploding loss, or a flat/increasing loss curve
@@ -237,6 +243,16 @@ section.
 Do not add clever distributed code unless you can explain the tensor placements,
 residual placement compatibility, gradient placement, and FSDP interaction.
 
+Use profiler output to identify concrete follow-up hypotheses. When the current
+best is runnable, when a candidate is unexpectedly slow, or when ideas are
+running low, run a profiled 20-step experiment on the current best or candidate
+command. Inspect the generated Kineto traces for GPU idle gaps, dominant CUDA
+kernels, collective time, data-loading stalls, compile overhead, and memory
+pressure. Convert profiler observations into one narrow next experiment; for
+example, a communication hotspot can motivate one TP/FSDP layout change, an
+attention hotspot can motivate one attention-backend change, and unused memory
+can motivate one batch-size or checkpointing change.
+
 ## Measurement
 
 Redirect full output to logs. Do not let distributed training spam the context.
@@ -244,8 +260,28 @@ Redirect full output to logs. Do not let distributed training spam the context.
 Example:
 
 ```
-<train command> > run.log 2>&1
+<train command> --training.steps=20 > run.log 2>&1
 ```
+
+Every experiment-loop run must include `--training.steps=20` or an equivalent
+CLI override that makes TorchTitan report `total steps 20` at startup. Treat a
+run with any other step count as invalid for comparison and rerun with the
+20-step cap.
+
+For profiler-driven idea generation, enable TorchTitan's profiler on a normal
+20-step run, for example:
+
+```
+<train command> --training.steps=20 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Profiler traces are written under the dump folder's `profiling/traces`
+directory. Use those traces to explain the next hypothesis in
+`parallelize_results.tsv` or the work log. Because profiling adds overhead, do
+not compare a profiled run's MFU against unprofiled runs as the primary
+performance result unless every candidate being compared was measured with the
+same profiler settings. Enable `--profiler.enable_memory_snapshot` only when
+memory behavior is the bottleneck or when diagnosing OOMs.
 
 Extract metrics from both console logs and the structured JSONL file printed at
 startup:
@@ -366,8 +402,9 @@ LOOP FOREVER after setup is confirmed:
 
 1. Inspect git state and record the current best commit.
 2. Choose exactly one concrete implementation/config hypothesis that is expected
-   to improve MFU over the current best. State the expected mechanism before
-   editing.
+   to improve MFU over the current best. Use recent logs, structured metrics,
+   and profiler traces to generate and justify the hypothesis. State the
+   expected mechanism before editing.
 3. Edit the smallest source/config surface needed for that one hypothesis. Edit
    only `torchtitan/models/qwen3/parallelize.py` and
    `torchtitan/models/qwen3/sharding.py` unless changing launch config knobs in
@@ -375,7 +412,8 @@ LOOP FOREVER after setup is confirmed:
    code that is actually exercised by the candidate command.
 4. Run import/syntax checks.
 5. Commit the candidate.
-6. Run the training command once with output redirected to `run.log`.
+6. Run the training command once with `--training.steps=20` and output
+   redirected to `run.log`.
 7. Use that one run for both correctness and performance. If correctness fails,
    inspect logs, fix obvious bugs, and retry only as needed for diagnosis. If
    the idea is fundamentally broken, log `crash` or `discard`.
@@ -430,4 +468,6 @@ Timeout:
 
 Do not stop after one successful run. Continue until the human interrupts you or
 provides a new instruction. If ideas run low, re-read the reference
-parallelization files and try narrower changes around the best implementation.
+parallelization files, run a profiled 20-step pass on the current best, and try
+narrower changes around the best implementation based on the observed
+bottleneck.
