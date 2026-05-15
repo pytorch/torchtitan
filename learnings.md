@@ -462,3 +462,11 @@ The diagnostic profile of the fused optimizer-state best completed with loss fal
 Rank 0 kernel buckets were dense GEMM/scaled-mm 1.091s / 38.1%, NCCL reduce-scatter 0.604s / 21.1%, flash attention 0.582s / 20.3%, Float8 scale/cast/fused elementwise 0.256s / 8.9%, NCCL all-gather 0.101s / 3.5%, and optimizer kernels 0.037s / 1.3%. All-rank means were dense GEMM 1.090s, reduce-scatter 0.649s, flash attention 0.595s, Float8 scale/cast 0.250s, and all-gather 0.169s.
 
 Compared with the non-fused profile, optimizer-state bf16 mainly lowers memory and the collective buckets are smaller, but reduce-scatter remains the largest single communication bucket and the second-largest broad bucket after dense GEMM. The next evidence-backed throughput idea is a bounded HSDP 2x4 revisit on top of fused optimizer states, because the prior HSDP discard predates the new memory headroom.
+
+## Repeat Profile: Fused Optimizer-State Best
+
+A single repeat of the fused optimizer-state profile completed with loss falling from 12.35789 to 10.80815, peak memory 137.47GiB, MFU `N/A`, and 8,372 profiled tps. The trace was written under `outputs/profiling/traces/iteration_10`.
+
+Rank 0 buckets were dense GEMM/scaled-mm 1.100s / 37.5%, flash attention 0.604s / 20.6%, NCCL reduce-scatter 0.550s / 18.8%, Float8 scale/cast/fused elementwise 0.320s / 10.9%, NCCL all-gather 0.195s / 6.6%, and optimizer kernels 0.038s / 1.3%. All-rank means were dense GEMM 1.095s, reduce-scatter 0.668s, flash attention 0.604s, Float8 scale/cast 0.318s, and all-gather 0.170s.
+
+Compared with the prior non-fused profile, peak memory remains lower at 137.47GiB versus 145.48GiB, reduce-scatter is lower on rank 0 at 0.550s / 18.8% versus 0.854s / 26.2%, and dense GEMM plus flash attention now take the largest share. This confirms fused optimizer states changed memory pressure more than math kernels; the remaining optimization target is still split between dense/attention compute and FSDP communication rather than optimizer kernel time.
