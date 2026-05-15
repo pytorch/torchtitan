@@ -13,57 +13,22 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
+from .sharded_param_metadata import is_flex_shard_param
 
+if TYPE_CHECKING:
     from .bucket_storage import DStorage
-    from .placement_contract import Placement
 
 
 # Module attribute names for storing DStorage
 _DSTORAGE_ATTR = "_dstorage"
 _DSTORAGES_ATTR = "_dstorages"
 
-# Hidden attribute names for placement metadata on plain tensors
-_PLACEMENTS_ATTR = "_placements"
-_GLOBAL_SHAPE_ATTR = "_global_shape"
-_GLOBAL_STRIDE_ATTR = "_global_stride"
-_MESH_ATTR = "_mesh"
 _EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR = (
     "_flex_shard_eager_bucket_unshard_hook_registered"
 )
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
 _PARAM_FQN_ATTR = "_flex_shard_param_fqn"
 _BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
-
-
-def set_sharding_info(
-    tensor: torch.Tensor,
-    placements: tuple[Placement, ...],
-    global_shape: torch.Size,
-    global_stride: tuple[int, ...],
-    mesh: DeviceMesh,
-) -> None:
-    """Annotate a tensor with FlexShard placement metadata."""
-    tensor._placements = placements
-    tensor._global_shape = global_shape
-    tensor._global_stride = global_stride
-    tensor._mesh = mesh
-
-
-def get_placements(tensor: torch.Tensor) -> tuple[Placement, ...] | None:
-    """Get FlexShard placements from a tensor, or None if not annotated."""
-    return getattr(tensor, _PLACEMENTS_ATTR, None)
-
-
-def get_global_shape(tensor: torch.Tensor) -> torch.Size | None:
-    """Get the global (unsharded) shape from a tensor, or None if not annotated."""
-    return getattr(tensor, _GLOBAL_SHAPE_ATTR, None)
-
-
-def is_flex_shard_param(tensor: torch.Tensor) -> bool:
-    """Check if a tensor has FlexShard placement metadata."""
-    return hasattr(tensor, _PLACEMENTS_ATTR)
 
 
 def _is_graph_capture_active() -> bool:
@@ -155,8 +120,14 @@ class ParamModuleInfo:
 
 
 @dataclass
-class EagerParamAccessState:
-    """Mutable state for eager-only FlexShard parameter access."""
+class ParamAccessorState:
+    """Mutable per-parameter state used by FlexShard's property getter.
+
+    Bucket pre-forward hooks write the current full parameter tensor into this
+    state. The dynamically installed parameter property reads it when module
+    code accesses ``self.weight``. This lets eager module code see full params
+    while persistent module storage remains sharded.
+    """
 
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
@@ -165,8 +136,8 @@ class EagerParamAccessState:
 
     def consume_pre_unsharded_param(self) -> torch.Tensor:
         """Return the hook-provided full param or raise for unsupported access."""
-        # In eager mode, _pre_unsharded is set by the bucket unshard
-        # pre-forward hook so parameter reads preserve bucketed collectives.
+        # _pre_unsharded is set by the bucket unshard pre-forward hook so
+        # parameter reads preserve bucketed collectives.
         pre = self._pre_unsharded
         if pre is not None:
             # TODO: Keep this cache valid for the whole forward. Clearing it
@@ -244,9 +215,9 @@ _parametrized_module_class_counter = 0
 
 def _register_param_accessors(
     module: nn.Module,
-    param_states: dict[str, EagerParamAccessState],
+    param_states: dict[str, ParamAccessorState],
 ) -> None:
-    """Register per-parameter property getters that read eager access state.
+    """Register per-parameter property getters that read accessor state.
 
     Uses dynamic subclass creation (not nn.utils.parametrize) to avoid
     state_dict key mangling. state_dict reads self._parameters directly,
@@ -254,12 +225,12 @@ def _register_param_accessors(
 
     Args:
         module: The leaf module owning the parameters.
-        param_states: Maps parameter name to its eager access state.
+        param_states: Maps parameter name to its accessor state.
     """
     global _parametrized_module_class_counter
     _parametrized_module_class_counter += 1
 
-    def _make_flex_shard_param_getter(param_state: EagerParamAccessState):
+    def _make_flex_shard_param_getter(param_state: ParamAccessorState):
         def get_flex_shard_param(self):
             return param_state.consume_pre_unsharded_param()
 
@@ -279,7 +250,7 @@ def _register_param_accessors(
 
 
 def _register_module_param_accessors(
-    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
+    module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
 ) -> None:
     """Register property-based parameter accessors grouped by owning module."""
     for module, param_map in module_param_map.items():

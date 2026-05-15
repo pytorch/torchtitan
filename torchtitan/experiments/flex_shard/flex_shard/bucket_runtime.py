@@ -25,12 +25,12 @@ from .bucket_collectives import (
     UnshardHandle,
 )
 from .bucket_storage import BucketSpec, DStorage, ParamInfo
-from .param_access import (
+from .unsharded_param_access import (
     _BUCKET_FQN_ATTR,
     _EAGER_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
-    EagerParamAccessState,
+    ParamAccessorState,
     ParamModuleInfo,
 )
 from .utils import _get_storage_debug_fqn, _record_function_if_eager
@@ -51,7 +51,7 @@ class ParamEntry:
     """
 
     module_info: ParamModuleInfo
-    access_state: EagerParamAccessState
+    access_state: ParamAccessorState
     param_info: ParamInfo
 
 
@@ -305,7 +305,7 @@ class BucketRuntime:
     def from_storage(
         cls,
         storage: DStorage,
-        module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
+        module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
         context: BucketCommContext | None = None,
     ) -> BucketRuntime | None:
         """Create runtime state for one storage bucket."""
@@ -330,7 +330,7 @@ class BucketRuntime:
     @staticmethod
     def _get_param_entries(
         storage: DStorage,
-        module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
+        module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
     ) -> list[ParamEntry]:
         """Return params in a bucket with their owning module and access state."""
         param_entries: list[ParamEntry] = []
@@ -657,9 +657,9 @@ def _create_eager_param_states(
     storages: list[DStorage],
     fqn_to_bucket_spec: dict[str, BucketSpec],
     device: torch.device,
-) -> dict[nn.Module, dict[str, EagerParamAccessState]]:
+) -> dict[nn.Module, dict[str, ParamAccessorState]]:
     """Create eager parameter access state grouped by owning leaf module."""
-    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]] = {}
+    module_param_map: dict[nn.Module, dict[str, ParamAccessorState]] = {}
 
     for storage in storages:
         bucket_fqn = _get_storage_debug_fqn(storage)
@@ -671,7 +671,7 @@ def _create_eager_param_states(
             compute_device = (
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
-            param_state = EagerParamAccessState(
+            param_state = ParamAccessorState(
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
@@ -691,7 +691,7 @@ def _create_eager_param_states(
 
 def _install_bucket_unshard_hooks(
     storages: list,
-    module_param_map: dict[nn.Module, dict[str, EagerParamAccessState]],
+    module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
 ) -> None:
     """Install pre/post forward hooks for per-bucket unshard.
 
