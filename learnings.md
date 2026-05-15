@@ -434,3 +434,13 @@ This beats both the prior 9,382 tps fused max and the 9,364 tps non-fused max, s
 ## Next Runtime-Overhead Revisit
 
 Revisit `--debug.no-enable-structured-logging` on top of the fused optimizer-state current best. The previous no-structured-logging run beat its baseline on throughput but failed the loss trend gate; because the flag only disables structured trace calls, one bounded retry on the newer command is reasonable. Keep it only if it beats 9,384 tps with finite/falling loss.
+
+## Experiment Review: Structured Logging Disabled on Fused Best
+
+Disabling structured trace logging on the fused optimizer-state current best is a discard. The run completed with the same 137.47GiB peak memory but loss rose from 12.56440 to 19.02411, and throughput reached only 9,363 tps.
+
+This is the second no-structured-logging experiment that failed the loss trend gate, so close that runtime-overhead knob for this autoresearch branch. Keep structured logging enabled in the current best command.
+
+## Next Activation-Budget Probe with Fused Optimizer States
+
+The fused optimizer-state path consistently lowers peak memory to 137.47GiB on valid runs. Try one adjacent activation-budget retune at 0.9375 with fused optimizer states. Before fused optimizer states, 0.9375 was close to the best but did not win; with lower optimizer-state memory, it may reduce recompute or variance enough to beat 9,384 tps while staying below the previous 145.48GiB memory plateau.
