@@ -9,7 +9,6 @@ from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
-from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
@@ -188,10 +187,7 @@ def qwen3_14b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
-        model_spec=model_registry(
-            "14B",
-            converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)],
-        ),
+        model_spec=model_registry("14B"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
