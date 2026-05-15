@@ -8,13 +8,15 @@ import torch
 import torch.nn as nn
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.flex_shard import BucketSpec, flex_shard, OffloadPolicy
-from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
-from torchtitan.experiments.flex_shard.flex_shard.sharded_param import (
+from torchtitan.experiments.flex_shard import (
+    BucketSpec,
+    flex_shard,
     get_global_shape,
     get_placements,
     is_flex_shard_param,
+    OffloadPolicy,
 )
+from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
 from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_access import (
     FlexShardModule,
 )
@@ -44,10 +46,9 @@ class TestFlexShardAPI(TestCase):
 
             self.assertIs(result, model)
             self.assertIsInstance(model, FlexShardModule)
-            self.assertEqual(len(model.dstorages), 5)
-            self.assertIs(model.dstorage, model.dstorages[0])
+            self.assertEqual(len(model.sharded_bucket_storages), 5)
             self.assertEqual(
-                set(model.dstorage.param_infos),
+                set(model.sharded_bucket_storages[0].param_infos),
                 {"tok_embeddings.weight"},
             )
             for param in model.parameters():

@@ -24,16 +24,16 @@ from .bucket_collectives import (
     ReduceGradHandle,
     UnshardHandle,
 )
-from .bucket_storage import BucketSpec, DStorage, ParamInfo
+from .bucket_storage import BucketSpec, ParamInfo, ShardedBucketStorage
 from .unsharded_param_access import (
     _BUCKET_FQN_ATTR,
     _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR,
     _EAGER_COMM_CONTEXTS_ATTR,
     _PARAM_FQN_ATTR,
-    ParamAccessorState,
     ParamModuleRef,
+    UnshardedParamSlot,
 )
-from .utils import _get_storage_debug_fqn, _record_function_if_eager
+from .utils import _get_bucket_storage_debug_fqn, _record_function_if_eager
 
 
 logger = logging.getLogger(__name__)
@@ -44,14 +44,15 @@ class ParamEntry:
     """Per-parameter bucket runtime state.
 
     module_ref locates the live nn.Parameter for local shard reads and grad
-    writes. accessor_state holds mutable forward/backward parameter accessor state.
-    param_info carries immutable storage and placement metadata for collectives.
+    writes. unsharded_param_slot is the hook-to-getter handoff for the current
+    unsharded parameter.
+    param_info carries immutable bucket storage and placement metadata for collectives.
     Keeping them together preserves bucket order and avoids repeated FQN
     resolution in hooks.
     """
 
     module_ref: ParamModuleRef
-    accessor_state: ParamAccessorState
+    unsharded_param_slot: UnshardedParamSlot
     param_info: ParamInfo
 
 
@@ -117,7 +118,7 @@ class BucketCommContext:
         if idx == 0:
             return None
         next_bucket = self.buckets[idx - 1]
-        if not next_bucket.storage._reshard_after_forward:
+        if not next_bucket.bucket_storage._reshard_after_forward:
             return None
         return next_bucket
 
@@ -237,7 +238,7 @@ class BucketCommContext:
             prepared = prepare_reduce_grad(
                 grads,
                 infos,
-                bucket.storage._mesh,
+                bucket.bucket_storage._mesh,
                 debug_fqn=bucket.debug_fqn,
             )
         self.pending_reduce_grad_launches.append(
@@ -296,55 +297,55 @@ def _accumulate_sharded_grads(
 class BucketRuntime:
     """Runtime state and hooks for one FlexShard bucket."""
 
-    storage: DStorage
+    bucket_storage: ShardedBucketStorage
     entries: list[ParamEntry]
     context: BucketCommContext
     debug_fqn: str | None
 
     @classmethod
-    def from_storage(
+    def from_bucket_storage(
         cls,
-        storage: DStorage,
-        module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
+        bucket_storage: ShardedBucketStorage,
+        module_param_slots: dict[nn.Module, dict[str, UnshardedParamSlot]],
         context: BucketCommContext | None = None,
     ) -> BucketRuntime | None:
-        """Create runtime state for one storage bucket."""
-        entries = cls._get_param_entries(storage, module_param_map)
+        """Create runtime state for one bucket storage."""
+        entries = cls._get_param_entries(bucket_storage, module_param_slots)
         logger.debug(
-            f"Batched hooks: {len(entries)}/{len(storage._param_infos)} params matched"
+            f"Batched hooks: {len(entries)}/{len(bucket_storage._param_infos)} params matched"
         )
         if not entries:
             return None
         if context is None:
-            comm_device = cls._comm_device(storage, entries)
-            context = BucketCommContext.get(storage._module, comm_device)
+            comm_device = cls._comm_device(bucket_storage, entries)
+            context = BucketCommContext.get(bucket_storage._module, comm_device)
             if context is None:
-                context = BucketCommContext.create(storage._module, comm_device)
+                context = BucketCommContext.create(bucket_storage._module, comm_device)
         return cls(
-            storage=storage,
+            bucket_storage=bucket_storage,
             entries=entries,
             context=context,
-            debug_fqn=_get_storage_debug_fqn(storage),
+            debug_fqn=_get_bucket_storage_debug_fqn(bucket_storage),
         )
 
     @staticmethod
     def _get_param_entries(
-        storage: DStorage,
-        module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
+        bucket_storage: ShardedBucketStorage,
+        module_param_slots: dict[nn.Module, dict[str, UnshardedParamSlot]],
     ) -> list[ParamEntry]:
-        """Return params in a bucket with their owning module and accessor state."""
+        """Return params in a bucket with owning module refs and unsharded slots."""
         param_entries: list[ParamEntry] = []
-        for info in storage._param_infos.values():
-            module_ref = ParamModuleRef.resolve(storage._module, info.fqn)
-            if module_ref.module in module_param_map:
-                accessor_state = module_param_map[module_ref.module].get(
+        for info in bucket_storage._param_infos.values():
+            module_ref = ParamModuleRef.resolve(bucket_storage._module, info.fqn)
+            if module_ref.module in module_param_slots:
+                unsharded_param_slot = module_param_slots[module_ref.module].get(
                     module_ref.param_name
                 )
-                if accessor_state is not None:
+                if unsharded_param_slot is not None:
                     param_entries.append(
                         ParamEntry(
                             module_ref=module_ref,
-                            accessor_state=accessor_state,
+                            unsharded_param_slot=unsharded_param_slot,
                             param_info=info,
                         )
                     )
@@ -352,14 +353,14 @@ class BucketRuntime:
 
     @staticmethod
     def _comm_device(
-        storage: DStorage,
+        bucket_storage: ShardedBucketStorage,
         entries: list[ParamEntry],
     ) -> torch.device:
         """Return the device used for this bucket's collectives."""
-        comm_device = storage.byte_storage.device
+        comm_device = bucket_storage.byte_storage.device
         for entry in entries:
-            if entry.accessor_state.compute_device is not None:
-                return entry.accessor_state.compute_device
+            if entry.unsharded_param_slot.compute_device is not None:
+                return entry.unsharded_param_slot.compute_device
         return comm_device
 
     @property
@@ -374,15 +375,15 @@ class BucketRuntime:
         local_shards: list[torch.Tensor] = []
         for entry in self.entries:
             module_ref = entry.module_ref
-            accessor_state = entry.accessor_state
+            unsharded_param_slot = entry.unsharded_param_slot
             param = module_ref.module._parameters[module_ref.param_name]
             local_shard = param if use_autograd else param.data
             if (
-                accessor_state.compute_device is not None
-                and local_shard.device != accessor_state.compute_device
+                unsharded_param_slot.compute_device is not None
+                and local_shard.device != unsharded_param_slot.compute_device
             ):
                 local_shard = local_shard.to(
-                    accessor_state.compute_device,
+                    unsharded_param_slot.compute_device,
                     non_blocking=True,
                 )
             local_shards.append(local_shard)
@@ -390,10 +391,10 @@ class BucketRuntime:
 
     def bucket_module(self) -> nn.Module:
         """Find the deepest common ancestor module for this bucket's params."""
-        fqns = list(self.storage._param_infos.keys())
+        fqns = list(self.bucket_storage._param_infos.keys())
         prefixes = [".".join(fqn.split(".")[:-1]) for fqn in fqns]
         if not prefixes:
-            return self.storage._module
+            return self.bucket_storage._module
         common = prefixes[0]
         for prefix in prefixes[1:]:
             i = 0
@@ -406,8 +407,8 @@ class BucketRuntime:
         elif common and common not in prefixes:
             common = ""
         if not common:
-            return self.storage._module
-        mod = self.storage._module
+            return self.bucket_storage._module
+        mod = self.bucket_storage._module
         for part in common.split("."):
             mod = getattr(mod, part)
         return mod
@@ -432,12 +433,12 @@ class BucketRuntime:
         # physical bucket unshard/reduce-grad, so reject them until that
         # support exists instead of silently installing an unreplayable hook.
         if (
-            self.storage._reshard_after_forward
-            and target is self.storage._module
+            self.bucket_storage._reshard_after_forward
+            and target is self.bucket_storage._module
             and any(
                 hasattr(child, "_checkpoint_wrapped_module")
-                for child in self.storage._module.modules()
-                if child is not self.storage._module
+                for child in self.bucket_storage._module.modules()
+                if child is not self.bucket_storage._module
             )
         ):
             logger.debug(
@@ -452,7 +453,7 @@ class BucketRuntime:
         return begin_bucket_unshard(
             self._local_shards(use_autograd=False),
             self.infos,
-            self.storage._mesh,
+            self.bucket_storage._mesh,
             self.context.unshard_stream,
             debug_fqn=self.debug_fqn,
         )
@@ -464,11 +465,11 @@ class BucketRuntime:
 
     def in_reshard_after_forward_recompute(self) -> bool:
         """Return whether this bucket is in reshard-after-forward recompute."""
-        recompute_state = self.storage._reshard_after_forward_recompute_state
+        recompute_state = self.bucket_storage._reshard_after_forward_recompute_state
         return (
-            self.storage._reshard_after_forward
+            self.bucket_storage._reshard_after_forward
             and recompute_state is not None
-            and recompute_state.is_recomputing(id(self.storage))
+            and recompute_state.is_recomputing(id(self.bucket_storage))
         )
 
     def prefetch_next(self) -> None:
@@ -527,7 +528,7 @@ class BucketRuntime:
             result = begin_reduce_grad(
                 grads,
                 infos,
-                self.storage._mesh,
+                self.bucket_storage._mesh,
                 self.context.reduce_grad_stream,
                 debug_fqn=self.debug_fqn,
             )
@@ -556,11 +557,11 @@ class BucketRuntime:
             self.prefetch_next()
             self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
         for entry, full_param in zip(self.entries, full_params, strict=True):
-            entry.accessor_state._current_unsharded_param = full_param
+            entry.unsharded_param_slot._current_unsharded_param = full_param
 
     def post_forward_hook(self, mod, args, output) -> None:
         for entry in self.entries:
-            entry.accessor_state._current_unsharded_param = None
+            entry.unsharded_param_slot._current_unsharded_param = None
 
 
 class _BucketUnshard(torch.autograd.Function):
@@ -590,7 +591,7 @@ class _BucketUnshard(torch.autograd.Function):
             result = begin_bucket_unshard(
                 [shard.detach() for shard in local_shards],
                 runtime.bucket.infos,
-                runtime.bucket.storage._mesh,
+                runtime.bucket.bucket_storage._mesh,
                 runtime.bucket.context.unshard_stream,
                 debug_fqn=runtime.bucket.debug_fqn,
             )
@@ -634,7 +635,7 @@ class _BucketUnshard(torch.autograd.Function):
             result = begin_reduce_grad(
                 grads,
                 valid_infos,
-                bucket.storage._mesh,
+                bucket.bucket_storage._mesh,
                 bucket.context.reduce_grad_stream,
                 debug_fqn=bucket.debug_fqn,
             )
@@ -664,8 +665,8 @@ class _BucketUnshard(torch.autograd.Function):
         return (None, *([None] * ctx.num_inputs))
 
 
-def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
-    bucket_fqn = _get_storage_debug_fqn(storage)
+def _raise_unreplayable_reshard_hook(bucket_storage: ShardedBucketStorage) -> None:
+    bucket_fqn = _get_bucket_storage_debug_fqn(bucket_storage)
     bucket_msg = f" for bucket {bucket_fqn!r}" if bucket_fqn else ""
     raise RuntimeError(
         "FlexShard eager reshard_after_forward could not register a "
@@ -676,18 +677,18 @@ def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
     )
 
 
-def _create_param_accessor_states(
+def _create_unsharded_param_slots(
     module: nn.Module,
-    storages: list[DStorage],
+    bucket_storages: list[ShardedBucketStorage],
     fqn_to_bucket_spec: dict[str, BucketSpec],
     device: torch.device,
-) -> dict[nn.Module, dict[str, ParamAccessorState]]:
-    """Create parameter accessor state grouped by owning leaf module."""
-    module_param_map: dict[nn.Module, dict[str, ParamAccessorState]] = {}
+) -> dict[nn.Module, dict[str, UnshardedParamSlot]]:
+    """Create unsharded parameter slots grouped by owning leaf module."""
+    module_param_slots: dict[nn.Module, dict[str, UnshardedParamSlot]] = {}
 
-    for storage in storages:
-        bucket_fqn = _get_storage_debug_fqn(storage)
-        for fqn, info in storage._param_infos.items():
+    for bucket_storage in bucket_storages:
+        bucket_fqn = _get_bucket_storage_debug_fqn(bucket_storage)
+        for fqn, info in bucket_storage._param_infos.items():
             bucket_spec = fqn_to_bucket_spec[fqn]
             mp_policy = bucket_spec.mp_policy
             param_dtype = mp_policy.param_dtype if mp_policy else None
@@ -695,56 +696,60 @@ def _create_param_accessor_states(
             compute_device = (
                 torch.device(device) if bucket_spec.offload_policy is not None else None
             )
-            accessor_state = ParamAccessorState(
+            unsharded_param_slot = UnshardedParamSlot(
                 param_dtype=param_dtype,
                 reduce_dtype=reduce_dtype,
                 compute_device=compute_device,
             )
 
-            setattr(accessor_state, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False)
-            setattr(accessor_state, _PARAM_FQN_ATTR, fqn)
-            setattr(accessor_state, _BUCKET_FQN_ATTR, bucket_fqn)
+            setattr(unsharded_param_slot, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False)
+            setattr(unsharded_param_slot, _PARAM_FQN_ATTR, fqn)
+            setattr(unsharded_param_slot, _BUCKET_FQN_ATTR, bucket_fqn)
 
             module_ref = ParamModuleRef.resolve(module, fqn)
-            module_param_map.setdefault(module_ref.module, {})[
+            module_param_slots.setdefault(module_ref.module, {})[
                 module_ref.param_name
-            ] = accessor_state
+            ] = unsharded_param_slot
 
-    return module_param_map
+    return module_param_slots
 
 
 def _install_bucket_unshard_hooks(
-    storages: list,
-    module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
+    bucket_storages: list[ShardedBucketStorage],
+    module_param_slots: dict[nn.Module, dict[str, UnshardedParamSlot]],
 ) -> None:
     """Install pre/post forward hooks for per-bucket unshard.
 
-    In eager mode, each DStorage's pre-forward hook starts a single bucket
-    unshard call (one collective per bucket), then sets
-    _current_unsharded_param on each parameter accessor state so the property
-    getter can return the hook-provided tensor.
+    In eager mode, each ShardedBucketStorage's pre-forward hook starts a single bucket
+    unshard call (one collective per bucket), then fills each
+    UnshardedParamSlot so the property getter can return the hook-provided
+    tensor.
 
     CUDA buckets use the same custom autograd bucket path in eager and compile
     so Dynamo traces the same bucket pre-hook and parameter access logic.
     """
-    for storage in storages:
-        if not storage._param_infos:
+    for bucket_storage in bucket_storages:
+        if not bucket_storage._param_infos:
             raise AssertionError("Expected FlexShard bucket storage to own parameters.")
-        if storage.byte_storage.device.type != "cuda":
+        if bucket_storage.byte_storage.device.type != "cuda":
             raise AssertionError("Expected FlexShard bucket storage to be on CUDA.")
 
-        bucket_runtime = BucketRuntime.from_storage(
-            storage=storage,
-            module_param_map=module_param_map,
+        bucket_runtime = BucketRuntime.from_bucket_storage(
+            bucket_storage=bucket_storage,
+            module_param_slots=module_param_slots,
         )
         if bucket_runtime is None:
             continue
 
         target = bucket_runtime.resolve_bucket_forward_hook_module()
         if target is None:
-            _raise_unreplayable_reshard_hook(storage)
+            _raise_unreplayable_reshard_hook(bucket_storage)
         target.register_forward_pre_hook(bucket_runtime.pre_forward_hook)
         target.register_forward_hook(bucket_runtime.post_forward_hook)
         bucket_runtime.context.buckets.append(bucket_runtime)
         for entry in bucket_runtime.entries:
-            setattr(entry.accessor_state, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, True)
+            setattr(
+                entry.unsharded_param_slot,
+                _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR,
+                True,
+            )

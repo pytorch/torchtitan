@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from .bucket_storage import DStorage
+from .bucket_storage import ShardedBucketStorage
 from .utils import (
     _module_path_common_prefix,
     _strip_checkpoint_wrapped_module_path,
@@ -235,12 +235,12 @@ def _set_module_by_path(module: nn.Module, path: str, child: nn.Module) -> None:
         setattr(parent, name, child)
 
 
-def _get_module_paths_to_wrap(storage: DStorage) -> list[str]:
+def _get_module_paths_to_wrap(bucket_storage: ShardedBucketStorage) -> list[str]:
     """Return module paths to wrap for one reshard-after-forward bucket."""
     owner_paths = sorted(
         {
             _strip_checkpoint_wrapped_module_path(".".join(fqn.split(".")[:-1]))
-            for fqn in storage._param_infos
+            for fqn in bucket_storage._param_infos
             if "." in fqn
         }
     )
@@ -251,25 +251,25 @@ def _get_module_paths_to_wrap(storage: DStorage) -> list[str]:
     if common:
         top_level_paths = sorted(
             {
-                _top_level_owner_path(storage._module, owner_path)
+                _top_level_owner_path(bucket_storage._module, owner_path)
                 for owner_path in owner_paths
             }
         )
         top_level_paths = [path for path in top_level_paths if path]
         if len(top_level_paths) == 1 and top_level_paths[0] != common:
             return top_level_paths
-        target = _get_module_by_path(storage._module, common)
+        target = _get_module_by_path(bucket_storage._module, common)
         if isinstance(target, (nn.ModuleDict, nn.ModuleList)):
             return sorted(
                 {
-                    _top_level_owner_path(storage._module, owner_path)
+                    _top_level_owner_path(bucket_storage._module, owner_path)
                     for owner_path in owner_paths
                 }
             )
         return [common]
     return sorted(
         {
-            _top_level_owner_path(storage._module, owner_path)
+            _top_level_owner_path(bucket_storage._module, owner_path)
             for owner_path in owner_paths
         }
     )
@@ -277,7 +277,7 @@ def _get_module_paths_to_wrap(storage: DStorage) -> list[str]:
 
 def _apply_reshard_after_forward(
     module: nn.Module,
-    reshard_storages: list[DStorage],
+    reshard_bucket_storages: list[ShardedBucketStorage],
 ) -> None:
     """Wrap FlexShard-managed bucket modules for reshard-after-forward.
 
@@ -294,13 +294,13 @@ def _apply_reshard_after_forward(
     recompute_state = _ReshardAfterForwardRecomputeState()
     bucket_ids_by_path: dict[str, set[int]] = {}
     child_paths = [name for name, _ in module.named_children()]
-    for storage in reshard_storages:
-        storage._reshard_after_forward_recompute_state = recompute_state
-        storage_paths = _get_module_paths_to_wrap(storage)
-        if not storage_paths:
-            storage_paths = child_paths
-        for path in storage_paths:
-            bucket_ids_by_path.setdefault(path, set()).add(id(storage))
+    for bucket_storage in reshard_bucket_storages:
+        bucket_storage._reshard_after_forward_recompute_state = recompute_state
+        bucket_storage_paths = _get_module_paths_to_wrap(bucket_storage)
+        if not bucket_storage_paths:
+            bucket_storage_paths = child_paths
+        for path in bucket_storage_paths:
+            bucket_ids_by_path.setdefault(path, set()).add(id(bucket_storage))
 
     for path in sorted(bucket_ids_by_path, key=lambda p: (p.count("."), p)):
         child = _get_module_by_path(module, path)

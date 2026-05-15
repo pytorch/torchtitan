@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .bucket_runtime import _create_param_accessor_states, _install_bucket_unshard_hooks
+from .bucket_runtime import _create_unsharded_param_slots, _install_bucket_unshard_hooks
 from .bucket_storage import (
     _assign_params_to_buckets,
     _materialize_bucket_storages,
@@ -23,7 +23,7 @@ from .reshard_after_forward import _apply_reshard_after_forward
 from .unsharded_param_access import (
     _attach_flex_shard_module_state,
     _check_not_already_flex_sharded,
-    _register_module_param_accessors,
+    _install_unsharded_param_getters,
     FlexShardModule,
 )
 from .utils import (
@@ -164,10 +164,10 @@ def flex_shard(
     3. Creates a unified byte buffer per bucket for all its parameters
     4. Replaces each parameter with a plain tensor annotated with placement metadata
     5. Registers property-based accessors for eager parameter access
-    6. Stores DStorages on the module (accessible via module.dstorages)
+    6. Stores ShardedBucketStorage objects on the module
 
-    Each bucket gets its own byte buffer and DStorage, enabling independent
-    unshard operations per bucket.
+    Each bucket gets its own byte buffer and ShardedBucketStorage, enabling
+    independent unshard operations per bucket.
 
     Args:
         module: The module to shard. CPU modules are moved to the mesh's CUDA
@@ -181,7 +181,8 @@ def flex_shard(
             checkpoint recomputation.
 
     Returns:
-        The module (mutated in-place). Use module.dstorages to access internals.
+        The module (mutated in-place). Use
+        module.sharded_bucket_storages to inspect bucket storage internals.
 
     Example::
 
@@ -220,7 +221,7 @@ def flex_shard(
         buckets,
     )
 
-    storages, fqn_to_bucket_spec = _materialize_bucket_storages(
+    bucket_storages, fqn_to_bucket_spec = _materialize_bucket_storages(
         module,
         inputs.named_params,
         inputs.bucket_assignments,
@@ -230,25 +231,25 @@ def flex_shard(
         inputs.device,
     )
 
-    _attach_flex_shard_module_state(module, storages)
+    _attach_flex_shard_module_state(module, bucket_storages)
 
-    module_param_map = _create_param_accessor_states(
+    module_param_slots = _create_unsharded_param_slots(
         module,
-        storages,
+        bucket_storages,
         fqn_to_bucket_spec,
         inputs.device,
     )
-    _register_module_param_accessors(module_param_map)
+    _install_unsharded_param_getters(module_param_slots)
 
     # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
     # a selective policy that recomputes only collective ops (all-gather,
     # broadcast), saving compute ops to avoid redundant work.
-    reshard_storages = [s for s in storages if s._reshard_after_forward]
-    if reshard_storages:
-        _apply_reshard_after_forward(module, reshard_storages)
+    reshard_bucket_storages = [s for s in bucket_storages if s._reshard_after_forward]
+    if reshard_bucket_storages:
+        _apply_reshard_after_forward(module, reshard_bucket_storages)
 
     # Install bucket unshard hooks for eager mode when the storage layout
     # supports one collective per bucket.
-    _install_bucket_unshard_hooks(storages, module_param_map)
+    _install_bucket_unshard_hooks(bucket_storages, module_param_slots)
 
     return module
