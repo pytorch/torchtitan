@@ -112,11 +112,13 @@ class Llama3Model(Decoder):
                 )
 
             from torchtitan.models.llama3.sharding import set_llama3_sharding_config
+            from torchtitan.components.loss import ChunkedCELoss
 
             set_llama3_sharding_config(
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
+                chunked_loss=isinstance(trainer_config.loss, ChunkedCELoss.Config),
             )
 
         def get_nparams_and_flops(
