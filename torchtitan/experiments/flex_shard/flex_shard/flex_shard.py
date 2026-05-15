@@ -18,13 +18,13 @@ from .bucket_storage import (
     _materialize_bucket_storages,
     BucketSpec,
 )
-from .param_access import (
+from .reshard_after_forward import _apply_reshard_after_forward
+from .unsharded_param_access import (
     _attach_flex_shard_module_state,
     _check_not_already_flex_sharded,
     _register_module_param_accessors,
     FlexShardModule,
 )
-from .reshard_after_forward import _apply_reshard_after_forward
 from .utils import (
     _get_device_from_mesh,
     _get_managed_named_params,

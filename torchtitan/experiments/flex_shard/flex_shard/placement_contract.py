@@ -75,11 +75,11 @@ class PlacementReduceGradResult:
 class Placement(ABC):
     """Base class for FlexShard placement strategies.
 
-    Each subclass implements per-param sharding, storage layout, full-parameter
-    assembly, and gradient-reduction packing. The placement also owns the
-    collective pattern for bucket unshard and gradient reduction. For example,
-    Shard uses all-gather and reduce-scatter, while Owned uses broadcast and
-    reduce-to-owner.
+    The base class provides shared local storage helpers. Subclasses implement
+    the methods below that raise NotImplementedError: per-param local payload
+    selection and the bucket collective lifecycle for unshard and gradient
+    reduction. For example, Shard uses all-gather and reduce-scatter, while
+    Owned uses broadcast and reduce-to-owner.
     """
 
     def __init_subclass__(cls) -> None:
@@ -117,16 +117,11 @@ class Placement(ABC):
         rank: int,
         world_size: int,
     ) -> torch.Tensor:
-        """Extract this rank's local shard from the full parameter."""
-        raise NotImplementedError
+        """Extract this rank's local payload from the full parameter.
 
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Reconstruct the full parameter from typed per-rank shards."""
+        The returned tensor may be a view and does not need to be contiguous.
+        FlexShard makes it contiguous before copying into bucket byte storage.
+        """
         raise NotImplementedError
 
     def local_storage_layout(
@@ -157,11 +152,11 @@ class Placement(ABC):
         param_data = param.detach()
         if param_data.device.type == "meta":
             return
-        if not param_data.is_contiguous():
-            param_data = param_data.contiguous()
         shard = self.extract_local_shard(param_data, rank, world_size)
         if shard.numel() == 0:
             return
+        if not shard.is_contiguous():
+            shard = shard.contiguous()
         nbytes = shard.numel() * shard.element_size()
         if nbytes > info.storage_nbytes:
             raise ValueError(
@@ -169,7 +164,7 @@ class Placement(ABC):
                 f"but its storage layout only reserved {info.storage_nbytes} bytes."
             )
         byte_storage[info.byte_offset : info.byte_offset + nbytes].copy_(
-            shard.reshape(-1).view(torch.uint8)
+            shard.view(-1).view(torch.uint8)
         )
 
     def make_local_storage_view(
