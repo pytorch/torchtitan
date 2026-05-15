@@ -267,6 +267,13 @@ class RLTrainer(Configurable):
         )
 
         def __post_init__(self):
+            if self.generator.checkpoint.enable:
+                raise ValueError(
+                    "Generator checkpoint must be disabled in the RL loop "
+                    "(weights are synced from the trainer via TorchStore). "
+                    "Set generator.checkpoint.enable=False."
+                )
+
             if self.trainer.debug.batch_invariant:
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")

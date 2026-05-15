@@ -11,15 +11,10 @@ from typing import Any
 
 import torch
 import torch.distributed._functional_collectives as funcol
-import torch.distributed.checkpoint as dcp
 import torch.distributed.distributed_c10d as c10d
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
-from torch.distributed.checkpoint.state_dict import (
-    get_model_state_dict,
-    set_model_state_dict,
-    StateDictOptions,
-)
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -83,6 +78,9 @@ class PolicyTrainer(Actor, Configurable):
         ac_config: ActivationCheckpointConfig = field(
             default_factory=lambda: ActivationCheckpointConfig(mode="none")
         )
+        checkpoint: CheckpointManager.Config = field(
+            default_factory=CheckpointManager.Config
+        )
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
 
@@ -145,7 +143,7 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
-        model = self._build_model(model_spec, config, device_type, hf_assets_path)
+        model = self._build_model(model_spec, config, device_type)
         model.train()
         self.model = model
         self.model_parts = [model]
@@ -158,6 +156,25 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         self.policy_version = 0
+
+        # Always build CheckpointManager; enable is a field on the config.
+        # When enable=False (CI/debug), load() is a no-op and random init stands.
+        self.checkpointer = config.checkpoint.build(
+            dataloader=None,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states={"train_state": self},
+            sd_adapter=self.sd_adapter,
+            base_folder=config.dump_folder,
+        )
+        self.checkpointer.load()
+        if not self.checkpointer.enable:
+            logger.warning(
+                "Checkpoint disabled, skip weight loading and use random-initialized weights. "
+                "Set checkpoint.enable=True to load from a checkpoint."
+            )
+
         self.generator: Any | None = None
 
         # Data parallelism: mesh is available after _build_model triggers build_mesh
@@ -174,45 +191,17 @@ class PolicyTrainer(Actor, Configurable):
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
 
+    def state_dict(self) -> dict[str, Any]:
+        return {"policy_version": self.policy_version}
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self.policy_version = state_dict["policy_version"]
+
     @endpoint
     async def close(self) -> None:
         """Destroy the worker's torch.distributed process group."""
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
-
-    def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
-        """Load model weights from HF checkpoint using DCP and state_dict_adapter.
-
-        Args:
-            model: The model to load weights into.
-            checkpoint_path: Path to HF checkpoint directory.
-        """
-        if self.sd_adapter is None:
-            logger.warning(
-                "No state_dict_adapter available, skipping initial weight load"
-            )
-            return
-
-        if not os.path.isdir(checkpoint_path):
-            raise FileNotFoundError(
-                f"Checkpoint path {checkpoint_path!r} does not exist. "
-                "Please provide a valid path to a HuggingFace checkpoint directory."
-            )
-
-        storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_path)
-        hf_state_dict = self.sd_adapter.to_hf(model.state_dict())
-        dcp.load(hf_state_dict, storage_reader=storage_reader)
-        torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
-
-        set_model_state_dict(
-            model=model,
-            model_state_dict=torchtitan_state_dict,
-            options=StateDictOptions(strict=True),
-        )
-        logger.info(
-            f"Loaded initial weights from {checkpoint_path} "
-            f"({len(torchtitan_state_dict)} parameters)"
-        )
 
     @sl.log_trace_span("build_model")
     def _build_model(
@@ -220,18 +209,19 @@ class PolicyTrainer(Actor, Configurable):
         model_spec: ModelSpec,
         config: Config,
         device_type: str,
-        hf_assets_path: str,
     ):
-        """Build, parallelize, and initialize a model from checkpoint.
+        """Build, parallelize, and initialize a model with random weights.
+
+        Checkpoint loading (e.g. from HF) is handled separately by
+        CheckpointManager after model and optimizer construction.
 
         Args:
             model_spec: Model specification for building and parallelizing.
-            config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
+            config: Trainer config (used for dtype, parallelism, etc.).
             device_type: Device type string (e.g. "cuda").
-            hf_assets_path: Path to HF assets folder for checkpoint loading.
 
         Returns:
-            Initialized model with weights loaded from checkpoint.
+            Model with random-initialized weights.
         """
 
         # TODO: Also support flex attention backend later.
@@ -263,9 +253,6 @@ class PolicyTrainer(Actor, Configurable):
         model.to_empty(device=device_type)
         with torch.no_grad():
             model.init_weights(buffer_device=None)
-
-        # Load initial weights from HF
-        self._load_initial_hf_weights(model, hf_assets_path)
 
         return model
 
@@ -461,17 +448,17 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     @sl.log_trace_span("save_checkpoint")
-    async def save_checkpoint(self, path: str) -> None:
-        """Save model state dict to disk via DCP.
+    async def save_checkpoint(self, step: int, last_step: bool = False) -> bool:
+        """Save checkpoint via CheckpointManager.
 
         Args:
-            path: Directory to save the checkpoint to.
+            step: Current training step number.
+            last_step: Whether this is the final step of training.
+
+        Returns:
+            True if a checkpoint was saved.
         """
-        # TODO: Reuse torchtitan's CheckpointManager for async saves, HF export,
-        # and checkpoint loading for resume support.
-        state_dict = {"model": get_model_state_dict(self.model)}
-        dcp.save(state_dict, checkpoint_id=path)
-        logger.info(f"Saved checkpoint to {path}")
+        return self.checkpointer.save(step, last_step=last_step)
 
     @endpoint
     @sl.log_trace_span("push_model_state_dict")
