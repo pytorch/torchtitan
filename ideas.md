@@ -29,11 +29,47 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.enable_sequence_parallel`
   - Success criteria and expected risk: Discarded at `e67f61c`; it ran correctly but fell to 4,971 tps, so TP collectives and smaller local matmuls outweighed the memory savings for this shape.
 
-- Idea: Local batch size 8 with FSDP no-reshard
+- ~~Idea: Local batch size 8 with FSDP no-reshard~~
   - Current best source commit: 9db79f7 result row / current source after TP revert
   - Source: profile and memory-headroom analysis
   - Expected mechanism for improving reported tokens/sec: The best run keeps FSDP parameters unresharded after forward and reaches only 72.2GiB peak on a 178.35GiB B200. Doubling local batch size should increase useful tokens per optimizer step and per FSDP collective while staying below the memory risk threshold.
   - Supporting evidence: Baseline profile rank 0 showed NCCL reduce-scatter as the largest kernel bucket at about 0.86s in the captured step and all-gather around 0.23s. The no-reshard candidate improved tps from 5,774 to 5,872 while using 40.49% memory, leaving room to increase batch before considering more mesh complexity.
   - Planned source/config changes: None; command-only candidate.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --training.local_batch_size=8`
-  - Success criteria and expected risk: Keep if finite loss and steady-state tps exceed 5,872 with peak memory below roughly 95% of available GPU memory. Risk is OOM or lower efficiency from longer step time outweighing larger batch.
+  - Success criteria and expected risk: Discarded at `dfac656`; tps was essentially tied at 5,873 but loss increased from 12.42 to 16.38, so it failed the convergence sanity check.
+
+- Idea: Selective activation checkpointing with FSDP no-reshard
+  - Current best source commit: 9db79f7 result row / current source after TP revert
+  - Source: memory-headroom analysis
+  - Expected mechanism for improving reported tokens/sec: Full activation checkpointing saves memory but recomputes every block. Selective checkpointing should keep enough memory headroom on B200 while reducing recomputation and improving matmul/attention useful work per step.
+  - Supporting evidence: Full AC plus no-reshard used 72.2GiB, far below the 178.35GiB capacity, and the profile/MFU indicated compute headroom remained.
+  - Planned source/config changes: None; command-only candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective`
+  - Success criteria and expected risk: Kept at `0b0796f` with 6,808 tps, 28.45% MFU, 113.7GiB peak memory, and falling finite loss.
+
+- ~~Idea: Disable activation checkpointing with FSDP no-reshard~~
+  - Current best source commit: 0b0796f
+  - Source: memory-headroom follow-up
+  - Expected mechanism for improving reported tokens/sec: Removing recomputation entirely could improve throughput if memory stayed below the B200 limit.
+  - Supporting evidence: Selective AC still used only 113.7GiB, leaving apparent headroom before the experiment.
+  - Planned source/config changes: None; command-only candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=none`
+  - Success criteria and expected risk: Crashed at `dc56c35`; no-AC with no-reshard OOMed during RoPE with about 178.15GiB in use.
+
+- ~~Idea: Selective checkpointing without RNG preservation~~
+  - Current best source commit: 0b0796f
+  - Source: activation-checkpoint overhead follow-up
+  - Expected mechanism for improving reported tokens/sec: Avoiding RNG state preservation can reduce checkpoint wrapper overhead if dropout/RNG is irrelevant for this model path.
+  - Supporting evidence: The selective-AC run was the best result, so reducing wrapper overhead was a narrow follow-up.
+  - Planned source/config changes: None; command-only candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation-checkpoint.mode=selective --activation-checkpoint.no-preserve-rng-state`
+  - Success criteria and expected risk: Discarded at `9690a1`; throughput dropped to 6,775 tps and loss was flat/increasing by step 10.
+
+- Idea: Local batch size 6 with selective AC and no-reshard
+  - Current best source commit: 0b0796f
+  - Source: memory-headroom and batch-scaling analysis
+  - Expected mechanism for improving reported tokens/sec: Selective AC is the current best and uses 113.7GiB. A smaller batch increase than the failed batch-8/full-AC run may increase useful tokens per collective and improve GPU occupancy while staying below the no-AC OOM boundary.
+  - Supporting evidence: Full AC batch 8 had enough memory but failed loss sanity, while no-AC batch 4 OOMed. Selective AC batch 4 leaves roughly 64% peak memory use, so batch 6 is a narrower memory-headroom probe than batch 8.
+  - Planned source/config changes: None; command-only candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --training.local_batch_size=6`
+  - Success criteria and expected risk: Keep only if loss stays finite and does not show the batch-8 increasing pattern, tps exceeds 6,808, and peak memory stays below roughly 95% of B200 capacity. Risk is OOM or slower per-token throughput from memory pressure.
