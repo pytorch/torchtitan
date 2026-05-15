@@ -482,3 +482,15 @@ Loss was finite/falling from 12.35089 to 9.74531, but peak memory rose to 166.04
 The command-only `--comm.trace_buf_size=0` probe on the fused optimizer-state current best is a discard. It reached 8,907 tps, peak memory 137.47GiB, and MFU `N/A`, below the 9,384 tps current best.
 
 Loss rose from 12.47707 to 16.04552, so disabling NCCL flight recorder buffering did not preserve the objective's finite/falling-loss requirement. Treat communication-side trace buffering as non-useful for this fused best; the remaining evidence points back to compute/attention or stability-sensitive knobs rather than this diagnostic buffer.
+
+## Next Activation-Checkpoint Overhead Probe
+
+Try disabling activation-checkpoint RNG state preservation on the fused optimizer-state current best. The Qwen3 model path has no dropout references, and `docs/debugging.md` notes that `preserve_rng_state` can be slower because checkpointing stashes and restores RNG state around recompute. Since memory-budget AC is still central to the best command, this is a targeted overhead knob that does not change sharding, Float8 coverage, optimizer implementation, or communication topology.
+
+The intended command adds only `--activation_checkpoint.no-preserve-rng-state` to the current best command. Keep it only if the loss remains finite/falling and throughput beats 9,384 tps.
+
+## Experiment Review: Disable Activation-Checkpoint RNG Preservation
+
+The command-only `--activation_checkpoint.no-preserve-rng-state` probe on the fused optimizer-state current best is a discard. The tyro CLI accepted the preferred spelling, the run completed with finite/falling loss from 12.37173 to 8.02247, peak memory stayed 137.47GiB, and MFU was `N/A`.
+
+Throughput reached only 8,686 tps, well below the 9,384 tps current best. Do not pursue RNG-preservation disabling as an activation-checkpoint overhead win for this Qwen3 fused optimizer-state configuration; either its overhead is not on the critical path here or the changed checkpoint behavior interacts poorly with compile/recompute scheduling.

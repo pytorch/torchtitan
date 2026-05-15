@@ -535,3 +535,12 @@
   - Planned source/config changes: None; command-only communication diagnostics knob on the current best.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16 --comm.trace_buf_size=0`
   - Success criteria and expected risk: Discarded at `2c30ff05`; disabling the NCCL flight recorder buffer reached only 8,907 tps and loss rose from 12.47707 to 16.04552, so it failed both the throughput and falling-loss gates. Peak memory stayed at 137.47GiB.
+
+- ~~Idea: Disable activation-checkpoint RNG state preservation on fused optimizer-state best~~
+  - Current best result row: 9,384 tps from fused bfloat16 optimizer states, bfloat16 FSDP reduction, `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: manager activation-checkpoint overhead review after communication-side probes failed.
+  - Expected mechanism for improving reported tokens/sec: `preserve_rng_state=True` makes checkpointing stash and restore RNG state around recompute. The Qwen3 model code has no dropout references in the current path, so disabling RNG preservation should avoid that overhead without changing model placements, Float8 coverage, optimizer, or communication.
+  - Supporting evidence: `docs/debugging.md` explicitly notes that preserving RNG state may be slower. The fused profile shows dense GEMM/attention/recompute-adjacent work now dominates over optimizer kernels, and higher activation budgets or HSDP did not produce valid wins, so a low-risk checkpoint-overhead knob is worth one run.
+  - Planned source/config changes: None; command-only activation-checkpoint knob on the current best.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --activation_checkpoint.no-preserve-rng-state --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
+  - Success criteria and expected risk: Discarded at `5d8ba810`; the preferred CLI spelling was accepted and loss fell from 12.37173 to 8.02247, but throughput reached only 8,686 tps versus the 9,384 tps current best. Peak memory stayed at 137.47GiB.
