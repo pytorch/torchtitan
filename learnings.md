@@ -534,3 +534,9 @@ This is worse than both the 9,384 tps fused bfloat16 optimizer-state best and th
 The CP=2 source-backed probe on the fused optimizer-state best is a crash discard. The minimal Qwen3 source change successfully removed the CP guard, wrapped each layer's `attention.inner_attention` with `apply_cp_to_forward`, and created active mesh dimensions `['batch', 'loss', 'fsdp', 'cp', 'efsdp']`, but the run failed before step 1.
 
 The failure is in the same compiler-memory-budget area as earlier TP=2 memory-budget attempts: Inductor raised `RuntimeError: Unknown metadata type <class 'torch._library.fake_class_registry.FakeScriptObject'> on node primals_10` during min-cut activation partitioning. No loss, throughput, MFU, or peak training memory was emitted, so this provides no valid throughput row. Revert the CP source change and keep the 9,384 tps fused optimizer-state command as the current best.
+
+## Experiment Review: Varlen Attention Backend
+
+The Qwen3 14B `attn_backend="varlen"` source-backed probe is a crash discard. The only source change was adding `attn_backend="varlen"` to the `qwen3_14b()` `model_registry("14B", ...)` call while preserving the existing `rowwise_with_gw_hp` Float8 converter and filters, but the run failed during model construction before step 1.
+
+The failure is a dependency gate rather than a throughput or numerical result: `VarlenAttention` attempted to activate FA3 and import `flash_attn_interface`, which is not installed in this environment. No loss, throughput, MFU, or peak memory was emitted. Revert the varlen config change and keep the SDPA fused optimizer-state command as the current best at 9,384 tps.
