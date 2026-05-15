@@ -327,3 +327,12 @@
   - Planned source/config changes: In `qwen3_14b()` only, change `Float8LinearConverter.Config(recipe_name="rowwise", ...)` to `recipe_name="rowwise_with_gw_hp"` while keeping the existing filters and `model_compile_enabled=True`.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
   - Success criteria and expected risk: Kept at `2c54749b`; the run completed with finite/falling loss from 12.29840 to 9.54931, MFU `N/A`, 145.05GiB peak memory, and 9,229 tps, beating the prior 8,897 tps best. The `rowwise_with_gw_hp` recipe source change was kept.
+
+- ~~Idea: Repeat-confirm Float8 rowwise_with_gw_hp current best~~
+  - Current best source commit: `2c54749b`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: manager repeat-confirmation after unexpectedly large recipe win; an identical command is already active in the checkout.
+  - Expected mechanism for improving reported tokens/sec: Re-running the exact new-best command checks whether the 9,229 tps result is stable or a favorable variance sample before spending runs on adjacent activation budgets.
+  - Supporting evidence: Earlier memory-budget rows showed high variance, and `rowwise_with_gw_hp` unexpectedly beat rowwise by 332 tps despite using a high-precision grad-weight path. A repeat is the fastest way to distinguish a robust recipe win from noise.
+  - Planned source/config changes: None; repeat on the current kept `rowwise_with_gw_hp` source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded as repeat diagnostic at `a1f59bf`; the run completed with finite/falling loss from 12.37330 to 7.53270, MFU `N/A`, and the same 145.05GiB peak memory, but reached 9,213 tps versus the 9,229 tps best.

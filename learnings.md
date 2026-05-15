@@ -268,3 +268,13 @@ Memory-budget tuning and local batch size are saturated on the current best stac
 The `rowwise_with_gw_hp` Float8 recipe is the new best on the current stack. Changing only the `qwen3_14b()` `Float8LinearConverter.Config` recipe and running 8-way FSDP no-reshard with model-only compile and memory-budget 0.95 completed with finite/falling loss from 12.29840 to 9.54931, MFU `N/A`, and 145.05GiB peak memory.
 
 Throughput reached 9,229 tps, beating the previous 8,897 tps best by 332 tps while using roughly the same memory region. Despite moving the grad-weight GEMM inputs back to high precision, the reduced Float8 casting/scaling work appears to pay off for this 10-step workload. Keep the source change and treat `rowwise_with_gw_hp` plus memory-budget 0.95 as the current best.
+
+## Next Rowwise GW-HP Repeat
+
+An identical `rowwise_with_gw_hp` memory-budget 0.95 command is already active after the new-best commit. Finalize it as a repeat-confirmation run rather than starting a different experiment. If it stays near 9,229 tps with falling loss, the recipe win is likely robust; if it falls back toward the old 8.9k plateau, treat the first row as a favorable variance sample before trying adjacent budgets.
+
+## Experiment Review: rowwise_with_gw_hp Repeat
+
+The exact `rowwise_with_gw_hp` current-best command repeated successfully and supports the new recipe as a real improvement, but it did not set a new best. The run completed with finite loss falling from 12.37330 to 7.53270, peak memory matching the prior row at 145.05GiB, MFU `N/A`, and 9,213 tps.
+
+Record this as a discard diagnostic because it is 16 tps below the 9,229 tps best. The repeat is still close enough to confirm that `rowwise_with_gw_hp` is consistently in the 9.2k tps range on this stack, rather than only a one-off spike.
