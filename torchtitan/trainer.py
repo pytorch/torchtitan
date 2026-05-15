@@ -648,14 +648,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
-        typechecking = self.config.debug.spmd_typechecking
-        if typechecking not in (None, "global"):
-            raise ValueError(
-                "debug.spmd_typechecking only supports None or 'global'."
-        )
         typecheck_scope = (
             spmd.typecheck(local=False)
-            if typechecking == "global"
+            if self.config.debug.spmd_typechecking
             else contextlib.nullcontext()
         )
 
