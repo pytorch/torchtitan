@@ -82,7 +82,7 @@ def parallelize_qwen3(
             parallelism.fsdp_reshard_after_forward == "always"
         )
 
-    for layer in model.layers:
+    for layer in model.layers.values():
         fully_shard(layer, **fsdp_config)
     fully_shard(model, **fsdp_config)
     logger.info("Applied FSDP to the Qwen3 model")
