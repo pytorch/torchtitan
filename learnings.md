@@ -162,3 +162,9 @@ The memory-budget lever now looks saturated for this workload. The 0.9 profile s
 The HSDP 2x4 lower-budget probe completed but was much slower than the current best. With `dp_replicate=2`, `dp_shard=4`, no-reshard FSDP, Float8 rowwise, model-only compile, and memory budget 0.75, loss fell from 12.62485 to 7.83562 and peak memory reached 157.72GiB, but throughput was only 5,455 tps with MFU `N/A`. This is below the 8,877 tps memory-budget 0.9 best and below the prior 0.75 8-way FSDP row.
 
 The smaller FSDP shard group did not pay for the extra HSDP replication/all-reduce cost on this workload, and the memory cost was high even with the lower activation budget. The Qwen3 HSDP source change was reverted after the discard. Treat same-shape HSDP as unattractive unless a later profile or topology-specific change gives a stronger reason to re-open it.
+
+## Experiment Review: HSDP 2x4 Memory Budget 0.9
+
+The requested HSDP 2x4 run with memory-budget 0.9 confirmed that this mesh direction is not useful here. Loss was finite and fell from 12.48534 to 7.49267, but throughput reached only 5,837 tps, far below the 8,877 tps 8-way FSDP best. Peak memory rose to 172.79GiB, about 96.88% of reported B200 capacity, which is above the program's rough memory risk line.
+
+The higher activation budget improved over the accidental HSDP 0.75 row but not nearly enough to offset HSDP overhead, and it made memory risky. The Qwen3 HSDP source change was reverted. Current best remains Float8 rowwise with model-only compile, no-reshard FSDP, and compiler memory-budget 0.9.
