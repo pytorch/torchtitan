@@ -364,3 +364,13 @@ Current best is now `rowwise_with_gw_hp` with bfloat16 FSDP reduction, no-reshar
 Disabling structured trace logging on the bf16-reduce current-best stack is a discard. The command completed and reached 9,355 tps with 145.48GiB peak memory, but loss rose from 12.19051 to 14.05692.
 
 Because this was meant to be a low-risk runtime-overhead probe, the rising loss is enough to reject it even though throughput was higher than the 9,332 tps bf16-reduce row. Keep structured logging enabled for the current best until a clean repeat proves otherwise.
+
+## Next Repeat Confirmation: bfloat16 Reduce
+
+An exact current-best command is already active in the checkout: bfloat16 FSDP reduction, `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95. Finalize it as a repeat-confirmation run rather than starting another experiment. If it stays above 9,332 tps with falling loss, the communication-dtype win is stronger; if it falls back or rises in loss, keep the original bfloat16-reduce row as a narrow best and treat the source as needing more confirmation.
+
+## Experiment Review: bfloat16 Reduce Repeat
+
+The clean repeat of the bfloat16-reduce current-best command is a discard diagnostic, not a new best. It completed with loss falling from 12.43899 to 9.72588, peak memory 145.48GiB, MFU `N/A`, and 9,315 tps.
+
+This is below the 9,332 tps bf16-reduce max but still above the prior 9,229 tps `rowwise_with_gw_hp` best. Keep the bf16-reduce source as current best, but treat the win as narrow and somewhat noisy rather than a large step change.

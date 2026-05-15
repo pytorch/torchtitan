@@ -417,3 +417,12 @@
   - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --debug.no-enable-structured-logging`
   - Success criteria and expected risk: Discarded at `b317775f`; the run completed and reached 9,355 tps, but loss rose from 12.19051 to 14.05692 at 145.48GiB peak memory, so it failed the strict loss trend gate despite higher tps.
+
+- ~~Idea: Repeat-confirm bfloat16 FSDP reduction current best~~
+  - Current best source commit: `ef51a052`; current best result row: 9,332 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: manager repeat-confirmation after a narrow communication-dtype win and a higher-tps structured-logging discard.
+  - Expected mechanism for improving reported tokens/sec: Re-running the exact current-best command checks whether the bfloat16 reduce source change is reproducible and whether normal variance can produce a clean row above the structured-logging discard's throughput without disabling structured logging.
+  - Supporting evidence: The bfloat16-reduce run is only 103 tps above the prior best, while the no-structured-logging run reached 9,355 tps but failed the loss trend gate. An exact repeat should clarify whether the new source is robust before trying additional knobs.
+  - Planned source/config changes: None; repeat on the current kept bfloat16-reduce source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded as repeat diagnostic at `f60c1124`; the run completed with finite/falling loss from 12.43899 to 9.72588, MFU `N/A`, and 145.48GiB peak memory, but reached 9,315 tps versus the 9,332 tps best. It remains above the prior 9,229 tps gw-hp best, so it confirms keeping the bf16-reduce source.
