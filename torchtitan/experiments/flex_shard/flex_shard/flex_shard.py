@@ -18,14 +18,11 @@ from .bucket_storage import (
     _materialize_bucket_storages,
     BucketParamFQNsByIndex,
     BucketSpec,
+    ShardedBucketStorage,
 )
 from .reshard_after_forward import _apply_reshard_after_forward
-from .unsharded_param_access import (
-    _attach_flex_shard_module_state,
-    _check_not_already_flex_sharded,
-    _install_unsharded_param_getters,
-    FlexShardModule,
-)
+from .sharded_param import is_flex_shard_param
+from .unsharded_param_access import _install_unsharded_param_getters
 from .utils import (
     _get_device_from_mesh,
     _get_managed_named_params,
@@ -44,6 +41,58 @@ if TYPE_CHECKING:
 __all__ = [
     "flex_shard",
 ]
+
+
+_SHARDED_BUCKET_STORAGES_ATTR = "_sharded_bucket_storages"
+
+
+class FlexShardModule:
+    """Mixin added to modules after flex_shard()."""
+
+    @property
+    def sharded_bucket_storages(self) -> list[ShardedBucketStorage]:
+        """All bucket storage objects, one per bucket."""
+        return getattr(self, _SHARDED_BUCKET_STORAGES_ATTR)
+
+
+def _check_not_already_flex_sharded(module: nn.Module) -> None:
+    """Raise if applying FlexShard would create nested ownership."""
+    if getattr(module, _SHARDED_BUCKET_STORAGES_ATTR, None) is not None:
+        raise ValueError(
+            f"Module {type(module).__name__} already has ShardedBucketStorage. "
+            "Cannot apply flex_shard twice to the same module."
+        )
+    for child_fqn, child in module.named_modules():
+        if (
+            child_fqn
+            and getattr(child, _SHARDED_BUCKET_STORAGES_ATTR, None) is not None
+        ):
+            raise ValueError(
+                "Nested flex_shard wrapping is not supported. "
+                f"Child module {child_fqn!r} is already FlexSharded. "
+                "Apply flex_shard once at the root module and express bucket "
+                "boundaries with BucketSpec FQN patterns."
+            )
+    for param_fqn, param in module.named_parameters(remove_duplicate=False):
+        if is_flex_shard_param(param):
+            raise ValueError(
+                "Nested flex_shard wrapping is not supported. "
+                f"Parameter {param_fqn!r} is already managed by FlexShard. "
+                "Apply flex_shard once at the root module and express bucket "
+                "boundaries with BucketSpec FQN patterns."
+            )
+
+
+def _attach_flex_shard_module_state(
+    module: nn.Module,
+    bucket_storages: list[ShardedBucketStorage],
+) -> None:
+    """Attach FlexShard ownership state and mixin accessors to a module."""
+    setattr(module, _SHARDED_BUCKET_STORAGES_ATTR, bucket_storages)
+
+    cls = type(module)
+    if not issubclass(cls, FlexShardModule):
+        module.__class__ = type(cls.__name__, (cls, FlexShardModule), {})
 
 
 @dataclass(frozen=True)

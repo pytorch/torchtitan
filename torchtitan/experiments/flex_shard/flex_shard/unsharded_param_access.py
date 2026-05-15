@@ -8,41 +8,22 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import torch
 import torch.nn as nn
 
-from .sharded_param import is_flex_shard_param
 
-if TYPE_CHECKING:
-    from .bucket_storage import ShardedBucketStorage
-
-
-# Module attribute names for storing ShardedBucketStorage
-_SHARDED_BUCKET_STORAGES_ATTR = "_sharded_bucket_storages"
-
-_BUCKET_UNSHARD_HOOK_REGISTERED_ATTR = "_flex_shard_bucket_unshard_hook_registered"
-_EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
-_PARAM_FQN_ATTR = "_flex_shard_param_fqn"
-_BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
-
-
-def _raise_missing_eager_bucket_unshard(unsharded_param_slot: Any) -> None:
-    param_fqn = getattr(unsharded_param_slot, _PARAM_FQN_ATTR, "<unknown>")
-    bucket_fqn = getattr(unsharded_param_slot, _BUCKET_FQN_ATTR, None)
-    hook_registered = getattr(
-        unsharded_param_slot, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False
-    )
-    bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
+def _raise_missing_eager_bucket_unshard(slot: UnshardedParamSlot) -> None:
+    bucket_msg = f" in bucket {slot.bucket_fqn!r}" if slot.bucket_fqn else ""
     hook_msg = (
         " The bucket hook was registered but did not run before parameter access."
-        if hook_registered
+        if slot.bucket_unshard_hook_registered
         else " No bucket hook was registered for this parameter."
     )
     raise RuntimeError(
         "FlexShard eager mode requires full parameter data from a "
-        f"bucket unshard hook for parameter {param_fqn!r}{bucket_msg}."
+        f"bucket unshard hook for parameter {slot.param_fqn!r}{bucket_msg}."
         f"{hook_msg} This usually means the parameter was accessed outside "
         "the hooked module forward, or the BucketSpec boundary does not match "
         "the module hook/checkpoint execution unit. Split the bucket to match "
@@ -73,14 +54,14 @@ class _MixedPrecisionCast(torch.autograd.Function):
 
 
 @dataclass
-class ParamModuleRef:
+class ParamOwnerRef:
     """Owning module and local parameter name for a managed parameter."""
 
     module: nn.Module
     param_name: str
 
     @classmethod
-    def resolve(cls, root_module: nn.Module, fqn: str) -> ParamModuleRef:
+    def resolve(cls, root_module: nn.Module, fqn: str) -> ParamOwnerRef:
         """Resolve a parameter FQN from root, unwrapping checkpoint wrappers."""
         parts = fqn.split(".")
         leaf_module = root_module
@@ -113,6 +94,9 @@ class UnshardedParamSlot:
     does not own the unsharded parameter tensor's storage.
     """
 
+    param_fqn: str
+    bucket_fqn: str | None
+    bucket_unshard_hook_registered: bool = False
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
     compute_device: torch.device | None = None
@@ -137,56 +121,6 @@ class UnshardedParamSlot:
             return current
 
         _raise_missing_eager_bucket_unshard(self)
-
-
-class FlexShardModule:
-    """Mixin added to modules after flex_shard()."""
-
-    @property
-    def sharded_bucket_storages(self) -> list[ShardedBucketStorage]:
-        """All bucket storage objects, one per bucket."""
-        return getattr(self, _SHARDED_BUCKET_STORAGES_ATTR)
-
-
-def _check_not_already_flex_sharded(module: nn.Module) -> None:
-    """Raise if applying FlexShard would create nested ownership."""
-    if getattr(module, _SHARDED_BUCKET_STORAGES_ATTR, None) is not None:
-        raise ValueError(
-            f"Module {type(module).__name__} already has ShardedBucketStorage. "
-            "Cannot apply flex_shard twice to the same module."
-        )
-    for child_fqn, child in module.named_modules():
-        if (
-            child_fqn
-            and getattr(child, _SHARDED_BUCKET_STORAGES_ATTR, None) is not None
-        ):
-            raise ValueError(
-                "Nested flex_shard wrapping is not supported. "
-                f"Child module {child_fqn!r} is already FlexSharded. "
-                "Apply flex_shard once at the root module and express bucket "
-                "boundaries with BucketSpec FQN patterns."
-            )
-    for param_fqn, param in module.named_parameters(remove_duplicate=False):
-        if is_flex_shard_param(param):
-            raise ValueError(
-                "Nested flex_shard wrapping is not supported. "
-                f"Parameter {param_fqn!r} is already managed by FlexShard. "
-                "Apply flex_shard once at the root module and express bucket "
-                "boundaries with BucketSpec FQN patterns."
-            )
-
-
-def _attach_flex_shard_module_state(
-    module: nn.Module,
-    bucket_storages: list[ShardedBucketStorage],
-) -> None:
-    """Attach FlexShard state and mixin accessors to a module."""
-    setattr(module, _SHARDED_BUCKET_STORAGES_ATTR, bucket_storages)
-    setattr(module, _EAGER_COMM_CONTEXTS_ATTR, {})
-
-    cls = type(module)
-    if not issubclass(cls, FlexShardModule):
-        module.__class__ = type(cls.__name__, (cls, FlexShardModule), {})
 
 
 _parametrized_module_class_counter = 0
