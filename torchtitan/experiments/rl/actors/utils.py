@@ -109,11 +109,10 @@ def verify_logprob_identity(
         zero = torch.zeros((), dtype=torch.float32, device=device)
         return PartialLogprobDrift(zero, zero, zero)
 
+    # 1e-6 threshold ignores bf16-quantization-level diffs
     diff = trainer_flat - generator_flat
     return PartialLogprobDrift(
         logprob_diff_mean=diff.sum() / num_global_valid_tokens,
         logprob_diff_max=diff.abs().max(),
-        ratio_tokens_different=(
-            (generator_flat != trainer_flat).sum() / num_global_valid_tokens
-        ),
+        ratio_tokens_different=(diff.abs() > 1e-6).sum() / num_global_valid_tokens,
     )

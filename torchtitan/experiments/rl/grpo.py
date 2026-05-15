@@ -38,6 +38,7 @@ import torch
 import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
+
 from torchtitan.config import (
     CompileConfig,
     ConfigManager,
@@ -301,7 +302,10 @@ class RLTrainer(Configurable):
         self.trainer = None
         self.generator = None
         self._proc_meshes = []
-        self.metrics_processor: m.MetricsProcessor | None = None
+        self.metrics_processor: m.MetricsProcessor = config.metrics.build(
+            log_dir=config.dump_folder,
+            job_config=config.to_dict(),
+        )
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
@@ -317,12 +321,10 @@ class RLTrainer(Configurable):
             except Exception:
                 logger.exception("%s.close failed", actor_name)
 
-        if self.metrics_processor is not None:
-            try:
-                self.metrics_processor.close()
-            except Exception:
-                logger.exception("metrics_processor close failed")
-            self.metrics_processor = None
+        try:
+            self.metrics_processor.close()
+        except Exception:
+            logger.exception("metrics_processor close failed")
 
         for i, mesh in enumerate(self._proc_meshes):
             try:
@@ -390,8 +392,8 @@ class RLTrainer(Configurable):
             token_logprobs=[ep.token_logprobs for ep in episodes],
         )
 
-    @sl.log_trace_span("setup")
-    async def setup(
+    @sl.log_trace_span("setup_async")
+    async def setup_async(
         self,
         *,
         host_mesh=None,
@@ -400,6 +402,11 @@ class RLTrainer(Configurable):
         gpus_per_node: int | None = None,
     ):
         """Spawn Monarch actors on separate meshes and initialize weights.
+
+        Kept separate from ``__init__`` because actor spawning, torch
+        elastic env setup, TorchStore initialization, and the initial
+        weight push/pull are all ``await``-based runtime side effects
+        that cannot run in a synchronous constructor.
 
         Creates separate GPU meshes for trainer and generator and
         synchronizes initial weights from trainer to generator. Must be
@@ -545,11 +552,6 @@ class RLTrainer(Configurable):
             self.trainer.push_model_state_dict.call().get()
         with sl.log_trace_span("generator_pull_model_state_dict"):
             self.generator.pull_model_state_dict.call(0).get()
-
-        self.metrics_processor = config.metrics.build(
-            log_dir=config.dump_folder,
-            job_config=config.to_dict(),
-        )
 
     @sl.log_trace_span("_collect_rollouts")
     def _collect_rollouts(
@@ -715,11 +717,14 @@ class RLTrainer(Configurable):
 
         # collect validation metrics before training
         # so we can compare before/after
-        validation_metrics = await self.validate()
+        pre_validation_metrics = await self.validate()
         self.metrics_processor.log(
             step=0,
-            metrics=validation_metrics,
+            metrics=pre_validation_metrics,
             is_validation=True,
+        )
+        pre_validation_agg = m.MetricsProcessor._aggregate_metrics(
+            pre_validation_metrics
         )
 
         sl.log_trace_instant("training_start")
@@ -824,12 +829,30 @@ class RLTrainer(Configurable):
                 step=step, metrics=step_metrics, is_validation=False
             )
 
-        validation_metrics = await self.validate()
+        post_validation_metrics = await self.validate()
         self.metrics_processor.log(
             step=num_steps,
-            metrics=validation_metrics,
+            metrics=post_validation_metrics,
             is_validation=True,
         )
+        post_validation_agg = m.MetricsProcessor._aggregate_metrics(
+            post_validation_metrics
+        )
+
+        # Side-by-side pre/post summary so the before/after improvement is
+        # visible without scrolling back through the train loop.
+        reward_keys = sorted(
+            k
+            for k in set(pre_validation_agg) | set(post_validation_agg)
+            if "reward" in k
+        )
+        logger.info("=" * 60)
+        logger.info("Validation summary (pre / post):")
+        for key in reward_keys:
+            pre = pre_validation_agg.get(key, float("nan"))
+            post = post_validation_agg.get(key, float("nan"))
+            logger.info(f"  {key}:  {pre:+.3f}  /  {post:+.3f}")
+        logger.info("=" * 60)
 
 
 async def main():
@@ -845,7 +868,7 @@ async def main():
 
     rl_trainer = RLTrainer(config)
     try:
-        await rl_trainer.setup()
+        await rl_trainer.setup_async()
         await rl_trainer.train()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted; attempting graceful shutdown...")
