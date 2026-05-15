@@ -9,6 +9,8 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10`
   - Success criteria and expected risk: Kept at `fc6629b` with 5,774 tps; later command-only no-reshard improved to 5,872 tps.
 
+- Compare observed performance in traces to roofline to guide optimization search.
+
 ## Manager Generated Ideas
 
 - ~~Idea: Profile current best after first runnable result~~
@@ -316,3 +318,12 @@
   - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable`
   - Success criteria and expected risk: Discarded at `0b83acb6`; the run completed with finite/falling loss from 12.46363 to 7.79407 and acceptable 141.93GiB peak memory, but throughput reached only 8,882 tps, below the 8,897 tps model-only compile best.
+
+- ~~Idea: Float8 rowwise with high-precision grad-weight path~~
+  - Current best source commit: `bc4abd27`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95 and model-only compile.
+  - Source: manager final supported Float8 recipe check.
+  - Expected mechanism for improving reported tokens/sec: TorchTitan and TorchAO support `rowwise_with_gw_hp`, which disables Float8 casting for the grad-weight GEMM inputs. This is primarily a numerical-safety variant, but it also removes some grad-weight scaling work; a 10-step run can verify whether the reduced casting overhead offsets the bf16 grad-weight GEMM cost.
+  - Supporting evidence: TorchAO's recipe config shows `rowwise_with_gw_hp` keeps forward and grad-input rowwise Float8 while making the grad-weight GEMM high precision. The tensorwise recipe was slower and numerically bad, so this is the last supported Float8 recipe variant worth measuring before closing quantization recipe tuning.
+  - Planned source/config changes: In `qwen3_14b()` only, change `Float8LinearConverter.Config(recipe_name="rowwise", ...)` to `recipe_name="rowwise_with_gw_hp"` while keeping the existing filters and `model_compile_enabled=True`.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Kept at `2c54749b`; the run completed with finite/falling loss from 12.29840 to 9.54931, MFU `N/A`, 145.05GiB peak memory, and 9,229 tps, beating the prior 8,897 tps best. The `rowwise_with_gw_hp` recipe source change was kept.

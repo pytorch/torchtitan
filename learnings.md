@@ -258,3 +258,13 @@ This is below the 8,897 tps model-only compile best and below the 8,891 tps 0.95
 The centered 0.925 memory-budget probe completed normally but did not improve the current best. On the current Float8 rowwise source with model-only compile and no-reshard 8-way FSDP, loss fell from 12.39717 to 9.11266, peak memory matched the 0.95 plateau at 143.96GiB, and throughput reached 8,718 tps with MFU `N/A`.
 
 This is a discard against the 8,897 tps 0.95 best. Since 0.9, 0.925, 0.95, and 0.975 all sit in roughly the same memory region but vary widely in throughput, memory-budget tuning looks saturated and noisy rather than smoothly optimizable.
+
+## Next Float8 Recipe Probe
+
+Memory-budget tuning and local batch size are saturated on the current best stack. The only remaining supported Float8 recipe variant not measured is `rowwise_with_gw_hp`. TorchAO config inspection shows it keeps forward and grad-input rowwise Float8 but disables Float8 casting for the grad-weight path, making grad-weight high precision. This is likely slower because the grad-weight GEMM becomes bf16, but it is a bounded `qwen3_14b()` converter change and closes the official Float8 recipe search space if it does not beat 8,897 tps.
+
+## Experiment Review: Float8 Rowwise Grad-Weight High Precision
+
+The `rowwise_with_gw_hp` Float8 recipe is the new best on the current stack. Changing only the `qwen3_14b()` `Float8LinearConverter.Config` recipe and running 8-way FSDP no-reshard with model-only compile and memory-budget 0.95 completed with finite/falling loss from 12.29840 to 9.54931, MFU `N/A`, and 145.05GiB peak memory.
+
+Throughput reached 9,229 tps, beating the previous 8,897 tps best by 332 tps while using roughly the same memory region. Despite moving the grad-weight GEMM inputs back to high precision, the reduced Float8 casting/scaling work appears to pay off for this 10-step workload. Keep the source change and treat `rowwise_with_gw_hp` plus memory-budget 0.95 as the current best.
