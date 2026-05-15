@@ -92,10 +92,9 @@ class Shard(Placement):
         empty_shape[self.dim] = 0
         while len(chunks) < world_size:
             chunks.append(param.new_empty(empty_shape))
-        return chunks[rank].contiguous()
+        return chunks[rank]
 
-    @override
-    def assemble_from_shards(
+    def _assemble_from_shards(
         self,
         per_rank_shards: list[torch.Tensor],
         global_shape: torch.Size,
@@ -206,7 +205,7 @@ class Shard(Placement):
                             torch.empty(shape, dtype=info.dtype, device=device)
                         )
                 full_params.append(
-                    self.assemble_from_shards(
+                    self._assemble_from_shards(
                         per_rank_shards, info.global_shape, info.dtype
                     )
                 )

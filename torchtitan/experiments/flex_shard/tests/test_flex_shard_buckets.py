@@ -50,7 +50,7 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _materialize_bucket_storages,
     DStorage,
 )
-from torchtitan.experiments.flex_shard.flex_shard.param_access import (
+from torchtitan.experiments.flex_shard.flex_shard.sharded_param_metadata import (
     is_flex_shard_param,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
@@ -92,14 +92,6 @@ class _TestPlacement(Placement):
         world_size: int,
     ) -> torch.Tensor:
         return param.contiguous()
-
-    def assemble_from_shards(
-        self,
-        per_rank_shards: list[torch.Tensor],
-        global_shape: torch.Size,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        return per_rank_shards[0].to(dtype).view(global_shape)
 
 
 class _PaddedShard(Shard):
@@ -406,6 +398,57 @@ class TestBucketPlacementValidation(TestCase):
                 self._named_params(),
                 mesh,
             )
+
+    def test_copy_param_to_storage_accepts_non_contiguous_shard_view(self):
+        """Placement local payloads may be non-contiguous views."""
+
+        class _TransposePlacement(Placement):
+            def __eq__(self, other: object) -> bool:
+                return isinstance(other, _TransposePlacement)
+
+            def __hash__(self) -> int:
+                return hash(type(self))
+
+            def compute_local_shape(
+                self, global_shape: torch.Size, rank: int, world_size: int
+            ) -> torch.Size:
+                if world_size != 1:
+                    raise AssertionError("Expected single-rank test placement.")
+                return torch.Size([global_shape[1], global_shape[0]])
+
+            def extract_local_shard(
+                self,
+                param: torch.Tensor,
+                rank: int,
+                world_size: int,
+            ) -> torch.Tensor:
+                if world_size != 1:
+                    raise AssertionError("Expected single-rank test placement.")
+                return param.t()
+
+        placement = _TransposePlacement()
+        param = torch.arange(6, dtype=torch.float32).view(2, 3)
+        local_shape = placement.compute_local_shape(param.shape, rank=0, world_size=1)
+        info = ParamInfo(
+            fqn="weight",
+            global_shape=param.shape,
+            global_stride=param.stride(),
+            dtype=param.dtype,
+            requires_grad=True,
+            placements=(placement,),
+            local_shape=local_shape,
+            local_numel=param.numel(),
+            storage_nbytes=param.numel() * param.element_size(),
+            global_numel=param.numel(),
+        )
+        byte_storage = torch.empty(info.storage_nbytes, dtype=torch.uint8)
+
+        local_payload = placement.extract_local_shard(param, rank=0, world_size=1)
+        self.assertFalse(local_payload.is_contiguous())
+        placement.copy_param_to_storage(byte_storage, info, param, rank=0, world_size=1)
+
+        copied = byte_storage.view(torch.float32).view(local_shape)
+        self.assertEqual(copied, local_payload.contiguous())
 
     def test_rejects_shard_dim_out_of_range(self):
         """Placement layout validation is front-loaded."""
