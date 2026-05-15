@@ -56,9 +56,6 @@ def parallelize_qwen3(
     if skip_dp or not parallel_dims.dp_enabled:
         return model
 
-    if parallel_dims.dp_replicate_enabled:
-        raise NotImplementedError("Qwen3 bootstrap FSDP does not support HSDP.")
-
     if ac_config.mode != "none":
         apply_ac(
             model,
@@ -70,7 +67,11 @@ def parallelize_qwen3(
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
-    fsdp_mesh = parallel_dims.get_mesh("fsdp")
+    fsdp_mesh = (
+        parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+        if parallel_dims.dp_replicate_enabled
+        else parallel_dims.get_mesh("fsdp")
+    )
     mp_policy = MixedPrecisionPolicy(
         param_dtype=getattr(torch, training.mixed_precision_param),
         reduce_dtype=getattr(torch, training.mixed_precision_reduce),

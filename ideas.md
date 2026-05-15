@@ -191,11 +191,20 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
   - Success criteria and expected risk: Completed as diagnostic discard with profiled tps 7,885, loss falling from 12.52719 to 9.78586, and 144.0GiB peak memory. The rank-0 trace shows NCCL total around 1.26s, with reduce-scatter the largest single kernel bucket, so communication is again a primary bottleneck.
 
-- Idea: Float8 memory-budget activation checkpointing at 1.0
+- ~~Idea: Float8 memory-budget activation checkpointing at 1.0~~
   - Current best source commit: ba580fde / branch source at `bc825c47`
   - Source: memory-budget follow-up
   - Expected mechanism for improving reported tokens/sec: Budget 0.9 improved slightly over 0.75 while using 144.0GiB, so budget 1.0 may further reduce recomputation by using the compiler's runtime-optimized activation strategy.
   - Supporting evidence: Budget 0.9 remains below B200 capacity and below the program's rough 95% memory-risk threshold. The throughput gain over 0.75 is small and noisy, but the run is stable and still has roughly 25GiB to the 95% line.
   - Planned source/config changes: None; command-only candidate on the current Float8 source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=1.0 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 8,877 tps. Risks are OOM, high memory fragmentation, or no further recompute reduction despite higher memory.
+  - Success criteria and expected risk: Discarded at `3c76b65c`; the run completed with finite/slightly falling loss from 12.59874 to 12.51579, 154.35GiB peak memory, and 8,851 tps. Extra activation memory did not beat the 8,877 tps budget 0.9 best.
+
+- Idea: HSDP 2x4 with Float8 memory-budget 0.9
+  - Current best source commit: `99ad2926`; current best result row: 8,877 tps from Float8 rowwise plus memory-budget 0.9.
+  - Source: Float8 memory-budget 0.9 profile and HSDP/FSDP2 mesh research.
+  - Expected mechanism for improving reported tokens/sec: The 0.9 profile shows NCCL around 1.26s with reduce-scatter the largest single kernel bucket. HSDP with two replica groups of four GPUs should reduce each FSDP shard group's reduce-scatter/all-gather scope from 8 GPUs to 4 GPUs, trading some cross-replica all-reduce and higher parameter memory for less sharded-collective pressure.
+  - Supporting evidence: `docs/fsdp.md` says FSDP2 uses a 2D mesh for HSDP with replication on mesh axis 0 and sharding on axis 1. `torchtitan/experiments/transformers_modeling_backend/parallelize.py` uses `parallel_dims.get_mesh(["dp_replicate", "fsdp"])` when `parallel_dims.dp_replicate_enabled`, matching that contract. Memory-budget 0.9 already uses 144.0GiB and budget 1.0 used 154.35GiB, so a first 0.9 HSDP probe is plausible but memory-riskier than 0.75.
+  - Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, replace the HSDP `NotImplementedError` with a Qwen3-local mesh selection: `["dp_replicate", "fsdp"]` when `parallel_dims.dp_replicate_enabled`, otherwise `"fsdp"`. Keep the existing Float8 rowwise `qwen3_14b()` source unchanged.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep only if the 10-step run completes with finite/falling loss and exceeds 8,877 tps. Risks are higher per-rank parameter memory from shard degree 4, added replica all-reduce, and noisy throughput; if it crashes or underperforms, revert the source change and record discard/crash.
