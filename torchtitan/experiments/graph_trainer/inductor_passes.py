@@ -13,6 +13,8 @@ regional_inductor.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
 from torch._inductor.compile_fx import compile_fx_inner
 from torch.fx.passes.regional_inductor import regional_inductor
@@ -232,7 +234,15 @@ def full_inductor_compilation_pass(
                 break
 
         if fake_mode is not None:
-            with fake_mode:
+            ignore_fresh_unbacked = (
+                fake_mode.shape_env.ignore_fresh_unbacked_symbols
+                if fake_mode.shape_env is not None
+                else nullcontext
+            )
+            # This is an FX-to-FX canonicalization pass. Fresh symbols from
+            # explicit scalar nodes such as MoE split-size ``item`` calls may be
+            # intermediate-only, so they do not need final-output bindings here.
+            with fake_mode, ignore_fresh_unbacked():
                 gm = make_fx(
                     gm,
                     decomposition_table=decomp_table,
