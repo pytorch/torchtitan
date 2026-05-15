@@ -64,6 +64,10 @@ def build_decoder_config_for_backend(
 
 
 _MODULE_FQN = "module_fqn"
+_EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
+_EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
+_EP_TOKEN_EXCHANGE = "EP_token_exchange"
+_EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
 
 
@@ -126,43 +130,27 @@ def annotate_moe_ep_regions() -> None:
     for dispatcher_cls in (LocalTokenDispatcher, AllToAllTokenDispatcher):
         _annotate_method_once(dispatcher_cls, "dispatch", {"EP": "dispatch"})
         _annotate_method_once(dispatcher_cls, "combine", {"EP": "combine"})
+    _annotate_method_once(
+        AllToAllTokenDispatcher,
+        "_token_count_exchange",
+        {_EP_TOKEN_COUNT_EXCHANGE: "dispatch"},
+    )
+    _annotate_method_once(
+        AllToAllTokenDispatcher,
+        "_sync_token_count_exchange",
+        {_EP_TOKEN_COUNT_SYNC: "dispatch"},
+    )
+    _annotate_method_once(
+        AllToAllTokenDispatcher,
+        "_dispatch_token_exchange",
+        {_EP_TOKEN_EXCHANGE: "dispatch"},
+    )
+    _annotate_method_once(
+        AllToAllTokenDispatcher,
+        "_combine_token_exchange",
+        {_EP_TOKEN_EXCHANGE: "combine"},
+    )
     _annotate_method_once(MoE, "forward", {"EP": "compute"})
-
-
-# ---------------------------------------------------------------------------
-# Chunk pass utilities
-# ---------------------------------------------------------------------------
-# These helpers are shared by chunk passes and tests around graph_trainer's
-# traced FX metadata. Keep chunk-specific rewrite policy in ep_chunk_pass.py.
-
-
-def _is_module_fqn_inside_root(fqn: str, root_fqn: str) -> bool:
-    return fqn == root_fqn or fqn.startswith(root_fqn + ".")
-
-
-def _tensor_meta(node: torch.fx.Node) -> torch.Tensor | None:
-    val = node.meta.get("val")
-    return val if isinstance(val, torch.Tensor) else None
-
-
-def _free_symbols(value: object) -> frozenset[object]:
-    from torch.fx.experimental.symbolic_shapes import free_symbols
-
-    return frozenset(free_symbols(value))
-
-
-def _dynamic_dim_symbols(val: torch.Tensor, dim: int) -> frozenset[object]:
-    return _free_symbols(val.shape[dim])
-
-
-def _ordered_nodes(gm: torch.fx.GraphModule) -> dict[torch.fx.Node, int]:
-    return {n: i for i, n in enumerate(gm.graph.nodes)}
-
-
-def _earliest_node(
-    nodes: list[torch.fx.Node], order: dict[torch.fx.Node, int]
-) -> torch.fx.Node:
-    return min(nodes, key=lambda n: order[n])
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
@@ -221,15 +209,35 @@ def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
 
 def get_default_transformer_block_buckets(
     n_layers: int,
+    *,
+    moe_layer_ids: frozenset[int] = frozenset(),
+    split_moe_expert_buckets: bool = False,
 ) -> list[list[str] | str]:
     """Get default transformer block buckets for manual bucketing passes.
 
     Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
     norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
     """
+    layer_buckets: list[list[str] | str] = []
+    for layer_id in range(n_layers):
+        if layer_id in moe_layer_ids and split_moe_expert_buckets:
+            layer_buckets.extend(
+                [
+                    [
+                        f"layers.{layer_id}.attention_norm",
+                        f"layers.{layer_id}.attention",
+                        f"layers.{layer_id}.ffn_norm",
+                        f"layers.{layer_id}.moe.router",
+                        f"layers.{layer_id}.moe.shared_experts",
+                    ],
+                    f"layers.{layer_id}.moe.experts",
+                ]
+            )
+        else:
+            layer_buckets.append(f"layers.{layer_id}")
     return [
         "tok_embeddings",
-        *[f"layers.{i}" for i in range(n_layers)],
+        *layer_buckets,
         ["norm", "lm_head"],
     ]
 

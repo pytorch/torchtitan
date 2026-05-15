@@ -243,13 +243,13 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
-                    "--compile.inductor_compilation full",
+                    "--compile.inductor_compilation regional",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+full_inductor",
-            "aot_fx_trace_llama3_fsdp_tp_full_inductor",
+            "aot_fx_trace llama3 FSDP+TP+regional_inductor",
+            "aot_fx_trace_llama3_fsdp_tp_regional_inductor",
             ngpu=8,
         ),
     ]
@@ -257,13 +257,66 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
 
 def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
     """DeepSeek-v3-based integration tests (require H100 machines)."""
+    ep_overlap_flex_tests = [
+        (
+            "regional",
+            "batch",
+            "layers.*",
+            "transformer_batch",
+        ),
+        (
+            "regional",
+            "batch",
+            "layers.*.moe",
+            "moe_batch",
+        ),
+        (
+            "regional",
+            "seq",
+            "layers.*.moe",
+            "moe_seq",
+        ),
+        (
+            "full",
+            "batch",
+            "layers.*",
+            "transformer_batch",
+        ),
+        (
+            "full",
+            "batch",
+            "layers.*.moe",
+            "moe_batch",
+        ),
+        (
+            "full",
+            "seq",
+            "layers.*.moe",
+            "moe_seq",
+        ),
+    ]
+
+    def inductor_compilation_arg(inductor_compilation: str) -> str:
+        if inductor_compilation == "regional":
+            return "--compile.inductor_compilation regional"
+        if inductor_compilation == "full":
+            return "--compile.inductor_compilation full"
+        raise AssertionError(f"unknown inductor mode {inductor_compilation}")
+
+    def ep_overlap_parallelism() -> list[str]:
+        return [
+            "--parallelism.data_parallel_shard_degree 8",
+            "--parallelism.tensor_parallel_degree 1",
+            "--parallelism.expert_parallel_degree 4",
+        ]
+
     return [
         # === JIT mode tests ===
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode jit",
                     "--parallelism.data_parallel_shard_degree 8",
                     "--parallelism.expert_parallel_degree 2",
@@ -293,7 +346,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode jit",
                     "--compile.backend inductor",
                     "--parallelism.tensor_parallel_degree 1",
@@ -315,7 +368,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode aot_fx_trace",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -339,7 +392,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode aot_fx_trace",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -355,18 +408,44 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode aot_fx_trace",
-                    "--compile.inductor_compilation full",
+                    "--compile.inductor_compilation regional",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                 ],
             ],
-            "aot_fx_trace deepseek_v3 FSDP+TP+EP+full_inductor",
-            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
+            "aot_fx_trace deepseek_v3 FSDP+TP+EP+regional_inductor",
+            "aot_fx_trace_deepseek_v3_fsdp_tp_ep_regional_inductor",
             ngpu=8,
         ),
+        *[
+            OverrideDefinitions(
+                [
+                    [
+                        "--module graph_trainer.deepseek_v3",
+                        "--config graph_trainer_deepseek_v3_debugmodel_flex_attn_ep",
+                        "--compile.mode aot_fx_trace",
+                        inductor_compilation_arg(inductor_compilation),
+                        "--compile.passes ep_overlap",
+                        "--compile.ep_overlap_chunk_strategy graph",
+                        f"--compile.ep_overlap_chunk_dim {mode}",
+                        f"--compile.ep_overlap_module_fqn {modules}",
+                        *(
+                            ["--compile.enable_fsdp_dense_region_overlap"]
+                            if modules == "layers.*.moe"
+                            else []
+                        ),
+                        *ep_overlap_parallelism(),
+                    ],
+                ],
+                f"aot_fx_trace deepseek_v3 FlexAttn {inductor_compilation}_inductor ep_overlap {variant}",
+                f"aot_fx_trace_deepseek_v3_flexattn_{inductor_compilation}_inductor_ep_overlap_{variant}",
+                ngpu=8,
+            )
+            for inductor_compilation, mode, modules, variant in ep_overlap_flex_tests
+        ],
         OverrideDefinitions(
             [
                 [
@@ -441,7 +520,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.qwen3",
-                    "--config graph_trainer_qwen3_debugmodel_moe",
+                    "--config graph_trainer_qwen3_debugmodel_moe_ep",
                     "--compile.mode aot_fx_trace",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -539,7 +618,7 @@ def _build_autoparallel_h100_tests() -> list[OverrideDefinitions]:
             [
                 [
                     "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--config graph_trainer_deepseek_v3_debugmodel_ep",
                     "--compile.mode aot_fx_trace",
                     "--compile.enable_autoparallel",
                     "--parallelism.data_parallel_shard_degree 4",

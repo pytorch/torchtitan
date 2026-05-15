@@ -246,7 +246,11 @@ class GraphTrainer(Trainer):
                     self.config.compile.pass_pipeline,
                     construct_default_graph_passes,
                 )
-                passes = pipeline_fn(self._traced_step, self.config)
+                passes = pipeline_fn(
+                    self._traced_step,
+                    self.config,
+                    parallel_dims=self.parallel_dims,
+                )
 
                 self._traced_step.gm = apply_graph_passes(
                     self._traced_step.gm,

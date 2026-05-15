@@ -202,6 +202,12 @@ class TokenChoiceTopKRouter(Module):
             ).reshape(bs, slen, self.top_k)
             % self.num_experts
         )
+        # Keep the forced routing IDs tied to this router invocation. Without
+        # this dependency, graph chunking can hoist the shape-only round-robin
+        # count path away from the chunk-local token exchange.
+        topk_expert_ids_BLK = topk_expert_ids_BLK + (
+            scores_BLE[..., : self.top_k].to(torch.int64) * 0
+        )
         topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_expert_ids_BLK)
         return topk_expert_ids_BLK, topk_scores_BLK
 
