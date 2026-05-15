@@ -290,10 +290,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
                 num_tokens_per_expert_group
             )
-            # non_blocking=True is safe in eager, but under torch.compile the
-            # async D2H transfer can race with the subsequent .tolist()/.item()
-            # calls, producing stale values and failing unbacked-symint guards.
-            non_blocking = not torch.compiler.is_compiling()
+            # non_blocking=True is safe in eager, but graph capture records the
+            # following .tolist() reads as split-size scalars. Keep that D2H
+            # copy synchronous under Dynamo and graph_trainer's make_fx tracing
+            # so collective split sizes cannot race with stale CPU values.
+            non_blocking = not (
+                torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
+            )
             input_splits = (
                 num_tokens_per_expert.view(ep_size, -1)
                 .sum(dim=1)

@@ -21,6 +21,16 @@ __all__ = [
 ]
 
 
+def _check_shape_equal(actual, expected, context: str) -> None:
+    for i, (actual_dim, expected_dim) in enumerate(zip(actual, expected, strict=True)):
+        torch._check(
+            actual_dim == expected_dim,
+            lambda i=i, actual_dim=actual_dim, expected_dim=expected_dim: (
+                f"{context} dim {i}: expected {expected_dim}, got {actual_dim}"
+            ),
+        )
+
+
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
@@ -224,17 +234,17 @@ def _reshape_for_broadcast_complex(
     seqlen = x.shape[1]
     if positions is None:
         freqs_cis = freqs_cis[0:seqlen]
-        assert freqs_cis.shape == (seqlen, x.shape[-1])
+        _check_shape_equal(freqs_cis.shape, (seqlen, x.shape[-1]), "freqs_cis")
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
     elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
+        _check_shape_equal(positions.shape, (1, seqlen), "positions")
         freqs_cis = freqs_cis[positions.squeeze(0)]
-        assert freqs_cis.shape == (seqlen, x.shape[-1])
+        _check_shape_equal(freqs_cis.shape, (seqlen, x.shape[-1]), "freqs_cis")
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
     else:
-        assert positions.shape == (x.shape[0], seqlen)
+        _check_shape_equal(positions.shape, (x.shape[0], seqlen), "positions")
         freqs_cis_expanded = freqs_cis[None, :, None, :].expand(x.shape[0], -1, -1, -1)
         freqs_cis = torch.gather(
             freqs_cis_expanded,
@@ -261,24 +271,26 @@ def _reshape_for_broadcast_cos_sin(
     bz, seqlen, _, head_dim = x.shape
     if positions is None:
         rope_cache = rope_cache[0:seqlen]
-        assert rope_cache.shape == (seqlen, head_dim * 2)
+        _check_shape_equal(rope_cache.shape, (seqlen, head_dim * 2), "rope_cache")
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
     elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
+        _check_shape_equal(positions.shape, (1, seqlen), "positions")
         rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, head_dim * 2)
+        _check_shape_equal(rope_cache.shape, (seqlen, head_dim * 2), "rope_cache")
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
     else:
-        assert positions.shape == (bz, seqlen)
+        _check_shape_equal(positions.shape, (bz, seqlen), "positions")
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
             index=positions.view(bz, seqlen, 1, 1).expand(bz, seqlen, 1, head_dim * 2),
         )
-        assert rope_cache.shape == (bz, seqlen, 1, head_dim * 2)
+        _check_shape_equal(
+            rope_cache.shape, (bz, seqlen, 1, head_dim * 2), "rope_cache"
+        )
         return rope_cache
 
 

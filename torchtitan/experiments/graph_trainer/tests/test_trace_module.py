@@ -117,6 +117,42 @@ class SimpleMLP(nn.Module):
 
 
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
+    def test_mark_dynamic_batch_and_seq_dims_with_rope(self):
+        from torch._dynamo import mark_dynamic
+
+        from torchtitan.models.common.rope import (
+            apply_rotary_emb_cos_sin,
+            apply_rotary_emb_single_complex,
+        )
+
+        def forward(x, xq, xk, freqs_cis, rope_cache, positions):
+            single = apply_rotary_emb_single_complex(x, freqs_cis, positions)
+            q, k = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
+            return single + q + k
+
+        batch, seq, heads, head_dim = 2, 4, 1, 8
+        x = torch.randn(batch, seq, heads, head_dim)
+        xq = torch.randn(batch, seq, heads, head_dim)
+        xk = torch.randn(batch, seq, heads, head_dim)
+        positions = torch.arange(seq).repeat(batch, 1)
+        freqs = torch.randn(seq * 2, head_dim // 2)
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        rope_cache = torch.randn(seq * 2, head_dim * 2)
+
+        for tensor in (x, xq, xk, positions):
+            mark_dynamic(tensor, 0)
+            mark_dynamic(tensor, 1)
+
+        traced = minimal_fx_tracer(forward)(
+            x, xq, xk, freqs_cis, rope_cache, positions
+        )
+        self.assertTrue(
+            torch.equal(
+                forward(x, xq, xk, freqs_cis, rope_cache, positions),
+                run_traced(traced)(x, xq, xk, freqs_cis, rope_cache, positions),
+            )
+        )
+
     def test_mark_unbacked_mixed_with_static_input_replay(self):
         from torch._dynamo.decorators import mark_unbacked
 
@@ -802,7 +838,7 @@ class TestTraceDTensor(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "only supports mark_unbacked\\(\\) on plain tensor inputs",
+            "only supports marked dynamic dims on plain tensor inputs",
         ):
             minimal_fx_tracer(forward)(tokens_dt)
 
