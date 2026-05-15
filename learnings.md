@@ -296,3 +296,9 @@ Throughput reached only 4,888 tps with 145.05GiB peak memory, far below both the
 The high-side `rowwise_with_gw_hp` memory-budget 1.0 probe is a discard. It completed the 10-step command, but step 1 already used 163.86GiB and the allocator repeatedly warned that expandable segment mappings failed with OOM-level free memory.
 
 Step 10 reached only 1,014 tps with peak memory 176.49GiB, 13 CUDA allocation retries, and loss rising from 12.14356 to 17.49169. Budget 1.0 is both slower and too close to the B200 memory ceiling, so the activation-budget retune is closed with 0.95 as the active setting for `rowwise_with_gw_hp`.
+
+## Experiment Review: rowwise_with_gw_hp Profile
+
+The completed profile run for the current `rowwise_with_gw_hp` best command is a discard diagnostic, not a ranked throughput result. The rank-0 training log shows finite/falling loss from 12.46392 to 10.33925, MFU `N/A`, 145.05GiB peak memory, and 8,540 profiled tps at step 10. The trace directory was logged as `./outputs/profiling/traces`.
+
+Because the profiler is active around the measured step, this row should not displace the 9,229 tps unprofiled best. Use the trace to choose any remaining in-scope source changes; keep `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95 as the current best stack.

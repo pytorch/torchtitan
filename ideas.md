@@ -354,3 +354,12 @@
   - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded at `90b4c8b6`; loss rose from 12.59183 to 16.25217 and throughput fell to 4,888 tps at 145.05GiB peak memory, so 0.95 remains the best `rowwise_with_gw_hp` budget.
+
+- ~~Idea: Profile Float8 rowwise_with_gw_hp current best~~
+  - Current best source commit: `ff585c4e`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: already-completed diagnostic run in `run.log`.
+  - Expected mechanism for improving reported tokens/sec: Profiling does not compete for best throughput, but it should identify whether the new `rowwise_with_gw_hp` best is dominated by NCCL, attention, bf16 grad-weight GEMMs, remaining Float8 casting, or runtime overhead.
+  - Supporting evidence: `rowwise_with_gw_hp` unexpectedly improved throughput over rowwise, and the repeat confirmed a stable 9.2k tps range. A profile is useful before choosing another source-level candidate.
+  - Planned source/config changes: None; diagnostic command-only profile on the current kept `rowwise_with_gw_hp` source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
+  - Success criteria and expected risk: Discard diagnostic at `067fdf0b`; the completed run in `run.log` has finite/falling loss from 12.46392 to 10.33925, MFU `N/A`, 145.05GiB peak memory, and 8,540 profiled tps. The trace directory was logged as `./outputs/profiling/traces`; profiler overhead makes the tps non-ranking.
