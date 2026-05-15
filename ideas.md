@@ -553,3 +553,12 @@
   - Planned source/config changes: None; command-only precision/storage candidate.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --training.dtype=bfloat16 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused`
   - Success criteria and expected risk: Discarded at `6d5971d5`; the run completed with finite/falling loss from 12.48515 to 6.99830, peak memory 129.79GiB, and MFU `N/A`, but throughput reached only 9,027 tps versus the 9,384 tps current best.
+
+- ~~Idea: Full bfloat16 training dtype with memory-budget 0.95~~
+  - Current best result row: 9,384 tps from float32 training storage, bfloat16 FSDP parameter/reduce dtypes, fused bfloat16 optimizer states, `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: manager activation-budget retune after full bf16 saved memory but was slow at 0.925.
+  - Expected mechanism for improving reported tokens/sec: Full bf16 training reduced peak memory to 129.79GiB and kept loss falling, leaving more activation headroom than the current-best 137.47GiB mixed-storage command. Raising memory-budget to 0.95 may save more activations, reduce recompute, and recover enough throughput to make the full-bf16 precision/storage path competitive.
+  - Supporting evidence: The full-bf16 0.925 row was numerically clean but 357 tps below the current best. Earlier non-full-bf16 budget sweeps showed 0.95 and 0.9375 can be near-best, so one adjacent higher-budget retune is justified before closing full bf16.
+  - Planned source/config changes: None; command-only activation-budget retune on the full-bf16 candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --training.dtype=bfloat16 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --optimizer.implementation fused`
+  - Success criteria and expected risk: Discarded at `bfe5289d`; the run reached only 8,952 tps, peak memory 129.79GiB, and MFU `N/A`, and loss rose from 12.28825 to 14.20371. Close full bf16 as a memory-saving but throughput-negative direction for this branch.

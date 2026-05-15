@@ -506,3 +506,13 @@ Use `--optimizer.implementation fused` rather than `fused_opt_states_bf16`; `doc
 The full `training.dtype=bfloat16` command with the normal fused optimizer is a discard. It completed cleanly and loss fell from 12.48515 to 6.99830, so the precision/storage change did not fail the short-run numerical gate. Peak memory dropped to 129.79GiB and MFU remained `N/A`.
 
 Throughput reached only 9,027 tps, below the 9,384 tps current best from float32 training storage plus fused bfloat16 optimizer states. Full bf16 storage saves another 7.68GiB versus the current best, but that memory saving does not translate into throughput on this stack and likely changes optimizer/parameter update behavior enough to hurt steady-state speed. Keep the fused optimizer-state command as the best precision/storage point for now.
+
+## Next Full-bfloat16 Budget Retune
+
+Before closing full bf16, spend some of its memory savings on a higher activation-checkpoint memory budget. The 0.925 full-bf16 run was stable and used only 129.79GiB, so a 0.95 budget may reduce recompute while remaining below the current best's 137.47GiB memory footprint. This is a single follow-up; if it does not beat 9,384 tps with falling loss, full bf16 should be treated as a memory-saving but throughput-negative path for this workload.
+
+## Experiment Review: Full bfloat16 Memory Budget 0.95
+
+The full-bf16 memory-budget 0.95 retune is a discard. It completed without OOM and kept the lower 129.79GiB peak memory from the full-bf16 path, but throughput reached only 8,952 tps and loss rose from 12.28825 to 14.20371.
+
+This is worse than both the 9,384 tps fused bfloat16 optimizer-state best and the prior full-bf16 0.925 run, which at least had falling loss. Raising the activation budget did not convert full-bf16 memory savings into throughput, so close full bf16 for this branch unless a later source/runtime change gives a new reason to revisit it. The current best remains the mixed-storage command with `--optimizer.implementation fused_opt_states_bf16` and memory-budget 0.925.
