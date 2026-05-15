@@ -363,3 +363,21 @@
   - Planned source/config changes: None; diagnostic command-only profile on the current kept `rowwise_with_gw_hp` source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
   - Success criteria and expected risk: Discard diagnostic at `067fdf0b`; the completed run in `run.log` has finite/falling loss from 12.46392 to 10.33925, MFU `N/A`, 145.05GiB peak memory, and 8,540 profiled tps. The trace directory was logged as `./outputs/profiling/traces`; profiler overhead makes the tps non-ranking.
+
+- Idea: Include Qwen3 lm_head in Float8 rowwise_with_gw_hp
+  - Current best source commit: `2c54749b`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: manager profile review and chunked-loss inspection.
+  - Expected mechanism for improving reported tokens/sec: `ChunkedCELoss` applies `lm_head` over eight chunks outside model compile, and Qwen3 14B's head is a large `5120 x 151936` projection. Converting it to Float8 may reduce a remaining large bf16 GEMM bucket and improve the chunked-loss tail without changing mesh shape or activation policy.
+  - Supporting evidence: The current profile still has large GEMM/scaled-mm and attention buckets, while direct Float8 scale/cast is only a small bucket. The current best filters `lm_head`, so this large projection remains bf16 even though the converter can handle dimensions divisible by 16. Prior KV-projection expansion was slower, but that was a smaller repeated attention projection; `lm_head` is larger and sits in the chunked loss path.
+  - Planned source/config changes: In `qwen3_14b()` only, remove `"lm_head"` from `Float8LinearConverter.Config(filter_fqns=...)`; keep `"attention.qkv_linear.wkv"` filtered, keep `recipe_name="rowwise_with_gw_hp"`, and keep `model_compile_enabled=True`. Revert the source change if the run is discarded or crashes.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep only if the 10-step run completes with finite/falling loss and beats 9,229 tps. Main risks are worse loss from quantizing the output projection, extra Float8 scaling overhead across eight chunks, and higher memory or compile/runtime cost in the chunked-loss path.
+
+- ~~Idea: Default FSDP reshard policy with Float8 rowwise_with_gw_hp~~
+  - Current best source commit: `eae444b9`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: manager deferred source-free reshard policy check.
+  - Expected mechanism for improving reported tokens/sec: Omitting the no-reshard override reduces parameter residency and may reduce memory pressure, but it can add all-gather overhead relative to the current explicit no-reshard best.
+  - Supporting evidence: Earlier no-reshard helped before the `rowwise_with_gw_hp` recipe; the profile still shows material NCCL time, so default reshard needed a fresh command-only check on the active source.
+  - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded at `eae444b9`; the run completed with finite/falling loss from 12.55290 to 10.28098 and lower 120.30GiB peak memory, but reached only 9,067 tps versus the 9,229 tps no-reshard best.

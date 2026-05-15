@@ -306,3 +306,15 @@ Because the profiler is active around the measured step, this row should not dis
 Trace bucket summary from `outputs/profiling/traces/iteration_10` shows rank-0 GPU kernel time at about 2.97s: matmul/scaled-mm kernels 1.33s (44.9%), NCCL kernels 0.77s (26.1%), attention kernels 0.59s (20.0%), and direct Float8 scale/cast/elemwise kernels 0.17s (5.7%). Across ranks, NCCL averaged 0.87s but ranged from 0.35s to 1.37s, with reduce-scatter dominating the communication bucket.
 
 Interpretation: the current best is primarily compute-bound on GEMM/attention, but FSDP reduce-scatter remains the largest non-compute bucket and is rank-imbalanced. Direct Float8 scaling/casting is too small to justify more recipe-only tuning unless a candidate also changes GEMM behavior. The next useful idea should target communication/reduce-scatter or a matmul/attention efficiency lever, with extra caution because prior HSDP and TP attempts were slower or unstable.
+
+## Next Float8 Coverage Probe: lm_head
+
+The next bounded source candidate is to remove only the `lm_head` Float8 filter while keeping `rowwise_with_gw_hp`, the `attention.qkv_linear.wkv` filter, model-only compile, no-reshard 8-way FSDP, and memory-budget 0.95. `ChunkedCELoss` applies `lm_head` over eight chunks and explicitly notes that the head is not compiled; for Qwen3 14B this is a large `5120 x 151936` projection that remains bf16 in the current best.
+
+This is higher risk than another command-only probe because it changes the output projection numerics and may add scaling overhead in the chunked-loss loop. It is still in scope and isolated to `qwen3_14b()` converter filtering. Keep it only if loss is finite/falling and throughput clears the current 9,229 tps best; otherwise revert the source and record the result as a coverage discard.
+
+## Experiment Review: Default FSDP Reshard Policy
+
+The source-free default FSDP reshard policy check is a discard on the active `rowwise_with_gw_hp` stack. Omitting `--parallelism.fsdp_reshard_after_forward=never` completed with finite/falling loss from 12.55290 to 10.28098, MFU `N/A`, and much lower peak memory at 120.30GiB.
+
+Throughput reached 9,067 tps, below both the 9,229 tps no-reshard best and its 9,213 tps repeat. The memory savings do not compensate for the added reshard/all-gather overhead on the 10-step objective, so keep explicit no-reshard in the current best command.
