@@ -334,3 +334,9 @@ This closes the broad Float8 coverage expansion path for now. Both the smaller K
 ## Next Compile Coverage Check
 
 The only remaining low-risk command-only lever near the current stack is default compile coverage under `rowwise_with_gw_hp`: run the current best command without `--compile.components model`, so TorchTitan compiles the loss function as well as the model. This does not compile `lm_head`, but it can test whether per-chunk CE compilation now helps after the recipe change. Keep it only if it beats 9,229 tps with finite/falling loss; prior rowwise evidence makes a small slowdown more likely than a large win.
+
+## Experiment Review: Default Compile Components with rowwise_with_gw_hp
+
+The default compile-components revisit is a discard. Running the active `rowwise_with_gw_hp` stack without `--compile.components model` completed, but loss rose from 12.52405 to 12.72060, peak memory was 142.74GiB, and throughput reached only 8,687 tps.
+
+Compiling the loss function still does not pay off on this stack. Keep `--compile.components model` in the current best command, and treat compile-coverage tuning as closed unless a future source change materially changes the loss path.

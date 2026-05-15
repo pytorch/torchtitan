@@ -382,14 +382,14 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded at `eae444b9`; the run completed with finite/falling loss from 12.55290 to 10.28098 and lower 120.30GiB peak memory, but reached only 9,067 tps versus the 9,229 tps no-reshard best.
 
-- Idea: Default compile components with Float8 rowwise_with_gw_hp
+- ~~Idea: Default compile components with Float8 rowwise_with_gw_hp~~
   - Current best source commit: `2c54749b`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
   - Source: manager low-risk compile-components revisit after the `rowwise_with_gw_hp` recipe changed the kernel mix.
   - Expected mechanism for improving reported tokens/sec: Removing `--compile.components model` lets TorchTitan compile the loss function in addition to the model. `ChunkedCELoss` still does not compile `lm_head`, but compiling the per-chunk cross-entropy may reduce loss-side overhead under the current recipe.
   - Supporting evidence: The earlier default-compile check was measured before `rowwise_with_gw_hp`; it was only slightly slower than the old rowwise best. The current `lm_head` Float8 expansion was a discard, so the remaining loss-path lever that does not change numerics is to compile the CE function.
   - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable`
-  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 9,229 tps. Risk is low because this changes only compile coverage, but prior rowwise evidence suggests loss compilation may be neutral or slightly slower.
+  - Success criteria and expected risk: Discarded at `28d7f02e`; the run completed but loss rose from 12.52405 to 12.72060, throughput reached only 8,687 tps, and peak memory was 142.74GiB.
 
 - ~~Idea: Default FSDP reshard policy with local batch size 5~~
   - Current best source commit: `1436b57f`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, memory-budget 0.95, and local batch size 4.
