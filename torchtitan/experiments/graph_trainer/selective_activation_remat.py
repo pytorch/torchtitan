@@ -109,11 +109,6 @@ def selective_activation_remat_pass(
     if not regions:
         return gm
 
-    # Assumption: chunked-loss regions (e.g. lm_head) do not carry AC, so
-    # at most one backward region depends on must_recompute forward nodes.
-    # If tag_sac_policy starts tagging the lm_head layer with AC, multiple
-    # disjoint backward regions could need remat and this heuristic must
-    # be revisited.
     remat_regions = [(s, e) for s, e, needs in regions if needs]
 
     if len(remat_regions) > 1:

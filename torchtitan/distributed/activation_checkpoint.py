@@ -61,6 +61,10 @@ def _get_default_save_ops() -> set:
     comm_ops = [
         torch.ops._c10d_functional.reduce_scatter_tensor.default,
         torch.ops._c10d_functional.all_to_all_single.default,
+        # D2H scalar reads (token dispatcher split sizes). Each
+        # recomputation triggers a CUDA synchronize; saving the tiny
+        # CPU scalar avoids re-executing the counts all-to-all chain.
+        torch.ops.aten._local_scalar_dense.default,
         # DeepEP (available when deepep is installed)
         (torch.ops, "deepep.dispatch.default"),
         (torch.ops, "deepep.combine.default"),

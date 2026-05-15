@@ -13,6 +13,8 @@ regional_inductor.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
 from torch.fx.passes.regional_inductor import regional_inductor
 
@@ -242,6 +244,12 @@ def full_inductor_compilation_pass(
     pre_collapse_cudagraph_compatible = is_cudagraph_compatible(
         gm, skip_flex_attention_check=True
     )
+    fake_mode = torch._guards.detect_fake_mode(example_inputs)
+    ignore_fresh_unbacked = (
+        fake_mode.shape_env.ignore_fresh_unbacked_symbols
+        if fake_mode is not None and fake_mode.shape_env is not None
+        else nullcontext
+    )
 
     _migrate_cpu_get_attrs_to_cuda(gm)
     for module in gm.modules():
@@ -256,7 +264,10 @@ def full_inductor_compilation_pass(
     # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
     # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
     # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
-    with ic.patch(reorder_for_peak_memory=True):
+    # This is an FX-to-compiled-artifact pass. Fresh symbols from explicit
+    # scalar nodes such as MoE split-size ``item`` calls may be
+    # intermediate-only, so they do not need final-output bindings here.
+    with ic.patch(reorder_for_peak_memory=True), ignore_fresh_unbacked():
         result = regional_inductor_pass(gm, example_inputs)
 
     # Carry the pre-collapse cudagraph verdict forward via gm.meta. The

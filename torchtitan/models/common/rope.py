@@ -36,6 +36,16 @@ def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None
     )
 
 
+def _check_shape_equal(actual, expected, context: str) -> None:
+    for i, (actual_dim, expected_dim) in enumerate(zip(actual, expected, strict=True)):
+        torch._check(
+            actual_dim == expected_dim,
+            lambda i=i, actual_dim=actual_dim, expected_dim=expected_dim: (
+                f"{context} dim {i}: expected {expected_dim}, got {actual_dim}"
+            ),
+        )
+
+
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
@@ -362,28 +372,31 @@ def _reshape_for_broadcast(
     cache_width = rope_cache.shape[-1]
     if positions is None:
         rope_cache = rope_cache[0:seqlen]
-        assert rope_cache.shape == (seqlen, cache_width)
+        _check_shape_equal(rope_cache.shape, (seqlen, cache_width), "rope_cache")
         shape = [
             d if i == 1 else cache_width if i == ndim - 1 else 1
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
     elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
+        _check_shape_equal(positions.shape, (1, seqlen), "positions")
         rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, cache_width)
+        _check_shape_equal(rope_cache.shape, (seqlen, cache_width), "rope_cache")
         shape = [
             d if i == 1 else cache_width if i == ndim - 1 else 1
             for i, d in enumerate(query_shape)
         ]
         return rope_cache.view(*shape)
     else:
-        assert positions.shape == (bsz, seqlen)
+        _check_shape_equal(positions.shape, (bsz, seqlen), "positions")
         rope_cache_expanded = rope_cache[None, :, None, :].expand(bsz, -1, -1, -1)
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
             index=positions.view(bsz, seqlen, 1, 1).expand(bsz, seqlen, 1, cache_width),
+        )
+        _check_shape_equal(
+            rope_cache.shape, (bsz, seqlen, 1, cache_width), "rope_cache"
         )
         return rope_cache
 

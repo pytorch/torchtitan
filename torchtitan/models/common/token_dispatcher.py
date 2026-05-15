@@ -251,6 +251,76 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     def __init__(self, config: Config):
         super().__init__(config)
 
+    def _token_count_exchange(
+        self,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.ep_mesh is not None
+        return all_to_all_single(
+            num_tokens_per_expert,
+            None,
+            None,
+            group=self.ep_mesh,
+        )
+
+    def _sync_token_count_exchange(
+        self,
+        num_tokens_per_expert: torch.Tensor,
+        num_tokens_per_expert_group: torch.Tensor,
+        ep_size: int,
+    ) -> tuple[torch.Tensor, list[int], list[int]]:
+        num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+            num_tokens_per_expert_group
+        )
+        # Graph capture records .tolist() as split-size scalar reads. Keep
+        # the copy synchronous there so split sizes cannot race stale CPU data.
+        non_blocking = not (
+            torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
+        )
+        input_splits = num_tokens_per_expert.view(ep_size, -1).sum(dim=1)
+        input_splits = input_splits.to(torch.device("cpu"), non_blocking=non_blocking)
+        output_splits = (
+            num_tokens_per_expert_group.view(ep_size, -1)
+            .sum(dim=1)
+            .to(torch.device("cpu"), non_blocking=False)
+        )
+        input_splits_list = input_splits.tolist()
+        output_splits_list = output_splits.tolist()
+
+        return (
+            num_tokens_per_expert_group,
+            input_splits_list,
+            output_splits_list,
+        )
+
+    def _dispatch_token_exchange(
+        self,
+        routed_input: torch.Tensor,
+        output_splits: list[int],
+        input_splits: list[int],
+    ) -> torch.Tensor:
+        assert self.ep_mesh is not None
+        return all_to_all_single(
+            routed_input,
+            output_splits,
+            input_splits,
+            self.ep_mesh,
+        )
+
+    def _combine_token_exchange(
+        self,
+        routed_output: torch.Tensor,
+        input_splits: list[int],
+        output_splits: list[int],
+    ) -> torch.Tensor:
+        assert self.ep_mesh is not None
+        return all_to_all_single(
+            routed_output,
+            input_splits,
+            output_splits,
+            self.ep_mesh,
+        )
+
     # pyrefly: ignore [bad-override]
     def dispatch(
         self,
@@ -303,39 +373,24 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
-            num_global_tokens_per_local_expert_E = all_to_all_single(
+            num_global_tokens_per_local_expert_E = self._token_count_exchange(
                 num_local_tokens_per_expert_E,
-                None,
-                None,
-                group=self.ep_mesh,
             )
-            # Need to wait explicitly because it is used by a triton kernel later
-            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_global_tokens_per_local_expert_E = (
-                torch.ops._c10d_functional.wait_tensor(
-                    num_global_tokens_per_local_expert_E
-                )
+            (
+                num_global_tokens_per_local_expert_E,
+                input_splits_list,
+                output_splits_list,
+            ) = self._sync_token_count_exchange(
+                num_local_tokens_per_expert_E,
+                num_global_tokens_per_local_expert_E,
+                ep_size,
             )
-            input_splits = (
-                num_local_tokens_per_expert_E.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
-            )
-            # NOTE: this would incur a device-to-host sync
-            output_splits = (
-                num_global_tokens_per_local_expert_E.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
-            input_splits_list = input_splits.tolist()
-            output_splits_list = output_splits.tolist()
 
-        # All-to-all dispatch tokens to EP ranks.
-        routed_input_RD = all_to_all_single(
+        # All-to-all dispatch tokens to EP ranks
+        routed_input_RD = self._dispatch_token_exchange(
             routed_input_ND,
             output_splits_list,
             input_splits_list,
-            self.ep_mesh,
         )
 
         # Reorder from rank-major to expert-major via _permute.
@@ -348,6 +403,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         # TODO: Consider using num_global_tokens_per_local_expert_e as the
         # expert_bias_e update buffer, then all-gather on EP ranks. This
         # is blocked by clarification on HybridEP token dropping.
+        num_local_experts = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         (
             input_shape,
             routed_input_RD,
@@ -356,6 +412,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         ) = self._permute(
             routed_input_RD,
             num_global_tokens_per_local_expert_E,
+            ep_size,
+            num_local_experts,
         )
 
         metadata = AllToAllDispatchMetadata(
@@ -372,6 +430,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         self,
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
+        ep_size,
+        num_local_experts,
     ):
         """Reorder tokens from rank-major to expert-major layout.
 
@@ -381,20 +441,17 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         Collapses token count matrix ``t_mat`` from ``(EP, e)`` to
         ``num_global_tokens_per_local_expert_e`` ``(e,)`` by summing across ranks.
         """
-        # pyrefly: ignore [missing-attribute]
-        ep_size = self.ep_mesh.size()
-        e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
         device = num_global_tokens_per_local_expert_E.device
         total = routed_input_RD.shape[0]
 
         # (EP, e) matrix of token counts per (rank, local_expert)
-        t_mat = num_global_tokens_per_local_expert_E.view(ep_size, e)
+        t_mat = num_global_tokens_per_local_expert_E.view(ep_size, num_local_experts)
 
         # Where each (r, e) segment starts in the input (rank-major order)
         input_starts = (
             num_global_tokens_per_local_expert_E.cumsum(0)
             - num_global_tokens_per_local_expert_E
-        ).view(ep_size, e)
+        ).view(ep_size, num_local_experts)
 
         # Transpose to expert-major (e, EP) and flatten
         segment_lens = t_mat.t().reshape(-1)
@@ -475,13 +532,12 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD, metadata.input_shape, metadata.permuted_indices
         )
 
-        # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
+        # All-to-all combine: returns AsyncCollectiveTensor, so the a2a runs
         # on the NCCL stream and won't block until the tensor is accessed.
-        routed_output_RD = all_to_all_single(
+        routed_output_RD = self._combine_token_exchange(
             routed_output_RD,
             metadata.input_splits,
             metadata.output_splits,
-            self.ep_mesh,
         )
 
         # With SP, create a full-size buffer for scatter_add so routed results
@@ -553,6 +609,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         self,
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
+        ep_size,
+        num_local_experts,
     ):
         # FP8/MXFP8 require groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
@@ -561,10 +619,6 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # Note that this will create side effects when wrapping the for-loop
         # implementation of GroupedExperts, as it does not need padding.
         from torchao.prototype.moe_training.ep.permute import permute_and_pad
-
-        # pyrefly: ignore [missing-attribute]
-        ep_size = self.ep_mesh.size()
-        e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
 
         (
             input_shape,
@@ -576,7 +630,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_input_RD,
             num_global_tokens_per_local_expert_E,
             ep_size,
-            e,
+            num_local_experts,
             self.pad_multiple,
         )
         return (

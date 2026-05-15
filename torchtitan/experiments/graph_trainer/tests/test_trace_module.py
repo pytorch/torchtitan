@@ -29,6 +29,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
 )
+from torchtitan.experiments.graph_trainer.trainer import (
+    _materialize_grad_for_param_layout,
+)
 
 
 def get_loss(logits, labels):
@@ -116,7 +119,166 @@ class SimpleMLP(nn.Module):
         return self.fc2(torch.relu(self.fc1(self.embed(x))))
 
 
+class _TraceableWrapper(torch.Tensor):
+    elem: torch.Tensor
+
+    __slots__ = ["elem"]
+
+    @staticmethod
+    def __new__(cls, elem):
+        wrapper = torch.Tensor._make_wrapper_subclass(
+            cls,
+            elem.size(),
+            dtype=elem.dtype,
+            layout=elem.layout,
+            device=elem.device,
+            requires_grad=elem.requires_grad,
+            strides=elem.stride(),
+            storage_offset=elem.storage_offset(),
+        )
+        wrapper.elem = elem
+        return wrapper
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        raise RuntimeError("Test wrapper should be rejected before tracing")
+
+    def __tensor_flatten__(self):
+        return ["elem"], None
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors, metadata, outer_size, outer_stride):
+        return _TraceableWrapper(inner_tensors["elem"])
+
+
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
+    def test_fakeify_input_copies_only_shape_annotations(self):
+        from torch._dynamo import mark_dynamic
+        from torch._subclasses import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        from torchtitan.experiments.graph_trainer.dynamic_shapes import _fakeify_input
+
+        x = torch.randn(2, 4)
+        mark_dynamic(x, 0)
+        x._graph_trainer_unrelated_state = "must not be copied"
+
+        fake_mode = FakeTensorMode(shape_env=ShapeEnv(), static_shapes=False)
+        with fake_mode:
+            fake_x = _fakeify_input(fake_mode, x, input_name="x")
+
+        self.assertTrue(hasattr(fake_x, "_dynamo_dynamic_indices"))
+        self.assertFalse(hasattr(fake_x, "_graph_trainer_unrelated_state"))
+
+    def test_mark_dynamic_wrapper_subclass_rejected(self):
+        from torch._dynamo import mark_dynamic
+
+        wrapper = _TraceableWrapper(torch.randn(2, 4))
+        mark_dynamic(wrapper, 0)
+
+        def forward(x):
+            return x
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "only supports marked dynamic dims on plain tensor inputs",
+        ):
+            minimal_fx_tracer(forward)(wrapper)
+
+    def test_nested_wrapper_subclass_marked_inner_rejected(self):
+        from torch._dynamo import mark_dynamic
+        from torch._dynamo.decorators import mark_unbacked
+
+        def forward(x):
+            return x
+
+        for marker in (mark_dynamic, mark_unbacked):
+            with self.subTest(marker=marker.__name__):
+                inner = torch.randn(2, 4)
+                marker(inner, 0)
+                wrapper = _TraceableWrapper(_TraceableWrapper(inner))
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "only supports marked dynamic dims on plain tensor inputs",
+                ):
+                    minimal_fx_tracer(forward)(wrapper)
+
+    def test_mark_dynamic_batch_and_seq_dims_with_rope(self):
+        from torch._dynamo import mark_dynamic
+
+        from torchtitan.models.common.rope import (
+            apply_rotary_emb_cos_sin,
+            apply_rotary_emb_single_complex,
+        )
+
+        def forward(x, xq, xk, freqs_cis, rope_cache, positions):
+            single = apply_rotary_emb_single_complex(x, freqs_cis, positions)
+            q, k = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
+            return single + q + k
+
+        batch, seq, heads, head_dim = 2, 4, 1, 8
+        position_cases = {
+            "none": None,
+            "single": torch.arange(seq).unsqueeze(0),
+            "batched": torch.arange(seq).repeat(batch, 1),
+        }
+
+        for name, positions in position_cases.items():
+            with self.subTest(positions=name):
+                x = torch.randn(batch, seq, heads, head_dim)
+                xq = torch.randn(batch, seq, heads, head_dim)
+                xk = torch.randn(batch, seq, heads, head_dim)
+                freqs = torch.randn(seq * 2, head_dim // 2)
+                freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+                rope_cache = torch.randn(seq * 2, head_dim * 2)
+
+                for tensor in (x, xq, xk):
+                    mark_dynamic(tensor, 0)
+                    mark_dynamic(tensor, 1)
+                if positions is not None:
+                    mark_dynamic(positions, 1)
+                    if positions.shape[0] > 1:
+                        mark_dynamic(positions, 0)
+
+                traced = minimal_fx_tracer(forward)(
+                    x, xq, xk, freqs_cis, rope_cache, positions
+                )
+                self.assertTrue(
+                    torch.equal(
+                        forward(x, xq, xk, freqs_cis, rope_cache, positions),
+                        run_traced(traced)(x, xq, xk, freqs_cis, rope_cache, positions),
+                    )
+                )
+
+    def test_rope_shape_mismatch_reports_runtime_check_context(self):
+        from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
+
+        seq, head_dim = 4, 8
+        xq = torch.randn(2, seq, 1, head_dim)
+        xk = torch.randn(2, seq, 1, head_dim)
+        rope_cache = torch.randn(seq * 2, head_dim * 2)
+        positions = torch.arange(seq - 1).unsqueeze(0)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "positions dim 1: expected 4, got 3",
+        ):
+            apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
+
+    def test_materialize_grad_for_param_layout_restores_param_strides(self):
+        param = torch.empty_strided((2, 3), (1, 2))
+        grad = torch.arange(6.0).reshape(2, 3)
+
+        materialized = _materialize_grad_for_param_layout(param, grad)
+
+        self.assertEqual(materialized.stride(), param.stride())
+        self.assertTrue(torch.equal(materialized, grad))
+        self.assertIs(
+            _materialize_grad_for_param_layout(param, materialized),
+            materialized,
+        )
+
     def test_mark_unbacked_mixed_with_static_input_replay(self):
         from torch._dynamo.decorators import mark_unbacked
 
@@ -849,7 +1011,7 @@ class TestTraceDTensor(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "only supports mark_unbacked\\(\\) on plain tensor inputs",
+            "only supports marked dynamic dims on plain tensor inputs",
         ):
             minimal_fx_tracer(forward)(tokens_dt)
 

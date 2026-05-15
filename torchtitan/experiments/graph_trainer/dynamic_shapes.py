@@ -27,10 +27,14 @@ def _tensor_has_mark_unbacked(tensor: torch.Tensor) -> bool:
     )
 
 
-def _wrapper_subclass_has_mark_unbacked(tensor: torch.Tensor) -> bool:
+def _tensor_has_mark_dynamic(tensor: torch.Tensor) -> bool:
+    return bool(getattr(tensor, "_dynamo_dynamic_indices", None))
+
+
+def _wrapper_subclass_has_marked_dynamic_dims(tensor: torch.Tensor) -> bool:
     if not is_traceable_wrapper_subclass(tensor):
         return False
-    if _tensor_has_mark_unbacked(tensor):
+    if _tensor_has_mark_unbacked(tensor) or _tensor_has_mark_dynamic(tensor):
         return True
 
     attrs, _ = tensor.__tensor_flatten__()
@@ -38,9 +42,11 @@ def _wrapper_subclass_has_mark_unbacked(tensor: torch.Tensor) -> bool:
         inner_value = getattr(tensor, attr)
         if not isinstance(inner_value, torch.Tensor):
             continue
-        if _tensor_has_mark_unbacked(
-            inner_value
-        ) or _wrapper_subclass_has_mark_unbacked(inner_value):
+        if (
+            _tensor_has_mark_unbacked(inner_value)
+            or _tensor_has_mark_dynamic(inner_value)
+            or _wrapper_subclass_has_marked_dynamic_dims(inner_value)
+        ):
             return True
     return False
 
@@ -56,8 +62,11 @@ def _symbolic_context_for_marked_dims(tensor: torch.Tensor) -> Any | None:
     marked_strict_unbacked_indices = getattr(
         tensor, "_dynamo_strict_unbacked_indices", set()
     )
+    marked_dynamic_indices = getattr(tensor, "_dynamo_dynamic_indices", set())
     has_outer_marked_dims = bool(
-        marked_unbacked_indices or marked_strict_unbacked_indices
+        marked_unbacked_indices
+        or marked_strict_unbacked_indices
+        or marked_dynamic_indices
     )
     if not has_outer_marked_dims:
         return None
@@ -75,6 +84,8 @@ def _symbolic_context_for_marked_dims(tensor: torch.Tensor) -> Any | None:
         elif dim in marked_strict_unbacked_indices:
             dynamic_sizes[dim] = DimDynamic.UNBACKED
             constraint_sizes[dim] = RelaxedUnspecConstraint(warn_only=False)
+        elif dim in marked_dynamic_indices:
+            dynamic_sizes[dim] = DimDynamic.DYNAMIC
 
     return StatelessSymbolicContext(
         dynamic_sizes=dynamic_sizes,
@@ -90,15 +101,33 @@ def _fakeify_input(
 ) -> torch.Tensor:
     from torch._dynamo.source import LocalSource
 
+    tensor_annotation_names = (
+        "_dynamo_unbacked_indices",
+        "_dynamo_strict_unbacked_indices",
+        "_dynamo_dynamic_indices",
+        "_dynamo_shape_ids",
+        "_dynamo_unbacked_bounds",
+        "_dynamo_hint_overrides",
+        "_specialize_on",
+    )
+
+    def copy_tensor_annotations(fake_arg: torch.Tensor) -> torch.Tensor:
+        for name in tensor_annotation_names:
+            if hasattr(arg, name):
+                setattr(fake_arg, name, getattr(arg, name))
+        return fake_arg
+
     symbolic_context = _symbolic_context_for_marked_dims(arg)
     if symbolic_context is None:
-        return fake_mode.from_tensor(arg, static_shapes=True)
+        return copy_tensor_annotations(fake_mode.from_tensor(arg, static_shapes=True))
 
     source = LocalSource(input_name, is_input=True)
-    return fake_mode.from_tensor(
-        arg,
-        source=source,
-        symbolic_context=symbolic_context,
+    return copy_tensor_annotations(
+        fake_mode.from_tensor(
+            arg,
+            source=source,
+            symbolic_context=symbolic_context,
+        )
     )
 
 
