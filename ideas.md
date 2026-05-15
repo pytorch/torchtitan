@@ -200,6 +200,15 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=1.0 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded at `3c76b65c`; the run completed with finite/slightly falling loss from 12.59874 to 12.51579, 154.35GiB peak memory, and 8,851 tps. Extra activation memory did not beat the 8,877 tps budget 0.9 best.
 
+- ~~Idea: HSDP 2x4 with Float8 memory-budget 0.75~~
+  - Current best source commit: `99ad2926`; current best result row: 8,877 tps from Float8 rowwise plus memory-budget 0.9.
+  - Source: Float8 memory-budget 0.9 profile and HSDP/FSDP2 mesh research.
+  - Expected mechanism for improving reported tokens/sec: The 0.9 profile shows NCCL around 1.26s with reduce-scatter the largest single kernel bucket. HSDP with two replica groups of four GPUs should reduce each FSDP shard group's reduce-scatter/all-gather scope from 8 GPUs to 4 GPUs, trading some cross-replica all-reduce and higher parameter memory for less sharded-collective pressure.
+  - Supporting evidence: `docs/fsdp.md` says FSDP2 uses a 2D mesh for HSDP with replication on mesh axis 0 and sharding on axis 1. `torchtitan/experiments/transformers_modeling_backend/parallelize.py` uses `parallel_dims.get_mesh(["dp_replicate", "fsdp"])` when `parallel_dims.dp_replicate_enabled`, matching that contract. Memory-budget 0.9 already uses 144.0GiB, so this lower-budget HSDP probe left room for the smaller shard group.
+  - Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, replace the HSDP `NotImplementedError` with a Qwen3-local mesh selection: `["dp_replicate", "fsdp"]` when `parallel_dims.dp_replicate_enabled`, otherwise `"fsdp"`. Keep the existing Float8 rowwise `qwen3_14b()` source unchanged.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.75 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded; the run completed with finite/falling loss from 12.62485 to 7.83562, MFU `N/A`, and 157.72GiB peak memory, but throughput was only 5,455 tps. The Qwen3 HSDP source change was reverted because it underperformed the 8,877 tps best.
+
 - Idea: HSDP 2x4 with Float8 memory-budget 0.9
   - Current best source commit: `99ad2926`; current best result row: 8,877 tps from Float8 rowwise plus memory-budget 0.9.
   - Source: Float8 memory-budget 0.9 profile and HSDP/FSDP2 mesh research.
