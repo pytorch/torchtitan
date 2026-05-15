@@ -7,6 +7,9 @@
 from .flex_shard import (
     BucketSpec,
     flex_shard,
+    get_global_shape,
+    get_placements,
+    is_flex_shard_param,
     LocalStorageLayout,
     MixedPrecisionPolicy,
     OffloadPolicy,
@@ -18,6 +21,9 @@ from .flex_shard import (
 __all__ = [
     "BucketSpec",
     "flex_shard",
+    "get_global_shape",
+    "get_placements",
+    "is_flex_shard_param",
     "LocalStorageLayout",
     "MixedPrecisionPolicy",
     "OffloadPolicy",

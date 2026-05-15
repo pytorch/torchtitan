@@ -174,17 +174,17 @@ class ParamInfo:
         return _get_single_placement(self.placements)
 
 
-class DStorage:
+class ShardedBucketStorage:
     """
     Manages a byte buffer that backs one bucket of sharded parameters.
 
-    All parameters in a storage must share a dtype and placement-compatible
+    All parameters in a bucket storage must share a dtype and placement-compatible
     local layout. Each placement owns its parameter's local storage layout and
-    exposed tensor view; DStorage only places those layouts sequentially in one
-    byte buffer.
+    exposed tensor view; ShardedBucketStorage only places those layouts
+    sequentially in one byte buffer.
 
     Communication is delegated to eager hooks and parameter accessors; this
-    storage object owns the byte buffer and metadata.
+    bucket storage object owns the byte buffer and metadata.
     """
 
     def __init__(
@@ -217,8 +217,8 @@ class DStorage:
         mesh: DeviceMesh,
         device: torch.device,
         bucket_spec: BucketSpec,
-    ) -> DStorage:
-        """Create storage for one bucket and install its sharded parameters."""
+    ) -> ShardedBucketStorage:
+        """Create storage metadata for one bucket and install sharded params."""
         param_infos, total_bytes = cls.create_param_infos(
             named_params,
             mesh,
@@ -237,7 +237,7 @@ class DStorage:
             byte_storage = torch.empty(total_bytes, dtype=torch.uint8, device=device)
             expected_param_device = torch.device(device)
 
-        storage = cls(
+        bucket_storage = cls(
             byte_storage,
             param_infos,
             mesh,
@@ -245,9 +245,9 @@ class DStorage:
             module,
             reshard_after_forward=bucket_spec.reshard_after_forward,
         )
-        storage.copy_params_from(named_params)
-        storage.install_sharded_params(expected_param_device)
-        return storage
+        bucket_storage.copy_params_from(named_params)
+        bucket_storage.install_sharded_params(expected_param_device)
+        return bucket_storage
 
     @staticmethod
     def _compute_local_storage_layout(
@@ -399,10 +399,10 @@ def _materialize_bucket_storages(
     param_placements: dict[str, tuple[Placement, ...]],
     mesh: DeviceMesh,
     device: torch.device,
-) -> tuple[list[DStorage], dict[str, BucketSpec]]:
-    """Create DStorages for bucket assignments and install sharded parameters."""
+) -> tuple[list[ShardedBucketStorage], dict[str, BucketSpec]]:
+    """Create ShardedBucketStorage objects and install sharded parameters."""
     named_params_dict = dict(named_params)
-    storages: list[DStorage] = []
+    bucket_storages: list[ShardedBucketStorage] = []
     fqn_to_bucket_spec: dict[str, BucketSpec] = {}
 
     for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
@@ -415,8 +415,8 @@ def _materialize_bucket_storages(
 
         bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
         bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
-        storages.append(
-            DStorage.from_bucket(
+        bucket_storages.append(
+            ShardedBucketStorage.from_bucket(
                 module,
                 bucket_named_params,
                 bucket_placements,
@@ -426,4 +426,4 @@ def _materialize_bucket_storages(
             )
         )
 
-    return storages, fqn_to_bucket_spec
+    return bucket_storages, fqn_to_bucket_spec

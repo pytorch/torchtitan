@@ -16,12 +16,11 @@ import torch.nn as nn
 from .sharded_param import is_flex_shard_param
 
 if TYPE_CHECKING:
-    from .bucket_storage import DStorage
+    from .bucket_storage import ShardedBucketStorage
 
 
-# Module attribute names for storing DStorage
-_DSTORAGE_ATTR = "_dstorage"
-_DSTORAGES_ATTR = "_dstorages"
+# Module attribute names for storing ShardedBucketStorage
+_SHARDED_BUCKET_STORAGES_ATTR = "_sharded_bucket_storages"
 
 _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR = "_flex_shard_bucket_unshard_hook_registered"
 _EAGER_COMM_CONTEXTS_ATTR = "_flex_shard_eager_comm_contexts"
@@ -46,11 +45,11 @@ def _raise_graph_capture_unsupported() -> None:
     )
 
 
-def _raise_missing_eager_bucket_unshard(accessor_state: Any) -> None:
-    param_fqn = getattr(accessor_state, _PARAM_FQN_ATTR, "<unknown>")
-    bucket_fqn = getattr(accessor_state, _BUCKET_FQN_ATTR, None)
+def _raise_missing_eager_bucket_unshard(unsharded_param_slot: Any) -> None:
+    param_fqn = getattr(unsharded_param_slot, _PARAM_FQN_ATTR, "<unknown>")
+    bucket_fqn = getattr(unsharded_param_slot, _BUCKET_FQN_ATTR, None)
     hook_registered = getattr(
-        accessor_state, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False
+        unsharded_param_slot, _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR, False
     )
     bucket_msg = f" in bucket {bucket_fqn!r}" if bucket_fqn else ""
     hook_msg = (
@@ -118,13 +117,17 @@ class ParamModuleRef:
 
 
 @dataclass
-class ParamAccessorState:
-    """Mutable per-parameter state used by FlexShard's property getter.
+class UnshardedParamSlot:
+    """Per-parameter handoff slot for the current unsharded parameter.
 
-    Bucket pre-forward hooks write the current full parameter tensor into this
-    state. The dynamically installed parameter property reads it when module
-    code accesses ``self.weight``. This lets eager module code see full params
-    while persistent module storage remains sharded.
+    FlexShard replaces managed module parameters with dynamic properties.
+    A bucket pre-forward hook writes the full parameter tensor produced by
+    bucket unshard into this slot. The dynamic property getter consumes that
+    tensor when module code reads ``self.weight``. The post-forward hook clears
+    any remaining value.
+
+    The slot also carries per-parameter dtype/device policy for the getter; it
+    does not own the unsharded parameter tensor's storage.
     """
 
     param_dtype: torch.dtype | None = None
@@ -133,9 +136,9 @@ class ParamAccessorState:
     _current_unsharded_param: torch.Tensor | None = None
 
     def consume_unsharded_param(self) -> torch.Tensor:
-        """Return the hook-provided full param or raise for unsupported access."""
-        # _current_unsharded_param is set by the bucket unshard pre-forward hook so
-        # parameter reads preserve bucketed collectives.
+        """Return the hook-provided unsharded param or raise if absent."""
+        # Filled from bucket unshard output by the pre-forward hook so parameter
+        # reads preserve bucketed collectives.
         current = self._current_unsharded_param
         if current is not None:
             # TODO: Keep this cache valid for the whole forward. Clearing it
@@ -159,25 +162,23 @@ class FlexShardModule:
     """Mixin added to modules after flex_shard()."""
 
     @property
-    def dstorage(self) -> DStorage:
-        """First (or only) DStorage. For multi-bucket, use .dstorages."""
-        return getattr(self, _DSTORAGE_ATTR)
-
-    @property
-    def dstorages(self) -> list:
-        """All DStorage instances (one per bucket)."""
-        return getattr(self, _DSTORAGES_ATTR)
+    def sharded_bucket_storages(self) -> list[ShardedBucketStorage]:
+        """All bucket storage objects, one per bucket."""
+        return getattr(self, _SHARDED_BUCKET_STORAGES_ATTR)
 
 
 def _check_not_already_flex_sharded(module: nn.Module) -> None:
     """Raise if applying FlexShard would create nested ownership."""
-    if getattr(module, _DSTORAGES_ATTR, None) is not None:
+    if getattr(module, _SHARDED_BUCKET_STORAGES_ATTR, None) is not None:
         raise ValueError(
-            f"Module {type(module).__name__} already has DStorage. "
+            f"Module {type(module).__name__} already has ShardedBucketStorage. "
             "Cannot apply flex_shard twice to the same module."
         )
     for child_fqn, child in module.named_modules():
-        if child_fqn and getattr(child, _DSTORAGES_ATTR, None) is not None:
+        if (
+            child_fqn
+            and getattr(child, _SHARDED_BUCKET_STORAGES_ATTR, None) is not None
+        ):
             raise ValueError(
                 "Nested flex_shard wrapping is not supported. "
                 f"Child module {child_fqn!r} is already FlexSharded. "
@@ -196,11 +197,10 @@ def _check_not_already_flex_sharded(module: nn.Module) -> None:
 
 def _attach_flex_shard_module_state(
     module: nn.Module,
-    storages: list[DStorage],
+    bucket_storages: list[ShardedBucketStorage],
 ) -> None:
     """Attach FlexShard state and mixin accessors to a module."""
-    setattr(module, _DSTORAGES_ATTR, storages)
-    setattr(module, _DSTORAGE_ATTR, storages[0] if storages else None)
+    setattr(module, _SHARDED_BUCKET_STORAGES_ATTR, bucket_storages)
     setattr(module, _EAGER_COMM_CONTEXTS_ATTR, {})
 
     cls = type(module)
@@ -211,11 +211,11 @@ def _attach_flex_shard_module_state(
 _parametrized_module_class_counter = 0
 
 
-def _register_param_accessors(
+def _install_module_unsharded_param_getters(
     module: nn.Module,
-    accessor_states: dict[str, ParamAccessorState],
+    unsharded_param_slots: dict[str, UnshardedParamSlot],
 ) -> None:
-    """Register per-parameter property getters that read accessor state.
+    """Install unsharded parameter getters on one leaf module.
 
     Uses dynamic subclass creation (not nn.utils.parametrize) to avoid
     state_dict key mangling. state_dict reads self._parameters directly,
@@ -223,20 +223,20 @@ def _register_param_accessors(
 
     Args:
         module: The leaf module owning the parameters.
-        accessor_states: Maps parameter name to its accessor state.
+        unsharded_param_slots: Maps parameter name to its unsharded slot.
     """
     global _parametrized_module_class_counter
     _parametrized_module_class_counter += 1
 
-    def _make_flex_shard_param_getter(accessor_state: ParamAccessorState):
+    def _make_flex_shard_param_getter(unsharded_param_slot: UnshardedParamSlot):
         def get_flex_shard_param(self):
-            return accessor_state.consume_unsharded_param()
+            return unsharded_param_slot.consume_unsharded_param()
 
         return get_flex_shard_param
 
     param_name_to_property = {
         param_name: property(_make_flex_shard_param_getter(state))
-        for param_name, state in accessor_states.items()
+        for param_name, state in unsharded_param_slots.items()
     }
     module_cls = type(
         f"FlexShard{module.__class__.__name__}_{_parametrized_module_class_counter}",
@@ -247,9 +247,9 @@ def _register_param_accessors(
     sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
 
 
-def _register_module_param_accessors(
-    module_param_map: dict[nn.Module, dict[str, ParamAccessorState]],
+def _install_unsharded_param_getters(
+    module_param_slots: dict[nn.Module, dict[str, UnshardedParamSlot]],
 ) -> None:
-    """Register property-based parameter accessors grouped by owning module."""
-    for module, param_map in module_param_map.items():
-        _register_param_accessors(module, param_map)
+    """Install unsharded parameter getters grouped by owning module."""
+    for module, param_slots in module_param_slots.items():
+        _install_module_unsharded_param_getters(module, param_slots)

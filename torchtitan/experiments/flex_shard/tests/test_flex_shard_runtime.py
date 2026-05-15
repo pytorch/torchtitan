@@ -9,9 +9,7 @@ from unittest.mock import patch
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.flex_shard.flex_shard.sharded_param import (
-    is_flex_shard_param,
-)
+from torchtitan.experiments.flex_shard import is_flex_shard_param
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_transformer_model,
     single_rank_cuda_mesh,
