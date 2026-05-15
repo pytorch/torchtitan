@@ -155,7 +155,7 @@ def set_gqa_inner_attention_local_map(
     GPT-OSS's flash attention with ``return_lse=True``); both outputs share
     the same heads-sharded placement.
     """
-    qkv: NamedPlacement = {TP: spmd.S(2)}
+    qkv = dense_activation_placement(tp=spmd.S(2))
     num_outputs = 2 if return_lse else 1
     in_placements = (qkv, qkv, qkv)
     inner_attention_cfg.sharding_config = ShardingConfig(
