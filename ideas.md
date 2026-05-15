@@ -126,4 +126,13 @@
   - Supporting evidence: `get_attention_config("flex_flash")` is supported on Hopper/Blackwell, configures `FlexAttention.Config(block_size=(256, 128), kernel_options={"BACKEND": "FLASH"})`, and returns a block-causal mask. The current best profile is no longer primarily NCCL-bound, so attention-kernel changes are a plausible narrow next lever.
   - Planned source/config changes: In `torchtitan/models/qwen3/config_registry.py`, change only the `qwen3_14b()` `model_spec` call to `model_registry("14B", attn_backend="flex_flash")`. Revert if discarded.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 7,898 tps. Risks are block-mask overhead, compile incompatibility, or slower FlexAttention codegen than SDPA for this sequence length and GQA shape.
+  - Success criteria and expected risk: Crashed before training at `330843d`; Inductor reported `BACKEND='FLASH' but flash attention cannot be used: CUTE flash attention library is not available`.
+
+- ~~Idea: Plain FlexAttention backend with model-only compile~~
+  - Current best source commit: a68a3c
+  - Source: accidental follow-up after flex-flash crash
+  - Expected mechanism for improving reported tokens/sec: Use FlexAttention with block-causal masks without the unavailable FLASH backend, possibly improving attention scheduling or mask handling versus SDPA.
+  - Supporting evidence: The same attention-backend hook is in scope through `model_registry("14B", attn_backend="flex")`, and it avoids the CUTE flash lowering requirement that blocked `flex_flash`.
+  - Planned source/config changes: In `qwen3_14b()`, set `model_spec=model_registry("14B", attn_backend="flex")`.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded from the observed run in `run.log`; it completed with finite loss dropping from 12.46586 to 11.08583, but only reached 5,101 tps and 21.31% MFU, far below the 7,898 tps SDPA current best. The source should be restored to default SDPA.
