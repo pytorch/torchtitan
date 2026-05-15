@@ -162,11 +162,9 @@ def qwen3_0_6b() -> Trainer.Config:
 def qwen3_1_7b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
-        hf_assets_path="./assets/hf/Qwen3-1.7B",
+        hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("1.7B"),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
-        ),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
