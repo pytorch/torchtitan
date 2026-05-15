@@ -82,6 +82,10 @@ class _StubCompileConfig:
     mode: str = "aot_fx_trace"
     backend: str = "aot_eager"
     passes: list = field(default_factory=list)
+    ep_overlap_chunk_dim: str = "batch"
+    ep_overlap_chunk_strategy: str = "graph"
+    ep_overlap_module_fqn: str = "layers.*"
+    ep_overlap_disable_early_grad_accumulation: bool = False
 
 
 @dataclass
@@ -171,6 +175,20 @@ class TestConfigFingerprint(unittest.TestCase):
         fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
         fp_b = compute_config_fingerprint(_make_stub_model(), cfg_b, dims)
         self.assertNotEqual(fp_a, fp_b)
+
+        cfg_graph_batch = _StubCompileConfig(passes=["ep_overlap"])
+        cfg_graph_seq = _StubCompileConfig(
+            passes=["ep_overlap"],
+            ep_overlap_chunk_dim="seq",
+            ep_overlap_module_fqn="layers.*.moe",
+        )
+        fp_graph_batch = compute_config_fingerprint(
+            _make_stub_model(), cfg_graph_batch, dims
+        )
+        fp_graph_seq = compute_config_fingerprint(
+            _make_stub_model(), cfg_graph_seq, dims
+        )
+        self.assertNotEqual(fp_graph_batch, fp_graph_seq)
 
     def test_pass_order_sensitive(self):
         from torchtitan.experiments.graph_trainer.precompile import (

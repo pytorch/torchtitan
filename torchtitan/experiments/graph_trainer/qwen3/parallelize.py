@@ -4,18 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch.fx.traceback import annotate_fn
-
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
+    annotate_moe_ep_regions,
     apply_cp_to_attention,
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    apply_ep_overlap_eager_chunking,
+)
 from torchtitan.experiments.graph_trainer.qwen3.model import GraphTrainerQwen3Model
 
 
@@ -30,16 +32,7 @@ def annotate_qwen3(model: GraphTrainerQwen3Model) -> None:
     """
     # Annotate MoE EP regions if any layer has MoE enabled
     if any(layer.moe is not None for layer in model.config.layers):
-        from torchtitan.models.common.moe import MoE
-        from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
-
-        LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
-            LocalTokenDispatcher.dispatch
-        )
-        LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
-            LocalTokenDispatcher.combine
-        )
-        MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
+        annotate_moe_ep_regions()
 
     annotate_module_fqns(model)
 
@@ -83,6 +76,7 @@ def parallelize_qwen3(
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
     model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
+    apply_ep_overlap_eager_chunking(model, compile_config)
 
     # Apply compilation based on mode
     model = apply_compile(

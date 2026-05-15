@@ -27,10 +27,14 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
     is_cudagraphable,
     is_full_cudagraphable,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    apply_ep_overlap_eager_chunking,
 )
 from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
@@ -2370,6 +2374,61 @@ class TestIsFullCudagraphable(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
         self.assertFalse(is_cudagraphable(s))
         self.assertFalse(is_full_cudagraphable(gm))
+
+
+class TestEagerChunking(TestCase):
+    def test_eager_chunking_is_idempotent(self):
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x.sin()
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x):
+                return self.layers[0](x)
+
+        model = Model()
+        config = GraphTrainerCompileConfig(
+            enable=True,
+            passes=["ep_overlap"],
+            ep_overlap_chunk_strategy="eager",
+            ep_overlap_module_fqn="layers.*",
+        )
+        apply_ep_overlap_eager_chunking(model, config)
+        wrapped_forward = model.layers[0].forward
+        apply_ep_overlap_eager_chunking(model, config)
+
+        self.assertIs(model.layers[0].forward, wrapped_forward)
+
+    def test_eager_chunking_rejects_unsupported_output_type(self):
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return {"x": x}
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x):
+                return self.layers[0](x)
+
+        model = Model()
+        apply_ep_overlap_eager_chunking(
+            model,
+            GraphTrainerCompileConfig(
+                enable=True,
+                passes=["ep_overlap"],
+                ep_overlap_chunk_strategy="eager",
+                ep_overlap_module_fqn="layers.*",
+            ),
+        )
+
+        with self.assertRaisesRegex(TypeError, "layers.0.*dict"):
+            model(torch.randn(4, 3))
 
 
 if __name__ == "__main__":

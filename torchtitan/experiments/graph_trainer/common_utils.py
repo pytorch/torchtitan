@@ -71,13 +71,17 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
 
 
+def _get_module_fqn(node: torch.fx.Node) -> str:
+    return node.meta.get("custom", {}).get(_MODULE_FQN, "")
+
+
 def _get_layer_id(node: torch.fx.Node) -> int:
     """Extract the layer index from the node's module_fqn metadata.
 
     Nodes under ``layers.<N>`` return ``N``.
     All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
     """
-    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+    fqn = _get_module_fqn(node)
     parts = fqn.split(".")
     if parts[0] == "layers" and len(parts) >= 2:
         try:
@@ -99,6 +103,30 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+
+
+def _annotate_method_once(cls: type, method_name: str, meta: dict[str, str]) -> None:
+    method = getattr(cls, method_name)
+    marker = f"_torchtitan_annotated_{'_'.join(f'{k}_{v}' for k, v in meta.items())}"
+    if getattr(method, marker, False):
+        return
+    wrapped = annotate_fn(meta)(method)
+    setattr(wrapped, marker, True)
+    setattr(cls, method_name, wrapped)
+
+
+def annotate_moe_ep_regions() -> None:
+    """Annotate MoE EP compute, dispatch, and combine regions for FX passes."""
+    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        LocalTokenDispatcher,
+    )
+
+    for dispatcher_cls in (LocalTokenDispatcher, AllToAllTokenDispatcher):
+        _annotate_method_once(dispatcher_cls, "dispatch", {"EP": "dispatch"})
+        _annotate_method_once(dispatcher_cls, "combine", {"EP": "combine"})
+    _annotate_method_once(MoE, "forward", {"EP": "compute"})
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):

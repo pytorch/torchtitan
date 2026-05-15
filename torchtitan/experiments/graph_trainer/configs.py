@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
-from typing import Literal
+from typing import Any, Literal
 
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.config.configs import CompileConfig
@@ -16,6 +16,15 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 )
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
+
+EpOverlapChunkDim = Literal["batch", "seq"]
+EpOverlapChunkStrategy = Literal["eager", "graph"]
+
+TRANSFORMER_BLOCK_FQN = "layers.*"
+MOE_BLOCK_FQN = "layers.*.moe"
+SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset(
+    {TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN}
+)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -95,6 +104,28 @@ class GraphTrainerCompileConfig(CompileConfig):
     two collectives can overlap. It is a no-op when the graph contains no
     FSDP all-gathers."""
 
+    ep_overlap_chunk_dim: Literal["batch", "seq"] = "batch"
+    """Logical input dimension to split for ``ep_overlap``.
+
+    Sequence chunking is only supported for MoE block roots because attention
+    requires full K/V context.
+    """
+
+    ep_overlap_chunk_strategy: Literal["eager", "graph"] = "graph"
+    """How selected EP-overlap regions are chunked before scheduling.
+
+    ``eager`` wraps module forwards before tracing. ``graph`` traces the
+    unmodified model and chunks selected regions with an FX graph pass.
+    """
+
+    ep_overlap_module_fqn: str = "layers.*"
+    """Single module FQN pattern chunked for ``ep_overlap``.
+
+    v1 supports all transformer blocks (``layers.*``) or all MoE blocks
+    (``layers.*.moe``). The overlap scheduler consumes the common chunk metadata
+    produced by either eager or graph chunking.
+    """
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
@@ -116,6 +147,38 @@ def validate_autoparallel_config(
             "AutoParallel graph_trainer integration only supports "
             "--compile.mode aot_fx_trace"
         )
+
+
+def validate_ep_overlap_config(
+    compile_config: Any,
+) -> tuple[EpOverlapChunkDim, EpOverlapChunkStrategy, str]:
+    chunk_dim = compile_config.ep_overlap_chunk_dim
+    if chunk_dim not in ("batch", "seq"):
+        raise ValueError(
+            "--compile.ep_overlap_chunk_dim must be 'batch' or 'seq' when "
+            "--compile.passes contains ep_overlap"
+        )
+
+    chunk_strategy = compile_config.ep_overlap_chunk_strategy
+    if chunk_strategy not in ("eager", "graph"):
+        raise ValueError(
+            "--compile.ep_overlap_chunk_strategy must be 'eager' or 'graph' when "
+            "--compile.passes contains ep_overlap"
+        )
+
+    module_fqn = compile_config.ep_overlap_module_fqn
+    if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
+        raise ValueError(
+            "--compile.ep_overlap_module_fqn must be either 'layers.*' "
+            "or 'layers.*.moe' for ep_overlap"
+        )
+    if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
+        raise ValueError(
+            "--compile.ep_overlap_chunk_dim seq is only supported with "
+            "--compile.ep_overlap_module_fqn layers.*.moe"
+        )
+
+    return chunk_dim, chunk_strategy, module_fqn
 
 
 def to_graph_trainer_config(
