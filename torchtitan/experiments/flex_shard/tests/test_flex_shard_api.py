@@ -17,9 +17,7 @@ from torchtitan.experiments.flex_shard import (
     OffloadPolicy,
 )
 from torchtitan.experiments.flex_shard.example.shard import per_param_placements, Shard
-from torchtitan.experiments.flex_shard.flex_shard.unsharded_param_access import (
-    FlexShardModule,
-)
+from torchtitan.experiments.flex_shard.flex_shard.flex_shard import FlexShardModule
 from torchtitan.experiments.flex_shard.tests.common import (
     flex_shard_cuda,
     flex_shard_transformer_model,
