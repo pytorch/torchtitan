@@ -408,3 +408,15 @@ The profiler diagnostic on the bf16-reduce 0.925 stack completed with loss falli
 Rank 0 kernel buckets still show communication as a major limiter: dense GEMM/scaled-mm is 1.115s / 34.2%, NCCL reduce-scatter is 0.854s / 26.2%, flash attention is 0.600s / 18.4%, Float8 scale/cast/fused elementwise is 0.253s / 7.8%, and NCCL all-gather is 0.212s / 6.5%. All-rank means were dense GEMM 1.104s, reduce-scatter 0.766s, flash attention 0.610s, Float8 scale/cast 0.251s, and all-gather 0.229s.
 
 The reduce-scatter kernel is now explicitly `ncclDevKernel_ReduceScatter_Sum_bf16_RING_LL`, so the bfloat16 reduction dtype is active, but reduce-scatter remains the largest single named kernel bucket on rank 0. Optimizer kernels are only about 31.5ms / 1.0% of rank-0 kernel time, so the queued bf16 optimizer-state probe is more of a memory/bandwidth cleanup than a direct kernel-time target.
+
+## Experiment Review: Fused bfloat16 Optimizer States
+
+The fused bfloat16 optimizer-state command is the new best. Running the active bf16-reduce, memory-budget 0.925 stack with `--optimizer.implementation fused_opt_states_bf16` completed with loss falling from 12.57776 to 10.44660, peak memory dropping from 145.48GiB to 137.47GiB, MFU `N/A`, and 9,382 tps.
+
+The throughput gain over the prior 9,364 tps max is narrow, but the memory drop is meaningful and the loss trend is acceptable. Treat the optimizer-state command as a provisional best until an exact repeat confirms that the 9,382 tps row is not just favorable variance.
+
+## Experiment Review: Fused Optimizer States Repeat
+
+The exact repeat of the fused bfloat16 optimizer-state command is a discard. It completed, but loss rose from 12.51469 to 14.71142, peak memory stayed at 137.47GiB, MFU was `N/A`, and throughput reached only 9,332 tps.
+
+This fails the loss trend gate and lands below both the 9,382 tps fused row and the 9,364 tps non-fused max. Flag the 9,382 tps fused optimizer-state row as suspect; do not spend its freed memory headroom on follow-up batch or activation-budget probes unless another clean fused repeat restores falling loss. The best clean non-fused max remains 9,364 tps at memory-budget 0.925.
