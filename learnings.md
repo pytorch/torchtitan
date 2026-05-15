@@ -471,14 +471,14 @@ Rank 0 buckets were dense GEMM/scaled-mm 1.100s / 37.5%, flash attention 0.604s 
 
 Compared with the prior non-fused profile, peak memory remains lower at 137.47GiB versus 145.48GiB, reduce-scatter is lower on rank 0 at 0.550s / 18.8% versus 0.854s / 26.2%, and dense GEMM plus flash attention now take the largest share. This confirms fused optimizer states changed memory pressure more than math kernels; the remaining optimization target is still split between dense/attention compute and FSDP communication rather than optimizer kernel time.
 
-## Next Communication-Overhead Probe
-
-Before changing source again for HSDP, try the command-only `--comm.trace_buf_size=0` knob on the fused optimizer-state current best. TorchTitan defaults the NCCL flight recorder buffer to 20000 entries, which may add small per-collective bookkeeping overhead. The fused profile still has nontrivial reduce-scatter and all-gather time, so disabling that diagnostic buffer is a cheap way to test whether communication tracing overhead is visible in the 10-step objective.
-
-This should not change model math or placements. Keep the result only if loss is finite/falling and throughput exceeds the 9,384 tps current best; otherwise discard it and return to the more invasive HSDP 2x4 revisit or another compute/attention-focused idea.
-
 ## Experiment Review: HSDP 2x4 Revisit with Fused Optimizer States
 
 The HSDP 2x4 revisit is a discard. A minimal Qwen3 `parallelize.py` change allowed the `dp_replicate` + `fsdp` mesh and the run created active dimensions `['batch', 'loss', 'dp_replicate', 'fsdp', 'efsdp']`, but throughput reached only 9,198 tps versus the 9,384 tps fused optimizer-state best.
 
 Loss was finite/falling from 12.35089 to 9.74531, but peak memory rose to 166.04GiB. HSDP did not convert the remaining reduce-scatter profile signal into a throughput win, and it consumed most of the memory saved by fused optimizer states. The HSDP-only source change has been reverted; keep 8-way FSDP no-reshard as the best source path.
+
+## Next Communication-Overhead Probe
+
+After the HSDP discard, try the command-only `--comm.trace_buf_size=0` knob on the fused optimizer-state current best. TorchTitan defaults the NCCL flight recorder buffer to 20000 entries, which may add small per-collective bookkeeping overhead. The fused profile still has nontrivial reduce-scatter and all-gather time, so disabling that diagnostic buffer is a cheap way to test whether communication tracing overhead is visible in the 10-step objective.
+
+This should not change model math or placements. Keep the result only if loss is finite/falling and throughput exceeds the 9,384 tps current best; otherwise discard it and move to another compute/attention-focused idea.
