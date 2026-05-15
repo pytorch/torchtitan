@@ -189,6 +189,12 @@ The remaining in-scope search space is mostly narrow quantization/config tuning.
 
 Next TP root-cause step: switch only activation checkpointing from memory-budget to selective while keeping TP=2, Float8 rowwise, model-only compile, and no-reshard FSDP. This isolates whether the previous TP crash was specifically the memory-budget min-cut partitioner or a broader TP/compile incompatibility.
 
+## Experiment Review: TP=2 Selective AC Root Cause
+
+TP=2 with Float8 rowwise, model-only compile, no-reshard FSDP, and selective AC is runnable, so the prior TP crash is specific to the compiler memory-budget partitioner rather than a general TP/compile incompatibility. The selective run completed with finite/falling loss from 3.06316 to 2.32347 and 72.00GiB peak memory.
+
+It is still a discard for performance: 7,017 tps is below the 8,877 tps 8-way FSDP memory-budget best and below the 8,399 tps Float8 rowwise selective-AC non-TP row. The run also logged global batch size 16 because TP=2 leaves only four data-parallel shard ranks, so TP reduces the reported token throughput for this fixed local-batch command. The Qwen3 TP source was reverted.
+
 ## Experiment Review: Float8 Tensorwise Recipe
 
 The Float8 tensorwise recipe is not useful under the current memory-budget best stack. Changing only `qwen3_14b()` from `recipe_name="rowwise"` to `recipe_name="tensorwise"` and running the 8-way FSDP no-reshard, model-only compile, memory-budget 0.9 command completed, but loss rose from 12.28795 to 15.71423. Throughput reached only 5,000 tps with MFU `N/A`, far below the 8,877 tps rowwise best, and peak memory was 145.67GiB.

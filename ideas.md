@@ -245,11 +245,11 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded; the 10-step run completed but loss rose from 12.28795 to 15.71423, throughput reached only 5,000 tps versus the 8,877 tps best, MFU was `N/A`, and peak memory was 145.67GiB. The `qwen3_14b()` Float8 recipe source change was reverted.
 
-- Idea: TP=2 root-cause with selective AC
+- ~~Idea: TP=2 root-cause with selective AC~~
   - Current best source commit: `0f036086`; current best result row: 8,877 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.9.
   - Source: human-requested TP root-cause follow-up.
   - Expected mechanism for improving reported tokens/sec: The TP=2 memory-budget run failed in Inductor's memory-budget/min-cut partitioner before step 1. Switching only activation checkpointing back to selective removes that partitioner while keeping TP=2, Float8 rowwise, model-only compile, no-reshard FSDP, and the current source filters, so it tests whether TP itself remains runnable/useful under the current Float8+compile stack.
   - Supporting evidence: Qwen3 14B's 40 query heads and 8 KV heads are divisible by TP=2, and the earlier TP2 sharding patch is known to build. The previous failure happened in memory-budget partitioning, not in Qwen3 head divisibility or FSDP mesh construction.
   - Planned source/config changes: Reapply the Qwen3 TP2 source/sharding patch from `e67f61c6`, keep HSDP disabled, and keep compile before TP wrapping as the least-bad ordering from the memory-budget attempt.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss, acceptable memory, and throughput above 8,877 tps. If it crashes, record as TP/compile incompatibility and revert; if it runs slower, discard and revert.
+  - Success criteria and expected risk: Discarded at `05a39792`; the run completed with finite/falling loss from 3.06316 to 2.32347 and 72.00GiB peak memory, but reached only 7,017 tps, below the 8,877 tps current best. TP+compile is runnable with selective AC, so the prior crash is specific to the memory-budget path, but TP remains slower here. The TP source was reverted.
