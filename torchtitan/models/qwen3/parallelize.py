@@ -21,6 +21,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
@@ -65,6 +66,9 @@ def parallelize_qwen3(
             model_compile_enabled=compile_config.enable,
             base_folder=dump_folder,
         )
+
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile(model, compile_config)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
