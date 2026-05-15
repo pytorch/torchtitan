@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 
 import torch
 import torchstore as ts
-from monarch.actor import Actor, endpoint
+from monarch.actor import Actor, current_rank, endpoint
+
 from torchtitan.config import (
     CompileConfig,
     Configurable,
@@ -24,7 +25,9 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.types import Completion
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
@@ -186,7 +189,17 @@ class VLLMGenerator(Actor, Configurable):
         model_path: str,
         compile_config: CompileConfig,
         max_num_seqs: int,
+        output_dir: str,
     ):
+        init_logger()
+        sl.init_structured_logger(
+            source="rl_generator",
+            output_dir=output_dir,
+            rank=current_rank().rank,
+            enable=config.debug.enable_structured_logging,
+        )
+        sl.log_trace_instant("structured_logger_started")
+
         self.config = config
         self.model_spec = model_spec
 
@@ -206,6 +219,7 @@ class VLLMGenerator(Actor, Configurable):
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
         set_batch_invariance(config.debug.batch_invariant)
 
@@ -251,9 +265,10 @@ class VLLMGenerator(Actor, Configurable):
             engine_kwargs["seed"] = config.debug.seed
         engine_args = EngineArgs(**engine_kwargs)
 
-        logger.info("Initializing LLMEngine from EngineArgs...")
-        self._engine = LLMEngine.from_engine_args(engine_args)
-        logger.info("vLLM rollout engine initialized")
+        with sl.log_trace_span("vllm_init"):
+            logger.info("Initializing LLMEngine from EngineArgs...")
+            self._engine = LLMEngine.from_engine_args(engine_args)
+            logger.info("vLLM rollout engine initialized")
 
         self.policy_version = 0
 
@@ -284,6 +299,12 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
+    async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
+        """Sync the structured-logger step counter from the controller."""
+        sl.set_step(step, relative_step=relative_step)
+
+    @endpoint
+    @sl.log_trace_span("generate")
     async def generate(
         self,
         prompts: list[str],
@@ -325,8 +346,9 @@ class VLLMGenerator(Actor, Configurable):
                 self._engine.add_request(str(i), prompt, sampling_params)
 
             all_outputs = []
-            while self._engine.has_unfinished_requests():
-                all_outputs.extend(self._engine.step())
+            with sl.log_trace_span("engine_steps"):
+                while self._engine.has_unfinished_requests():
+                    all_outputs.extend(self._engine.step())
 
             # vLLM may return requests out of order; sort by the integer
             # request_id we assigned so prompt_idx lines up with the input.
@@ -359,6 +381,7 @@ class VLLMGenerator(Actor, Configurable):
         return completions
 
     @endpoint
+    @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
         """Pull latest weights from TorchStore.
 

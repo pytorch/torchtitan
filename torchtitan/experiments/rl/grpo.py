@@ -55,6 +55,7 @@ from torchtitan.experiments.rl.types import (
     TrainBatch,
     Trajectory,
 )
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -350,6 +351,7 @@ class RLTrainer(Configurable):
         ]
 
     @staticmethod
+    @sl.log_trace_span("_collate_episodes")
     def _collate_episodes(episodes: list[Episode]) -> TrainBatch:
         """Pack episodes into a single varlen-packed TrainBatch."""
         all_ids: list[int] = []
@@ -373,6 +375,7 @@ class RLTrainer(Configurable):
             token_logprobs=[ep.token_logprobs for ep in episodes],
         )
 
+    @sl.log_trace_span("setup")
     async def setup(
         self,
         *,
@@ -419,93 +422,99 @@ class RLTrainer(Configurable):
 
         self._multi_node = host_mesh is not None
 
-        if host_mesh is not None:
-            # Multi-node mode: dedicate whole nodes to trainer vs generator
-            if (
-                trainer_nodes is None
-                or generator_nodes is None
-                or gpus_per_node is None
-            ):
-                raise ValueError(
-                    "trainer_nodes, generator_nodes, and gpus_per_node are "
-                    "required when host_mesh is provided"
+        # TODO(observability): the mesh_spawn span wraps ~80 LoC of branching
+        # provisioner logic. Pull a Provisioner.spawn_meshes(...) helper and
+        # shrink this span to a single call.
+        with sl.log_trace_span("mesh_spawn"):
+            if host_mesh is not None:
+                # Multi-node mode: dedicate whole nodes to trainer vs generator
+                if (
+                    trainer_nodes is None
+                    or generator_nodes is None
+                    or gpus_per_node is None
+                ):
+                    raise ValueError(
+                        "trainer_nodes, generator_nodes, and gpus_per_node are "
+                        "required when host_mesh is provided"
+                    )
+                # Validate that world sizes are evenly divisible by node counts
+                assert self.trainer_world_size % trainer_nodes == 0, (
+                    f"trainer_world_size ({self.trainer_world_size}) must be "
+                    f"evenly divisible by trainer_nodes ({trainer_nodes})"
                 )
-            # Validate that world sizes are evenly divisible by node counts
-            assert self.trainer_world_size % trainer_nodes == 0, (
-                f"trainer_world_size ({self.trainer_world_size}) must be "
-                f"evenly divisible by trainer_nodes ({trainer_nodes})"
+                assert self.generator_world_size % generator_nodes == 0, (
+                    f"generator_world_size ({self.generator_world_size}) must be "
+                    f"evenly divisible by generator_nodes ({generator_nodes})"
+                )
+
+                # Compute GPUs per node for each role based on the config's
+                # world size and number of nodes allocated to that role
+                trainer_gpus_per_node = self.trainer_world_size // trainer_nodes
+                generator_gpus_per_node = self.generator_world_size // generator_nodes
+
+                trainer_host_mesh = host_mesh.slice(hosts=slice(0, trainer_nodes))
+                generator_host_mesh = host_mesh.slice(
+                    hosts=slice(trainer_nodes, trainer_nodes + generator_nodes)
+                )
+
+                # Use Provisioner to set CUDA_VISIBLE_DEVICES so each role
+                # only sees its own GPUs and doesn't conflict with other
+                # processes on the node
+                trainer_provisioner = Provisioner(total_gpus=gpus_per_node)
+                generator_provisioner = Provisioner(total_gpus=gpus_per_node)
+
+                trainer_mesh = trainer_host_mesh.spawn_procs(
+                    per_host={"gpus": trainer_gpus_per_node},
+                    bootstrap=trainer_provisioner.allocate(trainer_gpus_per_node),
+                )
+                generator_mesh = generator_host_mesh.spawn_procs(
+                    per_host={"gpus": generator_gpus_per_node},
+                    bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
+                )
+            else:
+                # Single-node mode: partition GPUs on this_host() via
+                # CUDA_VISIBLE_DEVICES
+                provisioner = Provisioner(total_gpus=total_gpus)
+                trainer_mesh = this_host().spawn_procs(
+                    per_host={"gpus": self.trainer_world_size},
+                    bootstrap=provisioner.allocate(self.trainer_world_size),
+                )
+                generator_mesh = this_host().spawn_procs(
+                    per_host={"gpus": self.generator_world_size},
+                    bootstrap=provisioner.allocate(self.generator_world_size),
+                )
+
+            # Store proc meshes for cleanup
+            self._proc_meshes = [trainer_mesh, generator_mesh]
+
+            await setup_torch_elastic_env_async(trainer_mesh)
+            await setup_torch_elastic_env_async(generator_mesh)
+
+            # Spawn actors on their respective meshes
+            self.trainer = trainer_mesh.spawn(
+                "trainer",
+                PolicyTrainer,
+                config.trainer,
+                model_spec=config.model_spec,
+                hf_assets_path=config.hf_assets_path,
+                generator_dtype=config.generator.model_dtype,
+                compile_config=config.compile,
+                output_dir=config.dump_folder,
             )
-            assert self.generator_world_size % generator_nodes == 0, (
-                f"generator_world_size ({self.generator_world_size}) must be "
-                f"evenly divisible by generator_nodes ({generator_nodes})"
+
+            self.generator = generator_mesh.spawn(
+                "generator",
+                VLLMGenerator,
+                config.generator,
+                model_spec=config.model_spec,
+                model_path=config.hf_assets_path,
+                compile_config=config.compile,
+                max_num_seqs=max(
+                    config.num_prompts_per_step * config.generator.sampling.n,
+                    config.num_validation_samples,
+                ),
+                output_dir=config.dump_folder,
             )
-
-            # Compute GPUs per node for each role based on the config's
-            # world size and number of nodes allocated to that role
-            trainer_gpus_per_node = self.trainer_world_size // trainer_nodes
-            generator_gpus_per_node = self.generator_world_size // generator_nodes
-
-            trainer_host_mesh = host_mesh.slice(hosts=slice(0, trainer_nodes))
-            generator_host_mesh = host_mesh.slice(
-                hosts=slice(trainer_nodes, trainer_nodes + generator_nodes)
-            )
-
-            # Use Provisioner to set CUDA_VISIBLE_DEVICES so each role
-            # only sees its own GPUs and doesn't conflict with other
-            # processes on the node
-            trainer_provisioner = Provisioner(total_gpus=gpus_per_node)
-            generator_provisioner = Provisioner(total_gpus=gpus_per_node)
-
-            trainer_mesh = trainer_host_mesh.spawn_procs(
-                per_host={"gpus": trainer_gpus_per_node},
-                bootstrap=trainer_provisioner.allocate(trainer_gpus_per_node),
-            )
-            generator_mesh = generator_host_mesh.spawn_procs(
-                per_host={"gpus": generator_gpus_per_node},
-                bootstrap=generator_provisioner.allocate(generator_gpus_per_node),
-            )
-        else:
-            # Single-node mode: partition GPUs on this_host() via
-            # CUDA_VISIBLE_DEVICES
-            provisioner = Provisioner(total_gpus=total_gpus)
-            trainer_mesh = this_host().spawn_procs(
-                per_host={"gpus": self.trainer_world_size},
-                bootstrap=provisioner.allocate(self.trainer_world_size),
-            )
-            generator_mesh = this_host().spawn_procs(
-                per_host={"gpus": self.generator_world_size},
-                bootstrap=provisioner.allocate(self.generator_world_size),
-            )
-
-        # Store proc meshes for cleanup
-        self._proc_meshes = [trainer_mesh, generator_mesh]
-
-        await setup_torch_elastic_env_async(trainer_mesh)
-        await setup_torch_elastic_env_async(generator_mesh)
-
-        # Spawn actors on their respective meshes
-        self.trainer = trainer_mesh.spawn(
-            "trainer",
-            PolicyTrainer,
-            config.trainer,
-            model_spec=config.model_spec,
-            hf_assets_path=config.hf_assets_path,
-            generator_dtype=config.generator.model_dtype,
-            compile_config=config.compile,
-        )
-
-        self.generator = generator_mesh.spawn(
-            "generator",
-            VLLMGenerator,
-            config.generator,
-            model_spec=config.model_spec,
-            model_path=config.hf_assets_path,
-            compile_config=config.compile,
-            max_num_seqs=max(
-                config.num_prompts_per_step * config.generator.sampling.n,
-                config.num_validation_samples,
-            ),
-        )
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -513,18 +522,21 @@ class RLTrainer(Configurable):
         # LocalRankStrategy: routes each process to a storage volume based on
         #   LOCAL_RANK, so colocated processes share the same volume.
         # https://github.com/meta-pytorch/torchstore
-        await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
+        with sl.log_trace_span("torchstore_init"):
+            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # push weights from trainer
-        self.trainer.push_model_state_dict.call().get()
-        # pull weights for policy version 0 (initial weights)
-        self.generator.pull_model_state_dict.call(0).get()
+        # Initial weight sync from trainer to generator
+        with sl.log_trace_span("trainer_push_model_state_dict"):
+            self.trainer.push_model_state_dict.call().get()
+        with sl.log_trace_span("generator_pull_model_state_dict"):
+            self.generator.pull_model_state_dict.call(0).get()
 
         self.metrics_processor = config.metrics.build(
             log_dir=config.dump_folder,
             job_config=config.to_dict(),
         )
 
+    @sl.log_trace_span("_collect_rollouts")
     def _collect_rollouts(
         self,
         num_groups: int,
@@ -540,12 +552,13 @@ class RLTrainer(Configurable):
 
         trajectories: list[Trajectory] = []
         steps: list[Step] = []
-        for c in completions:
-            step_result = envs[c.prompt_idx].step(c.text)
-            steps.append(step_result)
-            trajectories.append(
-                Trajectory(sample_idx=c.prompt_idx, transitions=[(c, step_result)])
-            )
+        with sl.log_trace_span("score"):
+            for c in completions:
+                step_result = envs[c.prompt_idx].step(c.text)
+                steps.append(step_result)
+                trajectories.append(
+                    Trajectory(sample_idx=c.prompt_idx, transitions=[(c, step_result)])
+                )
 
         response_lens = [len(c.token_ids) for c in completions]
         prompt_lens = [len(c.prompt_token_ids) for c in completions]
@@ -566,6 +579,7 @@ class RLTrainer(Configurable):
         return trajectories, rollout_metrics
 
     @staticmethod
+    @sl.log_trace_span("_build_episodes")
     def _build_episodes(
         trajectories: list[Trajectory],
     ) -> tuple[list[Episode], list[m.Metric]]:
@@ -631,6 +645,7 @@ class RLTrainer(Configurable):
             )
         return episodes, episode_metrics
 
+    @sl.log_trace_span("validate")
     async def validate(self) -> list[m.Metric]:
         """Run validation on held-out prompts using greedy sampling.
 
@@ -693,7 +708,13 @@ class RLTrainer(Configurable):
             is_validation=True,
         )
 
-        for step in range(num_steps):
+        sl.log_trace_instant("training_start")
+
+        for step in range(1, num_steps + 1):
+            sl.set_step(step)
+            # Propagate the step counter to actors for structured logging.
+            self.trainer.sync_log_step.call(step)
+            self.generator.sync_log_step.call(step)
             # Cancellation point for Ctrl-C (KeyboardInterrupt) handling.
             # This yields to the event loop to check for cancellation, which
             # doesn't happen with `.get` calls.
@@ -719,10 +740,14 @@ class RLTrainer(Configurable):
                 self._collate_episodes(per_rank_episodes)
                 for per_rank_episodes in self._shard_episodes(episodes)
             ]
-            fwd_metrics = self._get_rank_0_value(
-                self.trainer.forward_backward.call(batches).get()
-            )
-            optim_output = self._get_rank_0_value(self.trainer.optim_step.call().get())
+            with sl.log_trace_span("trainer_forward_backward_call"):
+                fwd_metrics = self._get_rank_0_value(
+                    self.trainer.forward_backward.call(batches).get()
+                )
+            with sl.log_trace_span("trainer_optim_step_call"):
+                optim_output = self._get_rank_0_value(
+                    self.trainer.optim_step.call().get()
+                )
             trainer_policy_version = optim_output.policy_version
             optimizer_metrics = optim_output.metrics
             t_train_s = time.perf_counter() - t_train_start
@@ -731,9 +756,11 @@ class RLTrainer(Configurable):
             # TODO: we should have `push_model_state_dict` return `trainer_policy_version`
             # instead of having `trainer.optim_step` return it
             t_push_start = time.perf_counter()
-            self.trainer.push_model_state_dict.call().get()
+            with sl.log_trace_span("trainer_push_model_state_dict"):
+                self.trainer.push_model_state_dict.call().get()
             t_weight_sync_push_s = time.perf_counter() - t_push_start
-            self.generator.pull_model_state_dict.call(trainer_policy_version).get()
+            with sl.log_trace_span("generator_pull_model_state_dict"):
+                self.generator.pull_model_state_dict.call(trainer_policy_version).get()
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
             # --- divergence check before any logging ---
@@ -785,6 +812,15 @@ class RLTrainer(Configurable):
 
 async def main():
     config = ConfigManager().parse_args()
+    sl.init_structured_logger(
+        source="rl_controller",
+        output_dir=config.dump_folder,
+        rank=0,
+        # pyrefly: ignore [missing-attribute]
+        enable=config.trainer.debug.enable_structured_logging,
+    )
+    sl.log_trace_instant("structured_logger_started")
+
     rl_trainer = RLTrainer(config)
     try:
         await rl_trainer.setup()

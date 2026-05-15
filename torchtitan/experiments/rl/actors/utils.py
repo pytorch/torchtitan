@@ -11,7 +11,10 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from torchtitan.observability import structured_logger as sl
 
+
+@sl.log_trace_span("compute_logprobs")
 def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     """Compute per-token logprobs from logits.
 
@@ -31,6 +34,7 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
     return logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
 
 
+@sl.log_trace_span("extract_response_logprobs")
 def extract_response_logprobs(
     packed_logprobs: torch.Tensor,
     seq_lens: list[int],
@@ -62,6 +66,7 @@ class LogprobVerificationOutput:
 
 
 @torch.no_grad()
+@sl.log_trace_span("verify_logprob_identity")
 def verify_logprob_identity(
     generator_token_logprobs: list[list[float]],
     trainer_token_logprobs: list[torch.Tensor],

@@ -14,12 +14,13 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed.checkpoint as dcp
 import torch.distributed.distributed_c10d as c10d
 import torchstore as ts
-from monarch.actor import Actor, endpoint
+from monarch.actor import Actor, current_rank, endpoint
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
     StateDictOptions,
 )
+
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -42,6 +43,7 @@ from torchtitan.experiments.rl.actors.utils import (
 )
 from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
@@ -107,9 +109,16 @@ class PolicyTrainer(Actor, Configurable):
         compile_config: CompileConfig,
         hf_assets_path: str = "",
         generator_dtype: str = "",
+        output_dir: str,
     ):
-
         init_logger()
+        sl.init_structured_logger(
+            source="rl_trainer",
+            output_dir=output_dir,
+            rank=current_rank().rank,
+            enable=config.debug.enable_structured_logging,
+        )
+        sl.log_trace_instant("structured_logger_started")
 
         self.config = config
         self.compile_config = compile_config
@@ -129,7 +138,8 @@ class PolicyTrainer(Actor, Configurable):
         # Enable batch-invariant mode BEFORE init_distributed
         set_batch_invariance(config.debug.batch_invariant)
 
-        world_size = dist_utils.init_distributed(config.comm)
+        with sl.log_trace_span("torch_distributed_init"):
+            world_size = dist_utils.init_distributed(config.comm)
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
@@ -219,6 +229,7 @@ class PolicyTrainer(Actor, Configurable):
             f"({len(torchtitan_state_dict)} parameters)"
         )
 
+    @sl.log_trace_span("build_model")
     def _build_model(
         self,
         model_spec: ModelSpec,
@@ -273,6 +284,11 @@ class PolicyTrainer(Actor, Configurable):
 
         return model
 
+    @endpoint
+    async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
+        """Sync the structured-logger step counter from the controller."""
+        sl.set_step(step, relative_step=relative_step)
+
     def _reduce_valid_tokens(
         self, num_local_valid_tokens: torch.Tensor
     ) -> torch.Tensor:
@@ -320,6 +336,7 @@ class PolicyTrainer(Actor, Configurable):
         return out
 
     @endpoint
+    @sl.log_trace_span("forward_backward")
     async def forward_backward(self, train_data: list[TrainBatch]) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
@@ -375,20 +392,25 @@ class PolicyTrainer(Actor, Configurable):
         ).unsqueeze(0)
         attention_masks = create_varlen_metadata_for_document(positions)
 
-        logits = model(token_ids, attention_masks=attention_masks, positions=positions)
+        with sl.log_trace_span("model_forward"):
+            logits = model(
+                token_ids, attention_masks=attention_masks, positions=positions
+            )
         all_policy_logprobs = compute_logprobs(logits, token_ids)
         policy_logprobs = extract_response_logprobs(
             all_policy_logprobs, seq_lens, prompt_lens, response_lens
         )
 
-        loss, loss_metrics = self.loss_fn(
-            policy_logprobs=policy_logprobs,
-            advantages=advantages,
-            num_global_valid_tokens=num_global_valid_tokens,
-        )
+        with sl.log_trace_span("loss_fn"):
+            loss, loss_metrics = self.loss_fn(
+                policy_logprobs=policy_logprobs,
+                advantages=advantages,
+                num_global_valid_tokens=num_global_valid_tokens,
+            )
 
         self.optimizers.zero_grad()
-        loss.backward()
+        with sl.log_trace_span("model_backward"):
+            loss.backward()
 
         # Metrics for bitwise verification of policy logprobs.
         verification: LogprobVerificationOutput = verify_logprob_identity(
@@ -414,6 +436,7 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     @endpoint
+    @sl.log_trace_span("optim_step")
     async def optim_step(self) -> OptimStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
@@ -428,15 +451,17 @@ class PolicyTrainer(Actor, Configurable):
             )
         current_lr = float(current_lrs[0])
 
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.config.training.max_norm,
-            foreach=True,
-            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
-        )
+        with sl.log_trace_span("grad_clip"):
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.config.training.max_norm,
+                foreach=True,
+                pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+            )
 
-        self.optimizers.step()
-        self.lr_schedulers.step()
+        with sl.log_trace_span("optim"):
+            self.optimizers.step()
+            self.lr_schedulers.step()
 
         self.policy_version += 1
 
@@ -455,6 +480,7 @@ class PolicyTrainer(Actor, Configurable):
         )
 
     @endpoint
+    @sl.log_trace_span("save_checkpoint")
     async def save_checkpoint(self, path: str) -> None:
         """Save model state dict to disk via DCP.
 
@@ -468,6 +494,7 @@ class PolicyTrainer(Actor, Configurable):
         logger.info(f"Saved checkpoint to {path}")
 
     @endpoint
+    @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
         """Publish model weights for generator consumption via TorchStore.
 
