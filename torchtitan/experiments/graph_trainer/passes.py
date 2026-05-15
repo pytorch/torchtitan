@@ -41,11 +41,16 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     log_graph_diff,
     snapshot_graph,
 )
-from torchtitan.experiments.graph_trainer.configs import (
-    validate_ep_overlap_config,
+
+from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
+    ep_overlap_chunk_pass,
+    import_chunk_dim_metadata_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     import_eager_chunk_metadata_pass,
+)
+from torchtitan.experiments.graph_trainer.configs import (
+    validate_ep_overlap_config,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
@@ -156,6 +161,7 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
+    module_bucket_plans = get_default_transformer_block_buckets(n_layers)
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
@@ -163,11 +169,26 @@ def compile_time_passes(
         normalize_view_ops_as_reshape,
     ]
     if "ep_overlap" in config.compile.passes:
-        _overlap_dim, chunk_strategy, _module_fqn = validate_ep_overlap_config(
+        overlap_dim, chunk_strategy, module_fqn = validate_ep_overlap_config(
             config.compile
         )
         if chunk_strategy == "eager":
             passes.append(import_eager_chunk_metadata_pass)
+        else:
+            passes.extend(
+                [
+                    functools.partial(
+                        import_chunk_dim_metadata_pass,
+                        mode=overlap_dim,
+                    ),
+                    functools.partial(
+                        ep_overlap_chunk_pass,
+                        mode=overlap_dim,
+                        module_pattern=module_fqn,
+                        num_static_inputs=traced_result.num_static_inputs,
+                    ),
+                ]
+            )
     passes.extend(
         [
             functools.partial(
@@ -180,10 +201,14 @@ def compile_time_passes(
                 defer_n_layers=config.compile.cpu_offload_defer_n_layers,
             ),
             selective_activation_remat_pass,
+        ]
+    )
+    passes.extend(
+        [
             overlap_fsdp_ag_rs_pass,
             functools.partial(
                 joint_transformer_block_bucketing_reordering_pass,
-                module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+                module_bucket_plans=module_bucket_plans,
             ),
         ]
     )
