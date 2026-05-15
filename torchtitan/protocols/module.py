@@ -100,7 +100,7 @@ def redistribute_spmd_per_axis(
             mesh = current_mesh()
             assert mesh is not None
             pg = mesh.get_group(axis_name)
-            bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
+            bwd = {"op_dtype": x.dtype}
             x = spmd.redistribute(
                 x,
                 pg,

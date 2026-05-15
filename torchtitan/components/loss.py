@@ -96,11 +96,12 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         target_logit = local_target_logit.clone()
         dist.all_reduce(target_logit, op=dist.ReduceOp.SUM, group=tp_pg)
 
-        per_token_loss = -target_logit + global_exp_sum.log() + global_max
+        log_global_exp_sum = global_exp_sum.log()
+        per_token_loss = -target_logit + log_global_exp_sum + global_max
         loss = (per_token_loss * valid.to(per_token_loss.dtype)).sum()
 
-        probs = exp_shifted / global_exp_sum.unsqueeze(-1)
-        ctx.save_for_backward(probs, labels_1d)
+        log_probs = shifted - log_global_exp_sum.unsqueeze(-1)
+        ctx.save_for_backward(log_probs, labels_1d)
         ctx.logits_shape = logits_shape
         ctx.logits_dtype = logits.dtype
         ctx.vocab_start = vocab_start
@@ -112,8 +113,8 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, None]:
-        probs, labels_1d = ctx.saved_tensors
-        grad_logits = probs.clone()
+        log_probs, labels_1d = ctx.saved_tensors
+        grad_logits = torch.exp(log_probs)
 
         valid = labels_1d != IGNORE_INDEX
         in_range = (
@@ -514,18 +515,15 @@ class ChunkedCELoss(BaseLoss):
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedCELoss"
 
-        # SPMD path: all-gather S(1)@tp -> R@tp before chunking.
+        # SPMD path: all-gather S(1)@tp -> I@tp before chunking; loss compute
+        # is duplicated on TP after the sequence gather.
         if is_spmd_active() and self.enable_sp:
-            bwd = (
-                {"op_dtype": torch.float32}
-                if hidden_states.dtype != torch.float32
-                else None
-            )
+            bwd = {"op_dtype": hidden_states.dtype}
             hidden_states = spmd.redistribute(
                 hidden_states,
                 current_mesh().get_group("tp"),
                 src=spmd.S(1),
-                dst=spmd.R,
+                dst=spmd.I,
                 backward_options=bwd,
             )
 
