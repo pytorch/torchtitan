@@ -210,3 +210,13 @@ The remaining low-risk command space is a fine sweep around the current memory-b
 Memory budget 0.95 is the new best, but only by a narrow margin. On the current Float8 rowwise source with model-only compile and no-reshard 8-way FSDP, the 10-step command completed with loss falling from 12.28270 to 9.57252, peak memory 143.96GiB, and 8,897 tps. MFU remains `N/A` for this quantized path.
 
 This beats the prior 0.9 best by 20 tps with essentially the same memory, while 1.0 was slower and used about 10GiB more memory. Treat 0.95 as the current best row, but the gain is within the observed memory-budget noise band, so future candidates should clear 8,897 tps rather than reading this as a large activation-policy breakthrough.
+
+## Next Memory-Budget High-Side Probe
+
+Budget 0.95 is now the best row, but its peak memory is essentially the same as 0.9. This suggests the compiler's memory-budget partitioner may choose discrete activation-save sets rather than changing smoothly for each decimal value. Budget 1.0 picked a higher-memory point and slowed slightly. A single 0.975 run is the next narrow test: if it still uses about 144GiB, the result mostly measures variance around the current best; if it uses an intermediate or 1.0-like memory footprint, it tells whether the extra saved activations can beat the 8,897 tps threshold.
+
+## Experiment Review: Float8 Memory Budget 0.975
+
+Memory budget 0.975 did not improve the current best. The command completed normally on the current Float8 rowwise source with model-only compile and no-reshard 8-way FSDP, and loss fell from 12.47411 to 11.52573. Peak memory stayed at 143.96GiB, matching the 0.95 row rather than moving toward the 1.0 memory footprint, but throughput was only 5,453 tps with MFU `N/A`.
+
+This is a discard. The result is far below the 8,897 tps 0.95 best despite identical peak memory, reinforcing that this memory-budget region is noisy and that 0.975 did not select a useful higher-throughput partition.

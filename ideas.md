@@ -262,3 +262,12 @@
   - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
   - Success criteria and expected risk: Kept at `524fe989`; the run completed with finite/falling loss from 12.28270 to 9.57252, 143.96GiB peak memory, and 8,897 tps. This narrowly beats the prior 8,877 tps memory-budget 0.9 best without increasing memory materially.
+
+- ~~Idea: Float8 memory-budget activation checkpointing at 0.975~~
+  - Current best source commit: `a9329d6c`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95.
+  - Source: manager high-side memory-budget threshold probe.
+  - Expected mechanism for improving reported tokens/sec: Budget 0.95 matched the 0.9 memory footprint but beat it slightly, while budget 1.0 moved to a higher-memory, slightly slower point. A 0.975 budget tests whether there is an intermediate compiler partition that reduces recompute without paying the full 1.0 memory/runtime cost.
+  - Supporting evidence: The 0.9 and 0.95 rows both used about 144GiB, suggesting the compiler may choose discrete activation partitions across part of the budget range. The 1.0 row used 154.35GiB and remained below the memory risk line, so 0.975 should be safe enough as a single 10-step probe.
+  - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.975 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded at `a9329d6c`; the run completed with finite/falling loss from 12.47411 to 11.52573, 143.96GiB peak memory, and MFU `N/A`, but reached only 5,453 tps versus the 8,897 tps 0.95 best.
