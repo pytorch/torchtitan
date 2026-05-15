@@ -108,4 +108,13 @@
   - Supporting evidence: Model-only compile improved tps by 16.0% over selective AC without compile and changed peak memory from 113.7GiB to 108.2GiB. The previous profile no longer represents the current compiled execution path.
   - Planned source/config changes: None; diagnostic command-only run.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
-  - Success criteria and expected risk: Record as diagnostic discard, inspect trace, and use it to choose one next narrow idea. Do not compare profiled tps against unprofiled candidates.
+  - Success criteria and expected risk: Completed at `64178839` as a diagnostic discard; the trace shows dense matmuls and flash attention backward dominate the compiled path, with NCCL a smaller slice than before.
+
+- Idea: MXFP8 linear converter with model-only compile
+  - Current best source commit: a68a3c
+  - Source: compiled profile and B200 quantization research
+  - Expected mechanism for improving reported tokens/sec: The compiled profile is dominated by large dense linear GEMMs and attention kernels. MXFP8 dynamic quantization can move Qwen3's linear layers onto Blackwell FP8/MX kernels, reducing GEMM time while retaining high-precision communication.
+  - Supporting evidence: The latest rank 0 compiled trace has about 5.68s kernel time in the profiled step, with top kernels mostly nvjet matmuls and flash attention backward; NCCL is about 0.51s. `torchao` is installed, B200 satisfies SM100, and `MXFP8LinearConverter` is available. The TorchTitan MXFP8 docs say it is compatible with `torch.compile` and FSDP2 and requires B200/SM100.
+  - Planned source/config changes: In `torchtitan/models/qwen3/config_registry.py`, import `MXFP8LinearConverter` and set `qwen3_14b()` to call `model_registry("14B", converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)])`. Keep the edit limited to this model_spec converter choice and revert if discarded.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep if the run completes with finite/falling loss and exceeds 7,898 tps. Risks are converter incompatibility, compile OOM from quantization temporaries, or loss instability from dynamic MXFP8.
