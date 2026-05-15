@@ -43,26 +43,51 @@ class _ReshardAfterForwardRecomputeState:
         self._bucket_ids.reset(token)
 
 
-@contextmanager
-def _mark_recompute(
-    ctx: Any,
-    recompute_state: _ReshardAfterForwardRecomputeState,
-    recompute_bucket_ids: frozenset[int],
-) -> Generator[None, None, None]:
-    """Mark bucket-specific FlexShard reshard-after-forward recomputation."""
-    token = recompute_state.enter_recompute(recompute_bucket_ids)
-    try:
-        with ctx:
-            yield
-    finally:
-        recompute_state.exit_recompute(token)
-
-
 # These produce the unsharded param tensors that we want freed per-layer.
 _FLEX_SHARD_COLLECTIVE_OPS = {
     torch.ops._c10d_functional.all_gather_into_tensor.default,
     torch.ops._c10d_functional.wait_tensor.default,
 }
+
+
+def _apply_reshard_after_forward(
+    module: nn.Module,
+    reshard_bucket_storages: list[ShardedBucketStorage],
+) -> None:
+    """Wrap FlexShard-managed bucket modules for reshard-after-forward.
+
+    Each selected bucket's owning module gets wrapped with an activation
+    recompute policy that marks collective ops (all-gather, broadcast,
+    wait_tensor) as MUST_RECOMPUTE so unsharded params are freed after each
+    layer's forward.
+
+    Composes with activation checkpointing: if a child is already wrapped
+    by AC's CheckpointWrapper, the two policies are merged into a single
+    wrapper (FlexShard collectives -> MUST_RECOMPUTE, AC compute ops ->
+    MUST_SAVE, everything else -> PREFER_RECOMPUTE).
+    """
+    recompute_state = _ReshardAfterForwardRecomputeState()
+    bucket_ids_by_path: dict[str, set[int]] = {}
+    child_paths = [name for name, _ in module.named_children()]
+    for bucket_storage in reshard_bucket_storages:
+        bucket_storage._reshard_after_forward_recompute_state = recompute_state
+        bucket_storage_paths = _get_module_paths_to_wrap(bucket_storage)
+        if not bucket_storage_paths:
+            bucket_storage_paths = child_paths
+        for path in bucket_storage_paths:
+            bucket_ids_by_path.setdefault(path, set()).add(id(bucket_storage))
+
+    for path in sorted(bucket_ids_by_path, key=lambda p: (p.count("."), p)):
+        child = _get_module_by_path(module, path)
+        _set_module_by_path(
+            module,
+            path,
+            _wrap_module(
+                child,
+                recompute_state,
+                frozenset(bucket_ids_by_path[path]),
+            ),
+        )
 
 
 def _reshard_after_forward_policy(ctx, func, *args, **kwargs):
@@ -138,6 +163,21 @@ def _make_reshard_only_context_fn(
     return reshard_only_context_fn
 
 
+@contextmanager
+def _mark_recompute(
+    ctx: Any,
+    recompute_state: _ReshardAfterForwardRecomputeState,
+    recompute_bucket_ids: frozenset[int],
+) -> Generator[None, None, None]:
+    """Mark bucket-specific FlexShard reshard-after-forward recomputation."""
+    token = recompute_state.enter_recompute(recompute_bucket_ids)
+    try:
+        with ctx:
+            yield
+    finally:
+        recompute_state.exit_recompute(token)
+
+
 def _wrap_module(
     child: nn.Module,
     recompute_state: _ReshardAfterForwardRecomputeState,
@@ -155,27 +195,26 @@ def _wrap_module(
     )
 
     if isinstance(child, CheckpointWrapper):
-        # AC already applied — unwrap, merge policies, re-wrap
+        # AC already applied: unwrap, merge policies, re-wrap.
         inner = child._checkpoint_wrapped_module
         ac_kwargs = dict(child.checkpoint_fn.keywords)
         ac_kwargs.pop("use_reentrant", None)
         ac_context_fn = ac_kwargs.pop("context_fn", None)
         if ac_context_fn is not None:
-            # Selective AC — merge with reshard policy
+            # Selective AC: merge with reshard policy.
             merged_fn = _compose_with_ac_policy(
                 ac_context_fn,
                 recompute_state,
                 recompute_bucket_ids,
             )
         else:
-            # Full AC — add reshard policy via selective context
+            # Full AC: add reshard policy via selective context.
             merged_fn = _make_reshard_only_context_fn(
                 recompute_state,
                 recompute_bucket_ids,
             )
         return checkpoint_wrapper(inner, context_fn=merged_fn, **ac_kwargs)
 
-    # No AC — reshard-only wrapping
     return checkpoint_wrapper(
         child,
         context_fn=_make_reshard_only_context_fn(
@@ -247,43 +286,3 @@ def _get_module_paths_to_wrap(bucket_storage: ShardedBucketStorage) -> list[str]
             for owner_path in owner_paths
         }
     )
-
-
-def _apply_reshard_after_forward(
-    module: nn.Module,
-    reshard_bucket_storages: list[ShardedBucketStorage],
-) -> None:
-    """Wrap FlexShard-managed bucket modules for reshard-after-forward.
-
-    Each selected bucket's owning module gets wrapped with an activation
-    recompute policy that marks collective ops (all-gather, broadcast,
-    wait_tensor) as MUST_RECOMPUTE so unsharded params are freed after each
-    layer's forward.
-
-    Composes with activation checkpointing: if a child is already wrapped
-    by AC's CheckpointWrapper, the two policies are merged into a single
-    wrapper (FlexShard collectives → MUST_RECOMPUTE, AC compute ops →
-    MUST_SAVE, everything else → PREFER_RECOMPUTE).
-    """
-    recompute_state = _ReshardAfterForwardRecomputeState()
-    bucket_ids_by_path: dict[str, set[int]] = {}
-    child_paths = [name for name, _ in module.named_children()]
-    for bucket_storage in reshard_bucket_storages:
-        bucket_storage._reshard_after_forward_recompute_state = recompute_state
-        bucket_storage_paths = _get_module_paths_to_wrap(bucket_storage)
-        if not bucket_storage_paths:
-            bucket_storage_paths = child_paths
-        for path in bucket_storage_paths:
-            bucket_ids_by_path.setdefault(path, set()).add(id(bucket_storage))
-
-    for path in sorted(bucket_ids_by_path, key=lambda p: (p.count("."), p)):
-        child = _get_module_by_path(module, path)
-        _set_module_by_path(
-            module,
-            path,
-            _wrap_module(
-                child,
-                recompute_state,
-                frozenset(bucket_ids_by_path[path]),
-            ),
-        )

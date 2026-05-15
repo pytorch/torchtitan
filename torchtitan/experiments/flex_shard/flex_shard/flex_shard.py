@@ -22,7 +22,7 @@ from .bucket_storage import (
 )
 from .reshard_after_forward import _apply_reshard_after_forward
 from .sharded_param import is_flex_shard_param
-from .unsharded_param_access import _install_unsharded_param_getters
+from .unsharded_param_getters import _install_unsharded_param_getters
 from .utils import (
     _get_device_from_mesh,
     _get_managed_named_params,
@@ -53,6 +53,111 @@ class FlexShardModule:
     def sharded_bucket_storages(self) -> list[ShardedBucketStorage]:
         """All bucket storage objects, one per bucket."""
         return getattr(self, _SHARDED_BUCKET_STORAGES_ATTR)
+
+
+def flex_shard(
+    module: nn.Module,
+    mesh: DeviceMesh,
+    buckets: list[BucketSpec],
+) -> FlexShardModule:
+    """
+    Apply flat-storage FSDP sharding to a module.
+
+    This function:
+    1. Collects parameters from the module
+    2. Groups parameters into communication buckets (one per bucket, or all in one)
+    3. Creates a unified byte buffer per bucket for all its parameters
+    4. Replaces each parameter with a plain tensor annotated with placement metadata
+    5. Registers property-based accessors for eager parameter access
+    6. Stores ShardedBucketStorage objects on the module
+
+    Each bucket gets its own byte buffer and ShardedBucketStorage, enabling
+    independent unshard operations per bucket.
+
+    Args:
+        module: The module to shard. CPU modules are moved to the mesh's CUDA
+            device before sharding. Meta parameters keep uninitialized storage.
+        mesh: The 1D device mesh for sharding.
+        buckets: Required list of bucket specifications. Each bucket owns its
+            placement function. A single whole-module bucket can be expressed as
+            ``[BucketSpec(["*"], placement_fn=per_param_placements)]``.
+            When ``reshard_after_forward=True``, FlexShard raises if bucket
+            hooks cannot run in both the original forward and activation
+            checkpoint recomputation.
+
+    Returns:
+        The module (mutated in-place). Use
+        module.sharded_bucket_storages to inspect bucket storage internals.
+
+    Example::
+
+        >>> mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+        >>> model = Transformer(args)
+        >>> # Single bucket without reshard-after-forward:
+        >>> flex_shard(
+        ...     model,
+        ...     mesh,
+        ...     buckets=[
+        ...         BucketSpec(
+        ...             ["*"],
+        ...             placement_fn=per_param_placements,
+        ...             reshard_after_forward=False,
+        ...         )
+        ...     ],
+        ... )
+        >>> # Explicit buckets:
+        >>> flex_shard(
+        ...     model,
+        ...     mesh,
+        ...     buckets=[
+        ...         BucketSpec(["attn.*"], placement_fn=per_param_placements),
+        ...         BucketSpec(["ffn.*"], placement_fn=per_param_placements),
+        ...     ],
+        ... )
+    Note:
+        - Each parameter must have exactly one placement.
+        - Each bucket must contain one original parameter dtype. Split mixed
+          dtype parameters into separate buckets.
+        - Parameters on meta device will have uninitialized storage
+    """
+    inputs = _prepare_flex_shard_inputs(
+        module,
+        mesh,
+        buckets,
+    )
+
+    bucket_storages, fqn_to_bucket_spec = _materialize_bucket_storages(
+        module,
+        inputs.named_params,
+        inputs.bucket_assignments,
+        buckets,
+        inputs.param_placements,
+        inputs.shard_mesh,
+        inputs.device,
+    )
+
+    _attach_flex_shard_module_state(module, bucket_storages)
+
+    module_param_slots = _create_unsharded_param_slots(
+        module,
+        bucket_storages,
+        fqn_to_bucket_spec,
+        inputs.device,
+    )
+    _install_unsharded_param_getters(module_param_slots)
+
+    # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
+    # a selective policy that recomputes only collective ops (all-gather,
+    # broadcast), saving compute ops to avoid redundant work.
+    reshard_bucket_storages = [s for s in bucket_storages if s._reshard_after_forward]
+    if reshard_bucket_storages:
+        _apply_reshard_after_forward(module, reshard_bucket_storages)
+
+    # Install bucket unshard hooks for eager mode when the storage layout
+    # supports one collective per bucket.
+    _install_bucket_unshard_hooks(bucket_storages, module_param_slots)
+
+    return module
 
 
 def _check_not_already_flex_sharded(module: nn.Module) -> None:
@@ -197,108 +302,3 @@ def _prepare_flex_shard_inputs(
         param_placements=param_placements,
         bucket_assignments=bucket_assignments,
     )
-
-
-def flex_shard(
-    module: nn.Module,
-    mesh: DeviceMesh,
-    buckets: list[BucketSpec],
-) -> FlexShardModule:
-    """
-    Apply flat-storage FSDP sharding to a module.
-
-    This function:
-    1. Collects parameters from the module
-    2. Groups parameters into communication buckets (one per bucket, or all in one)
-    3. Creates a unified byte buffer per bucket for all its parameters
-    4. Replaces each parameter with a plain tensor annotated with placement metadata
-    5. Registers property-based accessors for eager parameter access
-    6. Stores ShardedBucketStorage objects on the module
-
-    Each bucket gets its own byte buffer and ShardedBucketStorage, enabling
-    independent unshard operations per bucket.
-
-    Args:
-        module: The module to shard. CPU modules are moved to the mesh's CUDA
-            device before sharding. Meta parameters keep uninitialized storage.
-        mesh: The 1D device mesh for sharding.
-        buckets: Required list of bucket specifications. Each bucket owns its
-            placement function. A single whole-module bucket can be expressed as
-            ``[BucketSpec(["*"], placement_fn=per_param_placements)]``.
-            When ``reshard_after_forward=True``, FlexShard raises if bucket
-            hooks cannot run in both the original forward and activation
-            checkpoint recomputation.
-
-    Returns:
-        The module (mutated in-place). Use
-        module.sharded_bucket_storages to inspect bucket storage internals.
-
-    Example::
-
-        >>> mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
-        >>> model = Transformer(args)
-        >>> # Single bucket without reshard-after-forward:
-        >>> flex_shard(
-        ...     model,
-        ...     mesh,
-        ...     buckets=[
-        ...         BucketSpec(
-        ...             ["*"],
-        ...             placement_fn=per_param_placements,
-        ...             reshard_after_forward=False,
-        ...         )
-        ...     ],
-        ... )
-        >>> # Explicit buckets:
-        >>> flex_shard(
-        ...     model,
-        ...     mesh,
-        ...     buckets=[
-        ...         BucketSpec(["attn.*"], placement_fn=per_param_placements),
-        ...         BucketSpec(["ffn.*"], placement_fn=per_param_placements),
-        ...     ],
-        ... )
-    Note:
-        - Each parameter must have exactly one placement.
-        - Each bucket must contain one original parameter dtype. Split mixed
-          dtype parameters into separate buckets.
-        - Parameters on meta device will have uninitialized storage
-    """
-    inputs = _prepare_flex_shard_inputs(
-        module,
-        mesh,
-        buckets,
-    )
-
-    bucket_storages, fqn_to_bucket_spec = _materialize_bucket_storages(
-        module,
-        inputs.named_params,
-        inputs.bucket_assignments,
-        buckets,
-        inputs.param_placements,
-        inputs.shard_mesh,
-        inputs.device,
-    )
-
-    _attach_flex_shard_module_state(module, bucket_storages)
-
-    module_param_slots = _create_unsharded_param_slots(
-        module,
-        bucket_storages,
-        fqn_to_bucket_spec,
-        inputs.device,
-    )
-    _install_unsharded_param_getters(module_param_slots)
-
-    # Reshard-after-forward: in eager mode, wrap each layer in checkpoint with
-    # a selective policy that recomputes only collective ops (all-gather,
-    # broadcast), saving compute ops to avoid redundant work.
-    reshard_bucket_storages = [s for s in bucket_storages if s._reshard_after_forward]
-    if reshard_bucket_storages:
-        _apply_reshard_after_forward(module, reshard_bucket_storages)
-
-    # Install bucket unshard hooks for eager mode when the storage layout
-    # supports one collective per bucket.
-    _install_bucket_unshard_hooks(bucket_storages, module_param_slots)
-
-    return module
