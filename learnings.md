@@ -173,6 +173,12 @@ Same-shape HSDP should be considered closed for this single-node fully NVLinked 
 
 Human direction supersedes the queued Float8 KV coverage idea for one bounded experiment: revisit TP=2 under the current best stack. The prior TP=2 result is stale because it was measured before the main winning changes, so this run will isolate only the TP mesh/sharding change on top of Float8 rowwise, no-reshard FSDP, model-only compile, and memory-budget 0.9. HSDP remains disabled.
 
+## Experiment Review: TP=2 Current-Best Revisit
+
+The bounded TP=2 revisit is blocked by the compiler stack before training starts. Restoring the known-good dense Qwen3 TP sharding contract and running the current best command with TP=2, Float8 rowwise, no-reshard FSDP, model-only compile, and memory-budget 0.9 failed before step 1 inside Inductor's min-cut memory-budget partitioner with `Unknown metadata type FakeScriptObject`. Moving compile before TP wrapping did not change the failure. This appears to be a TP/DTensor metadata interaction with the compiled memory-budget path, not a throughput result.
+
+Do not spend more runs on same-shape TP=2 with `--compile.enable --compile.components model --activation_checkpoint.mode=memory_budget` unless the compiler/DTensor issue is fixed or the experiment intentionally changes away from the current-best stack. The Qwen3 TP source was reverted, and the best remains the 8-way FSDP Float8 memory-budget 0.9 row.
+
 ## Experiment Review: Float8 KV Projection Coverage
 
 Including Qwen3's repeated `attention.qkv_linear.wkv` projection in Float8 rowwise did not improve the current best. The run converted 280 Float8 linear configs instead of the filtered baseline's 200 and completed with finite/falling loss from 12.53812 to 7.92596, MFU `N/A`, and 137.35GiB peak memory, but throughput reached only 8,190 tps versus the 8,877 tps best.

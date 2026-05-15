@@ -218,14 +218,14 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded at `d0ab38cc`; the run completed with finite/falling loss from 12.48534 to 7.49267, but throughput was only 5,837 tps and peak memory was 172.79GiB, above the program's rough 95% risk line. The Qwen3 HSDP source change was reverted.
 
-- Idea: TP=2 revisit with Float8 memory-budget current best
+- ~~Idea: TP=2 revisit with Float8 memory-budget current best~~
   - Current best source commit: `cbb4aeba`; current best result row: 8,877 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.9.
   - Source: human-requested bounded TP revisit after HSDP discard.
   - Expected mechanism for improving reported tokens/sec: The earlier TP=2+SP discard was measured before no-reshard, selective/model-only compile, Float8 rowwise, and memory-budget activation checkpointing changed the bottleneck. Reusing the known-good dense Qwen3 TP2 sharding contract may reduce local matmul and activation work under the current best stack while preserving the current no-reshard FSDP and Float8 setup.
   - Supporting evidence: Qwen3 14B has 40 query heads and 8 KV heads, both divisible by TP=2, and commit `e67f61c6` already established a working dense GQA + dense FFN sharding patch. HSDP is now closed, but TP evidence is stale relative to the current best.
   - Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, remove the TP guard and call `model.parallelize(tp_mesh)` before FSDP while keeping HSDP disabled. In `torchtitan/models/qwen3/sharding.py`, restore the shared decoder sharding helpers for dense GQA attention, QK norm, dense FFN, and block norms.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss, acceptable memory, and throughput above 8,877 tps. Discard and revert the TP source if it crashes, underperforms, or shows unstable loss.
+  - Success criteria and expected risk: Crashed before step 1. The initial source ordering and a minimal compile-before-TP ordering fix both failed in Inductor's memory-budget partitioner with `Unknown metadata type FakeScriptObject`, so TP=2 plus model-only compile plus memory-budget activation checkpointing is blocked in this stack. The TP source was reverted.
 
 - ~~Idea: Include Qwen3 KV projection in Float8 rowwise~~
   - Current best source commit: `cbb4aeba`; current best result row: 8,877 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.9.

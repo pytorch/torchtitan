@@ -44,6 +44,8 @@ def parallelize_qwen3(
     mesh shape, hardware topology, memory budget, model flavor, and enabled
     TorchTitan features. It does not need to be a universal implementation.
     """
+    if parallel_dims.tp_enabled:
+        raise NotImplementedError("Qwen3 DP-only parallelize does not support TP.")
     if parallel_dims.cp_enabled:
         raise NotImplementedError("Qwen3 DP-only parallelize does not support CP.")
     if parallel_dims.pp_enabled:
@@ -67,11 +69,6 @@ def parallelize_qwen3(
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
-
-    if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
-        logger.info("Applied TP to the Qwen3 model")
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
