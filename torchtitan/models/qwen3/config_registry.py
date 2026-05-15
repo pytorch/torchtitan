@@ -195,7 +195,6 @@ def qwen3_14b() -> Trainer.Config:
                 Float8LinearConverter.Config(
                     recipe_name="rowwise_with_gw_hp",
                     filter_fqns=[
-                        "lm_head",
                         "attention.qkv_linear.wkv",
                     ],
                     model_compile_enabled=True,
