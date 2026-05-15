@@ -129,6 +129,42 @@ def annotate_moe_ep_regions() -> None:
     _annotate_method_once(MoE, "forward", {"EP": "compute"})
 
 
+# ---------------------------------------------------------------------------
+# Chunk pass utilities
+# ---------------------------------------------------------------------------
+# These helpers are shared by chunk passes and tests around graph_trainer's
+# traced FX metadata. Keep chunk-specific rewrite policy in ep_chunk_pass.py.
+
+
+def _is_module_fqn_inside_root(fqn: str, root_fqn: str) -> bool:
+    return fqn == root_fqn or fqn.startswith(root_fqn + ".")
+
+
+def _tensor_meta(node: torch.fx.Node) -> torch.Tensor | None:
+    val = node.meta.get("val")
+    return val if isinstance(val, torch.Tensor) else None
+
+
+def _free_symbols(value: object) -> frozenset[object]:
+    from torch.fx.experimental.symbolic_shapes import free_symbols
+
+    return frozenset(free_symbols(value))
+
+
+def _dynamic_dim_symbols(val: torch.Tensor, dim: int) -> frozenset[object]:
+    return _free_symbols(val.shape[dim])
+
+
+def _ordered_nodes(gm: torch.fx.GraphModule) -> dict[torch.fx.Node, int]:
+    return {n: i for i, n in enumerate(gm.graph.nodes)}
+
+
+def _earliest_node(
+    nodes: list[torch.fx.Node], order: dict[torch.fx.Node, int]
+) -> torch.fx.Node:
+    return min(nodes, key=lambda n: order[n])
+
+
 def parallelize_inputs(parallel_dims, args, kwargs):
     if not parallel_dims.tp_enabled:
         return args, kwargs

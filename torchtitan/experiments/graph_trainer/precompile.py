@@ -64,6 +64,10 @@ def compute_config_fingerprint(
     h.update(
         f"compile:ep_overlap_module_fqn:{compile_config.ep_overlap_module_fqn}\n".encode()
     )
+    h.update(
+        "compile:ep_overlap_disable_early_grad_accumulation:"
+        f"{compile_config.ep_overlap_disable_early_grad_accumulation}\n".encode()
+    )
 
     h.update(f"torch_version:{torch.__version__}\n".encode())
 

@@ -44,6 +44,10 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
+from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
+    ep_overlap_chunk_pass,
+    populate_chunk_dim_metadata_pass,
+)
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     populate_eager_chunk_metadata_pass,
 )
@@ -111,6 +115,13 @@ def async_tensor_parallel_pass(
     return gm
 
 
+def _tensor_parallel_degree(config, parallel_dims=None) -> int:
+    """Return TP degree from ``ParallelDims`` when available, else config."""
+    if parallel_dims is not None and hasattr(parallel_dims, "tp"):
+        return int(parallel_dims.tp)
+    return int(getattr(config.parallelism, "tensor_parallel_degree", 1))
+
+
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -137,16 +148,83 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
+    module_bucket_plans = get_default_transformer_block_buckets(n_layers)
     passes: list[Callable] = [
         eliminate_dead_code_pass,
         canonicalize_graph_pass,
     ]
     if "ep_overlap" in config.compile.passes:
-        _overlap_dim, chunk_strategy, _module_fqn = validate_ep_overlap_config(
+        overlap_dim, chunk_strategy, module_fqn = validate_ep_overlap_config(
             config.compile
         )
+        if (
+            chunk_strategy == "graph"
+            and overlap_dim == "seq"
+            and _tensor_parallel_degree(config) > 1
+        ):
+            # TODO: Support graph EP chunking with TP after the MoE TP/SP
+            # boundary has a placement-aware contract.  Today, after DTensor
+            # lowering, the FX graph contains physical TP-local tensors.  For
+            # MoE sequence chunking, splitting a local ``Shard(1)`` sequence
+            # shard chunks ``u0 // tp_degree`` tokens per rank instead of the
+            # logical ``u0`` sequence.  The desired TP+EP MoE contract is for
+            # the MoE wrapper to own the TP/SP layout transition:
+            #
+            #   prologue: Shard(1) -> Replicate
+            #   body:     logical full-sequence chunks with EP collectives only
+            #   epilogue: Partial/Replicate -> Shard(1)
+            #
+            # With that contract, the chunk planner can move live-ins forward
+            # through the pure layout prologue until the chunked axis has the
+            # full symbolic dim, and move live-outs backward through the
+            # inverse epilogue before chunking.  The walk must be guarded: only
+            # cross allowlisted view/slice/cat and known non-EP c10d layout
+            # redistributes; require a unique dominance-safe chain; stop before
+            # router/top-k/groupedMM/shared-expert/dense compute; and validate
+            # that the final chunk body contains no non-EP collectives.
+            #
+            # This also avoids redundant inner MoE TP collectives: router can
+            # slice the replicated boundary input to its owned tokens, while
+            # shared experts can reuse that replicated input instead of issuing
+            # their own input all-gathers and leave the final reduction to the
+            # MoE boundary epilogue.
+            #
+            # Batch graph chunking with TP is temporarily allowed so we can
+            # root-cause it separately. The current lowering is not proven
+            # correct there either: DTensor TP/SP layout helper tensors can
+            # encode both batch and sequence structure in flattened index maps,
+            # so naive selected-symbol rewriting may split the layout map
+            # differently from eager chunking.
+            raise ValueError(
+                "Graph EP seq chunking does not support tensor_parallel_degree > 1. "
+                "After DTensor lowering, the FX graph contains TP-local sequence "
+                "shards; splitting those local tensors is not equivalent to eager "
+                "DTensor-level chunking. Use tensor_parallel_degree=1, eager "
+                "chunking, or a non-seq overlap dimension for this configuration."
+            )
         if chunk_strategy == "eager":
             passes.append(populate_eager_chunk_metadata_pass)
+        else:
+            passes.extend(
+                [
+                    functools.partial(
+                        populate_chunk_dim_metadata_pass,
+                        mode=overlap_dim,
+                    ),
+                    functools.partial(
+                        ep_overlap_chunk_pass,
+                        mode=overlap_dim,
+                        module_pattern=module_fqn,
+                        num_static_inputs=traced_result.num_static_inputs,
+                        optimize_grad_live_out=not (
+                            config.compile.ep_overlap_disable_early_grad_accumulation
+                        ),
+                        require_all_to_all=(
+                            getattr(config.parallelism, "expert_parallel_degree", 1) > 1
+                        ),
+                    ),
+                ]
+            )
     passes.extend(
         [
             functools.partial(
@@ -163,7 +241,7 @@ def compile_time_passes(
             reassign_collective_pgs_pass,
             functools.partial(
                 joint_transformer_block_bucketing_reordering_pass,
-                module_bucket_plans=get_default_transformer_block_buckets(n_layers),
+                module_bucket_plans=module_bucket_plans,
                 # FSDP2 packs buckets in managed parameter order. The traced state
                 # FQNs preserve that registration order, unlike graph execution order.
                 fsdp_param_module_order=get_fsdp_param_module_order(

@@ -22,9 +22,7 @@ EpOverlapChunkStrategy = Literal["eager", "graph"]
 
 TRANSFORMER_BLOCK_FQN = "layers.*"
 MOE_BLOCK_FQN = "layers.*.moe"
-SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset(
-    {TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN}
-)
+SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_FQN})
 
 
 @dataclass(kw_only=True, slots=True)
@@ -116,6 +114,15 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     ``eager`` wraps module forwards before tracing. ``graph`` traces the
     unmodified model and chunks selected regions with an FX graph pass.
+    """
+
+    ep_overlap_disable_early_grad_accumulation: bool = False
+    """Disable graph chunking's early parameter-gradient accumulation.
+
+    Early accumulation is the performant default: graph chunking materializes
+    parameter-gradient live-outs before distributed grad cast/communication
+    when legal. This flag preserves eager chunking's cast/reduction order for
+    strict bitwise tests.
     """
 
     ep_overlap_module_fqn: str = "layers.*"

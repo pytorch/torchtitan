@@ -13,11 +13,19 @@ regional_inductor.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from typing import Any
 
+import sympy
 import torch
 from torch.fx.passes.regional_inductor import regional_inductor
+from torch.utils._pytree import tree_map
+from torch.utils._sympy.functions import FloorDiv
 
+from torchtitan.experiments.graph_trainer.ep_pass_utils import (
+    _eval_hint,
+    CHUNK_SYMBOL_HINTS_META,
+    free_symbols,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -55,8 +63,86 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
     return key not in ["source_fn_stack", "nn_module_stack", "fwd_source_fn_stack"]
 
 
+def _localize_regional_chunk_input_symbols(gm: torch.fx.GraphModule) -> None:
+    """Use region-local symbols for chunk extents visible only as submodule inputs."""
+    selected_hints: dict[object, int] = {}
+    for node in gm.graph.nodes:
+        hints = node.meta.get(CHUNK_SYMBOL_HINTS_META)
+        if isinstance(hints, dict):
+            selected_hints.update(hints)
+    if not selected_hints:
+        return
+
+    half_symbols: dict[tuple[int, sympy.Symbol], sympy.Symbol] = {}
+    half_hints: dict[object, int] = {}
+
+    def half_symbol(shape_env: Any, symbol: sympy.Symbol) -> sympy.Symbol:
+        key = (id(shape_env), symbol)
+        if key in half_symbols:
+            return half_symbols[key]
+        symint = shape_env.create_unbacked_symint()
+        new_symbol = symint.node.expr
+        if new_symbol in shape_env.pending_fresh_unbacked_symbols:
+            shape_env.pending_fresh_unbacked_symbols.remove(new_symbol)
+        hint = max(1, (selected_hints[symbol] + 1) // 2)
+        shape_env.var_to_hint_override[new_symbol] = hint
+        half_symbols[key] = new_symbol
+        half_hints[new_symbol] = hint
+        return new_symbol
+
+    def rewrite_symbolic_value(value: object) -> object:
+        if not isinstance(value, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+            return value
+        symbols = free_symbols(value) & selected_hints.keys()
+        if not symbols:
+            return value
+        shape_env = value.node.shape_env
+        substitutions = {
+            FloorDiv(symbol, 2): half_symbol(shape_env, symbol) for symbol in symbols
+        }
+        expr = value.node.expr.subs(substitutions)
+        if expr == value.node.expr:
+            return value
+        hints = {**selected_hints, **half_hints}
+        hint = _eval_hint(expr, hints)
+        if isinstance(value, torch.SymInt):
+            return shape_env.create_symintnode(expr, hint=hint)
+        if isinstance(value, torch.SymFloat):
+            return shape_env.create_symfloatnode(expr, hint=hint)
+        return shape_env.create_symboolnode(expr)
+
+    def rewrite_tensor_meta(value: object) -> object:
+        if not isinstance(value, torch.Tensor):
+            return rewrite_symbolic_value(value)
+        changed = False
+        shape = []
+        for dim in value.shape:
+            new_dim = rewrite_symbolic_value(dim)
+            changed = changed or new_dim is not dim
+            shape.append(new_dim)
+        stride = []
+        for dim in value.stride():
+            new_dim = rewrite_symbolic_value(dim)
+            changed = changed or new_dim is not dim
+            stride.append(new_dim)
+        if not changed:
+            return value
+        return value.new_empty_strided(tuple(shape), tuple(stride))
+
+    for node in gm.graph.nodes:
+        if node.meta.get("chunked_region_role") is None:
+            continue
+        for key in ("val", "example_value", "eager_input_vals"):
+            if key in node.meta:
+                node.meta[key] = tree_map(rewrite_tensor_meta, node.meta[key])
+
+
 def regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    serializable: bool = False,
+    localize_chunk_input_symbols: bool = True,
 ) -> torch.fx.GraphModule:
     """Compile tagged graph regions with ``regional_inductor``.
 
@@ -104,6 +190,9 @@ def regional_inductor_pass(
     # tensor metadata.
     fake_mode = _get_fake_mode_from_gm(gm)
     tracing_ctx = torch._guards.TracingContext(fake_mode)
+
+    if localize_chunk_input_symbols:
+        _localize_regional_chunk_input_symbols(gm)
 
     if serializable:
         with (
@@ -244,13 +333,6 @@ def full_inductor_compilation_pass(
     pre_collapse_cudagraph_compatible = is_cudagraph_compatible(
         gm, skip_flex_attention_check=True
     )
-    fake_mode = torch._guards.detect_fake_mode(example_inputs)
-    ignore_fresh_unbacked = (
-        fake_mode.shape_env.ignore_fresh_unbacked_symbols
-        if fake_mode is not None and fake_mode.shape_env is not None
-        else nullcontext
-    )
-
     _migrate_cpu_get_attrs_to_cuda(gm)
     for module in gm.modules():
         if not isinstance(module, torch.fx.GraphModule):
@@ -264,11 +346,10 @@ def full_inductor_compilation_pass(
     # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
     # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
     # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
-    # This is an FX-to-compiled-artifact pass. Fresh symbols from explicit
-    # scalar nodes such as MoE split-size ``item`` calls may be
-    # intermediate-only, so they do not need final-output bindings here.
-    with ic.patch(reorder_for_peak_memory=True), ignore_fresh_unbacked():
-        result = regional_inductor_pass(gm, example_inputs)
+    with ic.patch(reorder_for_peak_memory=True):
+        result = regional_inductor_pass(
+            gm, example_inputs, localize_chunk_input_symbols=False
+        )
 
     # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
     # collapse is information-destroying; this is how downstream passes

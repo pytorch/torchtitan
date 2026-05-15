@@ -14,6 +14,9 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b_minimal_async_ep,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_ep,
+    deepseek_v3_debugmodel_flex_attn,
+    deepseek_v3_debugmodel_flex_attn_ep,
     deepseek_v3_debugmodel_minimal_async_ep,
 )
 
@@ -27,13 +30,13 @@ def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_debugmodel_ep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config = to_graph_trainer_config(deepseek_v3_debugmodel_ep(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config = to_graph_trainer_config(deepseek_v3_debugmodel_ep(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     config.model_spec = model_registry(
         "debugmodel",
@@ -53,11 +56,17 @@ def graph_trainer_deepseek_v3_debugmodel_minimal_async_ep() -> GraphTrainer.Conf
 
 
 def graph_trainer_deepseek_v3_debugmodel_flex_attn() -> GraphTrainer.Config:
-    return graph_trainer_deepseek_v3_debugmodel()
+    config = to_graph_trainer_config(deepseek_v3_debugmodel_flex_attn(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
 
 
 def graph_trainer_deepseek_v3_debugmodel_flex_attn_ep() -> GraphTrainer.Config:
-    return graph_trainer_deepseek_v3_debugmodel_ep()
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel_flex_attn_ep(), model_registry
+    )
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
 
 
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
