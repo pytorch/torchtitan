@@ -164,11 +164,20 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
   - Success criteria and expected risk: Crashed before completing step 1; even FFN-only MXFP8 failed in `torch.ops.torchao.mxfp8_quantize.default` in the compiled backward path. Stop pursuing MXFP8 on this environment without changing torchao/runtime.
 
-- Idea: Float8 current best with compiler memory-budget activation checkpointing
+- ~~Idea: Float8 current best with compiler memory-budget activation checkpointing~~
   - Current best source commit: ba580fde / branch source at `bc825c47`
   - Source: Float8 profile and memory-headroom analysis
   - Expected mechanism for improving reported tokens/sec: The current best uses manual selective activation checkpointing, which still recomputes work inside each compiled block. Compiler memory-budget activation checkpointing may save more useful activations while staying under the B200 memory limit, reducing recompute on the Float8 path and improving steady-state tps.
   - Supporting evidence: Float8 current best uses about 108.2GiB peak on 178.35GiB B200s, leaving substantial headroom. No-AC no-reshard OOMed in the bf16 path, so a mid-high compiler memory budget is safer than disabling checkpointing entirely. The latest Float8 profile shows only about 2.8s kernel time but visible recompute/scaling work, so reducing recompute is a plausible next lever.
   - Planned source/config changes: None; command-only candidate on the current Float8 source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.75 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 8,399 tps. Risks are OOM from saving too many activations, compiler partitioner overhead, or worse graphs than the current manual selective AC wrapper.
+  - Success criteria and expected risk: Kept at `9cf1a5ff`; memory budget 0.75 completed with finite loss falling from 12.26095 to 6.07721, 8,821 tps, MFU `N/A`, and 129.9GiB peak memory.
+
+- Idea: Float8 memory-budget activation checkpointing at 0.9
+  - Current best source commit: ba580fde / branch source at `bc825c47`
+  - Source: memory-budget follow-up
+  - Expected mechanism for improving reported tokens/sec: The 0.75 compiler memory budget improved throughput by reducing recomputation while using 129.9GiB peak memory. Raising the budget to 0.9 may save more activations and further reduce recomputation while still keeping below the 178.35GiB B200 capacity.
+  - Supporting evidence: The 0.75 run increased peak memory by about 21.7GiB over selective AC and improved tps from 8,399 to 8,821 with healthy loss. This leaves roughly 48GiB of headroom to the physical capacity and about 39GiB to the program's rough 95% risk line.
+  - Planned source/config changes: None; command-only candidate on the current Float8 source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 8,821 tps. Risks are OOM, memory fragmentation, or slower compiler partitioning if 0.9 saves activations that do not reduce critical recompute.
