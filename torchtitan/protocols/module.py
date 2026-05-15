@@ -102,7 +102,7 @@ def redistribute_spmd_per_axis(
             mesh = current_mesh()
             assert mesh is not None
             pg = mesh.get_group(axis_name)
-            bwd = {"op_dtype": torch.float32} if x.dtype != torch.float32 else None
+            bwd = {"op_dtype": x.dtype}
             x = spmd.redistribute(
                 x,
                 pg,
@@ -353,11 +353,13 @@ class Module(nn.Module, Configurable):
             for name in param_names:
                 param = module._parameters[name]
                 original_params[name] = param
-                bwd = (
-                    {"op_dtype": torch.float32}
-                    if param.dtype != torch.float32
-                    else None
+                device_type = param.device.type
+                op_dtype = (
+                    torch.get_autocast_dtype(device_type)
+                    if torch.is_autocast_enabled(device_type)
+                    else param.dtype
                 )
+                bwd = {"op_dtype": op_dtype, "out_dtype": param.dtype}
                 module._parameters[name] = spmd.convert(
                     param,
                     tp_pg,
