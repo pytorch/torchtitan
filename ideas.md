@@ -181,3 +181,21 @@
   - Planned source/config changes: None; command-only candidate on the current Float8 source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
   - Success criteria and expected risk: Mixed but best observed row is kept. The first recorded run completed with finite/falling loss but only 8,011 tps, below the 8,821 best. An unintended duplicate run of the exact same command completed with finite/falling loss from 12.34735 to 9.44670, 144.0GiB peak memory, and 8,877 tps. Treat 0.9 as the current best but note the large run-to-run variance.
+
+- ~~Idea: Profile Float8 memory-budget 0.9 current best~~
+  - Current best source commit: ba580fde / branch source at `bc825c47`
+  - Source: accidental diagnostic follow-up
+  - Expected mechanism for improving reported tokens/sec: A profile of the 0.9 current best should show whether the extra activation memory shifted the bottleneck back to FSDP communication, attention, Float8 scaling, or CPU/runtime overhead.
+  - Supporting evidence: Memory-budget 0.9 is the best observed setting but noisy, and budget 0.75 already showed NCCL and Float8 scaling overhead as material.
+  - Planned source/config changes: None; diagnostic command-only run.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
+  - Success criteria and expected risk: Completed as diagnostic discard with profiled tps 7,885, loss falling from 12.52719 to 9.78586, and 144.0GiB peak memory. The rank-0 trace shows NCCL total around 1.26s, with reduce-scatter the largest single kernel bucket, so communication is again a primary bottleneck.
+
+- Idea: Float8 memory-budget activation checkpointing at 1.0
+  - Current best source commit: ba580fde / branch source at `bc825c47`
+  - Source: memory-budget follow-up
+  - Expected mechanism for improving reported tokens/sec: Budget 0.9 improved slightly over 0.75 while using 144.0GiB, so budget 1.0 may further reduce recomputation by using the compiler's runtime-optimized activation strategy.
+  - Supporting evidence: Budget 0.9 remains below B200 capacity and below the program's rough 95% memory-risk threshold. The throughput gain over 0.75 is small and noisy, but the run is stable and still has roughly 25GiB to the 95% line.
+  - Planned source/config changes: None; command-only candidate on the current Float8 source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=1.0 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 8,877 tps. Risks are OOM, high memory fragmentation, or no further recompute reduction despite higher memory.

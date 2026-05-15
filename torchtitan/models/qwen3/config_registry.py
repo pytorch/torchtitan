@@ -196,6 +196,7 @@ def qwen3_14b() -> Trainer.Config:
                     recipe_name="rowwise",
                     filter_fqns=[
                         "lm_head",
+                        "attention.qkv_linear.wkv",
                     ],
                     model_compile_enabled=True,
                 ),
