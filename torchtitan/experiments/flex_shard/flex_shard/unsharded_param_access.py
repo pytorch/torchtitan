@@ -16,7 +16,7 @@ import torch.nn as nn
 from .sharded_param import is_flex_shard_param
 
 if TYPE_CHECKING:
-    from .bucket_storage import DStorage
+    from .bucket_storage import DStorage, ParamFQN
 
 
 # Module attribute names for storing DStorage
@@ -81,7 +81,7 @@ class ParamModuleRef:
     param_name: str
 
     @classmethod
-    def resolve(cls, root_module: nn.Module, fqn: str) -> ParamModuleRef:
+    def resolve(cls, root_module: nn.Module, fqn: ParamFQN) -> ParamModuleRef:
         """Resolve a parameter FQN from root, unwrapping checkpoint wrappers."""
         parts = fqn.split(".")
         leaf_module = root_module

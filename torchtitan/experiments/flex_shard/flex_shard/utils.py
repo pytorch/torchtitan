@@ -17,7 +17,7 @@ from torch.distributed.device_mesh import _get_device_handle
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
-    from .bucket_storage import DStorage
+    from .bucket_storage import BucketParamFQNsByIndex, DStorage, ParamFQN
     from .placement_contract import Placement
 
 
@@ -123,7 +123,7 @@ def _get_storage_debug_fqn(storage: DStorage) -> str | None:
 
 def _set_param_on_module(
     root_module: nn.Module,
-    fqn: str,
+    fqn: ParamFQN,
     param: nn.Parameter,
 ) -> None:
     """Navigate to submodule by FQN and set parameter."""
@@ -136,13 +136,13 @@ def _set_param_on_module(
 
 def _get_managed_named_params(
     module: nn.Module,
-) -> list[tuple[str, nn.Parameter]]:
+) -> list[tuple[ParamFQN, nn.Parameter]]:
     """
     Collect parameters managed by this root-level flex_shard() call.
     """
-    managed_params: list[tuple[str, nn.Parameter]] = []
+    managed_params: list[tuple[ParamFQN, nn.Parameter]] = []
 
-    seen_params: dict[int, str] = {}
+    seen_params: dict[int, ParamFQN] = {}
 
     # Use remove_duplicate=False so shared parameters are rejected instead of
     # leaving one alias unmanaged.
@@ -183,7 +183,7 @@ def _get_device_from_mesh(mesh: DeviceMesh) -> torch.device:
 
 
 def _validate_eager_params(
-    named_params: list[tuple[str, nn.Parameter]],
+    named_params: list[tuple[ParamFQN, nn.Parameter]],
     expected_device: torch.device | None = None,
 ) -> None:
     """Validate parameters supported by the eager-only path."""
@@ -211,8 +211,8 @@ def _validate_eager_params(
 
 
 def _validate_placements(
-    param_placements: dict[str, tuple[Placement, ...]],
-    named_params: list[tuple[str, nn.Parameter]],
+    param_placements: dict[ParamFQN, tuple[Placement, ...]],
+    named_params: list[tuple[ParamFQN, nn.Parameter]],
     mesh: DeviceMesh,
 ) -> None:
     """Validate that placements are compatible with eager FlexShard."""
@@ -269,10 +269,10 @@ def _validate_placements(
 
 
 def _validate_bucket_placements(
-    bucket_assignments: list[list[str]],
-    param_placements: dict[str, tuple[Placement, ...]],
+    bucket_assignments: BucketParamFQNsByIndex,
+    param_placements: dict[ParamFQN, tuple[Placement, ...]],
     buckets: list[Any],
-    named_params: list[tuple[str, nn.Parameter]],
+    named_params: list[tuple[ParamFQN, nn.Parameter]],
 ) -> None:
     """Validate minimal eager bucket constraints."""
     param_dict = dict(named_params)

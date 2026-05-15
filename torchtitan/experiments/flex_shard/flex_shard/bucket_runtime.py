@@ -24,7 +24,7 @@ from .bucket_collectives import (
     ReduceGradHandle,
     UnshardHandle,
 )
-from .bucket_storage import BucketSpec, DStorage, ParamInfo
+from .bucket_storage import BucketSpec, DStorage, ParamFQN, ParamInfo
 from .unsharded_param_access import (
     _BUCKET_FQN_ATTR,
     _BUCKET_UNSHARD_HOOK_REGISTERED_ATTR,
@@ -679,7 +679,7 @@ def _raise_unreplayable_reshard_hook(storage: DStorage) -> None:
 def _create_param_accessor_states(
     module: nn.Module,
     storages: list[DStorage],
-    fqn_to_bucket_spec: dict[str, BucketSpec],
+    fqn_to_bucket_spec: dict[ParamFQN, BucketSpec],
     device: torch.device,
 ) -> dict[nn.Module, dict[str, ParamAccessorState]]:
     """Create parameter accessor state grouped by owning leaf module."""
