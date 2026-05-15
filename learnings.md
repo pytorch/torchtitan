@@ -140,3 +140,9 @@ The next performance lever should be activation-checkpointing policy on the Floa
 Compiler memory-budget activation checkpointing at budget 0.75 is the new best. On top of the Float8 rowwise source, it completed the 10-step run with loss falling from 12.26095 to 6.07721, peak memory rising to 129.9GiB, and throughput improving to 8,821 tps. TorchTitan still reports MFU as `N/A` for this quantized path.
 
 This validates the hypothesis from the Float8 profile: spending memory to reduce recomputation is useful after the large linears are quantized. The memory increase from selective AC to budget 0.75 is about 21.7GiB, while the node still has roughly 48GiB to physical capacity and roughly 39GiB to the program's 95% risk threshold. The next narrow probe should raise the memory budget to 0.9 rather than jumping straight to no activation checkpointing.
+
+## Experiment Review: Float8 Memory Budget 0.9
+
+Memory budget 0.9 showed significant run-to-run variance. The first run completed normally with loss falling from 12.48586 to 7.42518, 144.0GiB peak memory, and 8,011 tps, so it was worse than the 0.75 best. A duplicate run of the exact same command completed with loss falling from 12.34735 to 9.44670, the same 144.0GiB peak memory, and 8,877 tps, which is the best observed throughput so far.
+
+Because both 0.9 runs were finite and used the same command, keep the 8,877 tps repeat as the current best but treat the 0.9 setting as noisy. The next step should profile or repeat-confirm the 0.9 current-best path before making source changes that might be smaller than the observed variance.

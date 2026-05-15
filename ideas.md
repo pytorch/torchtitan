@@ -173,11 +173,11 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.75 --compile.enable --compile.components model`
   - Success criteria and expected risk: Kept at `9cf1a5ff`; memory budget 0.75 completed with finite loss falling from 12.26095 to 6.07721, 8,821 tps, MFU `N/A`, and 129.9GiB peak memory.
 
-- Idea: Float8 memory-budget activation checkpointing at 0.9
+- ~~Idea: Float8 memory-budget activation checkpointing at 0.9~~
   - Current best source commit: ba580fde / branch source at `bc825c47`
   - Source: memory-budget follow-up
   - Expected mechanism for improving reported tokens/sec: The 0.75 compiler memory budget improved throughput by reducing recomputation while using 129.9GiB peak memory. Raising the budget to 0.9 may save more activations and further reduce recomputation while still keeping below the 178.35GiB B200 capacity.
   - Supporting evidence: The 0.75 run increased peak memory by about 21.7GiB over selective AC and improved tps from 8,399 to 8,821 with healthy loss. This leaves roughly 48GiB of headroom to the physical capacity and about 39GiB to the program's rough 95% risk line.
   - Planned source/config changes: None; command-only candidate on the current Float8 source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 8,821 tps. Risks are OOM, memory fragmentation, or slower compiler partitioning if 0.9 saves activations that do not reduce critical recompute.
+  - Success criteria and expected risk: Mixed but best observed row is kept. The first recorded run completed with finite/falling loss but only 8,011 tps, below the 8,821 best. An unintended duplicate run of the exact same command completed with finite/falling loss from 12.34735 to 9.44670, 144.0GiB peak memory, and 8,877 tps. Treat 0.9 as the current best but note the large run-to-run variance.
