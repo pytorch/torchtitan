@@ -540,3 +540,9 @@ The failure is in the same compiler-memory-budget area as earlier TP=2 memory-bu
 The Qwen3 14B `attn_backend="varlen"` source-backed probe is a crash discard. The only source change was adding `attn_backend="varlen"` to the `qwen3_14b()` `model_registry("14B", ...)` call while preserving the existing `rowwise_with_gw_hp` Float8 converter and filters, but the run failed during model construction before step 1.
 
 The failure is a dependency gate rather than a throughput or numerical result: `VarlenAttention` attempted to activate FA3 and import `flash_attn_interface`, which is not installed in this environment. No loss, throughput, MFU, or peak memory was emitted. Revert the varlen config change and keep the SDPA fused optimizer-state command as the current best at 9,384 tps.
+
+## Experiment Review: Final Variance Check
+
+The final exact repeat of the current-best fused optimizer-state command is a discard diagnostic. It completed with finite/falling loss from 12.38264 to 8.69525, peak memory 137.47GiB, and MFU `N/A`, but reported only 4,988 tps at step 10.
+
+Because the objective requires finite/falling loss and throughput above 9,384 tps, this repeat does not change the best row. Treat 9,384 tps from the prior fused optimizer-state run as the local maximum found by this autoresearch pass, with substantial short-run variance still present.
