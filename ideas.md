@@ -292,7 +292,7 @@
 
 - ~~Idea: Local batch size 5 with Float8 memory-budget 0.95~~
   - Current best source commit: `3cde416b`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95 and local batch size 4.
-  - Source: manager bounded batch-size probe after activation-budget saturation.
+  - Source: manager bounded batch-size probe after activation-budget saturation; this was the already-active run that superseded the pending 0.925 handoff for this iteration.
   - Expected mechanism for improving reported tokens/sec: Increasing local batch size from 4 to 5 raises global batch size from 32 to 40 tokens-per-step units, which could improve device utilization and amortize fixed per-step communication/runtime overhead if the extra activation memory remains below the rough risk line.
   - Supporting evidence: The current best uses 143.96GiB on 178.35GiB B200s, leaving roughly 25GiB to the 95% memory-risk line. Earlier batch-size probes were before Float8 and memory-budget activation checkpointing, so the evidence was stale.
   - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
@@ -308,12 +308,3 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model`
   - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 8,897 tps. Discard if it only confirms the plateau or shows the instability seen at adjacent budget values.
   - Worker note: This handoff's requested 0.925 command was not started because an already-active `--activation_checkpoint.memory_budget=0.95 --training.local_batch_size=5` run in this checkout superseded it. Preserve this 0.925 idea as pending for now; the actual completed run is recorded below.
-
-- ~~Idea: Local batch size 5 with Float8 memory-budget 0.95~~
-  - Current best source commit: `3cde416b`; current best result row: 8,897 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.95.
-  - Source: active-run handoff superseding the pending 0.925 command-only probe.
-  - Expected mechanism for improving reported tokens/sec: Increasing local batch size from 4 to 5 might increase useful tokens per optimizer step and per FSDP collective while staying below the B200 memory risk threshold.
-  - Supporting evidence: The active process was already running this command in `/home/avenkataraman/github/torchtitan`, so the worker finalized it instead of launching the planned 0.925 command.
-  - Planned source/config changes: None; command-only candidate on the current Float8 rowwise source.
-  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --training.local_batch_size=5`
-  - Success criteria and expected risk: Discarded at `3cde416b`; the run completed with finite/falling loss from 12.55001 to 8.61428, MFU `N/A`, and 164.84GiB peak memory, but reached only 5,924 tps versus the 8,897 tps best.

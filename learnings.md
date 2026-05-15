@@ -239,16 +239,10 @@ This is a discard. It is below the 8,897 tps 0.95 best and fails the falling-los
 
 ## Experiment Review: Local Batch Size 5
 
-Local batch size 5 is a discard on the current best stack. The command completed with global batch size 40, finite/falling loss from 12.55001 to 8.61428, and peak memory 164.84GiB, which is below the rough 95% B200 risk line but much closer to it than the local-batch-size 4 best.
+Local batch size 5 is a discard on the current best stack. This was the already-active run in the checkout, so it superseded the pending 0.925 handoff for this iteration; the 0.925 idea remains recorded as pending. The command completed with global batch size 40, finite/falling loss from 12.55001 to 8.61428, and peak memory 164.84GiB, which is below the rough 95% B200 risk line but much closer to it than the local-batch-size 4 best.
 
 Throughput reached only 5,924 tps, far below the 8,897 tps best at local batch size 4. The extra per-step tokens did not overcome the memory/runtime cost of the larger batch under Float8 rowwise, model-only compile, no-reshard FSDP, and memory-budget 0.95. Treat local batch size increases as unattractive unless another change materially lowers memory or per-step overhead first.
 
 ## Next Memory-Budget Center Probe
 
 The memory-budget search is now nearly exhausted. Budget 0.95 has the best row at 8,897 tps and a repeat at 8,891 tps, both with 143.96GiB peak memory. Budget 0.9 is slightly behind at 8,877 tps with the same memory region, while 0.85 used less memory but failed loss trend and 0.975 was much slower. A final 0.925 command-only probe is reasonable because it sits inside the stable 0.9-0.95 band. If it does not beat 8,897 tps with falling loss, treat memory-budget tuning as saturated.
-
-## Experiment Review: Float8 Memory Budget 0.95 Local Batch 5
-
-The planned 0.925 command was not launched in this handoff because an already-active run in the checkout was using the current Float8 rowwise source with memory budget 0.95 plus `--training.local_batch_size=5`. That active run superseded the pending 0.925 handoff for this iteration; the 0.925 idea remains recorded as pending.
-
-The local-batch-5 run completed normally with finite/falling loss from 12.55001 to 8.61428 and MFU `N/A`, but it reached only 5,924 tps. Peak memory rose to 164.84GiB, about 92.42% of the reported B200 capacity. This is below the memory risk line but far slower than the 8,897 tps local-batch-4 memory-budget 0.95 best, so larger local batch is a discard under the current Float8 rowwise, no-reshard FSDP, model-only compile stack.
