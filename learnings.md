@@ -358,3 +358,9 @@ The Qwen3-local bfloat16 FSDP reduction candidate is the new best. Adding `mixed
 This narrowly beats the prior 9,229 tps best and directly targets the reduce-scatter bandwidth bucket from the profile. The run emitted a tyro warning because the global `TrainingConfig.mixed_precision_reduce` type annotation is currently `Literal["float32"]`; per scope, the type was not edited. Since Qwen3 parallelize uses `getattr(torch, training.mixed_precision_reduce)` and the command completed with falling loss, keep the Qwen3-local source change while noting the type annotation mismatch as a cleanup concern if this graduates beyond autoresearch.
 
 Current best is now `rowwise_with_gw_hp` with bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+
+## Experiment Review: Structured Logging Disabled
+
+Disabling structured trace logging on the bf16-reduce current-best stack is a discard. The command completed and reached 9,355 tps with 145.48GiB peak memory, but loss rose from 12.19051 to 14.05692.
+
+Because this was meant to be a low-risk runtime-overhead probe, the rising loss is enough to reject it even though throughput was higher than the 9,332 tps bf16-reduce row. Keep structured logging enabled for the current best until a clean repeat proves otherwise.
