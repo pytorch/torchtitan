@@ -24,7 +24,7 @@ To set up a new experiment, work with the user to:
    name, for example `may14-qwen3-8xh100`. The branch
    `autoresearch-parallelize/<tag>` must not already exist.
 3. **Create the branch**: branch from the current commit that contains the
-   Qwen3 parallelize scaffold.
+   human-approved starting implementation.
 4. **Read the in-scope files**:
    - `program.md` -- this operating guide.
    - `torchtitan/models/qwen3/model.py` -- model structure and config update.
@@ -49,10 +49,22 @@ To set up a new experiment, work with the user to:
    missing, stop and ask the human to provide them.
 6. **Initialize `parallelize_results.tsv`** with just the header row. Do not
    commit this file.
-7. **Confirm setup**: summarize the train command, hardware, editable file, and
-   objective before starting the autonomous loop.
+7. **Confirm the starting point**: identify the current best source commit and,
+   if available, its measured MFU/throughput row. If the starting commit cannot
+   run the target command because Qwen3 parallelization is unimplemented, stop
+   and ask the human for a runnable starting commit or explicit approval for a
+   narrowly scoped bootstrap candidate. Do not create a generic baseline
+   implementation during setup.
+8. **Confirm setup**: summarize the train command, hardware, editable files,
+   current best, and objective before starting the autonomous loop.
 
 Once the human confirms, begin experimentation.
+
+Setup is read-only for source files. Reading references, checking the
+environment, creating the experiment branch, and initializing local run
+artifacts are setup work. Editing `parallelize.py`, `sharding.py`,
+`config_registry.py`, or launch knobs is experiment work and must follow the
+one-idea rule below.
 
 ## Editable Scope
 
@@ -142,22 +154,23 @@ Memory target:
   size, larger microbatches, less recomputation, or a faster parallelism layout
   that improves reported MFU. Do not treat low memory use as a win by itself.
 
-## Correctness Gates
+## Correctness And Measurement
 
-A candidate implementation must pass correctness before it can be considered for
-performance.
+A candidate uses one real training run for both correctness and performance.
+Do not run a separate short correctness job followed by a separate performance
+job unless the human explicitly asks for it or the candidate is failing before
+the train loop and needs a small diagnostic rerun.
 
 At minimum:
 
 1. Python import/syntax succeeds.
 2. The model builds on meta and reaches `parallelize_qwen3`.
-3. A short smoke run completes forward/backward for the target command shape or
-   a reduced version of the same command.
-4. Run a short convergence sanity check before accepting a performance result.
-   For initial experiments, about 10 optimizer steps is enough. The loss must
-   stay finite and should trend downward over those steps. A candidate that is
-   fast but produces NaNs, exploding loss, or a flat/increasing loss curve should
-   be discarded or fixed before benchmarking.
+3. The redirected training run completes forward/backward and logs enough steps
+   to judge both convergence and steady-state MFU.
+4. Use the early logged steps from that same run as the convergence sanity
+   check. The loss must stay finite and should trend downward. A candidate that
+   is fast but produces NaNs, exploding loss, or a flat/increasing loss curve
+   should be discarded or fixed before accepting its performance result.
    TorchTitan logs this as per-step `loss: ...`; for example a healthy short
    debug run may show loss falling across steps 1-10.
 
@@ -188,7 +201,8 @@ TorchTitan and PyTorch-native primitives are good starting points:
 - `apply_cp_to_forward` for context parallel attention wrapping
 - `apply_ac` for activation checkpointing
 - `apply_compile` for per-block compile
-- `apply_fsdp` from the closest existing model reference when appropriate
+- an existing FSDP helper when it can be reused directly; do not copy a full
+  reference implementation just to make a baseline runnable
 - `apply_moe_ep_tp`, `ExpertParallel`, `NoParallel`, or model-specific expert
   plans for MoE paths
 - quantization converters such as `Float8LinearConverter`,
@@ -199,17 +213,19 @@ TorchTitan and PyTorch-native primitives are good starting points:
 It is also fine to write custom logic inside the editable files when the
 existing helpers are too generic or leave performance on the table for this
 machine. Custom code must still be explainable, correct for the target command,
-and limited to `parallelize.py` / `sharding.py`.
+limited to `parallelize.py` / `sharding.py`, and small enough that the measured
+MFU change can be attributed to the stated hypothesis.
 
 Use `/home/avenkataraman/fbsource/genai/llama4x` as read-only inspiration for
 parallelization ideas, performance hypotheses, and machine-specific tricks when
 useful. Adapt concepts to TorchTitan's APIs and the target command instead of
 copying code blindly.
 
-Explore freely. Start by making a minimal correct implementation for the target
-command, then use logs, profiler output, memory usage, and failed runs to form
-the next hypothesis. The agent should invent and test parallelization strategies
-rather than follow a fixed checklist.
+Explore freely from the current best runnable implementation. Do not start by
+copying over a reference model's baseline orchestration. Each source or config
+change must be justified as a concrete attempt to improve MFU, throughput, or
+memory headroom that will be converted into MFU improvement in a follow-up
+candidate.
 
 Consider quantization as another performance lever. It is allowed through
 `model_spec` converters, and it may require compatible compile settings,
@@ -337,7 +353,7 @@ Example:
 
 ```
 commit	mfu_percent	tokens_per_sec	peak_memory_gb	status	description	command
-abc1234	41.20	1800000	73.4	keep	baseline FSDP+TP implementation	torchrun ...
+abc1234	41.20	1800000	73.4	keep	TP=2 attention and FFN sharding	torchrun ...
 def5678	39.80	1730000	70.1	discard	disable sequence parallel	torchrun ...
 012abcd	0.00	0	0.0	crash	TP=8 with bad qk_norm placement	torchrun ...
 ```
@@ -349,26 +365,35 @@ Do not commit `parallelize_results.tsv`.
 LOOP FOREVER after setup is confirmed:
 
 1. Inspect git state and record the current best commit.
-2. Choose exactly one concrete implementation/config hypothesis.
-3. Edit only `torchtitan/models/qwen3/parallelize.py` and
+2. Choose exactly one concrete implementation/config hypothesis that is expected
+   to improve MFU over the current best. State the expected mechanism before
+   editing.
+3. Edit the smallest source/config surface needed for that one hypothesis. Edit
+   only `torchtitan/models/qwen3/parallelize.py` and
    `torchtitan/models/qwen3/sharding.py` unless changing launch config knobs in
-   the command.
+   the command or an allowed `qwen3_1_7b()` field.
 4. Run import/syntax checks.
 5. Commit the candidate.
-6. Run the correctness gate.
-7. If correctness fails, inspect logs, fix obvious bugs, and retry. If the idea
-   is fundamentally broken, log `crash` or `discard`.
-8. Run the performance command with output redirected to `run.log`.
-9. Extract MFU, tokens/sec, peak memory, and failure signals.
-10. Append a row to `parallelize_results.tsv`.
-11. If the candidate improves the objective and passes correctness, keep the
+6. Run the training command once with output redirected to `run.log`.
+7. Use that one run for both correctness and performance. If correctness fails,
+   inspect logs, fix obvious bugs, and retry only as needed for diagnosis. If
+   the idea is fundamentally broken, log `crash` or `discard`.
+8. Extract MFU, tokens/sec, peak memory, convergence, and failure signals.
+9. Append a row to `parallelize_results.tsv`.
+10. If the candidate improves the objective and passes correctness, keep the
     commit and make it the new best.
-12. If it is worse, reset back to the previous best source commit. Keep the TSV
+11. If it is worse, reset back to the previous best source commit. Keep the TSV
     row uncommitted.
 
 One-idea rule:
 
 - Each loop iteration tests one idea only.
+- Broad baseline ports are not a valid idea. Do not copy an entire reference
+  `parallelize.py`, FSDP helper, sharding module, or generic runnable baseline
+  and treat it as one experiment.
+- Do not add code merely because the scaffold is incomplete. If the current best
+  cannot run, stop for a human-approved runnable starting point or an explicitly
+  approved bootstrap candidate with a tiny, auditable diff.
 - An idea may include the minimum coupled source and command/config changes
   required to make that hypothesis valid. For example, trying TP=2 with the
   necessary Qwen3 tensor placement changes is one idea.
@@ -376,6 +401,9 @@ One-idea rule:
   TP degree, activation checkpointing mode, compile settings, and batch size in
   the same iteration is not allowed unless the hypothesis explicitly depends on
   that full combination.
+- Prefer deleting, reusing, or narrowly adapting existing code over adding new
+  copied helpers. If the diff is large enough that several independent choices
+  could explain the result, split it before running.
 - If a result improves, attribute the improvement to the tested hypothesis and
   use the next loop iteration for the next idea.
 
