@@ -426,3 +426,21 @@
   - Planned source/config changes: None; repeat on the current kept bfloat16-reduce source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded as repeat diagnostic at `f60c1124`; the run completed with finite/falling loss from 12.43899 to 9.72588, MFU `N/A`, and 145.48GiB peak memory, but reached 9,315 tps versus the 9,332 tps best. It remains above the prior 9,229 tps gw-hp best, so it confirms keeping the bf16-reduce source.
+
+- Idea: Fused AdamW with bfloat16 optimizer states
+  - Current best source commit: `ef51a052`; current best result row: 9,364 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: manager optimizer-memory/step-overhead audit.
+  - Expected mechanism for improving reported tokens/sec: `optimizer.implementation=fused_opt_states_bf16` pre-initializes AdamW momentum and variance buffers in bfloat16 while retaining the fused optimizer path. This can reduce optimizer-state memory and may reduce optimizer-step bandwidth on the 10-step workload without changing parallelism or Float8 coverage.
+  - Supporting evidence: `docs/bf16_optimizer_states.md` says the option is compatible with FSDP2 and operates on local DTensor shards. The current best still spends a training-loop optimizer phase after gradient clipping, and memory is around 145.48GiB, so optimizer-state pressure remains relevant.
+  - Planned source/config changes: None; command-only candidate using the current kept bfloat16-reduce source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
+  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 9,364 tps. Risks are lower-precision optimizer moments affecting the short-run loss trend or extra pre-hook overhead outweighing memory savings.
+
+- ~~Idea: bfloat16-reduce memory-budget 0.925 active probe~~
+  - Current best source commit: `ef51a052`; current best result row: 9,332 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: already-active run discovered while preparing the optimizer-state handoff.
+  - Expected mechanism for improving reported tokens/sec: The bfloat16 FSDP reduction change slightly shifted the current-best runtime and memory profile. A centered lower memory-budget value may select a similar activation partition with less recompute/overhead variance or slightly better loss behavior than the 0.95 setting.
+  - Supporting evidence: The old rowwise and gw-hp memory-budget sweeps were measured before bfloat16 reduction. The current best and repeat are close, so a single adjacent budget probe is reasonable if it is already running.
+  - Planned source/config changes: None; command-only candidate on the current kept bfloat16-reduce source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Kept at `14e2361c`; the active run completed with finite/falling loss from 12.38271 to 9.11822, MFU `N/A`, 145.48GiB peak memory, and 9,364 tps, beating the 9,332 tps bf16-reduce budget 0.95 best.

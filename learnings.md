@@ -374,3 +374,17 @@ An exact current-best command is already active in the checkout: bfloat16 FSDP r
 The clean repeat of the bfloat16-reduce current-best command is a discard diagnostic, not a new best. It completed with loss falling from 12.43899 to 9.72588, peak memory 145.48GiB, MFU `N/A`, and 9,315 tps.
 
 This is below the 9,332 tps bf16-reduce max but still above the prior 9,229 tps `rowwise_with_gw_hp` best. Keep the bf16-reduce source as current best, but treat the win as narrow and somewhat noisy rather than a large step change.
+
+## Next Optimizer Probe
+
+The next bounded candidate is `--optimizer.implementation fused_opt_states_bf16` on the bf16-reduce current-best source. The documented behavior keeps the fused AdamW path while storing Adam moments in bfloat16 and is FSDP2-compatible on local DTensor shards. This may reduce optimizer-state memory or optimizer-step bandwidth enough to matter for the 10-step objective. Use the new memory-budget 0.925 best stack and keep it only if loss is finite/falling and throughput clears 9,364 tps; otherwise record it as an optimizer-state discard.
+
+## Active Run Supersedes Optimizer Handoff
+
+An already-active command is running the bf16-reduce current-best source at memory-budget 0.925. Finalize that active run before starting the optimizer-state probe. Treat it as a one-off adjacent memory-budget retune after bfloat16 reduction; keep it only if it beats 9,332 tps with finite/falling loss, otherwise return to the queued optimizer-state idea.
+
+## Experiment Review: bfloat16 Reduce Memory Budget 0.925
+
+The centered lower memory-budget retune on the confirmed bf16-reduce source is the new best. Running `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925 completed with loss falling from 12.38271 to 9.11822, peak memory 145.48GiB, MFU `N/A`, and 9,364 tps.
+
+This beats the 9,332 tps memory-budget 0.95 max and the 9,315 tps repeat while using the same peak memory. Keep budget 0.925 as the active activation-checkpoint setting for the bf16-reduce stack, and use 9,364 tps as the next comparison threshold.
