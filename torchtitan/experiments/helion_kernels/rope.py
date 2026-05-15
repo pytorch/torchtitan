@@ -96,6 +96,149 @@ def _rope_cos_sin_fwd_positions(
     return xq_out, xk_out
 
 
+def _nearest_power_of_2_bucket(value: int) -> int:
+    assert value > 0
+    lower = 1 << (value.bit_length() - 1)
+    upper = lower << 1
+    return lower if value - lower < upper - value else upper
+
+
+def _config(
+    block_sizes: list[int],
+    *,
+    num_warps: int,
+    num_stages: int,
+    pid_type: str = "flat",
+    indexing: list[str] | None = None,
+    load_eviction_policies: list[str] | None = None,
+    maxnreg: int | None = None,
+    num_sm_multiplier: int | None = None,
+) -> helion.Config:
+    kwargs: dict[str, Any] = {
+        "block_sizes": block_sizes,
+        "num_stages": num_stages,
+        "num_warps": num_warps,
+        "pid_type": pid_type,
+    }
+    if indexing is not None:
+        kwargs["indexing"] = indexing
+    if load_eviction_policies is not None:
+        kwargs["load_eviction_policies"] = load_eviction_policies
+    if maxnreg is not None:
+        kwargs["maxnreg"] = maxnreg
+    if num_sm_multiplier is not None:
+        kwargs["num_sm_multiplier"] = num_sm_multiplier
+    return helion.Config(**kwargs)
+
+
+_ROPE_HELION_CONFIGS_BY_SEQ_BUCKET: dict[int, helion.Config] = {
+    1: _config(
+        [512, 128],
+        num_warps=16,
+        num_stages=5,
+        pid_type="persistent_blocked",
+        maxnreg=128,
+        num_sm_multiplier=1,
+    ),
+    256: _config(
+        [1024, 128],
+        num_warps=8,
+        num_stages=4,
+    ),
+    1024: _config(
+        [512, 256],
+        num_warps=8,
+        num_stages=2,
+    ),
+}
+
+
+_ROPE_HELION_BWD_CONFIGS_BY_SEQ_BUCKET: dict[int, helion.Config] = {
+    1: _config([128, 16], num_warps=4, num_stages=3),
+    256: _config([1024, 512], num_warps=16, num_stages=6),
+    1024: _config([1024, 512], num_warps=8, num_stages=7),
+}
+
+
+def _rope_cos_sin_config(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+) -> helion.Config | None:
+    batch, seq_len, n_heads, head_dim = xq.shape
+    _, k_seq_len, n_kv_heads, k_head_dim = xk.shape
+    # These configs were tuned only for the Qwen3-32B TP=8 inference shapes:
+    # xq=[1, S, 8, 128], xk=[1, S, 1, 128], S in {1, 192, 1088}.
+    if (
+        batch != 1
+        or seq_len != k_seq_len
+        or n_heads != 8
+        or n_kv_heads != 1
+        or head_dim != 128
+        or k_head_dim != 128
+    ):
+        return None
+
+    seq_bucket = _nearest_power_of_2_bucket(seq_len)
+    return _ROPE_HELION_CONFIGS_BY_SEQ_BUCKET.get(seq_bucket)
+
+
+def _rope_cos_sin_bwd_config(
+    grad_xq_out: torch.Tensor,
+    grad_xk_out: torch.Tensor,
+) -> helion.Config | None:
+    batch, seq_len, n_heads, head_dim = grad_xq_out.shape
+    _, k_seq_len, n_kv_heads, k_head_dim = grad_xk_out.shape
+    # These configs were tuned only for the Qwen3-32B TP=8 inference shapes:
+    # grad_xq=[1, S, 8, 128], grad_xk=[1, S, 1, 128], S in {1, 192, 1088}.
+    if (
+        batch != 1
+        or seq_len != k_seq_len
+        or n_heads != 8
+        or n_kv_heads != 1
+        or head_dim != 128
+        or k_head_dim != 128
+    ):
+        return None
+
+    seq_bucket = _nearest_power_of_2_bucket(seq_len)
+    return _ROPE_HELION_BWD_CONFIGS_BY_SEQ_BUCKET.get(seq_bucket)
+
+
+def _rope_cos_sin_fwd_positions_with_config(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    rope_cache: torch.Tensor,
+    positions: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    config = _rope_cos_sin_config(xq, xk)
+    if config is None:
+        return _rope_cos_sin_fwd_positions(xq, xk, rope_cache, positions)
+
+    bound_kernel = _rope_cos_sin_fwd_positions.bind((xq, xk, rope_cache, positions))
+    if getattr(bound_kernel, "_config", None) != config:
+        bound_kernel.set_config(config)
+    return bound_kernel(xq, xk, rope_cache, positions)
+
+
+def _rope_cos_sin_bwd_positions_with_config(
+    grad_xq_out: torch.Tensor,
+    grad_xk_out: torch.Tensor,
+    rope_cache: torch.Tensor,
+    positions: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    config = _rope_cos_sin_bwd_config(grad_xq_out, grad_xk_out)
+    if config is None:
+        return _rope_cos_sin_bwd_positions(
+            grad_xq_out, grad_xk_out, rope_cache, positions
+        )
+
+    args = (grad_xq_out, grad_xk_out, rope_cache, positions)
+    bound_kernel = _rope_cos_sin_bwd_positions.bind(args)
+    if getattr(bound_kernel, "_config", None) != config:
+        bound_kernel.set_config(config)
+    return bound_kernel(*args)
+
+
 @helion.kernel(
     config=helion.Config(block_sizes=[512, 512], num_warps=4),
     static_shapes=True,
@@ -296,7 +439,9 @@ class _ApplyRotaryEmbCosSinHelion(torch.autograd.Function):
         ctx.xq_shape = xq.shape
         ctx.xk_shape = xk.shape
         ctx.save_for_backward(rope_cache, positions)
-        return _rope_cos_sin_fwd_positions(xq, xk, rope_cache, positions)
+        return _rope_cos_sin_fwd_positions_with_config(
+            xq, xk, rope_cache, positions
+        )
 
     @staticmethod
     def backward(
@@ -319,7 +464,7 @@ class _ApplyRotaryEmbCosSinHelion(torch.autograd.Function):
                 dtype=grad_xq_out.dtype,
             )
 
-        grad_xq, grad_xk = _rope_cos_sin_bwd_positions(
+        grad_xq, grad_xk = _rope_cos_sin_bwd_positions_with_config(
             grad_xq_out.contiguous(),
             grad_xk_out.contiguous(),
             rope_cache,
