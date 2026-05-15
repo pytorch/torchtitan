@@ -202,7 +202,6 @@ def _filter_tests(
             continue
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
-
         if (
             getattr(args, "gpu_arch_type", "cuda") == "rocm"
             and test_flavor.skip_rocm_test
