@@ -144,6 +144,15 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
                 count += 1
         return count
 
+    def _count_ep_a2a_nodes_with_pg(self, gm, pg_name):
+        return sum(
+            1
+            for node in gm.graph.nodes
+            if node.op == "call_function"
+            and "all_to_all_single" in str(node.target)
+            and node.args[3] == pg_name
+        )
+
     def test_overlap_rewrites_ag_nodes(self):
         """Apply overlap_fsdp_ag_rs_pass on the real backward graph and verify
         that FSDP AG nodes are rewritten to the auto-created extra PG."""
@@ -245,6 +254,83 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
         # All AG nodes should use their respective extra PGs
         self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg1), ag_pg1_before)
         self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg2), ag_pg2_before)
+
+    def test_overlap_rewrites_ep_a2a_on_fsdp_pg_to_separate_pg(self):
+        from torchtitan.experiments.graph_trainer.fsdp_passes import (
+            _EXTRA_EP_PG_REGISTRY,
+            _EXTRA_FSDP_PG_REGISTRY,
+        )
+
+        self._setup()
+        fsdp_pg_name = self._get_fsdp_pg_name()
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+        ag = graph.call_function(
+            c10d.all_gather_into_tensor.default, args=(x, 1, fsdp_pg_name)
+        )
+        wait = graph.call_function(c10d.wait_tensor.default, args=(ag,))
+        rs = graph.call_function(
+            c10d.reduce_scatter_tensor.default, args=(x, "sum", 1, fsdp_pg_name)
+        )
+        rs_wait = graph.call_function(c10d.wait_tensor.default, args=(rs,))
+        a2a = graph.call_function(
+            c10d.all_to_all_single.default, args=(x, [], [], fsdp_pg_name)
+        )
+        a2a.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "dispatch"}
+        graph.output((wait, rs_wait, a2a))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        _EXTRA_EP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        overlap_fsdp_ag_rs_pass(gm, ())
+
+        fsdp_extra_pg = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
+        ep_extra_pg = _EXTRA_EP_PG_REGISTRY[fsdp_pg_name]
+        self.assertNotEqual(fsdp_extra_pg, ep_extra_pg)
+        self.assertEqual(self._count_ag_nodes_with_pg(gm, fsdp_extra_pg), 1)
+        self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_extra_pg), 1)
+
+    def test_overlap_preserves_distinct_ep_pg_with_same_fsdp_ranks(self):
+        import torch.distributed as dist
+
+        from torchtitan.experiments.graph_trainer.fsdp_passes import (
+            _EXTRA_EP_PG_REGISTRY,
+            _EXTRA_FSDP_PG_REGISTRY,
+        )
+
+        self._setup()
+        fsdp_pg_name = self._get_fsdp_pg_name()
+        ep_pg = dist.new_group(
+            ranks=list(range(self.world_size)),
+            use_local_synchronization=True,
+        )
+        ep_pg_name = ep_pg.group_name
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+        ag = graph.call_function(
+            c10d.all_gather_into_tensor.default, args=(x, 1, fsdp_pg_name)
+        )
+        wait = graph.call_function(c10d.wait_tensor.default, args=(ag,))
+        rs = graph.call_function(
+            c10d.reduce_scatter_tensor.default, args=(x, "sum", 1, fsdp_pg_name)
+        )
+        rs_wait = graph.call_function(c10d.wait_tensor.default, args=(rs,))
+        a2a = graph.call_function(
+            c10d.all_to_all_single.default, args=(x, [], [], ep_pg_name)
+        )
+        a2a.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "combine"}
+        graph.output((wait, rs_wait, a2a))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        _EXTRA_EP_PG_REGISTRY.pop(ep_pg_name, None)
+        overlap_fsdp_ag_rs_pass(gm, ())
+
+        self.assertNotIn(ep_pg_name, _EXTRA_EP_PG_REGISTRY)
+        self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_pg_name), 1)
 
     def test_overlap_is_noop_when_no_fsdp_ag(self):
         """If the graph has no FSDP all-gathers, the pass is a no-op."""

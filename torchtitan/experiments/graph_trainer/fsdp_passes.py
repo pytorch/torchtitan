@@ -24,6 +24,7 @@ from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
+    is_fsdp_reduce_scatter,
     is_wait_tensor,
 )
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
@@ -135,30 +136,99 @@ def fsdp_reshard_after_fwd_pass(
 # Each NCCL PG gets its own CUDA stream, so the extra PG is what enables
 # AG/RS overlap in backward.
 _EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
+_EXTRA_EP_PG_REGISTRY: dict[str, str] = {}
 
 
-def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
-    """Return the extra PG name for ``source_pg_name``, creating it once.
-
-    The extra PG is a new NCCL process group with the same ranks as the source
-    FSDP PG but a different communicator (and therefore a different CUDA stream).
-    """
+def _get_or_create_extra_pg(
+    source_pg_name: str,
+    registry: dict[str, str],
+    *,
+    group_desc: str,
+    high_priority: bool = False,
+) -> str:
     import torch.distributed as dist
 
-    if source_pg_name in _EXTRA_FSDP_PG_REGISTRY:
-        return _EXTRA_FSDP_PG_REGISTRY[source_pg_name]
+    if source_pg_name in registry:
+        return registry[source_pg_name]
 
     source_pg = dist.distributed_c10d._resolve_process_group(source_pg_name)
     ranks = dist.get_process_group_ranks(source_pg)
-    extra_pg = dist.new_group(
-        ranks=ranks, group_desc="fsdp_extra", use_local_synchronization=True
+    pg_options = (
+        dist.ProcessGroupNCCL.Options(is_high_priority_stream=True)
+        if high_priority and hasattr(dist, "ProcessGroupNCCL")
+        else None
     )
-    _EXTRA_FSDP_PG_REGISTRY[source_pg_name] = extra_pg.group_name
+    extra_pg = dist.new_group(
+        ranks=ranks,
+        backend="nccl" if pg_options is not None else None,
+        pg_options=pg_options,
+        group_desc=group_desc,
+        use_local_synchronization=True,
+    )
+    registry[source_pg_name] = extra_pg.group_name
     logger.info(
-        f"Created extra FSDP PG (source: {source_pg_name}, "
-        f"extra: {extra_pg.group_name})"
+        f"Created extra {group_desc} PG (source: {source_pg_name}, "
+        f"extra: {extra_pg.group_name}, high_priority={high_priority})"
     )
     return extra_pg.group_name
+
+
+def _get_or_create_extra_fsdp_pg(source_pg_name: str) -> str:
+    """Return an extra FSDP PG with the same ranks and a distinct NCCL stream."""
+    return _get_or_create_extra_pg(
+        source_pg_name,
+        _EXTRA_FSDP_PG_REGISTRY,
+        group_desc="fsdp_extra",
+    )
+
+
+def _get_or_create_extra_ep_pg(source_pg_name: str) -> str:
+    """Return an extra EP PG so EP all-to-alls do not share the FSDP stream."""
+    return _get_or_create_extra_pg(
+        source_pg_name,
+        _EXTRA_EP_PG_REGISTRY,
+        group_desc="ep_extra",
+        high_priority=True,
+    )
+
+
+def _pg_rank_set(pg_name: str) -> frozenset[int]:
+    import torch.distributed as dist
+
+    pg = dist.distributed_c10d._resolve_process_group(pg_name)
+    return frozenset(dist.get_process_group_ranks(pg))
+
+
+def _same_process_group(lhs_pg_name: str, rhs_pg_name: str) -> bool:
+    import torch.distributed as dist
+
+    lhs_pg = dist.distributed_c10d._resolve_process_group(lhs_pg_name)
+    rhs_pg = dist.distributed_c10d._resolve_process_group(rhs_pg_name)
+    return lhs_pg is rhs_pg
+
+
+def _shares_process_group_with(
+    pg_name: str, candidate_pg_names: OrderedSet[str]
+) -> bool:
+    for candidate_pg_name in candidate_pg_names:
+        if _same_process_group(pg_name, candidate_pg_name):
+            if _pg_rank_set(pg_name) != _pg_rank_set(candidate_pg_name):
+                raise ValueError(
+                    "Resolved the same process group with different rank sets: "
+                    f"{pg_name} and {candidate_pg_name}"
+                )
+            return True
+    return False
+
+
+def _is_ep_all_to_all(node: fx.Node) -> bool:
+    custom = node.meta.get("custom", {})
+    return (
+        node.op == "call_function"
+        and "all_to_all_single" in str(node.target)
+        and isinstance(custom, dict)
+        and custom.get("EP") in ("dispatch", "combine")
+    )
 
 
 def overlap_fsdp_ag_rs_pass(
@@ -166,24 +236,30 @@ def overlap_fsdp_ag_rs_pass(
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
     """
-    Reassign FSDP all-gather nodes to extra NCCL process groups for
-    AG/RS overlap in backward.
+    Reassign FSDP all-gathers and overlapping EP all-to-alls to extra NCCL
+    process groups.
 
     Discovers all distinct FSDP PGs by inspecting the graph (e.g. one for
     FSDP, another for expert-FSDP), creates an extra NCCL PG over the same
     ranks for each (giving it a separate CUDA stream), and rewrites every
     all-gather to the corresponding extra PG. This separates all-gathers
     from reduce-scatters onto different streams, enabling AG/RS overlap in
-    backward.
+    backward. If an EP all-to-all resolves to the same process group as an FSDP
+    reduce-scatter, it receives its own extra high-priority PG constructed from
+    the EP group. Rank-set equality alone is not enough: two different process
+    groups can have the same ranks but already use separate NCCL communicators.
 
     No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
     bucketing passes so bucketed all-gathers inherit the new PG name.
     """
     source_pg_names: OrderedSet[str] = OrderedSet()
+    fsdp_rs_pg_names: OrderedSet[str] = OrderedSet()
     for node in gm.graph.nodes:
         if is_wait_tensor_from_fsdp(node):
             ag_node = node.args[0]
             source_pg_names.add(ag_node.args[2])
+        if is_fsdp_reduce_scatter(node):
+            fsdp_rs_pg_names.add(node.args[3])
 
     if not source_pg_names:
         return gm
@@ -191,16 +267,40 @@ def overlap_fsdp_ag_rs_pass(
     pg_mapping: dict[str, str] = {
         pg: _get_or_create_extra_fsdp_pg(pg) for pg in source_pg_names
     }
+    ep_source_pg_names = OrderedSet(
+        node.args[3]
+        for node in gm.graph.nodes
+        if _is_ep_all_to_all(node) and len(node.args) > 3
+    )
+    ep_pg_mapping: dict[str, str] = {
+        pg: _get_or_create_extra_ep_pg(pg)
+        for pg in ep_source_pg_names
+        if _shares_process_group_with(pg, fsdp_rs_pg_names)
+    }
 
-    count = 0
+    ag_count = 0
+    ep_count = 0
     for node in gm.graph.nodes:
         if is_all_gather(node) and node.args[2] in pg_mapping:
             # AG args: (input_tensor, group_size, group_name)
             node.args = (node.args[0], node.args[1], pg_mapping[node.args[2]])
-            count += 1
-    if count > 0:
+            ag_count += 1
+        elif (
+            _is_ep_all_to_all(node)
+            and len(node.args) > 3
+            and node.args[3] in ep_pg_mapping
+        ):
+            # A2A args: (input_tensor, output_splits, input_splits, group_name)
+            node.args = (*node.args[:3], ep_pg_mapping[node.args[3]], *node.args[4:])
+            ep_count += 1
+    if ag_count > 0:
         for source, target in pg_mapping.items():
             logger.info(f"Rewrote all-gather node(s) from PG {source} to PG {target}")
+    if ep_count > 0:
+        for source, target in ep_pg_mapping.items():
+            logger.info(
+                f"Rewrote EP all-to-all node(s) from PG {source} to PG {target}"
+            )
     gm.recompile()
     return gm
 
