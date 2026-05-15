@@ -119,7 +119,7 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
   - Success criteria and expected risk: Crashed at `a76c225`; conversion succeeded, but backward failed in `torchao.prototype.mx_formats.kernels.mxfp8_quantize_cuda` with an invalid argument from the MXFP8 quantize backward path. Discard the broad all-linear MXFP8 converter for now.
 
-- Idea: FlexAttention flash backend with model-only compile
+- ~~Idea: FlexAttention flash backend with model-only compile~~
   - Current best source commit: a68a3c
   - Source: compiled profile and attention-backend research
   - Expected mechanism for improving reported tokens/sec: The compiled profile still has flash attention backward and forward work among the top kernels. Switching the Qwen3 14B `model_spec` from the default SDPA attention backend to `flex_flash` may use the FlexAttention FLASH backend with block-causal masks on Blackwell, improving attention kernel scheduling without changing the model flavor or parallel layout.
@@ -235,3 +235,21 @@
   - Planned source/config changes: In `qwen3_14b()` only, remove `"attention.qkv_linear.wkv"` from `Float8LinearConverter.Config(filter_fqns=...)`; keep `"lm_head"` filtered and keep `recipe_name="rowwise"` with `model_compile_enabled=True`.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded; the 10-step run completed with finite/falling loss from 12.53812 to 7.92596, MFU `N/A`, and 137.35GiB peak memory, but throughput was only 8,190 tps versus the 8,877 tps best. The `qwen3_14b()` Float8 filter source change was reverted.
+
+- Idea: Float8 tensorwise recipe with current memory-budget best
+  - Current best source commit: `0f036086`; current best result row: 8,877 tps from rowwise Float8, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.9.
+  - Source: Float8 profile, KV coverage result, and TorchAO recipe inspection.
+  - Expected mechanism for improving reported tokens/sec: The current rowwise recipe adds many axiswise scaling/casting kernels. TorchAO's `Float8LinearConfig.from_recipe_name("tensorwise")` is present in the installed environment and uses tensorwise dynamic scales, which may reduce scale-reduction overhead and improve compile/runtime efficiency on the large repeated FFN and attention projection linears.
+  - Supporting evidence: The Float8 profiles show visible scale/cast kernels alongside NCCL, and expanding Float8 to smaller KV projections was slower, so the next narrow quantization lever should change scaling overhead for the already-good large-linears subset rather than convert more linears. Tensorwise is riskier numerically than rowwise but still keeps communication in high precision and leaves `lm_head` and `attention.qkv_linear.wkv` filtered.
+  - Planned source/config changes: In `qwen3_14b()` only, change `Float8LinearConverter.Config(recipe_name="rowwise", ...)` to `recipe_name="tensorwise"` while keeping the existing filter list and `model_compile_enabled=True`.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and exceeds 8,877 tps. Risks are unsupported TorchTitan config typing, worse loss from tensorwise scaling, or slower tensorwise kernels; revert the source change if discarded.
+
+- Idea: TP=2 root-cause with selective AC
+  - Current best source commit: `0f036086`; current best result row: 8,877 tps from 8-way FSDP Float8 rowwise plus memory-budget 0.9.
+  - Source: human-requested TP root-cause follow-up.
+  - Expected mechanism for improving reported tokens/sec: The TP=2 memory-budget run failed in Inductor's memory-budget/min-cut partitioner before step 1. Switching only activation checkpointing back to selective removes that partitioner while keeping TP=2, Float8 rowwise, model-only compile, no-reshard FSDP, and the current source filters, so it tests whether TP itself remains runnable/useful under the current Float8+compile stack.
+  - Supporting evidence: Qwen3 14B's 40 query heads and 8 KV heads are divisible by TP=2, and the earlier TP2 sharding patch is known to build. The previous failure happened in memory-budget partitioning, not in Qwen3 head divisibility or FSDP mesh construction.
+  - Planned source/config changes: Reapply the Qwen3 TP2 source/sharding patch from `e67f61c6`, keep HSDP disabled, and keep compile before TP wrapping as the least-bad ordering from the memory-budget attempt.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss, acceptable memory, and throughput above 8,877 tps. If it crashes, record as TP/compile incompatibility and revert; if it runs slower, discard and revert.
