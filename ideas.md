@@ -101,7 +101,7 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable`
   - Success criteria and expected risk: Discarded; it completed but reached only 7,139 tps, below the 7,898 tps model-only compile best.
 
-- Idea: Profile model-only compile current best
+- ~~Idea: Profile model-only compile current best~~
   - Current best source commit: a68a3c
   - Source: manager review after new best
   - Expected mechanism for improving reported tokens/sec: A profiled 10-step run of the current best will show whether the next bottleneck is now attention, dense matmul, FSDP collectives, loss, or compile/runtime overhead.
@@ -110,11 +110,20 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
   - Success criteria and expected risk: Completed at `64178839` as a diagnostic discard; the trace shows dense matmuls and flash attention backward dominate the compiled path, with NCCL a smaller slice than before.
 
-- Idea: MXFP8 linear converter with model-only compile
+- ~~Idea: MXFP8 linear converter with model-only compile~~
   - Current best source commit: a68a3c
   - Source: compiled profile and B200 quantization research
   - Expected mechanism for improving reported tokens/sec: The compiled profile is dominated by large dense linear GEMMs and attention kernels. MXFP8 dynamic quantization can move Qwen3's linear layers onto Blackwell FP8/MX kernels, reducing GEMM time while retaining high-precision communication.
   - Supporting evidence: The latest rank 0 compiled trace has about 5.68s kernel time in the profiled step, with top kernels mostly nvjet matmuls and flash attention backward; NCCL is about 0.51s. `torchao` is installed, B200 satisfies SM100, and `MXFP8LinearConverter` is available. The TorchTitan MXFP8 docs say it is compatible with `torch.compile` and FSDP2 and requires B200/SM100.
   - Planned source/config changes: In `torchtitan/models/qwen3/config_registry.py`, import `MXFP8LinearConverter` and set `qwen3_14b()` to call `model_registry("14B", converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)])`. Keep the edit limited to this model_spec converter choice and revert if discarded.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
-  - Success criteria and expected risk: Keep if the run completes with finite/falling loss and exceeds 7,898 tps. Risks are converter incompatibility, compile OOM from quantization temporaries, or loss instability from dynamic MXFP8.
+  - Success criteria and expected risk: Crashed at `a76c225`; conversion succeeded, but backward failed in `torchao.prototype.mx_formats.kernels.mxfp8_quantize_cuda` with an invalid argument from the MXFP8 quantize backward path. Discard the broad all-linear MXFP8 converter for now.
+
+- Idea: FlexAttention flash backend with model-only compile
+  - Current best source commit: a68a3c
+  - Source: compiled profile and attention-backend research
+  - Expected mechanism for improving reported tokens/sec: The compiled profile still has flash attention backward and forward work among the top kernels. Switching the Qwen3 14B `model_spec` from the default SDPA attention backend to `flex_flash` may use the FlexAttention FLASH backend with block-causal masks on Blackwell, improving attention kernel scheduling without changing the model flavor or parallel layout.
+  - Supporting evidence: `get_attention_config("flex_flash")` is supported on Hopper/Blackwell, configures `FlexAttention.Config(block_size=(256, 128), kernel_options={"BACKEND": "FLASH"})`, and returns a block-causal mask. The current best profile is no longer primarily NCCL-bound, so attention-kernel changes are a plausible narrow next lever.
+  - Planned source/config changes: In `torchtitan/models/qwen3/config_registry.py`, change only the `qwen3_14b()` `model_spec` call to `model_registry("14B", attn_backend="flex_flash")`. Revert if discarded.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 7,898 tps. Risks are block-mask overhead, compile incompatibility, or slower FlexAttention codegen than SDPA for this sequence length and GQA shape.
