@@ -52,7 +52,7 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     DStorage,
     ParamInfo,
 )
-from torchtitan.experiments.flex_shard.flex_shard.sharded_param_metadata import (
+from torchtitan.experiments.flex_shard.flex_shard.sharded_param import (
     is_flex_shard_param,
 )
 from torchtitan.experiments.flex_shard.tests.common import (
@@ -240,12 +240,12 @@ class TestBucketAssignment(TestCase):
         buckets = [
             BucketSpec(
                 ["attn.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             ),
             BucketSpec(
                 ["ffn.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             ),
         ]
@@ -264,7 +264,7 @@ class TestBucketAssignment(TestCase):
         buckets = [
             BucketSpec(
                 ["attn.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             )
         ]
@@ -281,12 +281,12 @@ class TestBucketAssignment(TestCase):
         buckets = [
             BucketSpec(
                 ["attn.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             ),
             BucketSpec(
                 ["*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             ),
         ]
@@ -517,7 +517,7 @@ class TestBucketPlacementValidation(TestCase):
         buckets = [
             BucketSpec(
                 ["*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             )
         ]
@@ -543,7 +543,7 @@ class TestBucketPlacementValidation(TestCase):
         buckets = [
             BucketSpec(
                 ["*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             )
         ]
@@ -579,7 +579,7 @@ class TestBucketPlacementValidation(TestCase):
                     buckets=[
                         BucketSpec(
                             ["*"],
-                            shard_placement_fn=mixed_placements,
+                            placement_fn=mixed_placements,
                             reshard_after_forward=False,
                         )
                     ],
@@ -736,7 +736,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         buckets = [
             BucketSpec(
                 ["*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             )
         ]
@@ -789,7 +789,7 @@ class TestBucketStorageLayout(FSDPTestMultiThread):
         buckets = [
             BucketSpec(
                 ["*"],
-                shard_placement_fn=owned_rank0,
+                placement_fn=owned_rank0,
                 reshard_after_forward=False,
             )
         ]
@@ -880,7 +880,7 @@ class TestDistributedBuckets(FSDPTest):
             [
                 BucketSpec(
                     ["*"],
-                    shard_placement_fn=per_param_placements,
+                    placement_fn=per_param_placements,
                     reshard_after_forward=False,
                 )
             ],

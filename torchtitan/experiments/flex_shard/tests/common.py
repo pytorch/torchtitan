@@ -80,7 +80,7 @@ def flex_shard_cuda(
         buckets = [
             BucketSpec(
                 ["*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=False,
             )
         ]
@@ -207,19 +207,19 @@ def transformer_bucket_specs(
         [
             BucketSpec(
                 ["tok_embeddings.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             ),
             BucketSpec(
                 ["pos_embeddings.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             ),
         ]
         + [
             BucketSpec(
                 [f"layers.{idx}.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             )
             for idx in range(num_layers)
@@ -227,12 +227,12 @@ def transformer_bucket_specs(
         + [
             BucketSpec(
                 ["norm.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             ),
             BucketSpec(
                 ["output.*"],
-                shard_placement_fn=per_param_placements,
+                placement_fn=per_param_placements,
                 reshard_after_forward=reshard_after_forward,
             ),
         ]
