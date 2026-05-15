@@ -696,6 +696,91 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types TP SP/LP on/off matrix",
+            "spmd_tp_sp_lp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP/DDP + TP/SP/LP composition",
+            "spmd_fsdp_ddp_tp_sp_lp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking=global",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types HSDP + TP/SP/LP composition",
+            "spmd_hsdp_tp_sp_lp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.data_parallel_shard_degree=4",
                     "--compile.enable",
                     "--training.steps=10",

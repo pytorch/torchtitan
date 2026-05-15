@@ -89,6 +89,7 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     sp_placement = dense_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
         state_shardings=state,
+        state_tp_ir={"weight"},
         in_src_shardings={"input": sp_placement},
         in_dst_shardings={"input": sp_placement},
         out_dst_shardings=sp_placement,
@@ -221,6 +222,7 @@ def set_decoder_sharding_config(
             out_placements=(embed_out,),
         ),
     )
+    config.tok_embeddings.enable_sp = enable_sp
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
     # ChunkedCELoss gathers SP hidden states before chunking; normal model
