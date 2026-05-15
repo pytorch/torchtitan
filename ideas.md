@@ -146,20 +146,29 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
   - Success criteria and expected risk: Kept at `ba580fde`; the completed run in `run.log` reached 8,399 tps, MFU `N/A`, 108.15GiB peak memory, and finite loss falling from 12.48223 to 11.18137. The worker dropped `auto_filter_small_kn` before committing because the installed torchao helper expects built `nn.Linear` modules and converted zero Qwen3 config-time linears; the measured source manually filters `lm_head` and `attention.qkv_linear.wkv`.
 
-- Idea: Profile Float8 rowwise current best
+- ~~Idea: Profile Float8 rowwise current best~~
   - Current best source commit: ba580fde
   - Source: new-best diagnostic
   - Expected mechanism for improving reported tokens/sec: Profiling the new Float8 best should show whether the remaining bottleneck is now dynamic scaling/casting overhead, FFN/attention GEMMs, FSDP collectives, loss/logit projection, or runtime overhead before adding another quantization or parallelism change.
   - Supporting evidence: Float8 rowwise improved the previous best from 7,898 to 8,399 tps and TorchTitan reports MFU as `N/A` for this quantized candidate, so the previous compiled profile no longer describes the active best.
   - Planned source/config changes: None; diagnostic command-only run using the current best source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
-  - Success criteria and expected risk: Record as diagnostic discard and do not compare profiled tps with unprofiled candidates. Use the trace to choose the next narrow idea.
+  - Success criteria and expected risk: Completed as diagnostic discard; profiled tps was 7,812 with profiler overhead. The trace shows shorter overall kernel time than the bf16 compiled profile, visible Float8 scaling/casting kernels, and NCCL again close to 1s in the captured profile step.
 
-- Idea: MXFP8 feed-forward-only converter with model-only compile
+- ~~Idea: MXFP8 feed-forward-only converter with model-only compile~~
   - Current best source commit: ba580fde
   - Source: lower-priority quantization follow-up after broad MXFP8 crash
   - Expected mechanism for improving reported tokens/sec: Qwen3 14B FFN linears are the largest repeated GEMMs (`5120 x 17408`, `17408 x 5120`, `5120 x 17408`) and are dimensions aligned for MXFP8. Restricting MXFP8 conversion to `feed_forward` may avoid the broad all-linear crash path involving the LM head, KV projection, or attention output/query linears while still accelerating the dominant dense matmul bucket.
   - Supporting evidence: The compiled profile is GEMM-heavy, TorchTitan MXFP8 is intended for B200/SM100 with compile/FSDP2, and the MXFP8 docs recommend filtering linears such as small KV projections. The all-linear MXFP8 candidate converted and started training before failing in MXFP8 quantize backward, so a narrower FQN set is a plausible root-cause isolation step rather than repeating the same broad crash.
   - Planned source/config changes: In `qwen3_14b()` only, locally import `MXFP8LinearConverter` and set `model_spec=model_registry("14B", converters=[MXFP8LinearConverter.Config(recipe_name="mxfp8_rceil", fqns=["feed_forward"], model_compile_enabled=True)])`.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model`
-  - Success criteria and expected risk: Defer until after profiling the Float8 current best. Keep only if the 10-step run completes with finite/falling loss and exceeds 8,399 tps. Risks are the same torchao MXFP8 backward invalid-argument crash, compile/codegen incompatibility, or quantization overhead outweighing the GEMM speedup at this local batch size.
+  - Success criteria and expected risk: Crashed before completing step 1; even FFN-only MXFP8 failed in `torch.ops.torchao.mxfp8_quantize.default` in the compiled backward path. Stop pursuing MXFP8 on this environment without changing torchao/runtime.
+
+- Idea: Float8 current best with compiler memory-budget activation checkpointing
+  - Current best source commit: ba580fde / branch source at `bc825c47`
+  - Source: Float8 profile and memory-headroom analysis
+  - Expected mechanism for improving reported tokens/sec: The current best uses manual selective activation checkpointing, which still recomputes work inside each compiled block. Compiler memory-budget activation checkpointing may save more useful activations while staying under the B200 memory limit, reducing recompute on the Float8 path and improving steady-state tps.
+  - Supporting evidence: Float8 current best uses about 108.2GiB peak on 178.35GiB B200s, leaving substantial headroom. No-AC no-reshard OOMed in the bf16 path, so a mid-high compiler memory budget is safer than disabling checkpointing entirely. The latest Float8 profile shows only about 2.8s kernel time but visible recompute/scaling work, so reducing recompute is a plausible next lever.
+  - Planned source/config changes: None; command-only candidate on the current Float8 source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.75 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Keep if the 10-step run completes with finite/falling loss and exceeds 8,399 tps. Risks are OOM from saving too many activations, compiler partitioner overhead, or worse graphs than the current manual selective AC wrapper.

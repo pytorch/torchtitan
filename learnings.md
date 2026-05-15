@@ -126,3 +126,11 @@ Float8 rowwise conversion of the large Qwen3 linears is the new best. The measur
 The `auto_filter_small_kn` option was not used in the measured source because a pre-run config check showed it converted zero Qwen3 linears in this checkout: the torchao auto-filter helper expects built `nn.Linear` modules, while TorchTitan's Qwen3 converter applies to `Linear.Config` objects. Manual filtering of the LM head and combined KV projection kept the intended conservative scope and produced a real Float8 candidate.
 
 Float8 improves the previous SDPA/model-only-compile best by about 6.3% (7,898 to 8,399 tps) with similar peak memory. Because the best has changed and MFU is omitted for quantized training, the next loop should profile the Float8 current best before trying another quantization or parallelism candidate. FFN-only MXFP8 remains a possible lower-priority follow-up, but it should not run before the new bottleneck is confirmed.
+
+## Experiment Review: Float8 Profile And FFN MXFP8
+
+The profiled Float8 current-best run should not be ranked against unprofiled rows, but it confirms that the active bottleneck changed again. The run completed with loss falling from 12.30372 to 11.29539, peak memory 108.15GiB, and profiled step-10 throughput of 7,812 tps. Rank 0 trace totals show about 2.81s of kernel time, around 0.99s of NCCL-named work, and many visible Float8 scaling/casting kernels such as `triton_red_fused_abs_amax...` and `aten::_scaled_mm`. Compared with the prior bf16 compiled profile, Float8 reduced the dense matmul burden but did not eliminate communication or quantization overhead.
+
+FFN-only MXFP8 still crashed before completing step 1 with `RuntimeError: invalid argument` from `torch.ops.torchao.mxfp8_quantize.default` in the compiled backward path. Since both broad MXFP8 and FFN-only MXFP8 hit the same torchao quantize-backward failure, MXFP8 should be considered blocked in this environment unless the torchao/runtime stack changes.
+
+The next performance lever should be activation-checkpointing policy on the Float8 source. The current best still uses only about 108.2GiB on 178.35GiB B200s, while disabling checkpointing entirely was unsafe in the earlier bf16 path. Compiler `memory_budget` mode is a narrower way to spend some memory headroom on fewer recomputations without jumping directly to no checkpointing.
