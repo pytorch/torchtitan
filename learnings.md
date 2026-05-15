@@ -318,3 +318,19 @@ This is higher risk than another command-only probe because it changes the outpu
 The source-free default FSDP reshard policy check is a discard on the active `rowwise_with_gw_hp` stack. Omitting `--parallelism.fsdp_reshard_after_forward=never` completed with finite/falling loss from 12.55290 to 10.28098, MFU `N/A`, and much lower peak memory at 120.30GiB.
 
 Throughput reached 9,067 tps, below both the 9,229 tps no-reshard best and its 9,213 tps repeat. The memory savings do not compensate for the added reshard/all-gather overhead on the 10-step objective, so keep explicit no-reshard in the current best command.
+
+## Experiment Review: Default FSDP Reshard with Local Batch Size 5
+
+The default-reshard local-batch-size 5 follow-up is a discard. It fit in memory on the active `rowwise_with_gw_hp` source, with peak memory reaching 144.04GiB, but the extra batch consumed almost all of the memory saved by default reshard and did not recover throughput.
+
+Step 10 reached 8,543 tps and loss rose from 12.47422 to 14.69380, so this fails both the 9,229 tps throughput gate and the finite/falling-loss sanity gate. Default reshard remains useful only as a memory-saving diagnostic, not as a path to higher throughput via batch-size 5.
+
+## Experiment Review: lm_head Float8 Coverage
+
+Including Qwen3 14B `lm_head` in `rowwise_with_gw_hp` Float8 is a discard. The candidate removed only the `lm_head` filter while keeping `attention.qkv_linear.wkv` filtered, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95. The run completed, but loss rose from 12.38387 to 16.43954, peak memory increased to 149.01GiB, and throughput reached only 8,399 tps.
+
+This closes the broad Float8 coverage expansion path for now. Both the smaller KV projection and the large chunked-loss `lm_head` projection were slower than the filtered current best, and `lm_head` also failed the falling-loss sanity check. Keep the current `filter_fqns=["lm_head", "attention.qkv_linear.wkv"]` source.
+
+## Next Compile Coverage Check
+
+The only remaining low-risk command-only lever near the current stack is default compile coverage under `rowwise_with_gw_hp`: run the current best command without `--compile.components model`, so TorchTitan compiles the loss function as well as the model. This does not compile `lm_head`, but it can test whether per-chunk CE compilation now helps after the recipe change. Keep it only if it beats 9,229 tps with finite/falling loss; prior rowwise evidence makes a small slowdown more likely than a large win.
