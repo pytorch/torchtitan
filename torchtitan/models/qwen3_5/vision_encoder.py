@@ -4,7 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -14,7 +15,7 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
-from torchtitan.protocols.module import Module, ModuleDict, ModuleList
+from torchtitan.protocols.module import Module, ModuleDict
 
 LayerNorm = Module.from_nn_module(nn.LayerNorm)
 GELU = Module.from_nn_module(nn.GELU)
@@ -22,14 +23,13 @@ GELU = Module.from_nn_module(nn.GELU)
 _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
-def get_vision_block_mask_mod(num_patch: torch.Tensor, max_num_patch: int):
+def get_vision_block_mask_mod(num_patch: torch.Tensor) -> Callable:
     """Create a mask modifier for block-diagonal attention.
 
     Each image only attends to its own patches.
 
     Args:
         num_patch: (num_vision,) actual number of patches per visual item
-        max_num_patch: Maximum number of patches (padded length)
     """
 
     def mask_mod(b, h, q_idx, kv_idx):
@@ -63,7 +63,7 @@ def _compute_learned_pos_embeds(
         dim: Hidden dimension
 
     Returns:
-        learned_pos: (num_vision, max_num_patch, dim) interpolated position embeddings
+        pos_embeds: (num_vision, max_num_patch, dim) interpolated position embeddings
     """
     num_vision = grid_thw.shape[0]
     dtype = learned_pos_embed.dtype
@@ -92,6 +92,7 @@ def _compute_learned_pos_embeds(
     for (h, w), indices in hw_to_indices.items():
         pos_hw = F.interpolate(
             pos_grid,
+            # pyrefly: ignore [bad-argument-type]
             size=(h, w),
             mode="bilinear",
             align_corners=True,
@@ -210,54 +211,13 @@ def _compute_2d_rope_cache(
             else:
                 rope_embeds[i, :seq_len] = rope_2d
 
-    # Compute cos/sin in model dtype (HF uses .float() here)
+    # Compute cos/sin in float32 for numerical precision
     rope_embeds = torch.cat((rope_embeds, rope_embeds), dim=-1)  # (N, L, head_dim)
     rope_cache = torch.cat([rope_embeds.cos(), rope_embeds.sin()], dim=-1).unsqueeze(
         2
     )  # (N, L, 1, head_dim*2)
 
     return rope_cache
-
-
-class PatchEmbed(Module):
-    """Patch Embedding using Linear projection.
-
-    Since patches are already extracted by the collator, we use Linear instead of Conv3d.
-    This is mathematically equivalent when Conv3d kernel_size equals input size:
-    - Conv3d: (B, C, T, H, W) with kernel=C*(T,H,W) and dim kernels → (B, dim, 1, 1, 1)
-    - Linear: (B, C*T*H*W) → (B, dim)
-    Same weighted sum, but Linear uses efficient batched matrix multiplication.
-    """
-
-    def __init__(
-        self,
-        patch_size: int,
-        temporal_patch_size: int,
-        in_channels: int,
-        embed_dim: int,
-        *,
-        proj: Linear.Config,
-    ):
-        super().__init__()
-        self.patch_size = patch_size
-        self.temporal_patch_size = temporal_patch_size
-        self.in_channels = in_channels
-        self.embed_dim = embed_dim
-
-        # patch_dim matches the flattened patch from collator: (pt * ph * pw * c)
-        self.patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
-        self.proj = proj.build()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Project patches to embeddings.
-
-        Args:
-            hidden_states: (batch, max_num_patch, patch_dim)
-
-        Returns:
-            (batch, max_num_patch, embed_dim)
-        """
-        return self.proj(hidden_states)
 
 
 class VisionRotaryEmbedding(Module):
@@ -282,25 +242,18 @@ class VisionRotaryEmbedding(Module):
         )
 
     def forward(self, seqlen: int) -> torch.Tensor:
-        """Compute rotary embeddings for a sequence."""
+        """Compute rotary frequency table for positions up to seqlen."""
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
-        freqs = torch.outer(seq, self.inv_freq)
-        return freqs
+        return torch.outer(seq, self.inv_freq)
 
 
 class PatchMerger(Module):
     """Merge spatial patches to reduce sequence length.
 
-    Args:
-        hidden_size: Hidden dimension of input features
-        out_hidden_size: Output hidden dimension after merging
-        spatial_merge_size: Number of patches to merge per spatial dimension
-        use_postshuffle_norm: If True, apply LayerNorm after spatial reshape
-            (norm dim = hidden_size * spatial_merge_size^2). If False, apply
-            before reshape (norm dim = hidden_size). DeepStack mergers use
-            postshuffle norm; the main merger uses pre-shuffle norm
+    Applies LayerNorm before spatial reshape, then projects through a
+    two-layer MLP (fc1 → GELU → fc2).
     """
 
     def __init__(
@@ -308,18 +261,16 @@ class PatchMerger(Module):
         hidden_size: int,
         out_hidden_size: int,
         spatial_merge_size: int,
+        layer_norm_eps: float,
         *,
         fc1: Linear.Config,
         fc2: Linear.Config,
-        use_postshuffle_norm: bool = False,
     ):
         super().__init__()
         self.spatial_merge_size = spatial_merge_size
         self.merged_hidden_size = hidden_size * (spatial_merge_size**2)
-        self.use_postshuffle_norm = use_postshuffle_norm
 
-        norm_dim = self.merged_hidden_size if use_postshuffle_norm else hidden_size
-        self.norm = LayerNorm(norm_dim, eps=1e-6)
+        self.norm = LayerNorm(hidden_size, eps=layer_norm_eps)
         self.linear_fc1 = fc1.build()
         self.act_fn = GELU(approximate="tanh")
         self.linear_fc2 = fc2.build()
@@ -334,20 +285,12 @@ class PatchMerger(Module):
             (batch, seq_len // spatial_merge_size^2, out_hidden_size)
         """
         batch_size, seq_len, _ = x.shape
-        if self.use_postshuffle_norm:
-            x = x.view(
-                batch_size,
-                seq_len // (self.spatial_merge_size**2),
-                self.merged_hidden_size,
-            )
-            x = self.norm(x)
-        else:
-            x = self.norm(x)
-            x = x.view(
-                batch_size,
-                seq_len // (self.spatial_merge_size**2),
-                self.merged_hidden_size,
-            )
+        x = self.norm(x)
+        x = x.view(
+            batch_size,
+            seq_len // (self.spatial_merge_size**2),
+            self.merged_hidden_size,
+        )
         x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         return x
 
@@ -356,48 +299,44 @@ class VisionAttention(Module):
     """Multi-head attention with FlexAttention for efficient batched processing."""
 
     def __init__(
-        self, dim: int, n_heads: int, *, qkv: Linear.Config, proj: Linear.Config
+        self,
+        dim: int,
+        num_heads: int,
+        *,
+        wq: Linear.Config,
+        wk: Linear.Config,
+        wv: Linear.Config,
+        proj: Linear.Config,
     ):
         super().__init__()
         self.dim = dim
-        self.num_heads = n_heads
+        self.num_heads = num_heads
         self.head_dim = self.dim // self.num_heads
 
-        self.qkv = qkv.build()
+        self.wq = wq.build()
+        self.wk = wk.build()
+        self.wv = wv.build()
         self.proj = proj.build()
         self.flex_attention = FlexAttention.Config().build()
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        x: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        """Apply multi-head attention with 2D RoPE.
+        bs, seqlen, _ = x.shape
 
-        Args:
-            hidden_states: (num_vision, max_num_patch, dim)
-            rope_cache: (num_vision, max_num_patch, 1, head_dim*2) precomputed cos/sin
-            attention_mask: BlockMask for attention
+        xq = self.wq(x).view(bs, seqlen, -1, self.head_dim)
+        xk = self.wk(x).view(bs, seqlen, -1, self.head_dim)
+        xv = self.wv(x).view(bs, seqlen, -1, self.head_dim)
 
-        Returns:
-            (num_vision, max_num_patch, dim)
-        """
-        num_vision, max_num_patch, _ = hidden_states.shape
+        xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache)
 
-        qkv = self.qkv(hidden_states).reshape(
-            num_vision, max_num_patch, 3, -1, self.head_dim
-        )
-        q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(
-            0
-        )  # Each: (num_vision, max_num_patch, heads, head_dim)
-
-        q, k = apply_rotary_emb_cos_sin(q, k, rope_cache)
-
-        attn_output = self.flex_attention(q, k, v, attention_masks=attention_mask)
-        attn_output = attn_output.reshape(num_vision, max_num_patch, -1)
-        return self.proj(attn_output)
+        output = self.flex_attention(xq, xk, xv, attention_masks=attention_mask)
+        output = output.reshape(bs, seqlen, -1)
+        return self.proj(output)
 
 
 class VisionMLP(Module):
@@ -409,8 +348,8 @@ class VisionMLP(Module):
         self.linear_fc2 = fc2.build()
         self.act_fn = GELU(approximate="tanh")
 
-    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
 
 
 class VisionTransformerBlock(Module):
@@ -419,10 +358,12 @@ class VisionTransformerBlock(Module):
     def __init__(
         self,
         dim: int,
-        n_heads: int,
+        num_heads: int,
         layer_norm_eps: float,
         *,
-        attn_qkv: Linear.Config,
+        attn_wq: Linear.Config,
+        attn_wk: Linear.Config,
+        attn_wv: Linear.Config,
         attn_proj: Linear.Config,
         mlp_fc1: Linear.Config,
         mlp_fc2: Linear.Config,
@@ -430,39 +371,39 @@ class VisionTransformerBlock(Module):
         super().__init__()
         self.norm1 = LayerNorm(dim, eps=layer_norm_eps)
         self.norm2 = LayerNorm(dim, eps=layer_norm_eps)
-        self.attn = VisionAttention(dim, n_heads, qkv=attn_qkv, proj=attn_proj)
+        self.attn = VisionAttention(
+            dim, num_heads, wq=attn_wq, wk=attn_wk, wv=attn_wv, proj=attn_proj
+        )
         self.mlp = VisionMLP(fc1=mlp_fc1, fc2=mlp_fc2)
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        x: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        hidden_states = hidden_states + self.attn(
-            self.norm1(hidden_states),
-            rope_cache=rope_cache,
-            attention_mask=attention_mask,
+        x = x + self.attn(
+            self.norm1(x), rope_cache=rope_cache, attention_mask=attention_mask
         )
-        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
-        return hidden_states
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 
-class Qwen3VLVisionEncoder(Module):
-    """Qwen3-VL Vision Encoder with FlexAttention.
+class Qwen35VisionEncoder(Module):
+    """Qwen3.5 Vision Encoder with FlexAttention.
 
     Uses padded batches (N, L, D) format for efficient processing.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        """Configuration for Qwen3-VL Vision Encoder (ViT)."""
+        """Configuration for Qwen3.5 Vision Encoder (ViT)."""
 
         dim: int = 1280
         ffn_dim: int = 5120
-        n_layers: int = 32
-        n_heads: int = 16
+        num_layers: int = 32
+        num_heads: int = 16
 
         patch_size: int = 16
         temporal_patch_size: int = 2
@@ -474,12 +415,13 @@ class Qwen3VLVisionEncoder(Module):
         layer_norm_eps: float = 1e-6
         rope_theta: float = 10000.0
 
-        # DeepStack: layer indices for extracting intermediate visual features
-        deepstack_visual_indices: list[int] = field(default_factory=lambda: [7, 15, 23])
-
         # Per-layer Linear configs for vision encoder sub-modules
+        # Linear instead of Conv3d — equivalent when kernel_size equals patch size,
+        # but more efficient via batched matmul on pre-flattened patches.
         patch_embed_proj: Linear.Config
-        attn_qkv: Linear.Config
+        attn_wq: Linear.Config
+        attn_wk: Linear.Config
+        attn_wv: Linear.Config
         attn_proj: Linear.Config
         mlp_fc1: Linear.Config
         mlp_fc2: Linear.Config
@@ -493,13 +435,7 @@ class Qwen3VLVisionEncoder(Module):
         self.patch_size = config.patch_size
         self.spatial_merge_unit = config.spatial_merge_size**2
 
-        self.patch_embed = PatchEmbed(
-            patch_size=config.patch_size,
-            temporal_patch_size=config.temporal_patch_size,
-            in_channels=config.in_channels,
-            embed_dim=config.dim,
-            proj=config.patch_embed_proj,
-        )
+        self.patch_embed = config.patch_embed_proj.build()
 
         # nn.Parameter (not nn.Embedding) because we interpolate the weight directly
         self.num_position_embeddings = config.num_position_embeddings
@@ -508,7 +444,7 @@ class Qwen3VLVisionEncoder(Module):
         )
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
-        head_dim = config.dim // config.n_heads
+        head_dim = config.dim // config.num_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(
             head_dim // 2, theta=config.rope_theta
         )
@@ -519,14 +455,16 @@ class Qwen3VLVisionEncoder(Module):
             {
                 str(idx): VisionTransformerBlock(
                     config.dim,
-                    config.n_heads,
+                    config.num_heads,
                     config.layer_norm_eps,
-                    attn_qkv=config.attn_qkv,
+                    attn_wq=config.attn_wq,
+                    attn_wk=config.attn_wk,
+                    attn_wv=config.attn_wv,
                     attn_proj=config.attn_proj,
                     mlp_fc1=config.mlp_fc1,
                     mlp_fc2=config.mlp_fc2,
                 )
-                for idx in range(config.n_layers)
+                for idx in range(config.num_layers)
             }
         )
 
@@ -534,25 +472,9 @@ class Qwen3VLVisionEncoder(Module):
             hidden_size=config.dim,
             out_hidden_size=config.out_hidden_size,
             spatial_merge_size=config.spatial_merge_size,
+            layer_norm_eps=config.layer_norm_eps,
             fc1=config.merger_fc1,
             fc2=config.merger_fc2,
-        )
-
-        # DeepStack mergers for intermediate layers
-        # DeepStack mergers use postshuffle norm (norm after spatial reshape)
-        self.deepstack_visual_indices = config.deepstack_visual_indices
-        self.deepstack_merger_list = ModuleList(
-            [
-                PatchMerger(
-                    hidden_size=config.dim,
-                    out_hidden_size=config.out_hidden_size,
-                    spatial_merge_size=config.spatial_merge_size,
-                    fc1=config.merger_fc1,
-                    fc2=config.merger_fc2,
-                    use_postshuffle_norm=True,
-                )
-                for _ in range(len(config.deepstack_visual_indices))
-            ]
         )
 
     def compute_position_embeddings(
@@ -565,7 +487,7 @@ class Qwen3VLVisionEncoder(Module):
         - ``_compute_2d_rope_cache``: 2D RoPE cache
 
         Args:
-            grid_thw: (num_vision, 3) with pixel patch counts [t, h, w] per visual item
+            grid_thw: (num_vision, 3) with patch counts [t, h, w] per visual item
             max_num_patch: Maximum number of patches (for padding)
 
         Returns:
@@ -573,7 +495,7 @@ class Qwen3VLVisionEncoder(Module):
             rope_cache: (num_vision, max_num_patch, 1, head_dim*2) RoPE cache for
                 apply_rotary_emb_cos_sin
         """
-        head_dim = self.config.dim // self.config.n_heads
+        head_dim = self.config.dim // self.config.num_heads
 
         # Get RoPE freq table, reusing cache when possible
         max_hw = int(grid_thw[:, 1:].max().item())
@@ -604,7 +526,7 @@ class Qwen3VLVisionEncoder(Module):
         pixel_values: torch.Tensor,
         *,
         grid_thw: torch.Tensor,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor:
         """Forward pass of the vision encoder.
 
         Processes both images and videos — each visual item is a batch of
@@ -616,40 +538,28 @@ class Qwen3VLVisionEncoder(Module):
 
         Returns:
             merged_hidden_states: (num_vision, max_merged_num_patch, out_hidden_size)
-            deepstack_features: List of features from intermediate layers
         """
         num_vision, max_num_patch, _ = pixel_values.shape
 
         num_patch = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).to(torch.long)
 
-        hidden_states = self.patch_embed(pixel_values)
+        x = self.patch_embed(pixel_values)  # (num_vision, max_num_patch, dim)
         learned_pos, rope_cache = self.compute_position_embeddings(
             grid_thw, max_num_patch
         )
-        hidden_states = hidden_states + learned_pos
+        x = x + learned_pos
 
-        mask_mod = get_vision_block_mask_mod(num_patch, max_num_patch)
+        mask_mod = get_vision_block_mask_mod(num_patch)
         attention_mask = _compiled_create_block_mask(
             mask_mod,
             num_vision,
             None,
             max_num_patch,
             max_num_patch,
-            device=hidden_states.device,
+            device=x.device,
         )
-        deepstack_features = []
 
-        for layer_idx, layer in self.layers.items():
-            hidden_states = layer(
-                hidden_states,
-                rope_cache=rope_cache,
-                attention_mask=attention_mask,
-            )
-            if int(layer_idx) in self.deepstack_visual_indices:
-                idx = self.deepstack_visual_indices.index(int(layer_idx))
-                deepstack_feature = self.deepstack_merger_list[idx](hidden_states)
-                deepstack_features.append(deepstack_feature)
+        for layer in self.layers.values():
+            x = layer(x, rope_cache=rope_cache, attention_mask=attention_mask)
 
-        merged_hidden_states = self.merger(hidden_states)
-
-        return merged_hidden_states, deepstack_features
+        return self.merger(x)
