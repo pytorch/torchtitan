@@ -396,8 +396,7 @@ class ChunkedCELoss(BaseLoss):
 
         total_loss = h_detached.new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
-            mesh_axis_names = current_mesh().mesh_dim_names
-            assert mesh_axis_names is not None
+            mesh_axis_names = spmd.current_mesh_names() or {}
             for axis_name in ("dp", "cp"):
                 if axis_name not in mesh_axis_names:
                     continue
@@ -439,7 +438,19 @@ class ChunkedCELoss(BaseLoss):
             else:
                 chunk_loss = self.fn(logits, label_chunk)
             if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
+                loss_scale = global_valid_tokens
+                if spmd.is_type_checking() and isinstance(loss_scale, torch.Tensor):
+                    mesh_axis_names = current_mesh().mesh_dim_names
+                    assert mesh_axis_names is not None
+                    if "cp" in mesh_axis_names:
+                        loss_scale = spmd.convert(
+                            loss_scale,
+                            current_mesh().get_group("cp"),
+                            src=spmd.I,
+                            dst=spmd.R,
+                            expert_mode=True,
+                        )
+                chunk_loss = chunk_loss / loss_scale
 
             if spmd.is_type_checking():
                 mesh_axis_names = current_mesh().mesh_dim_names
@@ -481,8 +492,7 @@ class ChunkedCELoss(BaseLoss):
         accumulated_grad: same types as h_detached (the input).
         """
         loss_type: dict = {}
-        mesh_axis_names = current_mesh().mesh_dim_names
-        assert mesh_axis_names is not None
+        mesh_axis_names = spmd.current_mesh_names() or {}
         for axis_name in ("dp", "cp"):
             if axis_name in mesh_axis_names:
                 loss_type[axis_name] = spmd.P

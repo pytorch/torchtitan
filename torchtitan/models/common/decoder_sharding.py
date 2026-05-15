@@ -89,6 +89,7 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     sp_placement = dense_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
         state_shardings=state,
+        state_tp_ir={"weight"},
         in_src_shardings={"input": sp_placement},
         in_dst_shardings={"input": sp_placement},
         out_dst_shardings=sp_placement,
@@ -148,20 +149,24 @@ def set_gqa_inner_attention_local_map(
     """Install a ``LocalSpmdConfig`` on an inner-attention config.
 
     q/k/v arrive as ``(bs, seq, heads, head_dim)`` with heads TP-sharded
-    (``S(2)``), regardless of SP. The local SPMD region checks types around
-    tensors before the kernel runs, then wraps outputs back.
+    (``S(2)``), regardless of SP. Under CP, K/V are gathered across the
+    sequence axis before entering the local attention kernel, while Q and the
+    attention output remain sequence-sharded.
 
     ``return_lse=True`` is for kernels that return ``(output, lse)`` (e.g.,
     GPT-OSS's flash attention with ``return_lse=True``); both outputs share
     the same heads-sharded placement.
     """
-    qkv: NamedPlacement = {TP: spmd.S(2)}
+    q: NamedPlacement = dense_activation_placement(tp=spmd.S(2))
+    kv_src: NamedPlacement = dense_activation_placement(tp=spmd.S(2))
+    kv_dst: NamedPlacement = dense_activation_placement(tp=spmd.S(2), cp=spmd.R)
     num_outputs = 2 if return_lse else 1
-    in_placements = (qkv, qkv, qkv)
     inner_attention_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={"k": kv_src, "v": kv_src},
+        in_dst_shardings={"k": kv_dst, "v": kv_dst},
         local_spmd=LocalSpmdConfig(
-            in_placements=in_placements,
-            out_placements=(qkv,) * num_outputs,
+            in_placements=(q, kv_dst, kv_dst),
+            out_placements=(q,) * num_outputs,
         ),
     )
 
@@ -221,6 +226,7 @@ def set_decoder_sharding_config(
             out_placements=(embed_out,),
         ),
     )
+    config.tok_embeddings.enable_sp = enable_sp
     config.norm.sharding_config = norm_config(enable_sp=enable_sp)
 
     # ChunkedCELoss gathers SP hidden states before chunking; normal model
