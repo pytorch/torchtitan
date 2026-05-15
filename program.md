@@ -18,13 +18,12 @@ To set up a new experiment, work with the user to:
    target workload and starting point. This includes launcher, config file,
    overrides, world size, model flavor, sequence length, precision, compile
    flags, parallelism flags, and initial training settings. The agent may tune
-   allowed `qwen3_1_7b()` config fields during search as long as the model,
+   allowed `qwen3_14b()` config fields during search as long as the model,
    data source, checkpoint behavior, and hardware target remain the same.
 2. **Agree on a run tag**: propose a tag based on today's date and workload
    name, for example `may14-qwen3-8xh100`. The branch
    `autoresearch-parallelize/<tag>` must not already exist.
-3. **Create the branch**: branch from the current commit that contains the
-   human-approved starting implementation.
+3. **Create the branch**: branch from the current commit.
 4. **Read the in-scope files**:
    - `program.md` -- this operating guide.
    - `torchtitan/models/qwen3/model.py` -- model structure and config update.
@@ -32,37 +31,41 @@ To set up a new experiment, work with the user to:
      orchestration to synthesize.
    - `torchtitan/models/qwen3/sharding.py` -- DTensor sharding contracts to
      synthesize.
-   - `torchtitan/models/qwen3/config_registry.py` -- `qwen3_1_7b()` config
+   - `torchtitan/models/qwen3/config_registry.py` -- `qwen3_14b()` config
      values to tune within the allowed scope.
-   - `torchtitan/models/llama3/parallelize.py` -- dense decoder reference.
-   - `torchtitan/models/llama4/parallelize.py` -- MoE/FSDP/EP reference.
-   - `torchtitan/models/gpt_oss/parallelize.py` -- GPT-OSS MoE reference.
    - `torchtitan/distributed/parallel_dims.py` -- mesh names and constraints.
    - `torchtitan/distributed/pipeline_parallel.py` -- PP composition rules.
    - `torchtitan/protocols/module.py` and `torchtitan/protocols/sharding.py`
      -- config-based DTensor sharding mechanics.
-   - `/home/avenkataraman/fbsource/genai/llama4x` -- optional inspiration for
-     parallelization ideas and performance hypotheses. Read-only; do not copy
-     code blindly.
 5. **Check environment**: confirm GPUs, world size, CUDA, PyTorch, and data paths
-   required by the train command are available. If data or checkpoints are
-   missing, stop and ask the human to provide them.
-6. **Initialize `parallelize_results.tsv`** with just the header row. Do not
-   commit this file.
-7. **Confirm the starting point**: identify the current best source commit and,
-   if available, its measured MFU/throughput row. If the starting commit cannot
-   run the target command because Qwen3 parallelization is unimplemented, stop
-   and ask the human for a runnable starting commit or explicit approval for a
-   narrowly scoped bootstrap candidate. Do not create a generic baseline
-   implementation during setup.
-8. **Confirm setup**: summarize the train command, hardware, editable files,
-   current best, and objective before starting the autonomous loop.
+   required by the train command are available. Record hardware properties
+   needed for roofline reasoning: GPU model, GPU count, available memory,
+   expected peak compute, expected memory bandwidth, and any visible
+   interconnect/topology information. If data or checkpoints are missing, stop
+   and ask the human to provide them.
+6. **Initialize committed experiment logs**: create `ideas.md`,
+   `learnings.md`, and `results.tsv`. `ideas.md` records ideas to try next and
+   ideas that have already been tried. It must include exactly two top-level
+   sections: `## Human Generated Ideas` and `## Manager Generated Ideas`.
+   `learnings.md` records detailed learnings from the experiment loop so far,
+   including hardware properties, profile notes, roofline conclusions, and
+   experiment interpretation.
+   `results.tsv` records compact run results with the header specified below.
+   Commit these three files as the first commit on the experiment branch before
+   any implementation experiment.
+7. **Record the starting point**: identify the current source commit, current
+   best commit if one exists, and any measured throughput/MFU row already in
+   `results.tsv`. The Qwen3 scaffold may not yet be the best implementation;
+   that is expected. Do not ask the human for a runnable baseline during setup.
+8. **Summarize setup**: record the train command, hardware, editable files,
+   current source commit, current best if known, and objective in `learnings.md`
+   before starting the autonomous loops.
 
-Once the human confirms, begin experimentation.
+Begin experimentation after setup is recorded.
 
-Setup is read-only for source files. Reading references, checking the
-environment, creating the experiment branch, and initializing local run
-artifacts are setup work. Editing `parallelize.py`, `sharding.py`,
+Setup is read-only for source files. Reading in-scope files, checking the
+environment, creating the experiment branch, and initializing committed run
+logs are setup work. Editing `parallelize.py`, `sharding.py`,
 `config_registry.py`, or launch knobs is experiment work and must follow the
 one-idea rule below.
 
@@ -73,9 +76,10 @@ one-idea rule below.
 - `torchtitan/models/qwen3/parallelize.py`
 - `torchtitan/models/qwen3/sharding.py`
 - `torchtitan/models/qwen3/config_registry.py`, but only inside
-  `qwen3_1_7b()` and only for allowed `Trainer.Config` values
-- local untracked run artifacts such as `run.log`, `correctness.log`,
-  `parallelize_results.tsv`, and temporary generated command files
+  `qwen3_14b()` and only for allowed `Trainer.Config` values
+- committed experiment logs: `ideas.md`, `learnings.md`, and `results.tsv`
+- local untracked run artifacts such as `run.log`, profiler traces, and
+  temporary generated command files
 - command-line config knobs used to launch experiments
 
 Both source implementation and config knobs are part of the search space. You
@@ -86,7 +90,7 @@ checkpointing, compile settings, FSDP reshard policy, pipeline schedule, and
 other CLI/config overrides, as long as the resulting command still represents
 the same target model/workload class agreed with the human.
 
-Within `qwen3_1_7b()`, you may tune any `Trainer.Config` values except these
+Within `qwen3_14b()`, you may tune any `Trainer.Config` values except these
 fixed fields:
 
 - `loss`
@@ -94,7 +98,7 @@ fixed fields:
 - `dataloader`
 - `checkpoint`
 
-`model_spec` is partially editable: keep the Qwen3 1.7B flavor, but you may
+`model_spec` is partially editable: keep the Qwen3 14B flavor, but you may
 change only the `model_registry(...)` keyword choices `attn_backend`,
 `moe_comm_backend`, and `converters`. Do not change the model flavor passed to
 `model_registry`.
@@ -103,45 +107,69 @@ Everything else in that `Trainer.Config` is fair game, including optimizer,
 learning-rate schedule, training settings such as sequence length and batch
 size, parallelism, activation checkpointing, compile, metrics, communication,
 validation, and other non-fixed config sections. Keep the model flavor fixed as
-Qwen3 1.7B.
+Qwen3 14B.
 
 **What you CANNOT edit without explicit human approval:**
 
 - model implementation files such as `torchtitan/models/qwen3/model.py`
 - `loss`, `hf_assets_path`, `dataloader`, or `checkpoint` inside
-  `qwen3_1_7b()`
+  `qwen3_14b()`
 - `model_spec` changes other than `attn_backend`, `moe_comm_backend`, and
-  `converters` kwargs to `model_registry("1.7B", ...)`
-- common distributed utilities
+  `converters` kwargs to `model_registry("14B", ...)`
+- shared distributed infrastructure, including files under
+  `torchtitan/distributed/`, `torchtitan/protocols/`, and
+  `torchtitan/models/common/`
 - trainer, metrics, data loader, loss, or evaluation code
 - dependency files or environment setup
 
 If a candidate needs broader source changes, log the idea and move on unless the
 human expands the scope.
 
+## Agent Roles
+
+The experiment is split across two agents with strict ownership:
+
+- The main agent is the **Manager**. During setup, it must spawn a **Worker**
+  subagent and give the worker ownership of the execution loop.
+- **Worker** owns source/config changes, experiment execution, commits for
+  candidate implementations, `results.tsv`, and all git commits on the branch.
+- **Manager** owns research, idea generation, and experiment review. The
+  manager may update only `ideas.md` and `learnings.md`, but must not commit.
+- The manager reads the worker's transcript, `results.tsv`, logs, profiler
+  summaries, structured metrics, hardware properties, and relevant
+  documentation. After each experiment, the manager reviews what happened,
+  updates `learnings.md` with detailed conclusions, and updates `ideas.md` with
+  newly researched ideas, reprioritized ideas, and crossed-out discarded ideas.
+- The worker reads `ideas.md` and `learnings.md` before each iteration, chooses
+  exactly one idea to execute, updates source/config as needed, runs the
+  experiment, appends the result to `results.tsv`, and commits all changes that
+  should land on the branch.
+- The manager must not edit source/config files, `results.tsv`, logs, dumps, or
+  generated artifacts. The manager must not run `git commit`.
+- The worker is the only agent that may run `git add`, `git commit`, rebase, or
+  any other command that changes branch history.
+- The worker and manager should communicate through the three committed
+  experiment files: `ideas.md`, `learnings.md`, and `results.tsv`.
+
 ## Objective
 
-Maximize TorchTitan's reported steady-state MFU for the exact train command on
-this machine or cluster while staying correct.
+Maximize TorchTitan's reported steady-state tokens/sec for the exact train
+command on this machine or cluster while staying correct.
 
 Primary objective:
 
 ```
-maximize reported mfu / mfu(%)
+maximize reported tps / throughput(tps)
 ```
 
-Quantization exception:
-
-TorchTitan may intentionally omit `mfu` / `mfu(%)` for quantized runs because
-the usual BF16 peak-FLOP denominator is not the right comparison for those
-kernels. If a quantized candidate omits MFU for that reason, compare it against
-other quantized or BF16 candidates using TorchTitan-reported `tps` /
-`throughput(tps)` and record MFU as `N/A`. Do not compute a custom MFU formula.
+Use the value reported by the train command. Do not invent a separate
+throughput formula. Console logs usually call this `tps`; structured metrics
+usually call this `throughput(tps)`.
 
 Tie-breakers and diagnostics, in order:
 
-1. higher reported `tps` / `throughput(tps)`
-2. peak memory closer to the target utilization without OOM
+1. peak memory closer to the target utilization without OOM
+2. higher reported `mfu` / `mfu(%)` when TorchTitan reports it
 3. simpler `parallelize.py` and `sharding.py`
 
 Memory target:
@@ -152,7 +180,8 @@ Memory target:
   unless the run is clearly stable.
 - Memory savings are valuable when they can be converted into larger batch
   size, larger microbatches, less recomputation, or a faster parallelism layout
-  that improves reported MFU. Do not treat low memory use as a win by itself.
+  that improves reported tokens/sec. Do not treat low memory use as a win by
+  itself.
 
 ## Correctness And Measurement
 
@@ -163,7 +192,7 @@ the train loop and needs a small diagnostic rerun.
 
 Each experiment-loop training run is capped at exactly 20 training steps. Add a
 command-line override such as `--training.steps=20` to every candidate command,
-regardless of the default configured in `qwen3_1_7b()`. If a candidate changes
+regardless of the default configured in `qwen3_14b()`. If a candidate changes
 `training.steps` in config, the executed experiment command must still run 20
 steps unless the human explicitly changes this program.
 
@@ -172,7 +201,7 @@ At minimum:
 1. Python import/syntax succeeds.
 2. The model builds on meta and reaches `parallelize_qwen3`.
 3. The redirected 20-step training run completes forward/backward and logs
-   enough steps to judge both convergence and steady-state MFU.
+   enough steps to judge both convergence and steady-state tokens/sec.
 4. Use the early logged steps from that same run as the convergence sanity
    check. The loss must stay finite and should trend downward. A candidate that
    is fast but produces NaNs, exploding loss, or a flat/increasing loss curve
@@ -193,24 +222,24 @@ assumptions about:
 - the exact model flavor
 - mesh shape and world size
 - GPU type and topology
-- sequence length and batch sizes selected by `qwen3_1_7b()` or CLI overrides
+- sequence length and batch sizes selected by `qwen3_14b()` or CLI overrides
 - whether PP/TP/CP/EP/FSDP are enabled
 - compile and activation checkpointing settings
 - attention backend, MoE communication backend, and config converters selected
   through allowed `model_spec` kwargs
 - whether the command is training or inference
 
-TorchTitan and PyTorch-native primitives are good starting points:
+TorchTitan and PyTorch-native primitives are useful starting points, not
+requirements:
 
 - `model.parallelize(tp_mesh)` for config-based DTensor sharding
 - `parallelize_module` and `PrepareModuleInputOutput` for local custom plans
 - `apply_cp_to_forward` for context parallel attention wrapping
 - `apply_ac` for activation checkpointing
 - `apply_compile` for per-block compile
-- an existing FSDP helper when it can be reused directly; do not copy a full
-  reference implementation just to make a baseline runnable
-- `apply_moe_ep_tp`, `ExpertParallel`, `NoParallel`, or model-specific expert
-  plans for MoE paths
+- PyTorch FSDP and DTensor APIs when the candidate needs them
+- `ExpertParallel`, `NoParallel`, or model-specific expert plans if the target
+  Qwen3 flavor and command actually exercise MoE paths
 - quantization converters such as `Float8LinearConverter`,
   `Float8GroupedExpertsConverter`, `MXFP8LinearConverter`, or
   `MXFP8GroupedExpertsConverter` when supported by the hardware and installed
@@ -220,25 +249,37 @@ It is also fine to write custom logic inside the editable files when the
 existing helpers are too generic or leave performance on the table for this
 machine. Custom code must still be explainable, correct for the target command,
 limited to `parallelize.py` / `sharding.py`, and small enough that the measured
-MFU change can be attributed to the stated hypothesis.
+tokens/sec change can be attributed to the stated hypothesis.
 
-Use `/home/avenkataraman/fbsource/genai/llama4x` as read-only inspiration for
-parallelization ideas, performance hypotheses, and machine-specific tricks when
-useful. Adapt concepts to TorchTitan's APIs and the target command instead of
-copying code blindly.
+The generated implementation does not have to follow TorchTitan's existing
+helper implementation for activation checkpointing, compile, FSDP wrapping, or
+their ordering. Alternative local wrapping strategies are allowed inside the
+editable Qwen3 files when they are part of one measured hypothesis. For example,
+the agent may try a different per-block compile boundary, a different
+checkpoint wrapper placement, a different FSDP wrapping granularity, or a
+different ordering between compile/checkpoint/FSDP, as long as the code remains
+scoped, explainable, and correct for the target command.
 
-Explore freely from the current best runnable implementation. Do not start by
-copying over a reference model's baseline orchestration. Each source or config
-change must be justified as a concrete attempt to improve MFU, throughput, or
-memory headroom that will be converted into MFU improvement in a follow-up
-candidate.
+Profile and roofline analysis should drive the search. Use TorchTitan profiler
+traces, structured metrics, and hardware properties to decide whether the next
+idea is attacking compute, HBM bandwidth, communication, launch overhead,
+pipeline bubbles, data loading, or memory headroom. A good idea should name the
+suspected bottleneck and why the proposed change should improve reported
+tokens/sec on this hardware.
+
+Explore freely from the current best runnable implementation. Do not inspect or
+copy non-Qwen3 model `parallelize.py` or `sharding.py` files as references; they
+are intentionally scaffolded for this experiment. Each source or config change
+must be justified as a concrete attempt to improve reported tokens/sec or
+memory headroom that will be converted into tokens/sec improvement in a
+follow-up candidate.
 
 Consider quantization as another performance lever. It is allowed through
 `model_spec` converters, and it may require compatible compile settings,
-hardware support, and converter filtering to be worthwhile. If TorchTitan
-reports MFU for a quantized candidate, use it normally. If TorchTitan omits MFU
-for a quantized candidate, use the quantization exception in the Objective
-section.
+hardware support, and converter filtering to be worthwhile. Quantized
+candidates are compared with the same primary objective: TorchTitan-reported
+`tps` / `throughput(tps)`. If TorchTitan omits MFU for a quantized candidate,
+record MFU as `N/A` and treat it as a diagnostic gap, not a ranking blocker.
 
 Do not add clever distributed code unless you can explain the tensor placements,
 residual placement compatibility, gradient placement, and FSDP interaction.
@@ -252,6 +293,21 @@ pressure. Convert profiler observations into one narrow next experiment; for
 example, a communication hotspot can motivate one TP/FSDP layout change, an
 attention hotspot can motivate one attention-backend change, and unused memory
 can motivate one batch-size or checkpointing change.
+
+Use roofline reasoning to avoid local search traps. If a profile shows the run
+is compute-bound relative to the hardware peak, look for kernel, compile,
+precision, attention backend, or quantization changes. If it is memory-bound,
+look for layout, activation checkpointing, batch size, sequence length, and
+memory format changes that improve useful work per byte. If it is
+communication-bound, look at mesh shape, overlap, sharding granularity,
+resharding policy, and collective placement. If the bottleneck is unclear,
+prefer a profiling or roofline-disambiguation idea over another blind knob
+sweep.
+
+Based on profile and roofline analysis, feel free to undo prior optimizations
+and move in a different direction. Maintain a healthy explore/exploit tradeoff;
+do not keep searching around a local maximum by trying nearby values of the same
+knob unless profile or roofline evidence says that knob is still the bottleneck.
 
 ## Measurement
 
@@ -276,12 +332,27 @@ For profiler-driven idea generation, enable TorchTitan's profiler on a normal
 ```
 
 Profiler traces are written under the dump folder's `profiling/traces`
-directory. Use those traces to explain the next hypothesis in
-`parallelize_results.tsv` or the work log. Because profiling adds overhead, do
-not compare a profiled run's MFU against unprofiled runs as the primary
-performance result unless every candidate being compared was measured with the
-same profiler settings. Enable `--profiler.enable_memory_snapshot` only when
-memory behavior is the bottleneck or when diagnosing OOMs.
+directory. The manager uses those traces to explain the next hypothesis in
+`ideas.md` or the latest conclusion in `learnings.md`. Because profiling adds
+overhead, do not compare a profiled run's tokens/sec against unprofiled runs as
+the primary performance result unless every candidate being compared was
+measured with the same profiler settings. Enable
+`--profiler.enable_memory_snapshot` only when memory behavior is the bottleneck
+or when diagnosing OOMs.
+
+For roofline notes, combine hardware properties with measured metrics:
+
+- hardware peak compute from TorchTitan's `Peak FLOPS used for computing MFU`
+  line or vendor/H100 documentation when TorchTitan does not print it
+- observed per-step `tflops`, `tps`, step time, and memory use
+- profiler evidence for dominant kernels, memory stalls, GPU idle time, and
+  collective latency
+- known memory bandwidth and interconnect/topology limits when available
+
+The manager writes a short roofline conclusion in `learnings.md` when it guides
+the next idea: compute-bound, memory-bound, communication-bound,
+launch/overhead-bound, or unclear. If it is unclear, state the measurement
+needed to disambiguate it.
 
 Extract metrics from both console logs and the structured JSONL file printed at
 startup:
@@ -320,7 +391,8 @@ step: 10  loss: 4.17040  grad_norm: 1.8422  memory: 0.69GiB(0.72%)  tps: 221,070
 Use `tps` as reported by TorchTitan. In the current metrics implementation it
 is tokens/sec per device, normalized by non-data-parallel size, and `mfu` is
 computed from that same value. For comparing candidates on the same world size
-and workload, reported `mfu` and `tps` are the primary performance fields.
+and workload, reported `tps` / `throughput(tps)` is the primary performance
+field. Reported `mfu` / `mfu(%)` is a useful diagnostic when present.
 
 Useful success fields:
 
@@ -356,30 +428,66 @@ Useful failure fields:
   model build, `parallelize_qwen3`, dataloading, forward, backward, optimizer,
   checkpointing, or metric logging
 
-Use TorchTitan's reported `mfu` / `mfu(%)` from logged training steps as the
-performance objective. Do not invent a separate MFU formula. Step 1 is often
-noisy because it includes first-iteration overheads, so compare candidates using
-later logged steps after warmup. If a non-quantized run does not report MFU,
-treat it as insufficient for performance comparison and fix logging or rerun. If
-a quantized run intentionally omits MFU, compare it using reported `tps` /
-`throughput(tps)` and record MFU as `N/A`.
+Use TorchTitan's reported `tps` / `throughput(tps)` from logged training steps
+as the performance objective. Do not invent a separate throughput formula. Step
+1 is often noisy because it includes first-iteration overheads, so compare
+candidates using later logged steps after warmup. If a run does not report
+tokens/sec, treat it as insufficient for performance comparison and fix logging
+or rerun. Record reported MFU when present, but do not require MFU for ranking.
 
-## Logging Results
+## Experiment Logs
 
-When an experiment finishes, append one row to `parallelize_results.tsv`.
+`ideas.md` is the manager-owned idea queue and idea history. It is checked in.
+It must contain exactly two top-level sections:
+
+- `## Human Generated Ideas`
+- `## Manager Generated Ideas`
+
+Each idea should include:
+
+- idea name
+- current best source commit
+- source of the idea: human, profile, roofline, metric regression, or
+  agent-generated
+- expected mechanism for improving reported tokens/sec
+- supporting evidence from logs, profiler traces, or roofline notes
+- planned source/config changes
+- planned command or config overrides
+- success criteria and expected risk
+
+This can be more detailed than `results.tsv`; use it to make the reasoning and
+expectations auditable. The manager keeps this file current.
+
+The human may add ideas to `## Human Generated Ideas` while the loop is running.
+The manager should consider any uncrossed human-generated ideas before adding
+new manager-generated ideas. If the worker tries a human-generated idea and
+discards it, the manager crosses it out in `ideas.md` using Markdown
+strikethrough and adds a short note pointing to the relevant `results.tsv` row
+or commit. If an idea is kept, the manager marks it as kept with the winning
+commit and measured tokens/sec.
+
+`learnings.md` is the manager-owned research memory. After reviewing each
+completed experiment, the manager updates it with detailed learnings from the
+run: what changed, what the logs/profiler/roofline evidence showed, why the
+result likely happened, what risks or confounders remain, and what this implies
+for future ideas. Keep profile notes, roofline notes, and hardware analysis in
+`learnings.md`, not in `ideas.md`.
+
+When an experiment finishes, the worker appends one row to `results.tsv`.
+`results.tsv` is checked in and worker-owned.
 
 The TSV has this header:
 
 ```
-commit	mfu_percent	tokens_per_sec	peak_memory_gb	status	description	command
+commit	tokens_per_sec	mfu_percent	peak_memory_gb	status	description	command
 ```
 
 Columns:
 
 1. short commit hash, 7 chars
-2. steady-state MFU percent, use `0.00` for crashes and `N/A` for quantized
-   runs where TorchTitan intentionally omits MFU
-3. steady-state tokens/sec, use `0` for crashes
+2. steady-state tokens/sec, use `0` for crashes
+3. steady-state MFU percent when reported, use `0.00` for crashes and `N/A`
+   when TorchTitan omits MFU
 4. peak memory in GB rounded to one decimal, use `0.0` for crashes
 5. status: `keep`, `discard`, or `crash`
 6. short description of the implementation/config idea
@@ -388,41 +496,79 @@ Columns:
 Example:
 
 ```
-commit	mfu_percent	tokens_per_sec	peak_memory_gb	status	description	command
-abc1234	41.20	1800000	73.4	keep	TP=2 attention and FFN sharding	torchrun ...
-def5678	39.80	1730000	70.1	discard	disable sequence parallel	torchrun ...
-012abcd	0.00	0	0.0	crash	TP=8 with bad qk_norm placement	torchrun ...
+commit	tokens_per_sec	mfu_percent	peak_memory_gb	status	description	command
+abc1234	1800000	41.20	73.4	keep	TP=2 attention and FFN sharding	torchrun ...
+def5678	1730000	39.80	70.1	discard	disable sequence parallel	torchrun ...
+012abcd	0	0.00	0.0	crash	TP=8 with bad qk_norm placement	torchrun ...
 ```
 
-Do not commit `parallelize_results.tsv`.
+The manager may edit `ideas.md` and `learnings.md`, but the worker commits
+those edits. The worker also commits `results.tsv` updates. Do not commit large
+logs, profiling traces, dumps, or temporary generated command files unless the
+human explicitly asks.
 
 ## Experiment Loop
 
-LOOP FOREVER after setup is confirmed:
+The worker loop and manager loop run continuously after setup is confirmed.
+
+Worker loop:
 
 1. Inspect git state and record the current best commit.
-2. Choose exactly one concrete implementation/config hypothesis that is expected
-   to improve MFU over the current best. Use recent logs, structured metrics,
-   and profiler traces to generate and justify the hypothesis. State the
-   expected mechanism before editing.
-3. Edit the smallest source/config surface needed for that one hypothesis. Edit
+2. Read `ideas.md` and `learnings.md`, especially `## Human Generated Ideas`,
+   `## Manager Generated Ideas`, and the latest profile/roofline conclusions in
+   `learnings.md`.
+3. Choose exactly one concrete implementation/config hypothesis that is expected
+   to improve reported tokens/sec over the current best. Prefer a relevant
+   uncrossed human-provided or manager-proposed idea when one exists; otherwise
+   choose a hypothesis backed by a recent profiler observation, roofline
+   conclusion, or documented hardware/software behavior. State the expected
+   mechanism before editing.
+4. Edit the smallest source/config surface needed for that one hypothesis. Edit
    only `torchtitan/models/qwen3/parallelize.py` and
    `torchtitan/models/qwen3/sharding.py` unless changing launch config knobs in
-   the command or an allowed `qwen3_1_7b()` field. The diff must contain only
+   the command or an allowed `qwen3_14b()` field. The diff must contain only
    code that is actually exercised by the candidate command.
-4. Run import/syntax checks.
-5. Commit the candidate.
-6. Run the training command once with `--training.steps=20` and output
+5. Run import/syntax checks.
+6. Commit the candidate source/config changes. Include the selected idea name
+   or ID in the commit message.
+7. Run the training command once with `--training.steps=20` and output
    redirected to `run.log`.
-7. Use that one run for both correctness and performance. If correctness fails,
+8. Use that one run for both correctness and performance. If correctness fails,
    inspect logs, fix obvious bugs, and retry only as needed for diagnosis. If
    the idea is fundamentally broken, log `crash` or `discard`.
-8. Extract MFU, tokens/sec, peak memory, convergence, and failure signals.
-9. Append a row to `parallelize_results.tsv`.
-10. If the candidate improves the objective and passes correctness, keep the
+9. Extract tokens/sec, MFU, peak memory, convergence, and failure signals.
+10. Append a row to `results.tsv`.
+11. Commit `results.tsv` plus any manager-made `ideas.md` and `learnings.md`
+    updates that should be recorded with this experiment result.
+12. If the candidate improves the objective and passes correctness, keep the
     commit and make it the new best.
-11. If it is worse, reset back to the previous best source commit. Keep the TSV
-    row uncommitted.
+13. If it is worse, restore source/config files back to the previous best
+    source state while preserving committed `results.tsv`, `ideas.md`, and
+    `learnings.md` history.
+
+Manager loop:
+
+1. Watch for the worker's transcript, new `results.tsv` rows, worker commits,
+   run logs, profiler traces, and structured metrics.
+2. Review each completed experiment and update `learnings.md` with detailed
+   conclusions, including profile/roofline interpretation and any confounders.
+3. Update `ideas.md`: cross out tried-and-discarded ideas, mark kept ideas with
+   commit and measured tokens/sec, reprioritize remaining ideas, and add newly
+   researched ideas under `## Manager Generated Ideas`.
+4. Keep researching. Use recent results, profiler traces, roofline analysis,
+   hardware properties, and relevant documentation to generate more ideas for
+   the worker.
+5. Do not commit. Leave `ideas.md` and `learnings.md` edits for the worker to
+   review and commit.
+
+Profiling And Roofline:
+
+- The profiler is a primary idea-generation tool. Profile computation,
+  communication latency, overlap, GPU idle time, and data loading to decide
+  what to improve next.
+- Use roofline analysis based on the actual hardware properties recorded during
+  setup. Do not assume the trace is at hardware roofline; estimate whether
+  kernels are leaving compute, bandwidth, or communication headroom.
 
 One-idea rule:
 
@@ -430,9 +576,10 @@ One-idea rule:
 - Broad baseline ports are not a valid idea. Do not copy an entire reference
   `parallelize.py`, FSDP helper, sharding module, or generic runnable baseline
   and treat it as one experiment.
-- Do not add code merely because the scaffold is incomplete. If the current best
-  cannot run, stop for a human-approved runnable starting point or an explicitly
-  approved bootstrap candidate with a tiny, auditable diff.
+- Do not add broad code merely because the scaffold is incomplete. If the
+  current best cannot run, the first worker iteration may be a narrow bootstrap
+  idea that makes the target command runnable. Record that idea in `ideas.md`
+  and `learnings.md`; keep the diff tiny and auditable.
 - An idea may include the minimum coupled source and command/config changes
   required to make that hypothesis valid. For example, trying TP=2 with the
   necessary Qwen3 tensor placement changes is one idea.
@@ -466,8 +613,9 @@ Timeout:
 
 ## Stop Condition
 
+NEVER STOP!
+
 Do not stop after one successful run. Continue until the human interrupts you or
-provides a new instruction. If ideas run low, re-read the reference
-parallelization files, run a profiled 20-step pass on the current best, and try
-narrower changes around the best implementation based on the observed
-bottleneck.
+provides a new instruction. If ideas run low, run a profiled 20-step pass on
+the current best, update the roofline notes, and choose the next narrow change
+from the observed bottleneck.
