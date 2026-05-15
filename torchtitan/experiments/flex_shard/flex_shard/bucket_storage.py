@@ -25,9 +25,12 @@ if TYPE_CHECKING:
     from .reshard_after_forward import _ReshardAfterForwardRecomputeState
 
 
+ParamFQN = str
+BucketParamFQNsByIndex = list[list[ParamFQN]]
+
 PlacementFn = Callable[
-    [list[tuple[str, nn.Parameter]], "DeviceMesh"],
-    dict[str, tuple["Placement", ...]],
+    [list[tuple[ParamFQN, nn.Parameter]], "DeviceMesh"],
+    dict[ParamFQN, tuple["Placement", ...]],
 ]
 
 
@@ -98,18 +101,19 @@ class BucketSpec:
 
 
 def _assign_params_to_buckets(
-    param_fqns: list[str],
+    param_fqns: list[ParamFQN],
     buckets: list[BucketSpec],
-) -> list[list[str]]:
+) -> BucketParamFQNsByIndex:
     """Assign each param FQN to exactly one bucket via fnmatch.
 
     Returns:
-        List of lists: assignments[i] = [fqn, ...] for bucket i.
+        A list aligned with ``buckets``: result[bucket_idx] is the ordered list
+        of parameter FQNs assigned to ``buckets[bucket_idx]``.
 
     Raises:
         ValueError: if any param matches zero or multiple buckets.
     """
-    param_to_buckets: dict[str, list[int]] = {fqn: [] for fqn in param_fqns}
+    param_to_buckets: dict[ParamFQN, list[int]] = {fqn: [] for fqn in param_fqns}
     for bucket_idx, bucket in enumerate(buckets):
         for fqn in param_fqns:
             for pattern in bucket.patterns:
@@ -142,7 +146,7 @@ def _assign_params_to_buckets(
         )
 
     # Build assignments
-    assignments: list[list[str]] = [[] for _ in buckets]
+    assignments: BucketParamFQNsByIndex = [[] for _ in buckets]
     for fqn, idxs in param_to_buckets.items():
         assignments[idxs[0]].append(fqn)
 
@@ -153,7 +157,7 @@ def _assign_params_to_buckets(
 class ParamInfo:
     """Metadata for a parameter in chunked storage."""
 
-    fqn: str
+    fqn: ParamFQN
     global_shape: torch.Size
     global_stride: tuple[int, ...]
     dtype: torch.dtype
@@ -187,7 +191,7 @@ class DStorage:
     def __init__(
         self,
         byte_storage: torch.Tensor,
-        param_infos: dict[str, ParamInfo],
+        param_infos: dict[ParamFQN, ParamInfo],
         mesh: DeviceMesh,
         total_bytes: int,
         module: nn.Module,
@@ -209,8 +213,8 @@ class DStorage:
     def from_bucket(
         cls,
         module: nn.Module,
-        named_params: list[tuple[str, nn.Parameter]],
-        param_placements: dict[str, tuple[Placement, ...]],
+        named_params: list[tuple[ParamFQN, nn.Parameter]],
+        param_placements: dict[ParamFQN, tuple[Placement, ...]],
         mesh: DeviceMesh,
         device: torch.device,
         bucket_spec: BucketSpec,
@@ -262,10 +266,10 @@ class DStorage:
     @classmethod
     def create_param_infos(
         cls,
-        named_params: list[tuple[str, nn.Parameter]],
+        named_params: list[tuple[ParamFQN, nn.Parameter]],
         mesh: DeviceMesh,
-        param_placements: dict[str, tuple[Placement, ...]],
-    ) -> tuple[dict[str, ParamInfo], int]:
+        param_placements: dict[ParamFQN, tuple[Placement, ...]],
+    ) -> tuple[dict[ParamFQN, ParamInfo], int]:
         """
         Create ParamInfo for each parameter, computing local layout and byte offsets.
 
@@ -273,7 +277,7 @@ class DStorage:
         uniform dtype. Each placement owns its per-parameter local storage layout;
         bucket storage only places those layouts sequentially in the byte buffer.
         """
-        param_infos: dict[str, ParamInfo] = {}
+        param_infos: dict[ParamFQN, ParamInfo] = {}
         current_byte_offset = 0
 
         for fqn, param in named_params:
@@ -311,7 +315,7 @@ class DStorage:
 
     def copy_params_from(
         self,
-        named_params: list[tuple[str, nn.Parameter]],
+        named_params: list[tuple[ParamFQN, nn.Parameter]],
     ) -> None:
         """Pack original parameter data into byte storage."""
         my_rank = self._mesh.get_local_rank()
@@ -373,7 +377,7 @@ class DStorage:
         return self._byte_storage.numel()
 
     @property
-    def param_infos(self) -> dict[str, ParamInfo]:
+    def param_infos(self) -> dict[ParamFQN, ParamInfo]:
         """Metadata for each parameter."""
         return self._param_infos
 
@@ -382,7 +386,7 @@ class DStorage:
         """World size of the mesh."""
         return self._mesh.size()
 
-    def get_local_view(self, fqn: str) -> torch.Tensor:
+    def get_local_view(self, fqn: ParamFQN) -> torch.Tensor:
         """Get the local tensor view for a parameter by FQN (from sharded storage)."""
         info = self._param_infos[fqn]
         return info.placement.make_local_storage_view(self._byte_storage, info)
@@ -390,17 +394,17 @@ class DStorage:
 
 def _materialize_bucket_storages(
     module: nn.Module,
-    named_params: list[tuple[str, nn.Parameter]],
-    bucket_assignments: list[list[str]],
+    named_params: list[tuple[ParamFQN, nn.Parameter]],
+    bucket_assignments: BucketParamFQNsByIndex,
     buckets: list[BucketSpec],
-    param_placements: dict[str, tuple[Placement, ...]],
+    param_placements: dict[ParamFQN, tuple[Placement, ...]],
     mesh: DeviceMesh,
     device: torch.device,
-) -> tuple[list[DStorage], dict[str, BucketSpec]]:
+) -> tuple[list[DStorage], dict[ParamFQN, BucketSpec]]:
     """Create DStorages for bucket assignments and install sharded parameters."""
     named_params_dict = dict(named_params)
     storages: list[DStorage] = []
-    fqn_to_bucket_spec: dict[str, BucketSpec] = {}
+    fqn_to_bucket_spec: dict[ParamFQN, BucketSpec] = {}
 
     for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
         if not bucket_fqns:
