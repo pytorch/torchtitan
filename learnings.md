@@ -394,3 +394,9 @@ This beats the 9,332 tps memory-budget 0.95 max and the 9,315 tps repeat while u
 The exact repeat of the 0.925 budget current-best command is a discard diagnostic. It completed with loss falling from 12.29194 to 6.69980, peak memory 145.48GiB, MFU `N/A`, and 9,233 tps.
 
 This does not reproduce the 9,364 tps max and lands below the 9,315 tps 0.95 repeat, though loss is cleanly falling and memory is unchanged. Keep 9,364 tps as the observed max/current best for the autoresearch objective, but treat the 0.925-over-0.95 advantage as noisy rather than robust.
+
+## Experiment Review: bfloat16 Reduce Memory Budget 0.9375
+
+The midpoint activation-budget probe is a discard. The 0.9375 run completed with loss falling from 12.47883 to 10.69838, peak memory 145.48GiB, MFU `N/A`, and 9,354 tps.
+
+This is above both clean repeats at 0.95 and 0.925, but it does not beat the 9,364 tps observed max from 0.925. Keep 0.925 as the current-best max for ranking, while noting that 0.9375 provides another near-best point and the activation-budget differences are within short-run noise.

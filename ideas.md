@@ -453,3 +453,12 @@
   - Planned source/config changes: None; exact repeat on the current kept bfloat16-reduce source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded as repeat diagnostic at `ad4926b0`; the run completed with finite/falling loss from 12.29194 to 6.69980, MFU `N/A`, and 145.48GiB peak memory, but reached only 9,233 tps versus the 9,364 tps best.
+
+- ~~Idea: bfloat16-reduce memory-budget 0.9375 midpoint~~
+  - Current best source commit: `ef51a052`; current best result row: 9,364 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: manager midpoint bracket after 0.925 was high but noisy and 0.95 repeated more stably.
+  - Expected mechanism for improving reported tokens/sec: A midpoint budget might choose a more stable activation partition between the high 0.925 max and the more reproducible 0.95 setting.
+  - Supporting evidence: 0.925 reached 9,364 tps but repeated at 9,233 tps; 0.95 reached 9,332 tps and repeated at 9,315 tps. A single 0.9375 run tests whether the best partition sits between them.
+  - Planned source/config changes: None; command-only activation-budget probe on the current kept bfloat16-reduce source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9375 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Discarded at `f8ea91e3`; the run completed with finite/falling loss from 12.47883 to 10.69838, MFU `N/A`, 145.48GiB peak memory, and 9,354 tps, which is close but still below the 9,364 tps max.
