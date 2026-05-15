@@ -462,3 +462,12 @@
   - Planned source/config changes: None; command-only activation-budget probe on the current kept bfloat16-reduce source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9375 --compile.enable --compile.components model`
   - Success criteria and expected risk: Discarded at `f8ea91e3`; the run completed with finite/falling loss from 12.47883 to 10.69838, MFU `N/A`, 145.48GiB peak memory, and 9,354 tps, which is close but still below the 9,364 tps max.
+
+- ~~Idea: Profile bf16-reduce memory-budget 0.925 current best~~
+  - Current best source commit: `ef51a052`; current best result row: 9,364 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
+  - Source: manager diagnostic request after bfloat16 FSDP reduction and activation-budget retuning.
+  - Expected mechanism for improving reported tokens/sec: Profiling does not compete for best throughput, but it should show whether bfloat16 reduction shrank reduce-scatter enough for GEMM, attention, Float8 scaling, optimizer, or runtime overhead to become the next bottleneck.
+  - Supporting evidence: The bfloat16-reduce win was narrow, activation-budget differences are noisy, and the pre-bfloat16 profile still had NCCL/reduce-scatter as a major bucket.
+  - Planned source/config changes: None; diagnostic profile on the current kept bfloat16-reduce source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
+  - Success criteria and expected risk: Discard diagnostic at `6252b73c`; the run completed with loss falling from 12.46033 to 11.89387, MFU `N/A`, 145.48GiB peak memory, and 8,565 profiled tps. Rank-0 trace buckets were dense GEMM/scaled-mm 1.115s/34.2%, NCCL reduce-scatter 0.854s/26.2%, flash attention 0.600s/18.4%, Float8 scale/cast/fused elementwise 0.253s/7.8%, and NCCL all-gather 0.212s/6.5%.

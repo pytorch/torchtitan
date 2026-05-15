@@ -400,3 +400,11 @@ This does not reproduce the 9,364 tps max and lands below the 9,315 tps 0.95 rep
 The midpoint activation-budget probe is a discard. The 0.9375 run completed with loss falling from 12.47883 to 10.69838, peak memory 145.48GiB, MFU `N/A`, and 9,354 tps.
 
 This is above both clean repeats at 0.95 and 0.925, but it does not beat the 9,364 tps observed max from 0.925. Keep 0.925 as the current-best max for ranking, while noting that 0.9375 provides another near-best point and the activation-budget differences are within short-run noise.
+
+## Experiment Review: bfloat16 Reduce Current-Best Profile
+
+The profiler diagnostic on the bf16-reduce 0.925 stack completed with loss falling from 12.46033 to 11.89387, peak memory 145.48GiB, MFU `N/A`, and 8,565 profiled tps. The trace was written under `outputs/profiling/traces/iteration_10`; it remains uncommitted.
+
+Rank 0 kernel buckets still show communication as a major limiter: dense GEMM/scaled-mm is 1.115s / 34.2%, NCCL reduce-scatter is 0.854s / 26.2%, flash attention is 0.600s / 18.4%, Float8 scale/cast/fused elementwise is 0.253s / 7.8%, and NCCL all-gather is 0.212s / 6.5%. All-rank means were dense GEMM 1.104s, reduce-scatter 0.766s, flash attention 0.610s, Float8 scale/cast 0.251s, and all-gather 0.229s.
+
+The reduce-scatter kernel is now explicitly `ncclDevKernel_ReduceScatter_Sum_bf16_RING_LL`, so the bfloat16 reduction dtype is active, but reduce-scatter remains the largest single named kernel bucket on rank 0. Optimizer kernels are only about 31.5ms / 1.0% of rank-0 kernel time, so the queued bf16 optimizer-state probe is more of a memory/bandwidth cleanup than a direct kernel-time target.
