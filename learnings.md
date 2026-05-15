@@ -513,6 +513,24 @@ Before closing full bf16, spend some of its memory savings on a higher activatio
 
 ## Experiment Review: Full bfloat16 Memory Budget 0.95
 
+The full-bf16 memory-budget 0.95 retune is a discard. It reached only 8,952 tps, peak memory stayed at 129.79GiB, MFU was `N/A`, and loss rose from 12.28825 to 14.20371.
+
+This closes full bf16 for this branch: it saves memory, but both tested activation budgets were slower than the 9,384 tps fused optimizer-state mixed-storage best, and the higher-budget follow-up failed the loss trend gate.
+
+## Next Context Parallel Probe
+
+Try CP=2 on the fused optimizer-state best with a minimal Qwen3 source change that wraps each layer's inner attention using `apply_cp_to_forward`. The current fused profiles still show flash attention around 20% of rank-0 kernel time, while communication-only and activation-checkpoint overhead knobs did not help. CP is a targeted attention/sequence-sharding probe without the TP=2 compiler fragility seen earlier.
+
+Use `context_parallel_degree=2` with explicit `data_parallel_shard_degree=4`, keeping TP=1, no-reshard FSDP, model-only compile, memory-budget 0.925, and `fused_opt_states_bf16`. Revert the CP source change unless the result beats 9,384 tps with finite/falling loss.
+
+## Experiment Review: Full bfloat16 Memory Budget 0.95
+
 The full-bf16 memory-budget 0.95 retune is a discard. It completed without OOM and kept the lower 129.79GiB peak memory from the full-bf16 path, but throughput reached only 8,952 tps and loss rose from 12.28825 to 14.20371.
 
 This is worse than both the 9,384 tps fused bfloat16 optimizer-state best and the prior full-bf16 0.925 run, which at least had falling loss. Raising the activation budget did not convert full-bf16 memory savings into throughput, so close full bf16 for this branch unless a later source/runtime change gives a new reason to revisit it. The current best remains the mixed-storage command with `--optimizer.implementation fused_opt_states_bf16` and memory-budget 0.925.
+
+## Experiment Review: Context Parallel Degree 2
+
+The CP=2 source-backed probe on the fused optimizer-state best is a crash discard. The minimal Qwen3 source change successfully removed the CP guard, wrapped each layer's `attention.inner_attention` with `apply_cp_to_forward`, and created active mesh dimensions `['batch', 'loss', 'fsdp', 'cp', 'efsdp']`, but the run failed before step 1.
+
+The failure is in the same compiler-memory-budget area as earlier TP=2 memory-budget attempts: Inductor raised `RuntimeError: Unknown metadata type <class 'torch._library.fake_class_registry.FakeScriptObject'> on node primals_10` during min-cut activation partitioning. No loss, throughput, MFU, or peak training memory was emitted, so this provides no valid throughput row. Revert the CP source change and keep the 9,384 tps fused optimizer-state command as the current best.
