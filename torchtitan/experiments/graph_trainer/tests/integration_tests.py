@@ -256,6 +256,72 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
 
 def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
     """DeepSeek-v3-based integration tests (require H100 machines)."""
+    ep_overlap_full_inductor_tests = [
+        (
+            "SDPA",
+            "graph_trainer_deepseek_v3_debugmodel_ep",
+            "graph",
+            "batch",
+            "layers.*",
+            "transformer_batch",
+        ),
+        (
+            "SDPA",
+            "graph_trainer_deepseek_v3_debugmodel_ep",
+            "graph",
+            "batch",
+            "layers.*.moe",
+            "moe_batch",
+        ),
+        (
+            "SDPA",
+            "graph_trainer_deepseek_v3_debugmodel_ep",
+            "graph",
+            "seq",
+            "layers.*.moe",
+            "moe_seq",
+        ),
+        (
+            "FlexAttn",
+            "graph_trainer_deepseek_v3_debugmodel_flex_attn_ep",
+            "graph",
+            "batch",
+            "layers.*",
+            "transformer_batch",
+        ),
+        (
+            "FlexAttn",
+            "graph_trainer_deepseek_v3_debugmodel_flex_attn_ep",
+            "graph",
+            "batch",
+            "layers.*.moe",
+            "moe_batch",
+        ),
+        (
+            "FlexAttn",
+            "graph_trainer_deepseek_v3_debugmodel_flex_attn_ep",
+            "graph",
+            "seq",
+            "layers.*.moe",
+            "moe_seq",
+        ),
+        (
+            "SDPA",
+            "graph_trainer_deepseek_v3_debugmodel_ep",
+            "eager",
+            "batch",
+            "layers.*",
+            "eager_transformer_batch",
+        ),
+        (
+            "FlexAttn",
+            "graph_trainer_deepseek_v3_debugmodel_flex_attn_ep",
+            "eager",
+            "batch",
+            "layers.*",
+            "eager_transformer_batch",
+        ),
+    ]
     return [
         # === JIT mode tests ===
         OverrideDefinitions(
@@ -359,6 +425,29 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
         ),
+        *[
+            OverrideDefinitions(
+                [
+                    [
+                        "--module graph_trainer.deepseek_v3",
+                        f"--config {config}",
+                        "--compile.mode aot_fx_trace",
+                        "--compile.inductor_compilation full",
+                        "--compile.passes ep_overlap",
+                        f"--compile.ep_overlap_chunk_strategy {strategy}",
+                        f"--compile.ep_overlap_chunk_dim {mode}",
+                        f"--compile.ep_overlap_module_fqn {modules}",
+                        "--parallelism.data_parallel_shard_degree 4",
+                        "--parallelism.tensor_parallel_degree 2",
+                        "--parallelism.expert_parallel_degree 4",
+                    ],
+                ],
+                f"aot_fx_trace deepseek_v3 {backend} full_inductor ep_overlap {variant}",
+                f"aot_fx_trace_deepseek_v3_{backend.lower()}_full_inductor_ep_overlap_{variant}",
+                ngpu=8,
+            )
+            for backend, config, strategy, mode, modules, variant in ep_overlap_full_inductor_tests
+        ],
         OverrideDefinitions(
             [
                 [

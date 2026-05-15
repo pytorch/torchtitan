@@ -25,18 +25,39 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
+    annotate_moe_ep_regions,
 )
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
 )
+from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
+    apply_chunk_pass,
+    ep_overlap_chunk_pass,
+    import_chunk_dim_metadata_pass,
+    mark_chunk_dynamic_dims,
+    prepare_ep_overlap_trace_inputs,
+)
+from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+    apply_ep_overlap_eager_chunking,
+    import_eager_chunk_metadata_pass,
+)
+from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
+    _schedule_ep_overlap_regions,
+    ep_overlap_validate_pass,
+)
 from torchtitan.experiments.graph_trainer.fsdp_passes import overlap_fsdp_ag_rs_pass
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
-from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
+from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    minimal_fx_tracer,
+    run_traced,
+)
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
     tag_sac_policy,
 )
 from torchtitan.experiments.graph_trainer.passes import (
+    compile_time_passes,
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
@@ -215,14 +236,14 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
 
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
-        # Create a second PG to simulate expert-FSDP
+        # Create a second PG to simulate expert-FSDP.
         second_pg = dist.new_group(
             ranks=list(range(self.world_size)),
             use_local_synchronization=True,
         )
         second_pg_name = second_pg.group_name
 
-        # Rewrite half the AG nodes to use the second PG
+        # Rewrite half the AG nodes to use the second PG.
         ag_nodes = [n for n in bw_gm.graph.nodes if is_all_gather(n)]
         self.assertGreater(len(ag_nodes), 1)
         half = len(ag_nodes) // 2
@@ -238,7 +259,7 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
         _EXTRA_FSDP_PG_REGISTRY.pop(second_pg_name, None)
         overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
 
-        # Both source PGs should have their own extra PG
+        # Both source PGs should have their own extra PG.
         self.assertIn(fsdp_pg_name, _EXTRA_FSDP_PG_REGISTRY)
         self.assertIn(second_pg_name, _EXTRA_FSDP_PG_REGISTRY)
         extra_pg1 = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
@@ -247,11 +268,11 @@ class TestOverlapFsdpAgRsPass(FSDPTest):
             extra_pg1, extra_pg2, "Each source PG must map to a distinct extra PG"
         )
 
-        # No AG nodes should still use original PGs
+        # No AG nodes should still use original PGs.
         self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name), 0)
         self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, second_pg_name), 0)
 
-        # All AG nodes should use their respective extra PGs
+        # All AG nodes should use their respective extra PGs.
         self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg1), ag_pg1_before)
         self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg2), ag_pg2_before)
 
@@ -832,6 +853,930 @@ class TestRemoveDetachPass(TestCase):
         self.assertEqual(gm(x), expected)
 
 
+class TestChunkPasses(TestCase):
+    def _chunk_batch(self, gm, **kwargs):
+        return apply_chunk_pass(gm, mode="batch", **kwargs)
+
+    def _chunk_seq(self, gm, **kwargs):
+        return apply_chunk_pass(gm, mode="seq", **kwargs)
+
+    def _build_linear_region_gm(self, *, input_shape=(4, 3), fqn="layers.0"):
+        graph = torch.fx.Graph()
+        w = graph.placeholder("w")
+        x = graph.placeholder("x")
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(x, w))
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(mm,))
+        graph.output(relu)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            w_val = torch.empty(input_shape[-1], input_shape[-1])
+            x_val = torch.empty(*input_shape)
+            out_val = torch.empty(*input_shape)
+
+        w.meta["val"] = w_val
+        x.meta["val"] = x_val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": input_shape[0]}}
+        for node in (mm, relu):
+            node.meta["val"] = out_val
+            node.meta["custom"] = {_MODULE_FQN: fqn}
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            node.meta["torchtitan_chunk_dims"] = {
+                "batch": {"dim": 0, "hint": input_shape[0]}
+            }
+        return gm
+
+    def _nodes_by_target(self, gm, target):
+        return [
+            n for n in gm.graph.nodes if n.op == "call_function" and n.target is target
+        ]
+
+    def _build_ep_overlap_schedule_gm(self, *, backward: bool = False):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+        outputs = []
+        for chunk_id in (1, 0) if backward else (0, 1):
+            pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+            first_launch = graph.call_function(
+                c10d.all_to_all_single.default,
+                args=(pre, [], [], "ep"),
+            )
+            first_wait = graph.call_function(
+                torch.ops.aten.relu.default, args=(first_launch,)
+            )
+            compute = graph.call_function(
+                torch.ops.aten.neg.default, args=(first_wait,)
+            )
+            second_launch = graph.call_function(
+                c10d.all_to_all_single.default,
+                args=(compute, [], [], "ep"),
+            )
+            second_wait = graph.call_function(
+                torch.ops.aten.relu.default, args=(second_launch,)
+            )
+            tail = graph.call_function(torch.ops.aten.neg.default, args=(second_wait,))
+            outputs.append(tail)
+
+            first_ep = "combine" if backward else "dispatch"
+            second_ep = "dispatch" if backward else "combine"
+            for node in (pre, first_launch, first_wait):
+                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": first_ep}
+            compute.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            for node in (second_launch, second_wait):
+                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": second_ep}
+            tail.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            for node in (
+                pre,
+                first_launch,
+                first_wait,
+                compute,
+                second_launch,
+                second_wait,
+                tail,
+            ):
+                node.meta["chunk_id"] = chunk_id
+                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_role"] = "body"
+                if backward:
+                    node.meta["autograd_backward"] = True
+
+        graph.output(tuple(outputs))
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _build_dense_then_moe_gm(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        dense = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        moe = graph.call_function(torch.ops.aten.neg.default, args=(dense,))
+        graph.output(moe)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            val = torch.empty(4, 3)
+
+        x.meta["val"] = val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        for node, fqn in ((dense, "layers.0"), (moe, "layers.1.moe")):
+            node.meta["val"] = val
+            node.meta["custom"] = {_MODULE_FQN: fqn}
+            node.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        moe.meta["custom"]["EP"] = "dispatch"
+        return gm
+
+    def _build_previous_module_live_in_gm(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        prev = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        cur = graph.call_function(torch.ops.aten.neg.default, args=(prev,))
+        graph.output(cur)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            val = torch.empty(4, 3)
+
+        x.meta["val"] = val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        for node, fqn in ((prev, "layers.0"), (cur, "layers.1")):
+            node.meta["val"] = val
+            node.meta["custom"] = {_MODULE_FQN: fqn}
+            node.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        return gm
+
+    def _build_scalar_live_out_gm(self, *, valid: bool):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        size = graph.call_function(torch.ops.aten.sym_size.int, args=(relu, 0))
+        scalar = size if valid else graph.call_function(operator.add, args=(size, 1))
+        graph.output((relu, scalar))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            val = torch.empty(4, 3)
+
+        x.meta["val"] = val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        relu.meta["val"] = val
+        relu.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        relu.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        size.meta["val"] = 4
+        size.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        if not valid:
+            scalar.meta["val"] = 5
+            scalar.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        return gm
+
+    def _build_opposite_direction_gm(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        backward_node = graph.call_function(torch.ops.aten.neg.default, args=(x,))
+        forward_node = graph.call_function(
+            torch.ops.aten.relu.default, args=(backward_node,)
+        )
+        graph.output(forward_node)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            val = torch.empty(4, 3)
+
+        x.meta["val"] = val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        backward_node.meta["val"] = val
+        backward_node.meta["autograd_backward"] = True
+        forward_node.meta["val"] = val
+        forward_node.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        return gm
+
+    def _build_forward_non_additive_no_dim_live_out_gm(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        amax = graph.call_function(torch.ops.aten.amax.default, args=(relu, [0], False))
+        graph.output((relu, amax))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            val = torch.empty(4, 3)
+            reduced_val = torch.empty(3)
+
+        x.meta["val"] = val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        relu.meta["val"] = val
+        relu.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        relu.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        amax.meta["val"] = reduced_val
+        amax.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        return gm
+
+    def _build_backward_internal_no_dim_live_out_gm(self):
+        graph = torch.fx.Graph()
+        w = graph.placeholder("w")
+        x = graph.placeholder("x")
+        grad_out = graph.placeholder("grad_out")
+        grad_act = graph.call_function(torch.ops.aten.mm.default, args=(grad_out, w))
+        x_t = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        grad_w = graph.call_function(torch.ops.aten.mm.default, args=(x_t, grad_out))
+        post = graph.call_function(torch.ops.aten.neg.default, args=(grad_w,))
+        graph.output((grad_act, post))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            w_val = torch.empty(3, 3)
+            val = torch.empty(4, 3)
+            x_t_val = torch.empty(3, 4)
+
+        w.meta["val"] = w_val
+        x.meta["val"] = val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        grad_out.meta["val"] = val
+        grad_out.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        grad_act.meta["val"] = val
+        grad_act.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        x_t.meta["val"] = x_t_val
+        grad_w.meta["val"] = w_val
+        post.meta["val"] = w_val
+        for node in (grad_act, x_t, grad_w):
+            node.meta["custom"] = {_MODULE_FQN: "layers.0"}
+            node.meta["autograd_backward"] = True
+        return gm
+
+    def _build_indirect_per_chunk_live_out_gm(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        grad = graph.placeholder("grad")
+        fwd = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        saved = graph.call_function(torch.ops.aten.amax.default, args=(fwd, [0], False))
+        indirect_helper = graph.call_function(
+            torch.ops.aten.unsqueeze.default, args=(saved, 0)
+        )
+        bwd = graph.call_function(
+            torch.ops.aten.add.Tensor, args=(grad, indirect_helper)
+        )
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            val = torch.empty(4, 3)
+            chunkless_val = torch.empty(3)
+            helper_val = torch.empty(1, 3)
+
+        for node in (x, grad):
+            node.meta["val"] = val
+            node.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        fwd.meta["val"] = val
+        fwd.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        fwd.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        saved.meta["val"] = chunkless_val
+        saved.meta["custom"] = {_MODULE_FQN: "layers.0"}
+        for node, meta_val in ((indirect_helper, helper_val), (bwd, val)):
+            node.meta["val"] = meta_val
+            node.meta["custom"] = {_MODULE_FQN: "layers.1"}
+            node.meta["autograd_backward"] = True
+        bwd.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        return gm
+
+    def test_chunk_batch_forward_region_semantics(self):
+        gm = self._build_linear_region_gm()
+        w = torch.randn(3, 3)
+        x = torch.randn(4, 3)
+        expected = gm(w, x)
+
+        self._chunk_batch(
+            gm,
+            module_patterns=["layers.*"],
+            num_static_inputs=1,
+        )
+
+        actual = gm(w, x)
+        self.assertEqual(actual, expected)
+
+        split_nodes = self._nodes_by_target(gm, torch.ops.aten.split_with_sizes.default)
+        cat_nodes = self._nodes_by_target(gm, torch.ops.aten.cat.default)
+        mm_nodes = self._nodes_by_target(gm, torch.ops.aten.mm.default)
+
+        self.assertEqual(len(split_nodes), 1)
+        self.assertEqual(split_nodes[0].args[0].name, "x")
+        self.assertEqual(len(cat_nodes), 1)
+        self.assertEqual(cat_nodes[0].args[1], 0)
+        self.assertEqual(
+            cat_nodes[0].meta.get("chunked_region_role"), "materialization"
+        )
+        self.assertNotIn("chunk_id", cat_nodes[0].meta)
+        self.assertEqual(len(mm_nodes), 2)
+        self.assertEqual({n.meta.get("chunk_id") for n in mm_nodes}, {0, 1})
+        self.assertEqual([n.meta.get("chunk_id") for n in mm_nodes], [0, 1])
+        self.assertTrue(
+            all(n.meta.get("chunked_region_role") == "body" for n in mm_nodes)
+        )
+
+        gm = self._build_previous_module_live_in_gm()
+        inp = torch.randn(4, 3)
+        expected = gm(inp)
+
+        self._chunk_batch(gm, module_patterns=["layers.1"])
+
+        actual = gm(inp)
+        self.assertEqual(actual, expected)
+
+        relu_nodes = self._nodes_by_target(gm, torch.ops.aten.relu.default)
+        neg_nodes = self._nodes_by_target(gm, torch.ops.aten.neg.default)
+        self.assertEqual(len(relu_nodes), 1)
+        self.assertEqual(len(neg_nodes), 2)
+        self.assertEqual({n.meta.get("chunk_id") for n in neg_nodes}, {0, 1})
+
+        gm = self._build_scalar_live_out_gm(valid=True)
+        inp = torch.randn(4, 3)
+        expected = gm(inp)
+
+        self._chunk_batch(gm, module_patterns=["layers.*"])
+
+        actual = gm(inp)
+        self.assertEqual(actual[0], expected[0])
+        self.assertEqual(actual[1], expected[1])
+
+    def test_chunk_pass_guardrails_and_pipeline_order(self):
+        with self.assertRaisesRegex(ValueError, "Cannot split annotated batch"):
+            self._chunk_batch(
+                self._build_linear_region_gm(input_shape=(3, 3)),
+                module_patterns=["layers.*"],
+                num_static_inputs=1,
+            )
+
+        with self.assertRaisesRegex(ValueError, "opposite graph direction"):
+            self._chunk_batch(
+                self._build_opposite_direction_gm(),
+                module_patterns=["layers.*"],
+            )
+
+        with self.assertRaisesRegex(NotImplementedError, "full-K/V"):
+            self._chunk_seq(
+                self._build_linear_region_gm(
+                    input_shape=(2, 4, 3), fqn="layers.0.attention"
+                ),
+                module_patterns=["layers.*.attention"],
+                num_static_inputs=1,
+            )
+
+        with self.assertRaisesRegex(ValueError, "cannot materialize scalar live-out"):
+            self._chunk_batch(
+                self._build_scalar_live_out_gm(valid=False),
+                module_patterns=["layers.*"],
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "forward accumulation proof or a backward parameter-gradient consumer",
+        ):
+            self._chunk_batch(
+                self._build_forward_non_additive_no_dim_live_out_gm(),
+                module_patterns=["layers.*"],
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "forward accumulation proof or a backward parameter-gradient consumer",
+        ):
+            self._chunk_batch(
+                self._build_backward_internal_no_dim_live_out_gm(),
+                module_patterns=["layers.*"],
+            )
+
+        gm = self._build_indirect_per_chunk_live_out_gm()
+        self._chunk_batch(gm, module_patterns=["layers.*"])
+        self.assertFalse(
+            any(node.name.startswith("amax_chunk_sum") for node in gm.graph.nodes)
+        )
+        helper_nodes = [
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.aten.unsqueeze.default
+        ]
+        self.assertEqual({node.meta.get("chunk_id") for node in helper_nodes}, {0, 1})
+
+        self._chunk_batch(
+            self._build_linear_region_gm(fqn="layers.0.moe"),
+            module_patterns=["layers.*.moe"],
+            num_static_inputs=1,
+        )
+
+        from types import SimpleNamespace
+
+        traced_result = SimpleNamespace(num_static_inputs=2)
+        config = SimpleNamespace(
+            model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
+            parallelism=SimpleNamespace(
+                enable_async_tensor_parallel=False,
+                fsdp_reshard_after_forward="default",
+                pipeline_parallel_degree=1,
+            ),
+            compile=SimpleNamespace(
+                passes=["ep_overlap"],
+                ep_overlap_chunk_dim="batch",
+                ep_overlap_chunk_strategy="graph",
+                ep_overlap_module_fqn="layers.*",
+                cpu_offload_prefetch_n_layers=1,
+                cpu_offload_defer_n_layers=1,
+                cpu_offload_budget_gb=1.0,
+                memory_policy="default",
+                inductor_compilation="full",
+                numerics_changing_optim=False,
+            ),
+        )
+
+        def pass_name(pass_fn):
+            return (
+                pass_fn.func.__name__ if hasattr(pass_fn, "func") else pass_fn.__name__
+            )
+
+        names = [
+            pass_name(pass_fn)
+            for pass_fn in compile_time_passes(
+                traced_result, config, use_cudagraph=False
+            )
+        ]
+        self.assertLess(
+            names.index("normalize_view_ops_as_reshape"),
+            names.index("import_chunk_dim_metadata_pass"),
+        )
+        self.assertLess(
+            names.index("import_chunk_dim_metadata_pass"),
+            names.index("ep_overlap_chunk_pass"),
+        )
+        self.assertLess(
+            names.index("ep_overlap_chunk_pass"),
+            names.index("tag_with_memory_policy_pass"),
+        )
+        self.assertLess(
+            names.index("ep_overlap_chunk_pass"),
+            names.index("apply_cpu_offload_pass"),
+        )
+        self.assertLess(
+            names.index("ep_overlap_chunk_pass"),
+            names.index("selective_activation_remat_pass"),
+        )
+        self.assertLess(
+            names.index("apply_cpu_offload_pass"),
+            names.index("selective_activation_remat_pass"),
+        )
+        self.assertLess(
+            names.index("ep_overlap_chunk_pass"),
+            names.index("joint_transformer_block_bucketing_reordering_pass"),
+        )
+        self.assertLess(
+            names.index("joint_transformer_block_bucketing_reordering_pass"),
+            names.index("ep_overlap_schedule_pass"),
+        )
+
+        x = torch.randn(4, 4)
+        labels = torch.ones(4, 4)
+        positions = torch.arange(4).repeat(4, 1)
+        prepare_ep_overlap_trace_inputs(
+            config.compile,
+            (x, labels, torch.tensor(16), {}, {"positions": positions}),
+            {},
+        )
+        self.assertTrue(hasattr(x, "_torchtitan_chunk_dims"))
+        self.assertTrue(hasattr(labels, "_torchtitan_chunk_dims"))
+        self.assertTrue(hasattr(positions, "_torchtitan_chunk_dims"))
+
+        config.compile.ep_overlap_module_fqn = ""
+        with self.assertRaisesRegex(ValueError, "ep_overlap_module_fqn"):
+            prepare_ep_overlap_trace_inputs(config.compile, (torch.randn(4, 4),), {})
+
+    def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
+        from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+
+        annotate_moe_ep_regions()
+
+        self.assertTrue(
+            getattr(
+                AllToAllTokenDispatcher.dispatch,
+                "_torchtitan_annotated_EP_dispatch",
+                False,
+            )
+        )
+        self.assertTrue(
+            getattr(
+                AllToAllTokenDispatcher.combine,
+                "_torchtitan_annotated_EP_combine",
+                False,
+            )
+        )
+
+    def test_ep_overlap_reorders_forward_and_backward_wait_suffixes(self):
+        for backward, first_chunk in ((False, 0), (True, 1)):
+            with self.subTest(backward=backward):
+                gm = self._build_ep_overlap_schedule_gm(backward=backward)
+                _schedule_ep_overlap_regions(
+                    gm,
+                    module_pattern="layers.*.moe",
+                    require_all_to_all=True,
+                )
+                nodes = list(gm.graph.nodes)
+                order = {node: idx for idx, node in enumerate(nodes)}
+
+                def named(chunk_id, target, ep=None, wait=False):
+                    matches = [
+                        node
+                        for node in nodes
+                        if node.meta.get("chunk_id") == chunk_id
+                        and node.target == target
+                        and (ep is None or node.meta.get("custom", {}).get("EP") == ep)
+                        and (
+                            not wait
+                            or node.meta.get("custom", {}).get("EP_wait") is True
+                        )
+                    ]
+                    self.assertEqual(len(matches), 1)
+                    return matches[0]
+
+                second_chunk = 1 - first_chunk
+                c10d = torch.ops._c10d_functional
+                first_dispatch_launch = named(
+                    first_chunk,
+                    c10d.all_to_all_single.default,
+                    ep="dispatch",
+                )
+                second_dispatch_launch = named(
+                    second_chunk,
+                    c10d.all_to_all_single.default,
+                    ep="dispatch",
+                )
+                first_dispatch_wait = named(
+                    first_chunk,
+                    torch.ops.aten.relu.default,
+                    ep="dispatch",
+                    wait=True,
+                )
+                first_combine_wait = named(
+                    first_chunk,
+                    torch.ops.aten.relu.default,
+                    ep="combine",
+                    wait=True,
+                )
+                second_combine_wait = named(
+                    second_chunk,
+                    torch.ops.aten.relu.default,
+                    ep="combine",
+                    wait=True,
+                )
+
+                self.assertLess(
+                    order[first_dispatch_launch], order[second_dispatch_launch]
+                )
+                self.assertLess(
+                    order[second_dispatch_launch], order[first_dispatch_wait]
+                )
+                self.assertLess(order[first_combine_wait], order[second_combine_wait])
+
+    def test_ep_overlap_reorders_non_body_setup_dependencies(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+        outputs = []
+        setup_nodes = {}
+        first_waits = {}
+        for chunk_id in (0, 1):
+            setup = graph.call_function(torch.ops.aten.clone.default, args=(x,))
+            pre = graph.call_function(torch.ops.aten.relu.default, args=(setup,))
+            dispatch = graph.call_function(
+                c10d.all_to_all_single.default,
+                args=(pre, [], [], "ep"),
+            )
+            dispatch_wait = graph.call_function(
+                torch.ops.aten.relu.default, args=(dispatch,)
+            )
+            compute = graph.call_function(
+                torch.ops.aten.neg.default, args=(dispatch_wait,)
+            )
+            combine = graph.call_function(
+                c10d.all_to_all_single.default,
+                args=(compute, [], [], "ep"),
+            )
+            combine_wait = graph.call_function(
+                torch.ops.aten.relu.default, args=(combine,)
+            )
+            outputs.append(combine_wait)
+            setup_nodes[chunk_id] = setup
+            first_waits[chunk_id] = dispatch_wait
+
+            setup.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            for node in (pre, dispatch, dispatch_wait):
+                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "dispatch"}
+            compute.meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            for node in (combine, combine_wait):
+                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "combine"}
+            for node in (pre, dispatch, dispatch_wait, compute, combine, combine_wait):
+                node.meta["chunk_id"] = chunk_id
+                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_role"] = "body"
+
+        graph.output(tuple(outputs))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        _schedule_ep_overlap_regions(
+            gm,
+            module_pattern="layers.*.moe",
+            require_all_to_all=True,
+        )
+        order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
+
+        self.assertLess(order[setup_nodes[1]], order[first_waits[0]])
+        self.assertLess(order[first_waits[0]], order[first_waits[1]])
+
+    def test_ep_overlap_rejects_advancing_remat_dependencies(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+
+        c0_pre = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+        c0_dispatch = graph.call_function(
+            c10d.all_to_all_single.default, args=(c0_pre, [], [], "ep")
+        )
+        c0_dispatch_wait = graph.call_function(
+            torch.ops.aten.relu.default, args=(c0_dispatch,)
+        )
+        c0_compute = graph.call_function(
+            torch.ops.aten.neg.default, args=(c0_dispatch_wait,)
+        )
+        c0_combine = graph.call_function(
+            c10d.all_to_all_single.default, args=(c0_compute, [], [], "ep")
+        )
+        c0_combine_wait = graph.call_function(
+            torch.ops.aten.relu.default, args=(c0_combine,)
+        )
+
+        c1_setup = graph.call_function(torch.ops.aten.clone.default, args=(x,))
+        c1_setup.meta["autograd_backward"] = True
+        c1_setup.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+        c1_pre = graph.call_function(torch.ops.aten.relu.default, args=(c1_setup,))
+        c1_dispatch = graph.call_function(
+            c10d.all_to_all_single.default, args=(c1_pre, [], [], "ep")
+        )
+        c1_dispatch_wait = graph.call_function(
+            torch.ops.aten.relu.default, args=(c1_dispatch,)
+        )
+        c1_compute = graph.call_function(
+            torch.ops.aten.neg.default, args=(c1_dispatch_wait,)
+        )
+        c1_combine = graph.call_function(
+            c10d.all_to_all_single.default, args=(c1_compute, [], [], "ep")
+        )
+        c1_combine_wait = graph.call_function(
+            torch.ops.aten.relu.default, args=(c1_combine,)
+        )
+        graph.output((c0_combine_wait, c1_combine_wait))
+
+        for chunk_id, nodes in {
+            0: (
+                c0_pre,
+                c0_dispatch,
+                c0_dispatch_wait,
+                c0_compute,
+                c0_combine,
+                c0_combine_wait,
+            ),
+            1: (
+                c1_pre,
+                c1_dispatch,
+                c1_dispatch_wait,
+                c1_compute,
+                c1_combine,
+                c1_combine_wait,
+            ),
+        }.items():
+            for node in nodes:
+                node.meta["chunk_id"] = chunk_id
+                node.meta["chunked_region_fqn"] = "layers.0.moe"
+                node.meta["chunked_region_role"] = "body"
+            for node in nodes[:3]:
+                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "dispatch"}
+            nodes[3].meta["custom"] = {_MODULE_FQN: "layers.0.moe"}
+            for node in nodes[4:]:
+                node.meta["custom"] = {_MODULE_FQN: "layers.0.moe", "EP": "combine"}
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        with self.assertRaisesRegex(ValueError, "rematerialization"):
+            _schedule_ep_overlap_regions(
+                gm,
+                module_pattern="layers.*.moe",
+                require_all_to_all=True,
+            )
+
+    def test_eager_chunking_traces_overlap_metadata(self):
+        class Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(3, 3)
+
+            def forward(self, x):
+                return torch.relu(self.linear(x))
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Block()])
+
+            def forward(self, x):
+                return self.layers[0](x)
+
+        model = Model()
+        annotate_module_fqns(model)
+        apply_ep_overlap_eager_chunking(
+            model,
+            GraphTrainerCompileConfig(
+                enable=True,
+                passes=["ep_overlap"],
+                ep_overlap_chunk_strategy="eager",
+                ep_overlap_module_fqn="layers.*",
+            ),
+        )
+
+        def step(inputs):
+            y = model(inputs)
+            loss = y.sum()
+            params = [p for p in model.parameters() if p.requires_grad]
+            return [loss] + list(torch.autograd.grad(loss, params))
+
+        traced = minimal_fx_tracer(step, module=model)(torch.randn(4, 3))
+        gm = import_eager_chunk_metadata_pass(traced.gm)
+        ep_overlap_validate_pass(
+            gm,
+            module_pattern="layers.*",
+            require_all_to_all=False,
+        )
+
+        body_chunks = {
+            node.meta.get("chunk_id")
+            for node in gm.graph.nodes
+            if node.meta.get("chunked_region_role") == "body"
+        }
+        backward_body_chunks = {
+            node.meta.get("chunk_id")
+            for node in gm.graph.nodes
+            if node.meta.get("chunked_region_role") == "body"
+            and node.meta.get("autograd_backward", False)
+        }
+        boundary_roles = {
+            node.meta.get("chunked_region_role")
+            for node in gm.graph.nodes
+            if node.meta.get("chunked_region_fqn") == "layers.0"
+        }
+        self.assertEqual(body_chunks, {0, 1})
+        self.assertEqual(backward_body_chunks, {0, 1})
+        self.assertIn("split_boundary", boundary_roles)
+        self.assertIn("materialization", boundary_roles)
+
+    def test_ep_overlap_chunk_skips_regions_without_ep_metadata(self):
+        gm = self._build_dense_then_moe_gm()
+        ep_overlap_chunk_pass(gm, mode="batch", module_pattern="layers.*")
+
+        chunked_roots = {
+            node.meta.get("chunked_region_fqn")
+            for node in gm.graph.nodes
+            if node.meta.get("chunked_region_role") == "body"
+        }
+        self.assertEqual(chunked_roots, {"layers.1"})
+
+        with self.assertRaisesRegex(ValueError, "No EP dispatch/combine regions"):
+            ep_overlap_chunk_pass(
+                self._build_linear_region_gm(fqn="layers.0"),
+                mode="batch",
+                module_pattern="layers.*",
+            )
+
+    def test_chunk_batch_backward_cats_activation_grad_and_sums_param_grad(self):
+        graph = torch.fx.Graph()
+        w = graph.placeholder("w")
+        x = graph.placeholder("x")
+        grad_out = graph.placeholder("grad_out")
+        grad_act = graph.call_function(torch.ops.aten.mm.default, args=(grad_out, w))
+        x_t = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        grad_w = graph.call_function(torch.ops.aten.mm.default, args=(x_t, grad_out))
+        graph.output((grad_act, grad_w))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            w_val = torch.empty(3, 3)
+            act_val = torch.empty(4, 3)
+            x_t_val = torch.empty(3, 4)
+
+        w.meta["val"] = w_val
+        x.meta["val"] = act_val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        grad_out.meta["val"] = act_val
+        grad_out.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        grad_act.meta["val"] = act_val
+        grad_act.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        x_t.meta["val"] = x_t_val
+        grad_w.meta["val"] = w_val
+        for node in (grad_act, x_t, grad_w):
+            node.meta["custom"] = {_MODULE_FQN: "layers.0"}
+            node.meta["autograd_backward"] = True
+
+        w_real = torch.randn(3, 3)
+        x_real = torch.randn(4, 3)
+        grad_out_real = torch.randn(4, 3)
+        expected = gm(w_real, x_real, grad_out_real)
+
+        self._chunk_batch(
+            gm,
+            module_patterns=["layers.*"],
+            num_static_inputs=1,
+        )
+
+        actual = gm(w_real, x_real, grad_out_real)
+        self.assertEqual(actual[0], expected[0])
+        self.assertEqual(actual[1], expected[1])
+
+        cat_nodes = self._nodes_by_target(gm, torch.ops.aten.cat.default)
+        sum_nodes = self._nodes_by_target(gm, torch.ops.aten.add.Tensor)
+        self.assertEqual(len(cat_nodes), 1)
+        self.assertEqual(len(sum_nodes), 1)
+        self.assertNotIn("chunk_id", cat_nodes[0].meta)
+        self.assertNotIn("chunk_id", sum_nodes[0].meta)
+        self.assertTrue(all(n.meta.get("autograd_backward") for n in sum_nodes))
+        body_chunk_ids = [
+            node.meta.get("chunk_id")
+            for node in gm.graph.nodes
+            if node.meta.get("chunked_region_role") == "body"
+            and node.meta.get("chunked_region_fqn") == "layers.0"
+        ]
+        self.assertIn(1, body_chunk_ids)
+        self.assertIn(0, body_chunk_ids)
+        self.assertLess(body_chunk_ids.index(1), body_chunk_ids.index(0))
+        self.assertTrue(
+            all(
+                n.meta.get("autograd_backward")
+                for n in gm.graph.nodes
+                if n.meta.get("chunked_region_fqn") == "layers.0"
+            )
+        )
+
+    def test_chunk_batch_backward_sums_grad_before_reduce_scatter(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        grad_out = graph.placeholder("grad_out")
+        x_t = graph.call_function(torch.ops.aten.t.default, args=(x,))
+        grad_w = graph.call_function(torch.ops.aten.mm.default, args=(x_t, grad_out))
+        c10d = torch.ops._c10d_functional
+        rs = graph.call_function(
+            c10d.reduce_scatter_tensor.default,
+            args=(grad_w, "sum", 2, "dp"),
+        )
+        graph.output(rs)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fake_mode = torch._subclasses.FakeTensorMode()
+        with fake_mode:
+            act_val = torch.empty(4, 3)
+            grad_val = torch.empty(3, 3)
+
+        x.meta["val"] = act_val
+        x.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        grad_out.meta["val"] = act_val
+        grad_out.meta["torchtitan_chunk_dims"] = {"batch": {"dim": 0, "hint": 4}}
+        x_t.meta["val"] = torch.empty(3, 4)
+        grad_w.meta["val"] = grad_val
+        rs.meta["val"] = grad_val
+        for node in (x_t, grad_w):
+            node.meta["custom"] = {_MODULE_FQN: "layers.0"}
+            node.meta["autograd_backward"] = True
+        rs.meta["autograd_backward"] = True
+
+        self._chunk_batch(gm, module_patterns=["layers.*"])
+
+        sum_nodes = self._nodes_by_target(gm, torch.ops.aten.add.Tensor)
+        self.assertEqual(len(sum_nodes), 1)
+        self.assertIs(rs.args[0], sum_nodes[0])
+        self.assertNotIn("chunk_id", sum_nodes[0].meta)
+
+    def test_chunk_batch_on_traced_toy_model(self):
+        model = ToyModel(dim=4, n_layers=1)
+        annotate_module_fqns(model)
+        x = torch.randn(4, 4)
+        mark_chunk_dynamic_dims(x, mode="batch")
+
+        def step(inputs):
+            y = model(inputs)
+            loss = y.sum()
+            params = [p for p in model.parameters() if p.requires_grad]
+            return [loss] + list(torch.autograd.grad(loss, params))
+
+        traced = minimal_fx_tracer(step, module=model)(x)
+        expected = step(x)
+
+        import_chunk_dim_metadata_pass(
+            traced.gm,
+            traced.example_inputs,
+            mode="batch",
+        )
+        self._chunk_batch(
+            traced.gm,
+            module_patterns=["layers.*"],
+            num_static_inputs=traced.num_static_inputs,
+        )
+
+        actual = run_traced(traced, module=model)(x)
+        self.assertEqual(len(actual), len(expected))
+        for actual_tensor, expected_tensor in zip(actual, expected):
+            self.assertEqual(actual_tensor, expected_tensor)
+        self.assertGreater(
+            sum(1 for node in traced.gm.graph.nodes if node.meta.get("chunk_id") == 0),
+            0,
+        )
+
+
 class TestRemoveIdentityViewPass(TestCase):
     """Unit tests for the remove_identity_view_pass graph pass."""
 
@@ -1326,8 +2271,8 @@ class TestAnnotateModuleFqns(TestCase):
     def test_same_class_instances_get_distinct_fqns(self):
         """Two parameterless instances of the same class get distinct fqns.
 
-        Calls minimal_fx_tracer without ``module=`` because parameterless
-        models cannot produce gradients via autograd.grad.
+        Uses minimal_fx_tracer directly (not trace_train_step) because
+        parameterless models cannot produce gradients via autograd.grad.
         """
 
         class Block(torch.nn.Module):
@@ -1346,10 +2291,10 @@ class TestAnnotateModuleFqns(TestCase):
         model = Model()
         annotate_module_fqns(model)
 
-        def fwd_only(x):
+        def fwd_only(state, x):
             return model(x)
 
-        traced = minimal_fx_tracer(fwd_only)(torch.randn(4))
+        traced = minimal_fx_tracer(fwd_only)({}, torch.randn(4))
         fqns = set()
         for node in traced.gm.graph.nodes:
             fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
@@ -1629,6 +2574,25 @@ class TestSelectiveActivationRematPass(TestCase):
         for inp in bwd.all_input_nodes:
             self.assertEqual(inp.name, e_name + "_recomputed")
         self.assertNotIn(e_name, [n.name for n in nodes])
+
+    def test_multiple_backward_regions_recompute_errors(self):
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        a = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        b = graph.call_function(torch.ops.aten.clone.default, args=(inp2,))
+        bwd1 = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
+        sep = graph.call_function(torch.ops.aten.neg.default, args=(inp1,))
+        bwd2 = graph.call_function(torch.ops.aten.mul.Tensor, args=(b, b))
+        graph.output((bwd1, sep, bwd2))
+        for node in (a, b):
+            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        for node in (bwd1, bwd2):
+            node.meta["autograd_backward"] = True
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        with self.assertRaisesRegex(RuntimeError, "disjoint backward regions"):
+            selective_activation_remat_pass(gm)
 
     def test_forward_consumer_keeps_original(self):
         """When a must_recompute node has both forward and backward
