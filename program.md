@@ -190,17 +190,17 @@ Do not run a separate short correctness job followed by a separate performance
 job unless the human explicitly asks for it or the candidate is failing before
 the train loop and needs a small diagnostic rerun.
 
-Each experiment-loop training run is capped at exactly 20 training steps. Add a
-command-line override such as `--training.steps=20` to every candidate command,
+Each experiment-loop training run is capped at exactly 10 training steps. Add a
+command-line override such as `--training.steps=10` to every candidate command,
 regardless of the default configured in `qwen3_14b()`. If a candidate changes
-`training.steps` in config, the executed experiment command must still run 20
+`training.steps` in config, the executed experiment command must still run 10
 steps unless the human explicitly changes this program.
 
 At minimum:
 
 1. Python import/syntax succeeds.
 2. The model builds on meta and reaches `parallelize_qwen3`.
-3. The redirected 20-step training run completes forward/backward and logs
+3. The redirected 10-step training run completes forward/backward and logs
    enough steps to judge both convergence and steady-state tokens/sec.
 4. Use the early logged steps from that same run as the convergence sanity
    check. The loss must stay finite and should trend downward. A candidate that
@@ -286,7 +286,7 @@ residual placement compatibility, gradient placement, and FSDP interaction.
 
 Use profiler output to identify concrete follow-up hypotheses. When the current
 best is runnable, when a candidate is unexpectedly slow, or when ideas are
-running low, run a profiled 20-step experiment on the current best or candidate
+running low, run a profiled 10-step experiment on the current best or candidate
 command. Inspect the generated Kineto traces for GPU idle gaps, dominant CUDA
 kernels, collective time, data-loading stalls, compile overhead, and memory
 pressure. Convert profiler observations into one narrow next experiment; for
@@ -316,19 +316,19 @@ Redirect full output to logs. Do not let distributed training spam the context.
 Example:
 
 ```
-<train command> --training.steps=20 > run.log 2>&1
+<train command> --training.steps=10 > run.log 2>&1
 ```
 
-Every experiment-loop run must include `--training.steps=20` or an equivalent
-CLI override that makes TorchTitan report `total steps 20` at startup. Treat a
+Every experiment-loop run must include `--training.steps=10` or an equivalent
+CLI override that makes TorchTitan report `total steps 10` at startup. Treat a
 run with any other step count as invalid for comparison and rerun with the
-20-step cap.
+10-step cap.
 
 For profiler-driven idea generation, enable TorchTitan's profiler on a normal
-20-step run, for example:
+10-step run, for example:
 
 ```
-<train command> --training.steps=20 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+<train command> --training.steps=10 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
 ```
 
 Profiler traces are written under the dump folder's `profiling/traces`
@@ -531,7 +531,7 @@ Worker loop:
 5. Run import/syntax checks.
 6. Commit the candidate source/config changes. Include the selected idea name
    or ID in the commit message.
-7. Run the training command once with `--training.steps=20` and output
+7. Run the training command once with `--training.steps=10` and output
    redirected to `run.log`.
 8. Use that one run for both correctness and performance. If correctness fails,
    inspect logs, fix obvious bugs, and retry only as needed for diagnosis. If
@@ -616,6 +616,6 @@ Timeout:
 NEVER STOP!
 
 Do not stop after one successful run. Continue until the human interrupts you or
-provides a new instruction. If ideas run low, run a profiled 20-step pass on
+provides a new instruction. If ideas run low, run a profiled 10-step pass on
 the current best, update the roofline notes, and choose the next narrow change
 from the observed bottleneck.
