@@ -38,14 +38,14 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --training.local_batch_size=8`
   - Success criteria and expected risk: Discarded at `dfac656`; tps was essentially tied at 5,873 but loss increased from 12.42 to 16.38, so it failed the convergence sanity check.
 
-- Idea: Selective activation checkpointing with FSDP no-reshard
+- ~~Idea: Selective activation checkpointing with FSDP no-reshard~~
   - Current best source commit: 9db79f7 result row / current source after TP revert
   - Source: memory-headroom analysis
   - Expected mechanism for improving reported tokens/sec: Full activation checkpointing saves memory but recomputes every block. Selective checkpointing should keep enough memory headroom on B200 while reducing recomputation and improving matmul/attention useful work per step.
   - Supporting evidence: Full AC plus no-reshard used 72.2GiB, far below the 178.35GiB capacity, and the profile/MFU indicated compute headroom remained.
   - Planned source/config changes: None; command-only candidate.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective`
-  - Success criteria and expected risk: Kept at `0b0796f` with 6,808 tps, 28.45% MFU, 113.7GiB peak memory, and falling finite loss.
+  - Success criteria and expected risk: Kept at `0b0796f` with 6,808 tps, 28.45% MFU, 113.7GiB peak memory, and falling finite loss. Later superseded by model-only per-block compile.
 
 - ~~Idea: Disable activation checkpointing with FSDP no-reshard~~
   - Current best source commit: 0b0796f
@@ -74,11 +74,38 @@
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --training.local_batch_size=6`
   - Success criteria and expected risk: Discarded at `50404e`; loss fell normally, but tps was 6,805, slightly below the 6,808 best, and memory rose to 141.9GiB.
 
-- Idea: Compile transformer blocks with selective AC and no-reshard
+- ~~Idea: Compile transformer blocks with selective AC and no-reshard~~
   - Current best source commit: 0b0796f
   - Source: selective-profile analysis
   - Expected mechanism for improving reported tokens/sec: The selective-AC profile reduced FSDP collective time enough that flash attention backward, dense matmuls, layer norm, and elementwise kernels dominate the captured GPU work. Per-block `torch.compile` may fuse or schedule block-level work better and reduce CPU/runtime overhead on the repeated 48-layer structure.
   - Supporting evidence: The selective profile rank 0 trace shows kernel time around 3.19s, NCCL around 0.44s, with top compute kernels including flash backward, several nvjet matmuls, layer norm, and elementwise kernels. CPU op time and CUDA runtime overhead are still visible in the trace.
   - Planned source/config changes: None if existing `parallelize_qwen3()` compile path handles the command; otherwise only the minimum Qwen3-local compile ordering fix if the command fails before training.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable`
-  - Success criteria and expected risk: Keep if step 10 tps exceeds 6,808 and loss stays finite/falling. Risks are compile overhead contaminating a 10-step run, graph breaks with checkpoint wrappers, compile-time failure, or higher memory use.
+  - Success criteria and expected risk: Kept at `a68a3c` with 7,898 tps, 33.00% MFU, 108.2GiB peak memory, and falling finite loss.
+
+- ~~Idea: Local batch size 6 with model-only compile, selective AC, and no-reshard~~
+  - Current best source commit: a68a3c
+  - Source: memory-headroom follow-up
+  - Expected mechanism for improving reported tokens/sec: A larger local batch might increase useful work per collective once per-block compile reduces compute overhead.
+  - Supporting evidence: Model-only compile uses 108.2GiB, leaving some apparent memory headroom.
+  - Planned source/config changes: None; command-only candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model --training.local_batch_size=6`
+  - Success criteria and expected risk: Crashed at `0461f6`; compiled forward OOMed before step 1, so the apparent memory headroom is not enough for batch 6 after compiler temporaries.
+
+- ~~Idea: Compile model and loss with selective AC and no-reshard~~
+  - Current best source commit: a68a3c
+  - Source: compile follow-up
+  - Expected mechanism for improving reported tokens/sec: Compiling the loss in addition to transformer blocks might reduce loss-side overhead and improve end-to-end tps.
+  - Supporting evidence: The current best uses `--compile.components model`; the default compile components are model plus loss, so this is a narrow command-only follow-up.
+  - Planned source/config changes: None; command-only candidate.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable`
+  - Success criteria and expected risk: Discarded; it completed but reached only 7,139 tps, below the 7,898 tps model-only compile best.
+
+- Idea: Profile model-only compile current best
+  - Current best source commit: a68a3c
+  - Source: manager review after new best
+  - Expected mechanism for improving reported tokens/sec: A profiled 10-step run of the current best will show whether the next bottleneck is now attention, dense matmul, FSDP collectives, loss, or compile/runtime overhead.
+  - Supporting evidence: Model-only compile improved tps by 16.0% over selective AC without compile and changed peak memory from 113.7GiB to 108.2GiB. The previous profile no longer represents the current compiled execution path.
+  - Planned source/config changes: None; diagnostic command-only run.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=selective --compile.enable --compile.components model --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`
+  - Success criteria and expected risk: Record as diagnostic discard, inspect trace, and use it to choose one next narrow idea. Do not compare profiled tps against unprofiled candidates.
