@@ -29,23 +29,6 @@ _PARAM_FQN_ATTR = "_flex_shard_param_fqn"
 _BUCKET_FQN_ATTR = "_flex_shard_bucket_fqn"
 
 
-def _is_graph_capture_active() -> bool:
-    """Return whether unsupported graph capture is active."""
-    if torch.compiler.is_compiling():
-        return True
-    try:
-        return torch._guards.TracingContext.try_get() is not None
-    except AttributeError:
-        return False
-
-
-def _raise_graph_capture_unsupported() -> None:
-    raise ValueError(
-        "FlexShard currently supports eager execution only; torch.compile and "
-        "graph capture are not supported yet."
-    )
-
-
 def _raise_missing_eager_bucket_unshard(accessor_state: Any) -> None:
     param_fqn = getattr(accessor_state, _PARAM_FQN_ATTR, "<unknown>")
     bucket_fqn = getattr(accessor_state, _BUCKET_FQN_ATTR, None)
@@ -150,8 +133,6 @@ class ParamAccessorState:
                 )
             return current
 
-        if _is_graph_capture_active():
-            _raise_graph_capture_unsupported()
         _raise_missing_eager_bucket_unshard(self)
 
 
