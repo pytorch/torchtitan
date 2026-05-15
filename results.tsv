@@ -2,3 +2,4 @@ commit	tokens_per_sec	mfu_percent	peak_memory_gb	status	description	command
 fc6629b	5774	24.12	50.1	keep	bootstrap FSDP over 8-way dp_shard mesh	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10
 e67f61c	4971	20.77	39.5	discard	TP=2 shared decoder sharding with sequence parallel	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --parallelism.enable_sequence_parallel
 3037e26	5487	22.93	50.1	discard	profiled current-best FSDP diagnostic	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1
+9db79f7	5872	24.53	72.2	keep	FSDP reshard_after_forward never	NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never
