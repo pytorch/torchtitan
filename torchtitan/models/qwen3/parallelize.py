@@ -11,6 +11,8 @@ This file is intentionally strategy-free. Autoresearch is expected to replace
 command, model flavor, and cluster/system it is optimizing for.
 """
 
+from torch.distributed._composable.replicate import replicate
+
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -19,6 +21,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.tools.logging import logger
 
 
 def parallelize_qwen3(
@@ -38,7 +41,20 @@ def parallelize_qwen3(
     mesh shape, hardware topology, memory budget, model flavor, and enabled
     TorchTitan features. It does not need to be a universal implementation.
     """
-    raise NotImplementedError(
-        "Qwen3 parallelization is intentionally left as a scaffold. "
-        "Generate a train-command-specific implementation before running Qwen3."
-    )
+    if parallel_dims.tp_enabled:
+        raise NotImplementedError("Qwen3 DP-only parallelize does not support TP.")
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError("Qwen3 DP-only parallelize does not support CP.")
+    if parallel_dims.pp_enabled:
+        raise NotImplementedError("Qwen3 DP-only parallelize does not support PP.")
+    if parallel_dims.ep_enabled:
+        raise NotImplementedError("Qwen3 DP-only parallelize does not support EP.")
+
+    if skip_dp or not parallel_dims.dp_enabled:
+        return model
+
+    dp_mesh = parallel_dims.get_mesh("batch")
+    replicate(model, device_mesh=dp_mesh, static_graph=True)
+    logger.info("Applied replicated DDP to the Qwen3 model")
+
+    return model
