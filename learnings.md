@@ -494,3 +494,15 @@ The intended command adds only `--activation_checkpoint.no-preserve-rng-state` t
 The command-only `--activation_checkpoint.no-preserve-rng-state` probe on the fused optimizer-state current best is a discard. The tyro CLI accepted the preferred spelling, the run completed with finite/falling loss from 12.37173 to 8.02247, peak memory stayed 137.47GiB, and MFU was `N/A`.
 
 Throughput reached only 8,686 tps, well below the 9,384 tps current best. Do not pursue RNG-preservation disabling as an activation-checkpoint overhead win for this Qwen3 fused optimizer-state configuration; either its overhead is not on the critical path here or the changed checkpoint behavior interacts poorly with compile/recompute scheduling.
+
+## Next Precision/Storage Probe
+
+Try full `training.dtype=bfloat16` with the normal fused optimizer on the current best stack. The present best already uses bfloat16 FSDP parameter and reduction dtypes plus bfloat16 Adam states, but it still starts from float32 training storage. Full bf16 training should build parameters, gradients, and optimizer state in bfloat16, which may reduce remaining parameter/gradient bandwidth and memory pressure.
+
+Use `--optimizer.implementation fused` rather than `fused_opt_states_bf16`; `docs/bf16_optimizer_states.md` says the special bf16-state hook is mainly for float32 training storage, while full bf16 training normally gets bf16 optimizer state dtypes with the default fused optimizer. This is a precision-changing candidate, so the strict finite/falling-loss gate matters.
+
+## Experiment Review: Full bfloat16 Training Dtype
+
+The full `training.dtype=bfloat16` command with the normal fused optimizer is a discard. It completed cleanly and loss fell from 12.48515 to 6.99830, so the precision/storage change did not fail the short-run numerical gate. Peak memory dropped to 129.79GiB and MFU remained `N/A`.
+
+Throughput reached only 9,027 tps, below the 9,384 tps current best from float32 training storage plus fused bfloat16 optimizer states. Full bf16 storage saves another 7.68GiB versus the current best, but that memory saving does not translate into throughput on this stack and likely changes optimizer/parameter update behavior enough to hurt steady-state speed. Keep the fused optimizer-state command as the best precision/storage point for now.
