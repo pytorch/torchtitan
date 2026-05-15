@@ -463,6 +463,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            self.loss_fn.enable_sp = (
+                parallel_dims.tp_enabled and config.parallelism.enable_sequence_parallel
+            )
+            self.loss_fn.loss_parallel = (
+                parallel_dims.tp_enabled
+                and not config.parallelism.disable_loss_parallel
+            )
+
         # Build validator if validation is configured
         if config.validator.enable:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
