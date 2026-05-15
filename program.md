@@ -371,7 +371,8 @@ LOOP FOREVER after setup is confirmed:
 3. Edit the smallest source/config surface needed for that one hypothesis. Edit
    only `torchtitan/models/qwen3/parallelize.py` and
    `torchtitan/models/qwen3/sharding.py` unless changing launch config knobs in
-   the command or an allowed `qwen3_1_7b()` field.
+   the command or an allowed `qwen3_1_7b()` field. The diff must contain only
+   code that is actually exercised by the candidate command.
 4. Run import/syntax checks.
 5. Commit the candidate.
 6. Run the training command once with output redirected to `run.log`.
@@ -397,6 +398,13 @@ One-idea rule:
 - An idea may include the minimum coupled source and command/config changes
   required to make that hypothesis valid. For example, trying TP=2 with the
   necessary Qwen3 tensor placement changes is one idea.
+- Do not add unused or inactive code in an experiment step. This includes
+  unused imports, helper functions that are not called, dormant branches for
+  parallelisms or config modes that the candidate command does not enable,
+  compile/quantization/checkpointing plumbing that is not part of the stated
+  hypothesis, and future-looking scaffolding for later ideas. If the code is
+  not required for the current candidate to run and measure the stated
+  hypothesis, leave it out.
 - Do not bundle unrelated optimizations in one iteration. For example, changing
   TP degree, activation checkpointing mode, compile settings, and batch size in
   the same iteration is not allowed unless the hypothesis explicitly depends on
