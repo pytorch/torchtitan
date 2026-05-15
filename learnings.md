@@ -335,8 +335,26 @@ This closes the broad Float8 coverage expansion path for now. Both the smaller K
 
 The only remaining low-risk command-only lever near the current stack is default compile coverage under `rowwise_with_gw_hp`: run the current best command without `--compile.components model`, so TorchTitan compiles the loss function as well as the model. This does not compile `lm_head`, but it can test whether per-chunk CE compilation now helps after the recipe change. Keep it only if it beats 9,229 tps with finite/falling loss; prior rowwise evidence makes a small slowdown more likely than a large win.
 
+## Experiment Review: Default Compile Coverage Under GW-HP
+
+Default compile coverage is a discard on the active `rowwise_with_gw_hp` stack. Running the current best command without `--compile.components model` compiled the loss function in addition to the model, but the 10-step run reached only 8,687 tps with MFU `N/A`, 142.74GiB peak memory, and loss rising from 12.52405 to 12.72060.
+
+This confirms the earlier rowwise result: compiling the CE loss does not help this chunked-loss workload, and may destabilize the short-run loss trend. Keep model-only compile in the current best command.
+
+## Next Runtime-Overhead Probe
+
+A final low-risk command-only probe is to disable structured trace logging with `--debug.no-enable-structured-logging` while keeping normal stdout metrics. `DebugConfig.enable_structured_logging=False` makes `log_trace_span`, `log_trace_instant`, and `log_trace_scalar` no-ops; the training loop calls these around step, batch fetch, forward/backward, optimizer, and metric collection. The expected gain is small, but for a 10-step objective this overhead can matter, and it does not change model math.
+
 ## Experiment Review: Default Compile Components with rowwise_with_gw_hp
 
 The default compile-components revisit is a discard. Running the active `rowwise_with_gw_hp` stack without `--compile.components model` completed, but loss rose from 12.52405 to 12.72060, peak memory was 142.74GiB, and throughput reached only 8,687 tps.
 
 Compiling the loss function still does not pay off on this stack. Keep `--compile.components model` in the current best command, and treat compile-coverage tuning as closed unless a future source change materially changes the loss path.
+
+## Experiment Review: bfloat16 FSDP Reduction
+
+The Qwen3-local bfloat16 FSDP reduction candidate is the new best. Adding `mixed_precision_reduce="bfloat16"` only to the `qwen3_14b()` `TrainingConfig` kept the active `rowwise_with_gw_hp` recipe, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95 stack. The run completed with loss falling from 12.34481 to 9.12246, peak memory 145.48GiB, MFU `N/A`, and 9,332 tps.
+
+This narrowly beats the prior 9,229 tps best and directly targets the reduce-scatter bandwidth bucket from the profile. The run emitted a tyro warning because the global `TrainingConfig.mixed_precision_reduce` type annotation is currently `Literal["float32"]`; per scope, the type was not edited. Since Qwen3 parallelize uses `getattr(torch, training.mixed_precision_reduce)` and the command completed with falling loss, keep the Qwen3-local source change while noting the type annotation mismatch as a cleanup concern if this graduates beyond autoresearch.
+
+Current best is now `rowwise_with_gw_hp` with bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.

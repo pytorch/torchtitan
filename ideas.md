@@ -399,3 +399,21 @@
   - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
   - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --training.local_batch_size=5`
   - Success criteria and expected risk: Discarded at `1436b57f`; the run completed but loss rose from 12.47422 to 14.69380, throughput reached only 8,543 tps, and peak memory rose to 144.04GiB, so it failed both the loss trend and throughput gates.
+
+- ~~Idea: Qwen3 bfloat16 FSDP reduction precision~~
+  - Current best source commit: `2c54749b`; current best result row: 9,229 tps from `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, memory-budget 0.95, and float32 gradient reduction.
+  - Source: manager reduce-scatter bandwidth follow-up from the current-best profile.
+  - Expected mechanism for improving reported tokens/sec: The profile showed NCCL around 26% of rank-0 GPU kernel time, dominated by reduce-scatter. Setting `mixed_precision_reduce="bfloat16"` for Qwen3 14B halves reduction payload size and may improve reduce-scatter bandwidth without adding HSDP or TP.
+  - Supporting evidence: HSDP and TP reduced or reshaped communication but were slower/unstable, while this changes only FSDP reduction dtype in `qwen3_14b()`.
+  - Planned source/config changes: In `qwen3_14b()` `TrainingConfig`, set `mixed_precision_reduce="bfloat16"`; keep `rowwise_with_gw_hp` and do not edit the global `TrainingConfig` type.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model`
+  - Success criteria and expected risk: Kept at `ef51a052`; loss fell from 12.34481 to 9.12246, throughput reached 9,332 tps, and peak memory was 145.48GiB. The run emitted a tyro warning because `TrainingConfig.mixed_precision_reduce` is annotated as `Literal["float32"]`, but the command completed and Qwen3 parallelize consumed the value.
+
+- Idea: Disable structured trace logging on current best
+  - Current best source commit: `ef51a052`; current best result row: 9,332 tps from `rowwise_with_gw_hp`, bfloat16 FSDP reduction, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.95.
+  - Source: manager overhead audit after source and compile-coverage candidates were exhausted.
+  - Expected mechanism for improving reported tokens/sec: The training loop records structured spans and scalars around step, data fetch, forward/backward, optimizer, and metric collection. Disabling the structured JSONL trace logger should remove that per-step logging overhead while preserving normal stdout metrics used for ranking.
+  - Supporting evidence: `DebugConfig.enable_structured_logging` explicitly makes all `log_trace_span`, `log_trace_instant`, and `log_trace_scalar` calls no-ops when false. The active objective is only 10 steps, so fixed Python/logging overhead can move reported step-10 tps even if GPU kernels are unchanged.
+  - Planned source/config changes: None; command-only candidate on the current kept `rowwise_with_gw_hp` source.
+  - Planned command or config overrides: `NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --compile.enable --compile.components model --debug.no-enable-structured-logging`
+  - Success criteria and expected risk: Keep only if the run completes with finite/falling loss and beats 9,332 tps. Risk is low because it does not change model math, but the expected gain is likely small.
