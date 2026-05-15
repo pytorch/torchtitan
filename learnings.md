@@ -172,3 +172,9 @@ The higher activation budget improved over the accidental HSDP 0.75 row but not 
 Same-shape HSDP should be considered closed for this single-node fully NVLinked run. Both HSDP probes were far below the 8-way FSDP best, and the 0.9 budget case exceeded the memory risk line. The next lower-risk direction is to finish measuring narrow Float8 coverage candidates before changing mesh shape again. One source-only commit already tested the edit shape for including `attention.qkv_linear.wkv` in Float8 rowwise, but no result row exists, so that is the next bounded experiment.
 
 Human direction supersedes the queued Float8 KV coverage idea for one bounded experiment: revisit TP=2 under the current best stack. The prior TP=2 result is stale because it was measured before the main winning changes, so this run will isolate only the TP mesh/sharding change on top of Float8 rowwise, no-reshard FSDP, model-only compile, and memory-budget 0.9. HSDP remains disabled.
+
+## Experiment Review: Float8 KV Projection Coverage
+
+Including Qwen3's repeated `attention.qkv_linear.wkv` projection in Float8 rowwise did not improve the current best. The run converted 280 Float8 linear configs instead of the filtered baseline's 200 and completed with finite/falling loss from 12.53812 to 7.92596, MFU `N/A`, and 137.35GiB peak memory, but throughput reached only 8,190 tps versus the 8,877 tps best.
+
+This closes the narrow KV coverage candidate for now. The extra small-projection Float8 work appears to add more scaling/casting or compile/runtime overhead than it removes from bf16 GEMM work under the current 8-way FSDP memory-budget 0.9 stack. The `qwen3_14b()` source filter was reverted, so `lm_head` and `attention.qkv_linear.wkv` remain filtered.
