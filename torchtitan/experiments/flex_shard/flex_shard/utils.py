@@ -270,7 +270,7 @@ def _validate_placements(
             )
 
 
-def _validate_bucket_placements(
+def _validate_bucket_uniform_dtype_and_placement(
     bucket_assignments: BucketParamFQNsByIndex,
     param_placements: dict[str, tuple[Placement, ...]],
     buckets: list[Any],

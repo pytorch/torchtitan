@@ -338,44 +338,6 @@ class ShardedBucketStorage:
         return info.placement.make_local_storage_view(self._byte_storage, info)
 
 
-def _materialize_bucket_storages(
-    module: nn.Module,
-    named_params: list[tuple[str, nn.Parameter]],
-    bucket_assignments: BucketParamFQNsByIndex,
-    buckets: list[BucketSpec],
-    param_placements: dict[str, tuple[Placement, ...]],
-    mesh: DeviceMesh,
-    device: torch.device,
-) -> tuple[list[ShardedBucketStorage], dict[str, BucketSpec]]:
-    """Create ShardedBucketStorage objects and install sharded parameters."""
-    named_params_dict = dict(named_params)
-    bucket_storages: list[ShardedBucketStorage] = []
-    fqn_to_bucket_spec: dict[str, BucketSpec] = {}
-
-    for bucket_idx, bucket_fqns in enumerate(bucket_assignments):
-        if not bucket_fqns:
-            continue
-
-        bucket_spec = buckets[bucket_idx]
-        for fqn in bucket_fqns:
-            fqn_to_bucket_spec[fqn] = bucket_spec
-
-        bucket_named_params = [(fqn, named_params_dict[fqn]) for fqn in bucket_fqns]
-        bucket_placements = {fqn: param_placements[fqn] for fqn in bucket_fqns}
-        bucket_storages.append(
-            ShardedBucketStorage.from_bucket(
-                module,
-                bucket_named_params,
-                bucket_placements,
-                mesh,
-                device,
-                bucket_spec,
-            )
-        )
-
-    return bucket_storages, fqn_to_bucket_spec
-
-
 def _assign_params_to_buckets(
     param_fqns: list[str],
     buckets: list[BucketSpec],
