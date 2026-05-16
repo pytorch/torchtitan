@@ -27,12 +27,14 @@ from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGener
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
+from torchtitan.experiments.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
 from torchtitan.experiments.rl.generator_router import (
     GeneratorRouter,
     RoundRobinRoutingStrategy,
 )
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.rubrics import RewardCompletionHash, Rubric
 from torchtitan.experiments.rl.trainer import GRPOLoss, RLTrainer
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.qwen3 import model_registry
@@ -385,3 +387,33 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> RLTrainer.Config:
             debug=batch_invariant_config,
         ),
     )
+
+
+def rl_grpo_qwen3_debug_batch_invariant() -> RLTrainer.Config:
+    """Batch-invariant GRPO config using debug model with random init (4 GPUs: 2 gen + 2 train).
+
+    Uses the tiny debugmodel with random initialization and the AlphabetSort
+    task. A small deterministic completion-hash reward keeps the CI loss
+    nonzero even when random-init completions miss the task reward.
+    """
+    config = rl_grpo_qwen3_0_6b_varlen_batch_invariant()
+    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+    config.hf_assets_path = "./tests/assets/tokenizer"
+    config.rollouter = AlphabetSortRollouter.Config(
+        rubric=Rubric.Config(
+            reward_fns=[
+                RewardAlphabetSort.Config(weight=1.0),
+                RewardCompletionHash.Config(weight=0.1),
+            ]
+        )
+    )
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        checkpoint=CheckpointManager.Config(enable=False),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        checkpoint=CheckpointManager.Config(enable=False),
+        sampling=dataclasses.replace(config.generator.sampling, max_tokens=100),
+    )
+    return config

@@ -34,8 +34,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module rl",
                     "--config rl_grpo_qwen3_0_6b_varlen",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.tensor_parallel_degree 4",
                     "--group_size 2",
                     "--batcher.batch.seq_len 1024",
                     "--renderer.enable-thinking False",
@@ -47,17 +47,17 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 no compile",
-            "rl_grpo_tp2_no_compile",
-            ngpu=4,
+            "RL GRPO TP=4 no compile",
+            "rl_grpo_tp4_no_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
                     "--module rl",
                     "--config rl_grpo_qwen3_0_6b_varlen",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.tensor_parallel_degree 4",
                     "--group_size 2",
                     "--batcher.batch.seq_len 1024",
                     "--renderer.enable-thinking False",
@@ -67,29 +67,27 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 compile",
-            "rl_grpo_tp2_compile",
-            ngpu=4,
+            "RL GRPO TP=4 compile",
+            "rl_grpo_tp4_compile",
+            ngpu=8,
         ),
     ]
 
 
-def build_rl_h100_test_list() -> list[OverrideDefinitions]:
+def build_rl_batch_invariant_test_list() -> list[OverrideDefinitions]:
     return [
         OverrideDefinitions(
             [
                 [
                     "--module rl",
-                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
-                    "--group_size 2",
-                    "--batcher.batch.seq_len 1024",
-                    "--renderer.enable-thinking False",
-                    "--generator.sampling.max_tokens 256",
+                    "--config rl_grpo_qwen3_debug_batch_invariant",
+                    "--batcher.batch.seq_len 768",
+                    "--generator.sampling.max_tokens 50",
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 batch-invariant + deterministic",
-            "rl_grpo_tp2_batch_invariant",
+            "RL GRPO debug batch-invariant + deterministic",
+            "rl_grpo_debug_batch_invariant",
             ngpu=4,
         ),
     ]
@@ -97,7 +95,8 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
 
 _TEST_SUITES = {
     "default": build_rl_test_list,
-    "h100": build_rl_h100_test_list,
+    "batch_invariant": build_rl_batch_invariant_test_list,
+    "h100": build_rl_batch_invariant_test_list,
 }
 
 
