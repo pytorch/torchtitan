@@ -562,3 +562,9 @@ The more actionable profile signal is the compiled AC/recompute path: the active
 The selective activation-checkpointing probe on the fused optimizer-state best is a discard. It completed 10 steps with peak memory only 101.71GiB, but throughput was 8,635 tps and loss rose from 12.46031 to 15.65681. The lower memory confirms selective AC saved much more activation state than the current memory-budget path, but it did not preserve short-run training behavior and was far slower than the 9,384 tps best.
 
 Do not replace memory-budget 0.925 with selective AC for this stack. The trace-derived recompute idea failed in practice; the remaining profile signal with a cleaner command-only knob is NCCL protocol choice. The detailed trace shows reduce-scatter and all-gather kernels using `RING_LL` for very large bf16 FSDP payloads, so a single `NCCL_PROTO=Simple` run is worth testing before closing communication-side protocol tuning.
+
+## Experiment Review: NCCL Simple Protocol
+
+Forcing `NCCL_PROTO=Simple` on the fused optimizer-state best is a discard. The run completed 10 steps at 9,382 tps with peak memory 137.47GiB, but it was still below the 9,384 tps best and loss rose from 12.50709 to 15.01339. This closes the obvious protocol override from the observed `RING_LL` kernels.
+
+The remaining NCCL-side trace detail is runtime/event handling rather than kernel protocol: rank 0 shows many CUDA event/stream calls around FSDP collectives, and `docs/composability.md` recommends `TORCH_NCCL_AVOID_RECORD_STREAMS=1` for async NCCL collectives to avoid record-stream overhead. Although that doc discusses TP, FSDP also uses process-group streams for async all-gather and reduce-scatter, so this is a reasonable single env-only probe.
