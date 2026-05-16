@@ -239,6 +239,7 @@ def construct_default_graph_passes(
     transformed during precompile phase, so only graph capture is returned.
     """
     graph_backend = _get_graph_capture_backend()
+    logger.info("Graph capture backend selected: %s", graph_backend)
 
     use_cudagraph = False
     use_xpugraph = False
