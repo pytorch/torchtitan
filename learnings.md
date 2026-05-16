@@ -580,3 +580,9 @@ The next trace-backed idea should target the large root FSDP payload instead of 
 Splitting `tok_embeddings`, `norm`, and `lm_head` into separate FSDP units is a discard. The run completed with finite/falling loss from 12.46221 to 7.00204 and lowered peak memory from 137.47GiB to 134.31GiB, but throughput reached only 9,029 tps versus the 9,384 tps best. The source change was reverted.
 
 The memory drop supports the root-payload diagnosis, but splitting every root-level module added enough wrapper/collective overhead to lose throughput. A narrower follow-up is still justified: split only `lm_head`. `tok_embeddings` is actually needed in decoder forward, while `lm_head` is skipped there and handled later by `ChunkedCELoss`, so an `lm_head`-only FSDP unit targets the unused half of the 1.56B-element root all-gather with less extra wrapper overhead.
+
+## Experiment Review: Split lm_head FSDP Unit
+
+Splitting only `lm_head` into its own FSDP unit is a discard. The run lowered peak memory to 134.48GiB, close to the broader root split, but throughput was only 8,907 tps and loss rose from 12.49483 to 16.76770. The source change was reverted. This closes the root-level FSDP split direction: it can reduce memory, but the extra standalone FSDP unit does not improve the 10-step throughput objective and can destabilize the short-run loss trend.
+
+After communication protocol/runtime and root-payload placement probes, the most consistent remaining profile signal is compute-side: kernel-only traces show scaled GEMM around 1.33s/rank, larger than flash attention or any individual collective mean. The current Inductor config reports `max_autotune_gemm=False` and `coordinate_descent_tuning=False`, so a single `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` command-only run is a reasonable compute-side probe. It may improve GEMM kernel choices without changing model semantics, although compile time/noise and cached kernel behavior are risks.
