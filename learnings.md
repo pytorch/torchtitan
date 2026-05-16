@@ -586,3 +586,9 @@ The memory drop supports the root-payload diagnosis, but splitting every root-le
 Splitting only `lm_head` into its own FSDP unit is a discard. The run lowered peak memory to 134.48GiB, close to the broader root split, but throughput was only 8,907 tps and loss rose from 12.49483 to 16.76770. The source change was reverted. This closes the root-level FSDP split direction: it can reduce memory, but the extra standalone FSDP unit does not improve the 10-step throughput objective and can destabilize the short-run loss trend.
 
 After communication protocol/runtime and root-payload placement probes, the most consistent remaining profile signal is compute-side: kernel-only traces show scaled GEMM around 1.33s/rank, larger than flash attention or any individual collective mean. The current Inductor config reports `max_autotune_gemm=False` and `coordinate_descent_tuning=False`, so a single `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` command-only run is a reasonable compute-side probe. It may improve GEMM kernel choices without changing model semantics, although compile time/noise and cached kernel behavior are risks.
+
+## Experiment Review: Inductor GEMM Max Autotune
+
+Generic `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` is a crash discard. The run failed before step 1 while compiling an FP8 GEMM candidate in Triton because this environment's Triton module lacks `tl.float8_e4m3fn`. No loss, throughput, MFU, or peak training memory was emitted.
+
+This does not fully close compute-side autotuning, because the crash came from a Triton FP8 candidate rather than the NVGEMM kernels that dominate the existing trace. The local Inductor config allows `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=NVGEMM`, so a narrower NVGEMM-only max-autotune run can test the same scaled-GEMM hypothesis while avoiding the failing Triton template path.
