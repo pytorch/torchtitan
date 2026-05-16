@@ -592,3 +592,9 @@ After communication protocol/runtime and root-payload placement probes, the most
 Generic `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` is a crash discard. The run failed before step 1 while compiling an FP8 GEMM candidate in Triton because this environment's Triton module lacks `tl.float8_e4m3fn`. No loss, throughput, MFU, or peak training memory was emitted.
 
 This does not fully close compute-side autotuning, because the crash came from a Triton FP8 candidate rather than the NVGEMM kernels that dominate the existing trace. The local Inductor config allows `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=NVGEMM`, so a narrower NVGEMM-only max-autotune run can test the same scaled-GEMM hypothesis while avoiding the failing Triton template path.
+
+## Experiment Review: NVGEMM-only Inductor GEMM Autotune
+
+NVGEMM-only GEMM autotune is also a crash discard. Inductor failed before step 1 with `NoValidChoicesError: No choices to select. No choices exist for backend; consider adding ATEN into max_autotune_gemm_backends`. No loss, throughput, MFU, or peak training memory was emitted.
+
+This closes the Inductor GEMM autotune branch in the current environment. Generic GEMM autotune crashes through the Triton FP8 template path, while NVGEMM-only produces no valid choices for these FP8/scaled-mm graphs. The current best remains the non-autotuned fused optimizer-state command at 9,384 tps with finite/falling loss.

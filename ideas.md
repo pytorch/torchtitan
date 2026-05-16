@@ -644,11 +644,11 @@
   - Planned command or config overrides: `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
   - Success criteria and expected risk: Crashed at `511df91d` before step 1 while compiling an FP8 GEMM candidate in Triton; this Triton build lacks `tl.float8_e4m3fn`. No loss, throughput, MFU, or peak memory was emitted.
 
-- Idea: Enable NVGEMM-only Inductor GEMM autotune
+- ~~Idea: Enable NVGEMM-only Inductor GEMM autotune~~
   - Current best result row: 9,384 tps from SDPA attention, float32 training storage, bfloat16 FSDP parameter/reduce dtypes, fused bfloat16 optimizer states, `rowwise_with_gw_hp`, no-reshard 8-way FSDP, model-only compile, and memory-budget 0.925.
   - Source: follow-up to the generic GEMM max-autotune crash.
   - Expected mechanism for improving reported tokens/sec: Enable GEMM autotuning but restrict candidate backends to `NVGEMM`, avoiding the Triton FP8 candidate path that crashed. The current trace's top GEMM kernels are NVidia-generated `nvjet_sm100...` kernels, so NVGEMM-only profiling may improve scaled-GEMM kernel choices without touching model semantics.
   - Supporting evidence: Inductor config comments list `NVGEMM` as a supported backend via `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS`, and the previous crash was specifically `tl.float8_e4m3fn` missing in Triton. The profile still shows scaled GEMM as the largest kernel bucket after communication and FSDP placement probes failed.
   - Planned source/config changes: None; environment-only compile/autotune probe.
   - Planned command or config overrides: `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=NVGEMM NGPU=8 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.925 --compile.enable --compile.components model --optimizer.implementation fused_opt_states_bf16`
-  - Success criteria and expected risk: Keep only if the run completes 10 steps, loss is finite/falling, and throughput beats 9,384 tps. Main risks are long compile time, NVGEMM not supporting the relevant FP8/scaled-mm cases, or autotuned choices increasing compile overhead without a step-time win.
+  - Success criteria and expected risk: Crashed at `d5c2a5eb` before step 1 with `NoValidChoicesError` because no valid choices existed for the NVGEMM-only backend set. No loss, throughput, MFU, or peak memory was emitted.
