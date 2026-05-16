@@ -332,6 +332,10 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_moe_dsv3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
@@ -348,6 +352,10 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
         )
 
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_moe_loss_compare(
