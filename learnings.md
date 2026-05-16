@@ -546,3 +546,13 @@ The failure is a dependency gate rather than a throughput or numerical result: `
 The final exact repeat of the current-best fused optimizer-state command is a discard diagnostic. It completed with finite/falling loss from 12.38264 to 8.69525, peak memory 137.47GiB, and MFU `N/A`, but reported only 4,988 tps at step 10.
 
 Because the objective requires finite/falling loss and throughput above 9,384 tps, this repeat does not change the best row. Treat 9,384 tps from the prior fused optimizer-state run as the local maximum found by this autoresearch pass, with substantial short-run variance still present.
+
+## Trace Detail Review After Final Variance Check
+
+The latest `outputs/profiling/traces/iteration_10` profile is more precise than the earlier coarse bucket summary. Kernel-only rank means are about 1.328s scaled GEMM, 0.604s flash attention, 0.668s reduce-scatter, 0.170s all-gather, 0.085s Float8 cast/scale kernels, and 0.023s optimizer kernels. Rank skew is strongest in reduce-scatter: rank 1 spends only 0.220s while rank 6 spends 1.086s, so FSDP communication remains real even though the HSDP topology change failed.
+
+The trace also shows that the apparent Float8 overhead in the coarse profile was inflated by CPU/runtime events. Actual Float8 cast/scale kernels are only roughly 3% of kernel time on rank 0, while the scaled GEMM kernels are by far the largest useful compute bucket. This argues against filtering more attention or MLP linear layers out of Float8: losing FP8 GEMM speed is likely more harmful than the small kernel-side scale overhead.
+
+There is about 0.95s of rank-0 `cudaStreamSynchronize` under `aten::_local_scalar_dense` during the profiled logging step, mostly around distributed metric collection and scalar extraction after optimizer step. That is a visible measurement/logging cost, but changing `metrics.log_freq` to avoid the final 10-step log would make the reported throughput less comparable and may leave too little loss trend evidence. Treat logging cadence as a lower-quality measurement knob, not the next main optimization.
+
+The more actionable profile signal is the compiled AC/recompute path: the active step is dominated by two compiled transformer-block graph calls plus their backward, with scaled GEMM and flash attention taking most kernel time. Since fused optimizer states lowered peak memory to 137.47GiB, try selective activation checkpointing as a command-only alternative to memory-budget AC. Selective AC saves expensive compute/communication ops and recomputes a controlled subset of matmuls; it may reduce recompute relative to the current min-cut memory-budget choice while still fitting in memory.
