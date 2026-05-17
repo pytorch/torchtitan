@@ -12,6 +12,8 @@ so individual protocol modules don't grow their own copies.
 
 from enum import Enum
 
+from torch.distributed.tensor import Placement
+
 
 class StrEnum(str, Enum):
     """str + Enum for Python < 3.11 compatibility."""
@@ -41,3 +43,9 @@ class MeshAxisName(StrEnum):
     PP = "pp"
     EP = "ep"
     EFSDP = "efsdp"
+
+
+# Placement per mesh axis, keyed by MeshAxisName.
+# Every sharding_config must declare a placement for every mesh axis it
+# will be applied against; ``resolve_placements`` errors otherwise.
+NamedPlacement = dict[MeshAxisName, Placement]
