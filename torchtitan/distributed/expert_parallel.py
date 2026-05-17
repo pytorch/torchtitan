@@ -16,6 +16,7 @@ from torch.distributed.tensor.parallel import ParallelStyle
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
 )
 
 
@@ -60,11 +61,12 @@ class ExpertParallel(ParallelStyle):
         ), f"{type(mod)} missing token_dispatcher attribute"
         assert isinstance(
             mod.token_dispatcher,
-            (AllToAllTokenDispatcher, DeepEPTokenDispatcher),
-        ), f"Expected AllToAllTokenDispatcher or DeepEPTokenDispatcher, got {type(mod.token_dispatcher)}"
+            (AllToAllTokenDispatcher, DeepEPTokenDispatcher, HybridEPTokenDispatcher),
+        ), f"Expected AllToAllTokenDispatcher, DeepEPTokenDispatcher, or HybridEPTokenDispatcher, got {type(mod.token_dispatcher)}"
         # Pass DeviceMesh (not ProcessGroup) so that CooR precompile
         # can use torch.ops._dtensor.mesh_get_process_group to keep
         # the FX graph rank-agnostic.
+        # pyrefly: ignore [bad-assignment]
         mod.token_dispatcher.ep_mesh = device_mesh
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
