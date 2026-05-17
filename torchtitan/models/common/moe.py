@@ -71,7 +71,7 @@ class GroupedExperts(Module):
             x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
         )
         return torch._grouped_mm(
-            +h, w2.bfloat16().transpose(-2, -1), offs=offsets
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
         ).type_as(x)
 
     def forward(
@@ -96,6 +96,9 @@ class GroupedExperts(Module):
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
         so dispatch/combine see the right meshes at runtime."""
         super().parallelize(parallel_dims)
+        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
+        # with current_mesh calls inside AllToAllTokenDispatcher and
+        # DeepEPTokenDispatcher.
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
@@ -316,7 +319,7 @@ class MoE(Module):
         self.register_buffer(
             "tokens_per_expert",
             torch.zeros(num_experts, dtype=torch.float32),
-            persistent=False,
+            persistent=True,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
