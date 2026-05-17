@@ -8,13 +8,12 @@
 
 Provides a general framework for replacing aten subgraphs in the FX graph
 with optimized kernel implementations. The kernels can come from any backend:
-Triton, torch.compile, Helion, handwritten CUDA, etc.
+Triton, torch.compile, handwritten CUDA, etc.
 
 The registry is populated by loading a directory of generated kernels
 (see ``load_from_dir``). Each kernel directory contains:
   - ``problem.py``: reference PyTorch implementation (``Model.forward``)
   - ``kernel.py`` or ``optimized_kernel.py``: Triton implementation (optional)
-  - ``helion_kernel.py``: Helion implementation (optional)
   - ``benchmark.json``: timing data for backend selection (optional)
 
 The replacement pass matches subgraphs by their op-target signature
@@ -52,7 +51,7 @@ _registered_schemas: set[str] = set()
 class Implementation:
     """A single backend implementation of a fused op."""
 
-    backend: str  # "triton", "compile", "eager", "helion"
+    backend: str  # "triton", "compile", "eager"
     fn: Callable
     time_ms: float = float("inf")
 
@@ -281,7 +280,6 @@ class FusedKernelRegistry:
             problem.py              # reference Model + get_inputs
             kernel.py               # Triton kernel (optional)
             optimized_kernel.py     # NCU-optimized Triton (optional)
-            helion_kernel.py        # Helion kernel (optional)
             benchmark.json          # timing results (optional)
         """
         generated = Path(generated_dir)
@@ -372,15 +370,6 @@ class FusedKernelRegistry:
                         time_ms=bench.get("triton_ms", float("inf")),
                     )
                     break
-
-            # Register Helion backend
-            helion_fn = _load_kernel_fn(d / "helion_kernel.py")
-            if helion_fn is not None:
-                op.implementations["helion"] = Implementation(
-                    backend="helion",
-                    fn=helion_fn,
-                    time_ms=bench.get("helion_ms", float("inf")),
-                )
 
             if op.implementations:
                 self.register(op)

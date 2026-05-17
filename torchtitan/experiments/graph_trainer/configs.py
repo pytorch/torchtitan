@@ -95,7 +95,7 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     fused_kernel_backend: str = ""
     """Override the default backend for all fused ops. Options: triton,
-    compile, eager, helion. When empty, the best backend is auto-selected
+    compile, eager. When empty, the best backend is auto-selected
     from benchmark.json timing data."""
 
     extract_fused_kernels_dir: str = ""

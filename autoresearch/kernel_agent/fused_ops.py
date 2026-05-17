@@ -2,7 +2,7 @@
 
 Offline step (kernel gen):
   1. extract_from_dump.py discovers fusible regions → problem.py
-  2. Various backends produce implementations (Triton, torch.compile, Helion, ...)
+  2. Various backends produce implementations (Triton, torch.compile, ...)
   3. benchmark_all.py measures each → benchmark.json
   4. Results stored in generated/<pattern>/
 
@@ -47,7 +47,7 @@ _registered_schemas: set[str] = set()
 @dataclass
 class Implementation:
     """A single backend implementation of a fused op."""
-    backend: str          # "triton", "compile", "eager", "helion", ...
+    backend: str          # "triton", "compile", "eager"
     fn: Callable          # the callable: kernel_function or compiled fn
     time_ms: float = float("inf")  # benchmark result (lower is better)
 
@@ -316,15 +316,6 @@ class FusedOpRegistry:
                         time_ms=bench_data.get("triton_ms", float("inf")),
                     )
                     break
-
-            # Register Helion backend if present
-            helion_fn = _load_kernel_fn(d / "helion_kernel.py")
-            if helion_fn is not None:
-                op.implementations["helion"] = Implementation(
-                    backend="helion",
-                    fn=helion_fn,
-                    time_ms=bench_data.get("helion_ms", float("inf")),
-                )
 
             if op.implementations:
                 registry.register(op)
