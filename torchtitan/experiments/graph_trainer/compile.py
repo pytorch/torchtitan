@@ -24,7 +24,6 @@ import torch.nn as nn
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     get_transformer_block_buckets,
 )
@@ -38,13 +37,11 @@ from torchtitan.tools.logging import logger
 def _apply_jit_compile(
     model: nn.Module,
     compile_config: GraphTrainerCompileConfig,
-    fsdp_reshard_after_forward: bool,
 ) -> nn.Module:
     """Apply JIT compilation (torch.compile with custom backend)."""
     transformer_block_buckets = get_transformer_block_buckets(model)
     backend = get_compile_backend_with_passes(
         compile_config,
-        fsdp_reshard_after_forward,
         transformer_block_buckets,
     )
     model.compile(
@@ -92,17 +89,12 @@ def apply_compile(
     torch._inductor.config.reorder_for_peak_memory = False
     torch._dynamo.config.capture_scalar_outputs = True
 
-    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-        parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
-    )
-
     if mode == "jit":
         if "model" not in compile_config.components:
             return model
         return _apply_jit_compile(
             model,
             compile_config,
-            fsdp_reshard_after_forward,
         )
     elif mode == "aot_fx_trace":
         # aot_fx_trace traces fwd+loss+bwd together inside forward_backward_step,
