@@ -10,7 +10,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial, Replicate
+from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -74,7 +74,7 @@ class GroupedExperts(Module):
             x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
         )
         return torch._grouped_mm(
-            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+            +h, w2.bfloat16().transpose(-2, -1), offs=offsets
         ).type_as(x)
 
     def forward(
@@ -83,24 +83,26 @@ class GroupedExperts(Module):
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add."""
-        # Convert to local for routed expert dispatch/compute.
-        # Replicate x → Partial grad; Shard x → grad unchanged.
-        if isinstance(x, DTensor):
-            grad_placements = (
-                (Partial(),) if x.placements[0].is_replicate() else x.placements
-            )
-            x = x.to_local(grad_placements=grad_placements)
-        if isinstance(top_scores, DTensor):
-            assert isinstance(selected_experts_indices, DTensor)
-            top_scores = top_scores.to_local()
-            selected_experts_indices = selected_experts_indices.to_local()
+        """Dispatch tokens to experts, compute, combine, and scatter_add.
 
+        When parallelized, ``local_map`` (from ``sharding_config``) handles
+        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
+        on exit. The forward body operates on plain local tensors.
+        """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
         return self.token_dispatcher.combine(routed_output, metadata, x)
+
+    def parallelize(self, parallel_dims) -> None:
+        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
+        so dispatch/combine see the right meshes at runtime."""
+        super().parallelize(parallel_dims)
+        self.token_dispatcher.wire_meshes(
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
 
 
 class TokenChoiceTopKRouter(Module):
@@ -227,14 +229,6 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        if (
-            expert_bias is not None
-            and isinstance(scores, DTensor)
-            and not isinstance(expert_bias, DTensor)
-        ):
-            expert_bias = DTensor.from_local(
-                expert_bias, scores.device_mesh, (Replicate(),), run_check=False
-            )
         scores_for_choice = scores if expert_bias is None else scores + expert_bias
         # Apply node-limited routing if configured
         if self.num_expert_groups is not None:
@@ -260,15 +254,9 @@ class TokenChoiceTopKRouter(Module):
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # histc doesn't support DTensor — use local tensor for counting.
-        indices_for_histc = (
-            selected_experts_indices._local_tensor
-            if isinstance(selected_experts_indices, DTensor)
-            else selected_experts_indices
-        )
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
-            indices_for_histc.view(-1),
+            selected_experts_indices.view(-1),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
@@ -341,9 +329,17 @@ class MoE(Module):
 
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
+
+        Under TP, the MoE wrapper's ``sharding_config`` (set by
+        ``set_moe_sharding_config``) handles input/output redistribution:
+        input is redistributed from sp_layout to desired_input_layouts;
+        output (Partial) is redistributed to sp_layout. MoE.forward()
+        operates on DTensors — the DTensor→local conversion happens at
+        the GroupedExperts boundary.
         """
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
+
         # top_scores and selected_experts_indices shape (bs*slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (

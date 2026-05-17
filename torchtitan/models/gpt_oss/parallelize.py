@@ -10,7 +10,6 @@ from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     parallelize_module,
     PrepareModuleInputOutput,
-    SequenceParallel,
 )
 
 from torchtitan.config import (
@@ -74,7 +73,7 @@ def parallelize_gptoss(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=parallelism.enable_sequence_parallel,
+            enable_sp=True,
         )
 
     if ac_config.mode != "none":
@@ -133,6 +132,8 @@ def apply_moe_ep_tp(
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
+    sp_layout = Shard(1) if enable_sp else Replicate()
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         # pyrefly: ignore [missing-attribute]
@@ -140,28 +141,26 @@ def apply_moe_ep_tp(
             continue
 
         if tp_mesh is not None:
-            sp_layout = Shard(1) if enable_sp else Replicate()
-            moe_desired_input_layouts = (
-                Replicate() if ep_mesh is None else sp_layout
-            )
-
             moe_layer_plan = {
+                # With SP: all-gather (Shard→Replicate) for input,
+                # reduce-scatter (Partial→Shard) for output.
+                # Without SP: input is already Replicate,
+                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
-                    desired_input_layouts=(moe_desired_input_layouts,),
+                    desired_input_layouts=(Replicate(),),
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
+                    # Keep MoE output as DTensor so the residual add
+                    # ``h + self.moe(...)`` composes with config-based
+                    # attention (which flows DTensors).
                     use_local_output=False,
                 ),
-                # Router gate: Replicate weights.
-                # EP off: input is Replicate, gate computes on all tokens, output local tensor.
-                # EP on:  input is Shard(0), gate computes on local token shard, output stays DTensor.
+                # replicate computation for the router
                 "moe.router.gate": NoParallel(
-                    local_output_grad_placements=(Partial(),)
-                )
-                if ep_mesh is None
-                else SequenceParallel(sequence_dim=0, use_local_output=False),
+                    local_output_grad_placements=(Partial(),),
+                ),
             }
             parallelize_module(
                 # pyrefly: ignore [bad-argument-type]
