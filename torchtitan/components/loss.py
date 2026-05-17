@@ -11,6 +11,7 @@ from typing import TypeAlias
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.tools.logging import logger
 
@@ -22,6 +23,13 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
+    if isinstance(pred, DTensor) and not isinstance(labels, DTensor):
+        mesh_axis_names = pred.device_mesh.mesh_dim_names
+        if mesh_axis_names is not None and "tp" in mesh_axis_names:
+            tp_axis = mesh_axis_names.index("tp")
+            if isinstance(pred.placements[tp_axis], Replicate):
+                pred = pred.to_local()
+
     return torch.nn.functional.cross_entropy(
         pred.flatten(0, 1).float(),
         labels.flatten(0, 1),
