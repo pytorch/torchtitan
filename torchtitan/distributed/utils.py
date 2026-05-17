@@ -45,11 +45,12 @@ def _dist_reduce(
             process group, and then the result will be all_reduced for the mesh.
     """
     if isinstance(x, DTensor):
-        # DTensor path: ``full_tensor()`` already performs the mesh reduction
-        # for Partial placements and is a no-op for Replicate. Skipping the
-        # subsequent mesh all-reduce is required to avoid double-counting.
-        # Shard placements are not supported — semantics are undefined since
-        # the reduction target is ambiguous.
+        # loss being a DTensor can be 1) full dtensor or 2) non-full dtensor but
+        # TP is enabled. For the former one, a single `full_tensor()` call is enough
+        # but for the later one, we need to treat it as a plain tensor. Since there
+        # is no robust way to distinguish the two and `full_tensor()` may result in
+        # multiple all_reduce() (one for dp_shard and one for CP), we always use
+        # `to_local()` to ensure loss parity in both cases.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
@@ -57,11 +58,9 @@ def _dist_reduce(
         if extra_pg is not None:
             raise ValueError(
                 "_dist_reduce does not support DTensor input combined with "
-                "extra_pg: ``full_tensor()`` already reduces over the DTensor's "
-                "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
-                "to that mesh. Pass a plain tensor when using extra_pg."
+                "extra_pg: pass a plain tensor when using extra_pg."
             )
-        return float(x.full_tensor().item())
+        x = x.to_local()
 
     # Plain tensor path.
     if extra_pg is not None:

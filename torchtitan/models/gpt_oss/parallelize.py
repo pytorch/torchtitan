@@ -51,6 +51,9 @@ def parallelize_gptoss(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    if parallelism.full_dtensor:
+        raise NotImplementedError("full_dtensor is not supported yet.")
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -65,8 +68,7 @@ def parallelize_gptoss(
         )
 
     if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
+        model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
