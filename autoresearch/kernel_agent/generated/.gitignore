@@ -1,0 +1,4 @@
+# Ignore all generated problems, kernels, logs, and benchmarks.
+# These are produced by the kernel fusion pipeline and should not be committed.
+*
+!.gitignore

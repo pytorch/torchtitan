@@ -1,0 +1,126 @@
+#!/bin/bash
+
+PROFILE_DIR=~/tmp/profile_traces
+rm --preserve-root=all --one-file-system -rf "$PROFILE_DIR"/*
+
+TLPARSE_OUTPUT_DIR=~/tmp/tlparse_output
+LOG_DIR=~/tmp/train_logs
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/run_$(date +%Y%m%d_%H%M%S).log"
+
+
+tlp ()
+{
+    rm --preserve-root=all --one-file-system -rf ~/tmp/trace_logs/*;
+    TORCH_TRACE=~/tmp/trace_logs "$@";
+    tlparse ~/tmp/trace_logs/*rank_0* --overwrite-manifold;
+    tlparse parse ~/tmp/trace_logs/*rank_0* -o "$TLPARSE_OUTPUT_DIR" --overwrite;
+    "$SCRIPT_DIR/scripts/upload_tlparse_passes.sh" "$TLPARSE_OUTPUT_DIR"
+}
+
+
+
+# graph_trainer_llama3_debugmodel
+    # --compile.disable_passes cudagraph_pass \
+
+# --- Llama3 debugmodel (FSDP only) ---
+# NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel tlp ./run_train.sh \
+#     --compile.mode aot_fx_trace \
+#     --parallelism.data_parallel_shard_degree=4 \
+#     --parallelism.tensor_parallel_degree=2 \
+#     --training.steps 10 \
+#     --dataloader.dataset c4_test \
+#     --compile.debug_graph_passes \
+#     --profiler.enable_profiling \
+#     --profiler.profile_freq 10 \
+#     --dump_folder "$PROFILE_DIR" \
+#     --debug.print-config \
+#     --compile.memory_policy=sac_and_offload \
+#     2>&1 | tee "$LOG_FILE"
+
+
+# torchx run --scheduler_args 'conda_fbpkg_id=torchtitan_conda_prod,localityConstraints=region;eag;gtn' mast.py:train --module_name graph_trainer.llama3 --config_name graph_trainer_llama3_8b --additional_folders /data/users/anshulsi/fbsource/fbcode/pytorch/torchtitan --twtask_bootstrap_script run_torchtitan.sh --name graph_trainer_llama3_8b_fsdp_baseline_daily_grandteton --h grandteton --nproc_per_node 8 --nodes 1 -- --training.steps=100 --training.local-batch-size 4 --training.seq-len 4096 --activation-checkpoint.mode selective --parallelism.data-parallel-shard-degree 8 --compile.mode aot_fx_trace --lr-scheduler.warmup-steps 20 --metrics.log-freq 10 --metrics.enable-tensorboard --checkpoint.interval 0 --validator.freq 0 --hf-assets-path /mnt/mffuse/Llama-3.1-8B
+
+# --- Llama3 8B (FSDP only, 8 GPUs) ---
+# To use fused kernels from autoresearch/kernel_agent/generated/:
+#   --compile.fused_kernel_dir autoresearch/kernel_agent/generated
+# To override the default backend:
+#   --compile.fused_kernel_backend triton|compile|eager
+FUSED_KERNEL_FLAGS=""
+if [ -n "${FUSED_KERNEL_DIR:-}" ]; then
+    FUSED_KERNEL_FLAGS="--compile.fused_kernel_dir $FUSED_KERNEL_DIR"
+elif [ "${FUSED_KERNELS:-0}" = "1" ]; then
+    FUSED_KERNEL_FLAGS="--compile.fused_kernel_dir autoresearch/kernel_agent/generated"
+fi
+if [ -n "$FUSED_KERNEL_FLAGS" ] && [ -n "${FUSED_KERNEL_BACKEND:-}" ]; then
+    FUSED_KERNEL_FLAGS="$FUSED_KERNEL_FLAGS --compile.fused_kernel_backend $FUSED_KERNEL_BACKEND"
+fi
+
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b tlp ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --parallelism.data_parallel_shard_degree=4 \
+    --parallelism.tensor_parallel_degree=2 \
+    --training.steps 10 \
+    --dataloader.dataset c4_test \
+    --compile.debug_graph_passes \
+    --compile.disable_passes cudagraph_pass \
+    --profiler.enable_profiling \
+    --profiler.profile_freq 10 \
+    --dump_folder "$PROFILE_DIR" \
+    --debug.print-config \
+    --compile.memory_policy=sac_and_offload \
+    $FUSED_KERNEL_FLAGS \
+    2>&1 | tee "$LOG_FILE"
+
+# --- DeepSeek-v3 debugmodel EP (FSDP+TP+EP) ---
+# NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel_ep tlp ./run_train.sh \
+#     --compile.mode aot_fx_trace \
+#     --parallelism.data_parallel_shard_degree=4 \
+#     --parallelism.tensor_parallel_degree=2 \
+#     --parallelism.expert_parallel_degree=4 \
+#     --training.steps 10 \
+#     --dataloader.dataset c4_test \
+#     --compile.debug_graph_passes \
+#     --profiler.enable_profiling \
+#     --profiler.profile_freq 10 \
+#     --dump_folder "$PROFILE_DIR" \
+#     --debug.print-config \
+#     --debug.enable_structured_logging \
+#     --compile.memory_policy=sac_and_offload \
+#     2>&1 | tee "$LOG_FILE"
+
+# --- DeepSeek-v3 16B (FSDP+TP+EP) ---
+# NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b tlp ./run_train.sh \
+#     --compile.mode aot_fx_trace \
+#     --parallelism.data_parallel_shard_degree=8 \
+#     --parallelism.tensor_parallel_degree=1 \
+#     --parallelism.expert_parallel_degree=8 \
+#     --training.steps 20 \
+#     --dataloader.dataset c4_test \
+#     --compile.debug_graph_passes \
+#     --compile.disable_passes cudagraph_pass \
+#     --profiler.enable_profiling \
+#     --profiler.profile_freq 10 \
+#     --dump_folder "$PROFILE_DIR" \
+#     --debug.print-config \
+#     --compile.memory_policy=sac_and_offload \
+#     2>&1 | tee "$LOG_FILE"
+
+echo "Run log saved to $LOG_FILE"
+
+# Upload rank 0 trace to Perfetto
+{
+TRACE_FILE=$(find "$PROFILE_DIR" -name "rank0_*" -type f | head -1)
+if [ -n "$TRACE_FILE" ]; then
+    echo "Uploading $TRACE_FILE"
+    python3 ~/local/fbsource/arvr/scripts/perfetto/share_trace.py "$TRACE_FILE"
+else
+    echo "No rank0 trace found in $PROFILE_DIR"
+fi
+} 2>&1 | tee -a "$LOG_FILE"
+
+# Upload log to pastry
+PASTRY_LINK=$(cat "$LOG_FILE" | pastry)
+echo "Pastry link: $PASTRY_LINK"

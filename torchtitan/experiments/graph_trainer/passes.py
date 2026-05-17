@@ -149,6 +149,11 @@ def compile_time_passes(
     )
     from torchtitan.models.common.attention import FlexAttention
 
+    from torchtitan.experiments.graph_trainer.fused_kernel_registry import (
+        FusedKernelRegistry,
+        fused_kernel_replacement_pass,
+    )
+
     n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
         remove_detach_pass,
@@ -173,6 +178,21 @@ def compile_time_passes(
     ]
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    # Fused kernel replacement: runs after all graph restructuring passes
+    # but before inductor compilation, so signatures match the final graph
+    # and inductor can further optimize around the fused ops.
+    fused_dir = config.compile.fused_kernel_dir
+    if fused_dir:
+        registry = FusedKernelRegistry()
+        registry.load_from_dir(fused_dir)
+        if config.compile.fused_kernel_backend:
+            registry.set_default_backend(config.compile.fused_kernel_backend)
+        passes.append(
+            functools.partial(
+                fused_kernel_replacement_pass, registry=registry
+            )
+        )
 
     inductor_compilation = config.compile.inductor_compilation
     if inductor_compilation == "full":
@@ -330,6 +350,20 @@ def apply_graph_passes(
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
     all_passes_elapsed = time.perf_counter() - all_passes_start
     logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
+    if debug:
+        from pathlib import Path
+        import tempfile
+
+        output_path = Path(tempfile.gettempdir()) / "final_graph_after_all_passes.txt"
+        output_path.write_text(
+            gm.print_readable(
+                print_output=False,
+                include_stride=True,
+                include_device=True,
+                expanded_def=True,
+            )
+        )
+        logger.info(f"Dumped final graph to {output_path}")
     return gm
 
 

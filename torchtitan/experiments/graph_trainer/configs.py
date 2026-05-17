@@ -84,6 +84,20 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
 
+    fused_kernel_dir: str = ""
+    """Directory containing generated fused kernels. When set, the fused
+    kernel replacement pass loads kernels from this directory and replaces
+    matched aten subgraphs with the best available backend (triton,
+    torch.compile, or eager). Each subdirectory must contain a problem.py
+    (reference implementation) and optionally kernel.py (triton) and
+    benchmark.json (timing data for backend selection). When empty, the
+    pass is a no-op."""
+
+    fused_kernel_backend: str = ""
+    """Override the default backend for all fused ops. Options: triton,
+    compile, eager, helion. When empty, the best backend is auto-selected
+    from benchmark.json timing data."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
