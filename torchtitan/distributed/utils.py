@@ -45,23 +45,37 @@ def _dist_reduce(
             process group, and then the result will be all_reduced for the mesh.
     """
     if isinstance(x, DTensor):
-        # DTensor path: ``full_tensor()`` already performs the mesh reduction
-        # for Partial placements and is a no-op for Replicate. Skipping the
-        # subsequent mesh all-reduce is required to avoid double-counting.
+        # DTensor path. ``full_tensor()`` reduces across the DTensor's own
+        # mesh (Partial → reduced; Replicate → no-op) and returns a plain
+        # tensor with the full value on every rank.
+        #
         # Shard placements are not supported — semantics are undefined since
         # the reduction target is ambiguous.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
         )
-        if extra_pg is not None:
-            raise ValueError(
-                "_dist_reduce does not support DTensor input combined with "
-                "extra_pg: ``full_tensor()`` already reduces over the DTensor's "
-                "mesh, and extra_pg (e.g. the FT replica group) is orthogonal "
-                "to that mesh. Pass a plain tensor when using extra_pg."
-            )
-        return float(x.full_tensor().item())
+
+        # If the requested reduction mesh is the same mesh the DTensor
+        # already lives on, ``full_tensor()`` has done the reduction and
+        # we must skip the subsequent all_reduce to avoid double-counting.
+        # Otherwise (the requested mesh is orthogonal to the DTensor's mesh,
+        # e.g. reducing a TP-Replicated loss across batch_mesh), we still
+        # need to reduce on the requested mesh — fall through to the
+        # plain-tensor path with the materialized full tensor.
+        x_mesh = x.device_mesh
+        x = x.full_tensor()
+        if mesh is None or _meshes_share_axes(x_mesh, mesh):
+            if extra_pg is not None:
+                raise ValueError(
+                    "_dist_reduce does not support DTensor input combined "
+                    "with extra_pg when the DTensor's mesh covers the "
+                    "requested reduction mesh: ``full_tensor()`` already "
+                    "reduces over that mesh and extra_pg is orthogonal. "
+                    "Pass a plain tensor when using extra_pg."
+                )
+            return float(x.item())
+        # Fall through to plain-tensor path to do the cross-mesh reduction.
 
     # Plain tensor path.
     if extra_pg is not None:
@@ -70,6 +84,18 @@ def _dist_reduce(
         return float(x.item())
     assert x.numel() == 1  # required by `.item()`
     return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
+
+
+def _meshes_share_axes(a: DeviceMesh, b: DeviceMesh) -> bool:
+    """True if meshes ``a`` and ``b`` cover any of the same root-mesh axes.
+
+    ``DeviceMesh.mesh_dim_names`` is an unambiguous identifier for an axis
+    within a root mesh, so a non-empty intersection of dim-name sets means
+    the two meshes overlap on at least one axis.
+    """
+    a_names = set(a.mesh_dim_names or ())
+    b_names = set(b.mesh_dim_names or ())
+    return bool(a_names & b_names)
 
 
 # TODO: rename this to maybe_dist_max
