@@ -64,6 +64,7 @@ class FusedOp:
     name: str
     signature: list[OpSig]  # op targets + shapes identifying the subgraph
     num_inputs: int
+    num_outputs: int = 1    # >1 means the op returns a tuple of tensors
     reference_fn: Callable | None = None
     implementations: dict[str, Implementation] = field(default_factory=dict)
     _active_backend: str | None = None
@@ -218,19 +219,26 @@ def _register_custom_op(fused_op: FusedOp) -> Callable:
         return getattr(torch.ops.fused_kernel, op_name)
 
     args = ", ".join(f"Tensor x{i}" for i in range(fused_op.num_inputs))
-    schema = f"{op_name}({args}) -> Tensor"
+    n_out = fused_op.num_outputs
+    if n_out == 1:
+        ret_type = "Tensor"
+    else:
+        ret_type = f"({', '.join(['Tensor'] * n_out)})"
+    schema = f"{op_name}({args}) -> {ret_type}"
     _lib.define(schema)
 
-    def cuda_impl(*args: torch.Tensor) -> torch.Tensor:
+    def cuda_impl(*args: torch.Tensor):
         return fused_op.dispatch(*args)
 
-    def meta_impl(*args: torch.Tensor) -> torch.Tensor:
+    def meta_impl(*args: torch.Tensor):
         if fused_op.reference_fn is not None:
             try:
                 return fused_op.reference_fn(*args)
             except Exception:
                 pass
-        return torch.empty_like(args[0])
+        if n_out == 1:
+            return torch.empty_like(args[0])
+        return tuple(torch.empty_like(args[0]) for _ in range(n_out))
 
     _lib.impl(op_name, cuda_impl, "CUDA")
     _lib.impl(op_name, meta_impl, "Meta")
@@ -293,16 +301,26 @@ class FusedKernelRegistry:
             if not signature:
                 continue
 
-            # Load reference
+            # Load reference and detect num_inputs / num_outputs
             ref_fn = None
             num_inputs = 0
+            num_outputs = 1
             try:
                 mod = _load_module_from_file(problem_path, f"_prob_{name}")
                 model_cls = getattr(mod, "Model", None)
                 get_inputs_fn = getattr(mod, "get_inputs", None)
                 if model_cls and get_inputs_fn:
                     ref_fn = model_cls().forward
-                    num_inputs = len(get_inputs_fn())
+                    inputs = get_inputs_fn()
+                    num_inputs = len(inputs)
+                    # Detect multi-output by running the reference
+                    try:
+                        with torch.no_grad():
+                            ref_out = ref_fn(*inputs)
+                        if isinstance(ref_out, tuple):
+                            num_outputs = len(ref_out)
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.debug(f"Failed to load reference from {problem_path}: {e}")
                 continue
@@ -311,6 +329,7 @@ class FusedKernelRegistry:
                 name=name,
                 signature=signature,
                 num_inputs=num_inputs,
+                num_outputs=num_outputs,
                 reference_fn=ref_fn,
             )
 
@@ -452,15 +471,47 @@ def fused_kernel_replacement_pass(
                     if arg.name not in matched_names and arg not in external_inputs:
                         external_inputs.append(arg)
 
+            # Find output nodes: nodes in the window that have users outside it
+            output_nodes = []
+            for n in window:
+                for user in n.users:
+                    if user.name not in matched_names:
+                        if n not in output_nodes:
+                            output_nodes.append(n)
+                        break
+            if not output_nodes:
+                output_nodes = [window[-1]]
+
+            # Check that num_outputs matches the registered op
+            if len(output_nodes) != fused_op.num_outputs:
+                i += 1
+                continue
+
             last_node = window[-1]
             with graph.inserting_after(last_node):
                 new_node = graph.call_function(
                     custom_op, args=tuple(external_inputs)
                 )
-                new_node.meta = last_node.meta.copy()
 
-            last_node.replace_all_uses_with(new_node)
-            new_node.replace_input_with(new_node, last_node)
+                if len(output_nodes) == 1:
+                    new_node.meta = output_nodes[0].meta.copy()
+                    output_nodes[0].replace_all_uses_with(new_node)
+                else:
+                    # Multi-output: the fused op returns a tuple.
+                    # Insert getitem nodes to fan out to each output's users.
+                    new_node.meta = {}
+                    for out_idx, out_node in enumerate(output_nodes):
+                        getitem_node = graph.call_function(
+                            operator.getitem, args=(new_node, out_idx)
+                        )
+                        getitem_node.meta = out_node.meta.copy()
+                        out_node.replace_all_uses_with(getitem_node)
+
+            # Fix self-references (new_node/getitem using themselves)
+            for user_node in list(new_node.users):
+                if user_node.target is operator.getitem:
+                    continue
+                user_node.replace_input_with(new_node, last_node)
 
             for old in reversed(window):
                 if not old.users:
@@ -745,9 +796,26 @@ def _generate_problem_from_region(
                 f"        {var} = torch.ops.{target_str}({', '.join(all_args)}){comment}"
             )
 
-    # Output: last node
-    last_var = var_map[nodes[-1].name]
-    body_lines.append(f"        return {last_var}")
+    # Outputs: nodes consumed outside the region
+    node_names = {n.name for n in nodes}
+    output_nodes = []
+    for n in nodes:
+        for user in n.users:
+            if user.name not in node_names:
+                if n not in output_nodes:
+                    output_nodes.append(n)
+                break
+    if not output_nodes:
+        output_nodes = [nodes[-1]]
+
+    num_outputs = len(output_nodes)
+    if num_outputs == 1:
+        body_lines.append(f"        return {var_map[output_nodes[0].name]}")
+        ret_type = "torch.Tensor"
+    else:
+        out_vars = ", ".join(var_map[n.name] for n in output_nodes)
+        body_lines.append(f"        return ({out_vars})")
+        ret_type = f"tuple[{', '.join(['torch.Tensor'] * num_outputs)}]"
 
     # Parameters and get_inputs
     param_parts = []
@@ -776,14 +844,14 @@ def _generate_problem_from_region(
     ]
     slug = "_".join(compute_ops[:4]) if compute_ops else "reshape_chain"
     desc = f"Fused region ({region.norm_fqn}): {' -> '.join(compute_ops) if compute_ops else 'reshape chain'}\n"
-    desc += f"Instances: {count}. Ops: {len(nodes)}, compute: {len(compute_ops)}.\n"
+    desc += f"Instances: {count}. Ops: {len(nodes)}, compute: {len(compute_ops)}, outputs: {num_outputs}.\n"
 
     return desc + f"""
 import torch
 import torch.nn as nn
 
 class Model(nn.Module):
-    def forward(self, {', '.join(param_parts)}) -> torch.Tensor:
+    def forward(self, {', '.join(param_parts)}) -> {ret_type}:
 {chr(10).join(body_lines)}
 
 def get_inputs():
