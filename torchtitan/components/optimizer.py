@@ -479,18 +479,37 @@ def register_moe_load_balancing_hook(
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
         if loss_mesh is not None:
-            if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
-                tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
-                    placements=[Replicate()]
-                    * tokens_per_expert_by_layer.device_mesh.ndim
-                )
+            # Under full_dtensor the DTensor mesh includes DP/CP axes,
+            # so redistribute reduces across all ranks and dp_cp_covered
+            # is True. Under non-full_dtensor only TP/EP are in the mesh,
+            # so DP/CP partial counts need a separate all-reduce.
+            is_dtensor = isinstance(
+                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+            )
+            if is_dtensor:
+                dt = tokens_per_expert_by_layer
+                # Reduce across TP/EP (and DP/CP under full_dtensor).
+                dp_cp_covered = dt.device_mesh.ndim > len({"tp", "ep"})
+                tokens_per_expert_by_layer = dt.redistribute(
+                    placements=[Replicate()] * dt.device_mesh.ndim
+                ).full_tensor()
             else:
-                # Perform single all-reduce to get global statistics across all processes
+                dp_cp_covered = False
+            if not dp_cp_covered:
                 pg = loss_mesh.get_group()
                 torch.distributed.all_reduce(
                     tokens_per_expert_by_layer,
                     group=pg,
                     op=torch.distributed.ReduceOp.SUM,
+                )
+            if is_dtensor:
+                tokens_per_expert_by_layer = (
+                    torch.distributed.tensor.DTensor.from_local(
+                        tokens_per_expert_by_layer,
+                        device_mesh=dt.device_mesh,
+                        placements=[Replicate()] * dt.device_mesh.ndim,
+                        run_check=False,
+                    )
                 )
 
         moe_layer_idx = 0

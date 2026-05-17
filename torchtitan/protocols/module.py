@@ -425,10 +425,7 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         out_named_placements = sharding_config.out_dst_shardings
-        out_grad_named_placements = sharding_config.local_output_grad_placements
-        mesh = parallel_dims.resolve_shared_mesh(
-            [out_named_placements, out_grad_named_placements]
-        )
+        mesh = parallel_dims.resolve_shared_mesh([out_named_placements])
         if mesh is None:
             return outputs
 
@@ -437,14 +434,6 @@ class Module(nn.Module, Configurable):
             if isinstance(outputs, DTensor) and outputs.placements != desired:
                 outputs = outputs.redistribute(placements=desired, async_op=True)
 
-        # Unwrap DTensor output to local tensor with the declared backward
-        # gradient placement. Mirrors NoParallel(local_output_grad_placements
-        # =...): the module returns a local tensor; in backward, the
-        # upstream local d_output is wrapped back as a DTensor with the
-        # declared placement (e.g. Partial to skip a downstream all-reduce).
-        if out_grad_named_placements is not None and isinstance(outputs, DTensor):
-            grad_placements = resolve_placements(out_grad_named_placements, mesh)
-            outputs = outputs.to_local(grad_placements=grad_placements)
         return outputs
 
     @classmethod
