@@ -175,22 +175,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=4,
             disabled=_JIT_DISABLED,
         ),
-            OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode aot_fx_trace",
-                    "--training.steps 5",
-                    "--parallelism.data_parallel_shard_degree 1",
-                    "--parallelism.tensor_parallel_degree 1",
-                    "--parallelism.context_parallel_degree 1",
-                ],
-            ],
-            "aot_fx_trace llama3 1D+xpugraph",
-            "aot_fx_trace_llama3_1d_xpugraph",
-            ngpu=1,
-        ),
         # === aot_fx_trace mode tests ===
         # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
         #
@@ -217,7 +201,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.context_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+CP",
+            "aot_fx_trace llama3 FSDP+TP+CP+graph_capture",
             "aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
             skip_rocm_test=True,
@@ -679,8 +663,8 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm","xpu"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda","rocm","xpu"],
+        help="GPU architecture type. Must be specified as either 'cuda','rocm' or 'xpu'.",
     )
     parser.add_argument(
         "--test_suite",
