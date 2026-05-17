@@ -55,15 +55,6 @@ class LocalTokenDispatcher(Configurable):
         self.top_k = config.top_k
         self.score_before_experts = config.score_before_experts
 
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """No-op for the EP=1 dispatcher. Subclasses override."""
-        del ep_mesh, tp_mesh
-
     def dispatch(
         self,
         x: torch.Tensor,
@@ -157,9 +148,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
-    ``ep_mesh`` and the ``sp_size`` / ``sp_rank`` SP coordinates are wired
-    by the owning ``GroupedExperts.parallelize`` override via
-    ``wire_meshes``.
+    ep_mesh is set by the parallelization code after construction.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -170,32 +159,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         super().__init__(config)
         # DeviceMesh (not ProcessGroup) so that CooR precompile can use
         # torch.ops._dtensor.mesh_get_process_group to keep the FX graph
-        # rank-agnostic. None when EP=1 so dispatch falls back to the
-        # LocalTokenDispatcher path.
+        # rank-agnostic. Set by ExpertParallel._partition_fn().
         self.ep_mesh: DeviceMesh | None = None
-        # Sequence-parallel split coordinates derived from tp_mesh.
-        # ``sp_rank`` uses ``DeviceMesh._sym_get_coordinate`` so it is a
-        # ``SymInt`` under CooR precompile, keeping the FX graph
-        # rank-agnostic. Defaults are the TP=1 values.
+        # TODO: these should be set at config time
+        # Set at runtime by apply_moe_ep_tp. Uses _sym_get_coordinate
+        # so the rank is a SymInt under CooR precompile.
         self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh and SP coordinates used by dispatch / combine.
-
-        Both arguments may be ``None`` when the corresponding parallelism
-        dimension is disabled; ``dispatch`` / ``combine`` handle the
-        disabled cases internally.
-        """
-        self.ep_mesh = ep_mesh
-        if tp_mesh is not None:
-            self.sp_size = tp_mesh.size()
-            self.sp_rank = tp_mesh._sym_get_coordinate(0)
+        self.sp_rank: int | torch.SymInt = -1
 
     def dispatch(
         self,
@@ -211,7 +181,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         all-to-all communication, just local token reordering with padding.
 
         With SP, x/top_scores/selected_experts_indices are already the local
-        SP shard (from DTensor Shard to_local via LocalMapConfig).
+        SP shard (from DTensor Shard to_local in GroupedExperts.forward).
 
         Args:
             x: (num_local_tokens, dim) local token shard
@@ -573,7 +543,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         self.comm_backend = config.comm_backend
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
-        # Wired by GroupedExperts.parallelize via wire_meshes.
+        # Set by ExpertParallel._partition_fn()
         self.ep_mesh: DeviceMesh | None = None
 
         # Import to register custom ops so SAC saves communication outputs
@@ -582,20 +552,6 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
             from torchtitan.distributed.deepep import hybridep  # noqa: F401
         else:
             from torchtitan.distributed.deepep import deepep  # noqa: F401
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by DeepEP dispatch / combine.
-
-        ``tp_mesh`` is ignored — DeepEP does not use SP token splitting.
-        Accepted for API parity with ``AllToAllTokenDispatcher.wire_meshes``.
-        """
-        del tp_mesh
-        self.ep_mesh = ep_mesh
 
     # pyrefly: ignore [bad-override]
     def dispatch(

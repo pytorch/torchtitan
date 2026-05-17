@@ -11,7 +11,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     apply_cp_to_attention,
@@ -61,8 +60,8 @@ def parallelize_llama(
     annotate_llama(model)
 
     if parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+        tp_mesh = parallel_dims.get_mesh("tp")
+        model.parallelize(tp_mesh)
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that

@@ -10,7 +10,15 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Shard
+from torch.distributed.tensor import Partial, Replicate, Shard
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    parallelize_module,
+    PrepareModuleInputOutput,
+    PrepareModuleOutput,
+    RowwiseParallel,
+    SequenceParallel,
+)
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -23,11 +31,13 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
 
@@ -56,9 +66,6 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallelism.full_dtensor:
-        raise NotImplementedError("full_dtensor is not supported yet.")
-
     # CP: wrap inner attention forward BEFORE parallelize() so CP logic
     # runs inside the local_map boundary on local tensors.
     if parallel_dims.cp_enabled:
@@ -68,12 +75,20 @@ def parallelize_llama(
             parallel_dims.get_mesh("cp"),
         )
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        model.parallelize(parallel_dims)
+    tp_mesh = None
     if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+        tp_mesh = parallel_dims.get_mesh("tp")
+        model.parallelize(tp_mesh)
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
-    # Set SP size/rank on EP dispatchers for sequence-parallel token splitting.
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            enable_sp=parallelism.enable_sequence_parallel,
+        )
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -345,3 +360,106 @@ def apply_fsdp(
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+
+
+def apply_moe_ep_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh | None,
+    ep_mesh: DeviceMesh | None,
+    enable_sp: bool = True,
+):
+    """
+    Apply MoE expert/tensor parallelism plans to MoE-enabled transformer blocks.
+
+    Args:
+        model: Model containing transformer blocks.
+        tp_mesh: Tensor-parallel device mesh.
+        ep_mesh: Expert-parallel device mesh.
+        enable_sp: Whether sequence parallelism is enabled.
+    """
+    assert ep_mesh is not None or tp_mesh is not None
+
+    # pyrefly: ignore [not-callable]
+    for transformer_block in model.layers.values():
+        # pyrefly: ignore [missing-attribute]
+        if not transformer_block.moe_enabled:
+            continue
+
+        if tp_mesh is not None:
+            sp_layout = Shard(1) if enable_sp else Replicate()
+            moe_desired_input_layouts = Replicate() if ep_mesh is None else sp_layout
+
+            moe_layer_plan = {
+                "moe": PrepareModuleInputOutput(
+                    input_layouts=(sp_layout,),
+                    desired_input_layouts=(moe_desired_input_layouts,),
+                    use_local_input=False,
+                    output_layouts=(Partial(),),
+                    desired_output_layouts=(sp_layout,),
+                    use_local_output=False,
+                ),
+                # GroupedExperts output is Partial, reduced at MoE boundary
+                "moe.experts": PrepareModuleOutput(
+                    output_layouts=Partial(),
+                    desired_output_layouts=Partial(),
+                    use_local_output=False,
+                ),
+                # Router gate: Replicate weights.
+                # EP off: input is Replicate, gate computes on all tokens, output local tensor.
+                # EP on:  input is Shard(0), gate computes on local token shard, output stays DTensor.
+                "moe.router.gate": NoParallel(local_output_grad_placements=(Partial(),))
+                if ep_mesh is None
+                else SequenceParallel(sequence_dim=0, use_local_output=False),
+            }
+            # pyrefly: ignore [missing-attribute]
+            if transformer_block.moe.shared_experts is not None:
+                # pyrefly: ignore [no-matching-overload]
+                moe_layer_plan.update(
+                    {
+                        "moe.shared_experts.w1": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
+                        ),
+                        "moe.shared_experts.w2": RowwiseParallel(
+                            output_layouts=Partial(),
+                            use_local_output=False,
+                        ),
+                        "moe.shared_experts.w3": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
+                        ),
+                    }
+                )
+            parallelize_module(
+                # pyrefly: ignore [bad-argument-type]
+                module=transformer_block,
+                device_mesh=tp_mesh,
+                # pyrefly: ignore [bad-argument-type]
+                parallelize_plan=moe_layer_plan,
+            )
+
+        experts_mesh, experts_plan = None, None
+        # EP disabled: shard routed expert weights across TP mesh
+        # (input Replicate, produces Partial output reduced at MoE boundary)
+        if ep_mesh is None:
+            experts_mesh = tp_mesh
+            experts_plan = TensorParallel()
+        else:
+            experts_mesh = ep_mesh
+            experts_plan = ExpertParallel()
+            # pyrefly: ignore [missing-attribute]
+            dispatcher = transformer_block.moe.experts.token_dispatcher
+            if tp_mesh is not None:
+                if isinstance(dispatcher, AllToAllTokenDispatcher):
+                    # sp_size and sp_rank are set for sequence-parallel token splitting
+                    # when EP borrows from TP.
+                    dispatcher.sp_size = tp_mesh.size()
+                    # Use _sym_get_coordinate so the rank is a SymInt
+                    # under CooR precompile instead of a concrete int
+                    # that gets baked into the FX graph.
+                    dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
+
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=transformer_block.moe.experts,
+            device_mesh=experts_mesh,
+            parallelize_plan=experts_plan,
+        )

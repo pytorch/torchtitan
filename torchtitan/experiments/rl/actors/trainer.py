@@ -351,7 +351,7 @@ class PolicyTrainer(Actor, Configurable):
             [p for m in self.model_parts for p in m.parameters()],
             self.config.training.max_norm,
             foreach=True,
-            parallel_dims=self.parallel_dims,
+            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
         )
 
         self.optimizers.step()
