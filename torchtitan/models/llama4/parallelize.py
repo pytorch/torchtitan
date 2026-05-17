@@ -12,9 +12,12 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
     parallelize_module,
     PrepareModuleInputOutput,
+    PrepareModuleOutput,
     RowwiseParallel,
+    SequenceParallel,
 )
 
 from torchtitan.config import (
@@ -33,11 +36,7 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.tensor_parallel import (
-    ColwiseParallelWithGradPlacement,
-    maybe_enable_async_tp,
-    NoParallel,
-)
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
@@ -87,7 +86,7 @@ def parallelize_llama(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=True,
+            enable_sp=parallelism.enable_sequence_parallel,
         )
 
     model_compile_enabled = (
@@ -380,8 +379,6 @@ def apply_moe_ep_tp(
     """
     assert ep_mesh is not None or tp_mesh is not None
 
-    sp_layout = Shard(1) if enable_sp else Replicate()
-
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         # pyrefly: ignore [missing-attribute]
@@ -389,46 +386,45 @@ def apply_moe_ep_tp(
             continue
 
         if tp_mesh is not None:
+            sp_layout = Shard(1) if enable_sp else Replicate()
+            moe_desired_input_layouts = Replicate() if ep_mesh is None else sp_layout
+
             moe_layer_plan = {
-                # With SP: all-gather (Shard→Replicate) for input,
-                # reduce-scatter (Partial→Shard) for output.
-                # Without SP: input is already Replicate,
-                # all-reduce (Partial→Replicate) for output.
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(sp_layout,),
-                    desired_input_layouts=(Replicate(),),
+                    desired_input_layouts=(moe_desired_input_layouts,),
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(sp_layout,),
-                    # Keep MoE output as DTensor so the residual add
-                    # ``h + self.moe(...)`` composes with config-based
-                    # attention (which flows DTensors).
                     use_local_output=False,
                 ),
-                # replicate computation for the router
-                "moe.router.gate": NoParallel(
-                    local_output_grad_placements=(Partial(),),
+                # GroupedExperts output is Partial, reduced at MoE boundary
+                "moe.experts": PrepareModuleOutput(
+                    output_layouts=Partial(),
+                    desired_output_layouts=Partial(),
+                    use_local_output=False,
                 ),
+                # Router gate: Replicate weights.
+                # EP off: input is Replicate, gate computes on all tokens, output local tensor.
+                # EP on:  input is Shard(0), gate computes on local token shard, output stays DTensor.
+                "moe.router.gate": NoParallel(local_output_grad_placements=(Partial(),))
+                if ep_mesh is None
+                else SequenceParallel(sequence_dim=0, use_local_output=False),
             }
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # Use ColwiseParallelWithGradPlacement to keep d_x as Partial in
-                # backward (avoids the all-reduce that from_local(Replicate)
-                # would otherwise trigger). For w2, output_layouts=Partial()
-                # skips the Partial→Replicate all-reduce in forward. The
-                # reduction happens once at the MoE output boundary
-                # (PrepareModuleInputOutput).
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
+                        "moe.shared_experts.w1": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
                         ),
                         "moe.shared_experts.w2": RowwiseParallel(
                             output_layouts=Partial(),
+                            use_local_output=False,
                         ),
-                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
+                        "moe.shared_experts.w3": ColwiseParallel(
+                            input_layouts=moe_desired_input_layouts,
                         ),
                     }
                 )
@@ -441,7 +437,8 @@ def apply_moe_ep_tp(
             )
 
         experts_mesh, experts_plan = None, None
-        # EP disabled: shard routed expert weights across TP mesh (input Replicate, produces Partial output reduced at MoE boundary)
+        # EP disabled: shard routed expert weights across TP mesh
+        # (input Replicate, produces Partial output reduced at MoE boundary)
         if ep_mesh is None:
             experts_mesh = tp_mesh
             experts_plan = TensorParallel()
