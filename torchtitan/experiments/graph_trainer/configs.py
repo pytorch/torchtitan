@@ -85,20 +85,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     Tensors are selected largest-first until the budget is exhausted."""
 
     fused_kernel_dir: str = ""
-    """Directory containing generated fused kernels. When set, the fused
-    kernel replacement pass loads kernels from this directory and replaces
-    matched aten subgraphs with the best available backend (triton,
-    torch.compile, or eager). Each subdirectory must contain a problem.py
-    (reference implementation) and optionally kernel.py (triton) and
-    benchmark.json (timing data for backend selection). When empty, the
-    pass is a no-op."""
-
-    extract_fused_kernels_dir: str = ""
-    """When set, extract fusible patterns from the live FX graph and write
-    KernelAgent-compatible problem.py files to this directory, then exit
-    without training. Runs after all graph restructuring passes but before
-    inductor, so the extracted patterns match the graph at the point where
-    fused kernels would be applied."""
+    """Directory for fused kernel extraction and acceleration. When set,
+    the fused kernel pass discovers fusible regions, replaces each with a
+    call_module wrapping the original subgraph (zero-overhead eager fallback),
+    and writes problem.py for offline kernel generation. If kernel.py exists
+    in a region's subdirectory (keyed by hash), the module's forward is
+    swapped to use the optimized kernel. When empty, the pass is a no-op."""
 
     precompile_artifact_dir: str = ""
     """

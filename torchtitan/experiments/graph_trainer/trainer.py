@@ -176,30 +176,18 @@ class GraphTrainer(Trainer):
                     )
 
             if self.config.compile.enable_passes:
-                from torchtitan.experiments.graph_trainer.fused_kernel_registry import (
-                    ExtractFusedKernelsExit,
-                )
-
                 pipeline_fn = PASS_PIPELINE_REGISTRY.get(
                     self.config.compile.pass_pipeline,
                     construct_default_graph_passes,
                 )
                 passes = pipeline_fn(self._traced_step, self.config)
 
-                try:
-                    self._traced_step.gm = apply_graph_passes(
-                        self._traced_step.gm,
-                        self._traced_step.example_inputs,
-                        passes,
-                        compile_config=self.config.compile,
-                    )
-                except ExtractFusedKernelsExit as e:
-                    print(f"[titan] {e}")
-                    import torch.distributed as dist
-                    if dist.is_initialized():
-                        dist.barrier()
-                        dist.destroy_process_group()
-                    raise SystemExit(0) from None
+                self._traced_step.gm = apply_graph_passes(
+                    self._traced_step.gm,
+                    self._traced_step.example_inputs,
+                    passes,
+                    compile_config=self.config.compile,
+                )
         with self.train_context():
             outputs = run_traced(self._traced_step, module=model)(
                 inputs,

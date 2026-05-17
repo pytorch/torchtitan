@@ -150,9 +150,7 @@ def compile_time_passes(
     from torchtitan.models.common.attention import FlexAttention
 
     from torchtitan.experiments.graph_trainer.fused_kernel_registry import (
-        FusedKernelRegistry,
-        extract_fused_kernels_pass,
-        fused_kernel_replacement_pass,
+        fused_kernel_pass,
     )
 
     n_layers = len(config.model_spec.model.layers)
@@ -180,28 +178,13 @@ def compile_time_passes(
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    # Extract fusible patterns from the live graph (extraction-only mode).
-    # Runs at the same point as the replacement pass — after all restructuring,
-    # before inductor. Raises ExtractFusedKernelsExit to stop training.
-    extract_dir = config.compile.extract_fused_kernels_dir
-    if extract_dir:
-        passes.append(
-            functools.partial(
-                extract_fused_kernels_pass, output_dir=extract_dir
-            )
-        )
-
-    # Fused kernel replacement: runs after all graph restructuring passes
-    # but before inductor compilation, so signatures match the final graph
-    # and inductor can further optimize around the fused ops.
+    # Fused kernel pass: discovers fusible regions, replaces with
+    # call_module (eager fallback), loads kernels if available.
+    # No-op when fused_kernel_dir is empty.
     fused_dir = config.compile.fused_kernel_dir
     if fused_dir:
-        registry = FusedKernelRegistry()
-        registry.load_from_dir(fused_dir)
         passes.append(
-            functools.partial(
-                fused_kernel_replacement_pass, registry=registry
-            )
+            functools.partial(fused_kernel_pass, kernel_dir=fused_dir)
         )
 
     inductor_compilation = config.compile.inductor_compilation
