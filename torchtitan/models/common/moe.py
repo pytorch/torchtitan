@@ -10,14 +10,13 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor import DTensor, Partial, Replicate
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 
 
 class GroupedExperts(Module):
@@ -80,18 +79,25 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add.
+        """Dispatch tokens to experts, compute, combine, and scatter_add."""
+        # Convert to local for routed expert dispatch/compute.
+        # Replicate x → Partial grad; Shard x → grad unchanged.
+        if isinstance(x, DTensor):
+            grad_placements = (
+                (Partial(),) if x.placements[0].is_replicate() else x.placements
+            )
+            x = x.to_local(grad_placements=grad_placements)
+        if isinstance(top_scores, DTensor):
+            assert isinstance(selected_experts_indices, DTensor)
+            top_scores = top_scores.to_local()
+            selected_experts_indices = selected_experts_indices.to_local()
 
-        shared_experts is passed to combine() where it overlaps with the async
-        combine all-to-all (NCCL stream) or async DeepEP combine.
-        """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+        return self.token_dispatcher.combine(routed_output, metadata, x)
 
 
 class TokenChoiceTopKRouter(Module):
@@ -218,6 +224,14 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
+        if (
+            expert_bias is not None
+            and isinstance(scores, DTensor)
+            and not isinstance(expert_bias, DTensor)
+        ):
+            expert_bias = DTensor.from_local(
+                expert_bias, scores.device_mesh, (Replicate(),), run_check=False
+            )
         scores_for_choice = scores if expert_bias is None else scores + expert_bias
         # Apply node-limited routing if configured
         if self.num_expert_groups is not None:
@@ -243,9 +257,15 @@ class TokenChoiceTopKRouter(Module):
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
+        # histc doesn't support DTensor — use local tensor for counting.
+        indices_for_histc = (
+            selected_experts_indices._local_tensor
+            if isinstance(selected_experts_indices, DTensor)
+            else selected_experts_indices
+        )
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
+            indices_for_histc.view(-1),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
@@ -258,18 +278,18 @@ class MoE(Module):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
-    1. Router computes expert assignments
-    2. GroupedExperts.forward() handles:
+    1. Router computes expert assignments (stays on DTensor)
+    2. GroupedExperts.forward() converts DTensor to local, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
-       b. expert computation
+       b. expert computation (local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
-          With EP, starts async communication (NCCL all-to-all or DeepEP
-          combine), runs shared_experts in parallel, then forces sync
-          (scatter_add for NCCL AllToAll, sync_combine for DeepEP) and
-          produces final output.
-          Without EP (LocalTokenDispatcher), no communication is needed.
+          - LocalTokenDispatcher (no EP): scatter_add only.
+          - AllToAll: all-to-all communication, then scatter_add.
+          - DeepEP/HybridEP: async combine_tokens.
+    3. Shared experts run on DTensor (overlaps with DeepEP async combine).
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -319,32 +339,8 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
-        # in backward, so gradient reduction (reduce-scatter from Partial to
-        # Shard(1)) happens once at the MoE boundary rather than being
-        # duplicated inside the MoE.
-        #
-        # Why grad(x) is Partial on the tp_mesh across all parallelism:
-        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
-        #   w1/w3, Rowwise on w2) produce Partial output gradients.
-        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via sequence-parallel token splitting in AllToAllTokenDispatcher),
-        #   so grad(x) is non-zero only at each rank's token positions (Partial).
-        #
-        # This holds for all MoE components (router.gate, routed experts, shared
-        # experts) and regardless of score_before_experts.
-        if isinstance(x, DTensor):
-            assert (
-                x.device_mesh.ndim == 1
-            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            assert x.device_mesh.mesh_dim_names == (
-                "tp",
-            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
-
         # top_scores and selected_experts_indices shape (bs*slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (
@@ -361,13 +357,21 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        out = self.experts(
-            x,
-            top_scores,
-            selected_experts_indices,
-            shared_experts=self.shared_experts,
-        )
+        out = self.experts(x, top_scores, selected_experts_indices)
 
+        # shared_experts runs in parallel with deepep combine communication.
+        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+
+        if isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher):
+            # Sync the combine operation before using routed_output.
+            # This inserts a CUDA stream wait, ensuring combine is complete before
+            # the subsequent addition or reshape operations read routed output.
+            from torchtitan.distributed.deepep.deepep import sync_combine
+
+            sync_combine()
+
+        if shared_out is not None:
+            out = out + shared_out
         return out.reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
