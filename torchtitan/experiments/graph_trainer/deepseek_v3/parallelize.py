@@ -81,7 +81,8 @@ def parallelize_deepseekv3(
 
     moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
     is_hybridep = moe_config is not None and isinstance(
-        moe_config.experts.token_dispatcher, HybridEPTokenDispatcher.Config
+        moe_config.experts.token_dispatcher,
+        HybridEPTokenDispatcher.Config,
     )
     if is_hybridep:
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
