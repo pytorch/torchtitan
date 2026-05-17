@@ -9,6 +9,7 @@ from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 
@@ -46,25 +47,19 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
             score_before_experts=td.score_before_experts,
             pad_multiple=pad_multiple,
         )
-    elif isinstance(td, DeepEPTokenDispatcher.Config):
-        if td.comm_backend == "deepep":
-            raise ValueError(
-                "DeepEP does not support pad_multiple. "
-                "Use hybridep or standard comm backend instead."
-            )
-        config.token_dispatcher = DeepEPTokenDispatcher.Config(
+    elif isinstance(td, HybridEPTokenDispatcher.Config):
+        config.token_dispatcher = HybridEPTokenDispatcher.Config(
             num_experts=td.num_experts,
             top_k=td.top_k,
             score_before_experts=td.score_before_experts,
-            comm_backend=td.comm_backend,
             non_blocking_capacity_factor=td.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
         )
     else:
         raise ValueError(
-            "MoE quantization requires a token dispatcher that handles "
-            "padding (TorchAOTokenDispatcher or hybridep). "
-            "Enable expert parallelism or use a compatible comm backend."
+            f"MoE quantization requires a token dispatcher that supports "
+            f"padding (TorchAOTokenDispatcher or HybridEPTokenDispatcher), "
+            f"got {type(td).__name__}."
         )
 
 
