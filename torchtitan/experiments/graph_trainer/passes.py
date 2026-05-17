@@ -275,13 +275,10 @@ def construct_default_graph_passes(
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
-        # Only CUDA graph uses insert_kernel_annotations_pass today.
-        # XPUGraph should not enable CUDA kernel annotations.
         passes.extend(
             compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
         )
 
-    # Graph capture should be the last pass.
     if graph_capture_pass is not None:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
