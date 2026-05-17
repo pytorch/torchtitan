@@ -65,7 +65,7 @@ class LocalTokenDispatcher(Configurable):
         """No-op for the EP=1 dispatcher. Subclasses override."""
         del ep_mesh, tp_mesh
 
-    def local_reorder(
+    def _local_reorder(
         self,
         x: torch.Tensor,
         top_scores: torch.Tensor,
@@ -115,7 +115,12 @@ class LocalTokenDispatcher(Configurable):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
-        return routed_input, num_tokens_per_expert, token_indices_experts_sorted, top_scores_experts_sorted
+        return (
+            routed_input,
+            num_tokens_per_expert,
+            token_indices_experts_sorted,
+            top_scores_experts_sorted,
+        )
 
     def dispatch(
         self,
@@ -135,7 +140,12 @@ class LocalTokenDispatcher(Configurable):
             num_tokens_per_expert: (num_experts,) token counts per expert
             metadata: LocalDispatchMetadata for combine()
         """
-        routed_input, num_tokens_per_expert, token_indices_experts_sorted, top_scores_experts_sorted = self.local_reorder(x, top_scores, selected_experts_indices)
+        (
+            routed_input,
+            num_tokens_per_expert,
+            token_indices_experts_sorted,
+            top_scores_experts_sorted,
+        ) = self._local_reorder(x, top_scores, selected_experts_indices)
 
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted=token_indices_experts_sorted,
@@ -254,7 +264,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         ep_size = self.ep_mesh.size()
 
-        routed_input, num_tokens_per_expert, token_indices_experts_sorted, top_scores_experts_sorted = self.local_reorder(x, top_scores, selected_experts_indices)
+        (
+            routed_input,
+            num_tokens_per_expert,
+            token_indices_experts_sorted,
+            top_scores_experts_sorted,
+        ) = self._local_reorder(x, top_scores, selected_experts_indices)
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
@@ -536,6 +551,19 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
+    def wire_meshes(
+        self,
+        *,
+        ep_mesh: DeviceMesh | None,
+        tp_mesh: DeviceMesh | None,
+    ) -> None:
+        """Install the EP mesh used by DeepEP dispatch / combine.
+
+        ``tp_mesh`` is ignored — DeepEP does not use SP token splitting.
+        """
+        del tp_mesh
+        self.ep_mesh = ep_mesh
+
     # pyrefly: ignore [bad-override]
     def dispatch(
         self,
@@ -646,21 +674,6 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         """Install the EP mesh used by HybridEP dispatch / combine.
 
         ``tp_mesh`` is ignored — HybridEP does not use SP token splitting.
-        Accepted for API parity with ``AllToAllTokenDispatcher.wire_meshes``.
-        """
-        del tp_mesh
-        self.ep_mesh = ep_mesh
-
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-        tp_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by DeepEP dispatch / combine.
-
-        ``tp_mesh`` is ignored — DeepEP does not use SP token splitting.
-        Accepted for API parity with ``AllToAllTokenDispatcher.wire_meshes``.
         """
         del tp_mesh
         self.ep_mesh = ep_mesh

@@ -17,13 +17,13 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.common.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
 )
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rmsnorm import RMSNorm
-from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
@@ -218,13 +218,19 @@ class DeepSeekV3Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    td_cfg = layer_cfg.moe.experts.token_dispatcher
+                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
                     if (
-                        isinstance(td_cfg, (DeepEPTokenDispatcher.Config, HybridEPTokenDispatcher.Config))
+                        isinstance(
+                            token_dispatcher_cfg,
+                            (
+                                DeepEPTokenDispatcher.Config,
+                                HybridEPTokenDispatcher.Config,
+                            ),
+                        )
                         and parallelism.expert_parallel_degree == 1
                     ):
                         raise ValueError(
-                            f"{type(td_cfg).__qualname__} requires expert parallelism "
+                            f"{type(token_dispatcher_cfg).__qualname__} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
 

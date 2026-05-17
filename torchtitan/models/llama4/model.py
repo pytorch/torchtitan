@@ -145,7 +145,13 @@ class Llama4Model(Decoder):
                     )
                     td_cfg = layer_cfg.moe.experts.token_dispatcher
                     if (
-                        isinstance(td_cfg, (DeepEPTokenDispatcher.Config, HybridEPTokenDispatcher.Config))
+                        isinstance(
+                            td_cfg,
+                            (
+                                DeepEPTokenDispatcher.Config,
+                                HybridEPTokenDispatcher.Config,
+                            ),
+                        )
                         and parallelism.expert_parallel_degree == 1
                     ):
                         raise ValueError(

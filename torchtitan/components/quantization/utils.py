@@ -8,7 +8,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
@@ -37,29 +36,28 @@ def swap_token_dispatcher(config, pad_multiple: int) -> None:
     Requires a dispatcher that handles padding (TorchAOTokenDispatcher or
     DeepEP hybridep). Raises ValueError if the dispatcher doesn't support it.
     """
-    td = config.token_dispatcher
-    if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
-        td, TorchAOTokenDispatcher.Config
-    ):
+    if isinstance(
+        config.token_dispatcher, AllToAllTokenDispatcher.Config
+    ) and not isinstance(config.token_dispatcher, TorchAOTokenDispatcher.Config):
         config.token_dispatcher = TorchAOTokenDispatcher.Config(
-            num_experts=td.num_experts,
-            top_k=td.top_k,
-            score_before_experts=td.score_before_experts,
+            num_experts=config.token_dispatcher.num_experts,
+            top_k=config.token_dispatcher.top_k,
+            score_before_experts=config.token_dispatcher.score_before_experts,
             pad_multiple=pad_multiple,
         )
-    elif isinstance(td, HybridEPTokenDispatcher.Config):
+    elif isinstance(config.token_dispatcher, HybridEPTokenDispatcher.Config):
         config.token_dispatcher = HybridEPTokenDispatcher.Config(
-            num_experts=td.num_experts,
-            top_k=td.top_k,
-            score_before_experts=td.score_before_experts,
-            non_blocking_capacity_factor=td.non_blocking_capacity_factor,
+            num_experts=config.token_dispatcher.num_experts,
+            top_k=config.token_dispatcher.top_k,
+            score_before_experts=config.token_dispatcher.score_before_experts,
+            non_blocking_capacity_factor=config.token_dispatcher.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
         )
     else:
         raise ValueError(
             f"MoE quantization requires a token dispatcher that supports "
             f"padding (TorchAOTokenDispatcher or HybridEPTokenDispatcher), "
-            f"got {type(td).__name__}."
+            f"got {type(config.token_dispatcher).__name__}."
         )
 
 

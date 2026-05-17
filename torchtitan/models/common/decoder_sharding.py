@@ -16,11 +16,18 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def dense_param_placement(*, tp: Placement) -> NamedPlacement:
+def dense_param_placement(
+    *,
+    tp: Placement,
+    dp: Placement = Replicate(),
+    cp: Placement = Replicate(),
+) -> NamedPlacement:
     """Placement for dense-path params/buffers.
 
-    DP/CP axes are ``Replicate`` at ``distribute_tensor`` time; FSDP reshards
-    DP_SHARD post-parallelize. TP placement is caller-specified.
+    DP/CP axes default to ``Replicate`` at ``distribute_tensor`` time;
+    FSDP reshards DP_SHARD post-parallelize. Callers can override ``dp``
+    and ``cp`` independently for buffers that accumulate partial counts
+    across data-parallel or context-parallel ranks.
 
     TODO: Ideally placements would be defined on a computation mesh that
     has a single DP axis (no DP_REPLICATE vs DP_SHARD distinction). That
@@ -28,9 +35,9 @@ def dense_param_placement(*, tp: Placement) -> NamedPlacement:
     resolved by FlexShard. Revisit once FlexShard lands.
     """
     return {
-        DP_REPLICATE: Replicate(),
-        DP_SHARD: Replicate(),
-        CP: Replicate(),
+        DP_REPLICATE: dp,
+        DP_SHARD: dp,
+        CP: cp,
         TP: tp,
     }
 

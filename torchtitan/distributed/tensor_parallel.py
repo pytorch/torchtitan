@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from collections.abc import Sequence
 from functools import partial
 from typing import Any
 
@@ -39,16 +38,13 @@ class NoParallel(ParallelStyle):
         *,
         input_layout: Placement | None = None,
         output_layout: Placement | None = None,
-        local_output_grad_placements: Sequence[Placement] | None = None,
+        use_local_output: bool = False,
     ):
         super().__init__()
         self.input_layout = input_layout or Replicate()
         self.output_layout = output_layout or Replicate()
         self.desired_input_layout = Replicate()
-        # If None, output stays as DTensor.
-        # If provided, output is cast to local tensor via
-        # to_local(grad_placements=local_output_grad_placements).
-        self.local_output_grad_placements = local_output_grad_placements
+        self.use_local_output = use_local_output
 
     @staticmethod
     def _prepare_input_fn(
@@ -76,17 +72,15 @@ class NoParallel(ParallelStyle):
     @staticmethod
     def _prepare_output_fn(
         output_layout: Placement,
-        local_output_grad_placements: Sequence[Placement] | None,
+        use_local_output: bool,
         mod: nn.Module,
         outputs: DTensor,
         device_mesh: DeviceMesh,
     ) -> torch.Tensor | DTensor:
         if outputs.placements != (output_layout,):
             outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
-        if local_output_grad_placements is not None:
-            return outputs.to_local(grad_placements=local_output_grad_placements)
-        else:
-            return outputs
+        # back to local tensor
+        return outputs.to_local() if use_local_output else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -101,7 +95,7 @@ class NoParallel(ParallelStyle):
             partial(
                 self._prepare_output_fn,  # pyrefly: ignore [bad-argument-type]
                 self.output_layout,
-                self.local_output_grad_placements,
+                self.use_local_output,
             ),
         )
 
