@@ -1,7 +1,7 @@
 """Fused op registry: backend-agnostic custom ops with lightweight dispatch.
 
 Offline step (kernel gen):
-  1. extract_from_dump.py discovers fusible regions → problem.py
+  1. --compile.extract_fused_kernels_dir discovers fusible regions → problem.py
   2. Various backends produce implementations (Triton, torch.compile, ...)
   3. benchmark_all.py measures each → benchmark.json
   4. Results stored in generated/<pattern>/

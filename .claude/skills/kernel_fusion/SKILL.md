@@ -92,72 +92,41 @@ categories are the optimization targets.
 
 ### 2c. Extract Fusible Regions
 
-Use the extraction script to automatically discover fusible patterns from
-the graph dump. It requires **no hardcoded pattern definitions** — it
-discovers everything from graph structure:
+Extract patterns directly from the live FX graph using a config flag.
+This runs as a graph pass with access to the real GraphModule and
+FakeTensor metadata — correct shapes on every node, proper dtypes,
+no text-dump fragility.
 
 ```bash
-# Dry run — show discovered regions without writing files
-python3 -m autoresearch.kernel_agent.extract_from_dump /tmp/final_graph_after_all_passes.txt --dry-run
+# Extract top 20 fusible patterns, then exit (no training):
+EXTRACT_KERNELS_DIR=autoresearch/kernel_agent/generated ./run_graph_trainer_llama3_8b.sh
 
-# Extract top 15 regions to generated/<name>/problem.py
-python3 -m autoresearch.kernel_agent.extract_from_dump /tmp/final_graph_after_all_passes.txt --top-n 15
-
-# Stricter filtering: only regions with ≥3 compute ops appearing ≥4 times
-python3 -m autoresearch.kernel_agent.extract_from_dump graph.txt --min-compute-ops 3 --min-count 4
+# Or directly:
+./run_train.sh --compile.extract_fused_kernels_dir /tmp/extracted ...
 ```
 
-The script (`autoresearch/kernel_agent/extract_from_dump.py`) works as follows:
+The extraction pass (`extract_fused_kernels_pass` in `fused_kernel_registry.py`):
 
-1. **Parse** the `print_readable` dump into structured nodes with shape/dtype/target.
-2. **Segment** the graph at heavy-op boundaries (matmuls, collectives, flash
-   attention, offload/reload). Everything between two heavy ops is one region.
-3. **Deduplicate** by op-target signature — regions with the same sequence of
-   op targets (e.g., `(_to_copy, reshape, view_as_complex, mul, view_as_real,
-   reshape, _to_copy)`) are grouped together. Repeated across 32 layers = 1 unique
-   signature with count 128.
-4. **Filter** by `--min-ops`, `--min-compute-ops` (excluding metadata ops like
-   reshape/view/transpose), and `--min-count`.
-5. **Rank** by `count × compute_ops × tensor_bytes` (frequency × complexity × size).
-6. **Generate** problem.py for the top-N regions, using the first instance as the
-   representative (with concrete shapes from the graph dump).
+1. **Segments** the graph at `module_fqn` boundaries (`layers.*.attention`,
+   `layers.*.feed_forward`, etc.) — uses the model's logical structure.
+2. **Splits** disconnected components within each segment via union-find.
+3. **Filters** out unfusable regions: anything containing `_c10d_functional.*`
+   (collectives), bucketing, offload/reload, flash attention, or embedding ops.
+   Keeps matmul only when it has epilog compute (mm→cast, mm→add).
+4. **Deduplicates** by `(normalized_fqn, op_signature, shape_signature)` —
+   same ops on same shapes in the same module type across layers.
+5. **Ranks** by `count × compute_ops × tensor_bytes`.
+6. **Generates** problem.py with aten IR ops, concrete shapes from FakeTensor
+   metadata, and multi-output support (tuple returns).
+7. **Exits** cleanly without training.
 
-Extracted problems use **raw aten IR** (`torch.ops.aten.silu.default(x)`) —
-no translation to high-level PyTorch. Aten ops are valid callable Python and
-preserve exact semantics. Type annotations from the dump are preserved as comments.
+### 2d. Limitations
 
-Flags:
-- `--min-ops N`: minimum total ops per region (default: 2)
-- `--min-compute-ops N`: minimum non-metadata ops (default: 1)
-- `--min-count N`: minimum repetitions in the graph (default: 2)
-- `--top-n N`: how many regions to extract (default: 20)
-
-### 2d. Review Extracted Regions
-
-The script prints a ranked table:
-
-```
-  #    Count  Ops Compute        Bytes Slug
-  0       62   30      15   67108864  _to_copy_view_as_complex__to_copy_view_as_complex
-  1      128   15       7   67108864  _to_copy_view_as_complex_mul_view_as_real
-  5       64   14       6  117440512  mul_mul_silu_backward_view.dtype
-  ...
-```
-
-Present this to the user. They can adjust filters and re-run, or proceed to
-Phase 4 with the generated problem files.
-
-### 2e. Limitations
-
-- **Cross-collective patterns** (e.g., cross-entropy with allreduce between
-  amax/sum) get split into separate regions at each allreduce boundary. The
-  extracted subgraphs have external inputs for allreduce results. These need
-  manual reformulation as self-contained algorithms (e.g., online softmax).
-- **Metadata-only regions** (pure reshape chains) are filtered out by default
-  via `--min-compute-ops 1`. They have zero compute but may have memory
-  traffic (clone/contiguous). Set `--min-compute-ops 0` to include them.
-- **Duplicate node names** across forward/recompute passes: the graph dump
-  may reuse names. The extractor picks the first occurrence.
+- **Collective-adjacent patterns**: regions are split at `_c10d_functional`
+  boundaries. Patterns that span across collectives (e.g., cross-entropy
+  with allreduce between amax/sum) need manual reformulation.
+- **Metadata-only regions** (pure reshape chains) are filtered out by
+  default (`min_compute_ops=1`).
 
 ## Phase 3: Manual Problem Adjustments (if needed)
 
