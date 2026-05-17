@@ -151,6 +151,7 @@ def compile_time_passes(
 
     from torchtitan.experiments.graph_trainer.fused_kernel_registry import (
         FusedKernelRegistry,
+        extract_fused_kernels_pass,
         fused_kernel_replacement_pass,
     )
 
@@ -178,6 +179,17 @@ def compile_time_passes(
     ]
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    # Extract fusible patterns from the live graph (extraction-only mode).
+    # Runs at the same point as the replacement pass — after all restructuring,
+    # before inductor. Raises ExtractFusedKernelsExit to stop training.
+    extract_dir = config.compile.extract_fused_kernels_dir
+    if extract_dir:
+        passes.append(
+            functools.partial(
+                extract_fused_kernels_pass, output_dir=extract_dir
+            )
+        )
 
     # Fused kernel replacement: runs after all graph restructuring passes
     # but before inductor compilation, so signatures match the final graph

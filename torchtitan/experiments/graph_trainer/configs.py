@@ -98,6 +98,13 @@ class GraphTrainerCompileConfig(CompileConfig):
     compile, eager, helion. When empty, the best backend is auto-selected
     from benchmark.json timing data."""
 
+    extract_fused_kernels_dir: str = ""
+    """When set, extract fusible patterns from the live FX graph and write
+    KernelAgent-compatible problem.py files to this directory, then exit
+    without training. Runs after all graph restructuring passes but before
+    inductor, so the extracted patterns match the graph at the point where
+    fused kernels would be applied."""
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
