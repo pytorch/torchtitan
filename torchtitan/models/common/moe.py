@@ -16,7 +16,10 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import (
+    DeepEPTokenDispatcher,
+    LocalTokenDispatcher,
+)
 
 
 class GroupedExperts(Module):
