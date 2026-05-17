@@ -264,6 +264,7 @@ class XPUGraphWrapper:
         self._args = None
         self._output = None
 
+
 _XPUGRAPH_UNSUPPORTED_OPS = {
     torch.ops.aten.index_put_.default: (
         "aten.index_put_ currently triggers an XPU event wait during "
