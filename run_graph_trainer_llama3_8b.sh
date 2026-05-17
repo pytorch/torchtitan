@@ -47,7 +47,7 @@ tlp ()
 #   Extract:  EXTRACT_KERNELS_DIR=/tmp/extracted ./run_graph_trainer_llama3_8b.sh
 #   Apply:    FUSED_KERNEL_DIR=/tmp/fused_working ./run_graph_trainer_llama3_8b.sh
 #   All:      FUSED_KERNELS=1 ./run_graph_trainer_llama3_8b.sh
-#   Backend:  FUSED_KERNEL_BACKEND=triton|compile|eager
+# Backend is auto-selected per op from benchmark.json (best of triton/compile/eager).
 FUSED_KERNEL_FLAGS=""
 if [ -n "${EXTRACT_KERNELS_DIR:-}" ]; then
     FUSED_KERNEL_FLAGS="--compile.extract_fused_kernels_dir $EXTRACT_KERNELS_DIR"
@@ -55,9 +55,6 @@ elif [ -n "${FUSED_KERNEL_DIR:-}" ]; then
     FUSED_KERNEL_FLAGS="--compile.fused_kernel_dir $FUSED_KERNEL_DIR"
 elif [ "${FUSED_KERNELS:-0}" = "1" ]; then
     FUSED_KERNEL_FLAGS="--compile.fused_kernel_dir autoresearch/kernel_agent/generated"
-fi
-if [ -n "$FUSED_KERNEL_FLAGS" ] && [ -n "${FUSED_KERNEL_BACKEND:-}" ]; then
-    FUSED_KERNEL_FLAGS="$FUSED_KERNEL_FLAGS --compile.fused_kernel_backend $FUSED_KERNEL_BACKEND"
 fi
 
 export PYTORCH_ALLOC_CONF="expandable_segments:True"

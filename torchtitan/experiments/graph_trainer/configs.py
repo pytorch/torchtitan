@@ -93,11 +93,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     benchmark.json (timing data for backend selection). When empty, the
     pass is a no-op."""
 
-    fused_kernel_backend: str = ""
-    """Override the default backend for all fused ops. Options: triton,
-    compile, eager. When empty, the best backend is auto-selected
-    from benchmark.json timing data."""
-
     extract_fused_kernels_dir: str = ""
     """When set, extract fusible patterns from the live FX graph and write
     KernelAgent-compatible problem.py files to this directory, then exit

@@ -198,8 +198,6 @@ def compile_time_passes(
     if fused_dir:
         registry = FusedKernelRegistry()
         registry.load_from_dir(fused_dir)
-        if config.compile.fused_kernel_backend:
-            registry.set_default_backend(config.compile.fused_kernel_backend)
         passes.append(
             functools.partial(
                 fused_kernel_replacement_pass, registry=registry

@@ -13,10 +13,7 @@ Runtime step (graph pass):
 
 Usage:
   registry = FusedOpRegistry.from_generated("autoresearch/kernel_agent/generated")
-  # Select backend globally or per-op
-  registry.set_default_backend("triton")
-  registry.set_backend("00_rope_bwd", "compile")
-  # Create and apply the graph pass
+  # Backend is auto-selected per op from benchmark.json
   pass_fn = registry.make_graph_pass()
   gm = pass_fn(gm, example_inputs)
 """
@@ -60,29 +57,16 @@ class FusedOp:
     input_specs: list[dict]         # shape/dtype for each input
     reference_fn: Callable | None = None  # eager PyTorch reference (Model.forward)
     implementations: dict[str, Implementation] = field(default_factory=dict)
-    _active_backend: str | None = None
-
-    @property
-    def active_backend(self) -> str | None:
-        return self._active_backend
-
-    @active_backend.setter
-    def active_backend(self, backend: str) -> None:
-        if backend not in self.implementations:
-            available = list(self.implementations.keys())
-            raise ValueError(f"Backend '{backend}' not available for {self.name}. Available: {available}")
-        self._active_backend = backend
-
     @property
     def best_backend(self) -> str | None:
-        """Backend with lowest benchmark time."""
+        """Backend with lowest benchmark time (from benchmark.json)."""
         if not self.implementations:
             return None
         return min(self.implementations, key=lambda k: self.implementations[k].time_ms)
 
     def dispatch(self, *args: Any) -> Any:
-        """Call the active backend (or best if none set)."""
-        backend = self._active_backend or self.best_backend
+        """Call the best backend based on microbenchmark results."""
+        backend = self.best_backend
         if backend is None:
             raise RuntimeError(f"No implementations registered for {self.name}")
         return self.implementations[backend].fn(*args)
@@ -227,23 +211,9 @@ class FusedOpRegistry:
 
     def __init__(self) -> None:
         self.ops: dict[str, FusedOp] = {}
-        self._default_backend: str | None = None
 
     def register(self, op: FusedOp) -> None:
         self.ops[op.name] = op
-        if self._default_backend and self._default_backend in op.implementations:
-            op.active_backend = self._default_backend
-
-    def set_default_backend(self, backend: str) -> None:
-        """Set the default backend for all ops that support it."""
-        self._default_backend = backend
-        for op in self.ops.values():
-            if backend in op.implementations:
-                op.active_backend = backend
-
-    def set_backend(self, op_name: str, backend: str) -> None:
-        """Override the backend for a specific op."""
-        self.ops[op_name].active_backend = backend
 
     @classmethod
     def from_generated(cls, generated_dir: str | Path) -> FusedOpRegistry:

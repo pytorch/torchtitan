@@ -66,24 +66,10 @@ class FusedOp:
     num_outputs: int = 1    # >1 means the op returns a tuple of tensors
     reference_fn: Callable | None = None
     implementations: dict[str, Implementation] = field(default_factory=dict)
-    _active_backend: str | None = None
-
-    @property
-    def active_backend(self) -> str | None:
-        return self._active_backend
-
-    @active_backend.setter
-    def active_backend(self, backend: str) -> None:
-        if backend not in self.implementations:
-            available = list(self.implementations.keys())
-            raise ValueError(
-                f"Backend '{backend}' not available for {self.name}. "
-                f"Available: {available}"
-            )
-        self._active_backend = backend
 
     @property
     def best_backend(self) -> str | None:
+        """Backend with lowest benchmark time (from benchmark.json)."""
         if not self.implementations:
             return None
         return min(
@@ -91,7 +77,8 @@ class FusedOp:
         )
 
     def dispatch(self, *args: Any) -> Any:
-        backend = self._active_backend or self.best_backend
+        """Call the best backend based on microbenchmark results."""
+        backend = self.best_backend
         if backend is None:
             raise RuntimeError(f"No implementations for {self.name}")
         return self.implementations[backend].fn(*args)
@@ -256,21 +243,9 @@ class FusedKernelRegistry:
 
     def __init__(self) -> None:
         self.ops: dict[str, FusedOp] = {}
-        self._default_backend: str | None = None
 
     def register(self, op: FusedOp) -> None:
         self.ops[op.name] = op
-        if self._default_backend and self._default_backend in op.implementations:
-            op.active_backend = self._default_backend
-
-    def set_default_backend(self, backend: str) -> None:
-        self._default_backend = backend
-        for op in self.ops.values():
-            if backend in op.implementations:
-                op.active_backend = backend
-
-    def set_backend(self, op_name: str, backend: str) -> None:
-        self.ops[op_name].active_backend = backend
 
     def load_from_dir(self, generated_dir: str | Path) -> None:
         """Load fused ops from a directory of generated kernels.
