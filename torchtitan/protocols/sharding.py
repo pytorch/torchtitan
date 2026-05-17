@@ -101,16 +101,6 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_input_grad_placements: Per-input ``NamedPlacement`` declaring
-            the placement of the **input gradient** when the plain input is
-            wrapped via ``DTensor.from_local`` at the input boundary. Keyed
-            by ``forward()`` arg name. Mirrors
-            ``ColwiseParallelWithGradPlacement(local_input_grad_placements=...)``.
-            Only effective for inputs that arrive as plain tensors and have
-            an entry in ``in_src_shardings``.
-            e.g. ``{"x": {TP: Partial()}}`` to keep d_x as Partial in
-            backward instead of all-reducing to Replicate.
-            ``None`` means default ``from_local`` grad behavior.
         local_output_grad_placements: ``NamedPlacement`` declaring the
             placement of the **output gradient** when the DTensor output is
             unwrapped via ``to_local(grad_placements=...)`` at the output
@@ -132,7 +122,6 @@ class ShardingConfig:
     in_dst_shardings: dict[str, NamedPlacement] | None = None
     out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
     out_dst_shardings: NamedPlacement | None = None
-    local_input_grad_placements: dict[str, NamedPlacement] | None = None
     local_output_grad_placements: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
 

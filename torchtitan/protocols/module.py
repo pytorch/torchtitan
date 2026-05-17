@@ -301,14 +301,6 @@ class Module(nn.Module, Configurable):
         if sharding_config.local_map is None:
             return fn
 
-        if sharding_config.local_input_grad_placements is not None:
-            raise ValueError(
-                f"{type(self).__name__}: local_map and "
-                "local_input_grad_placements cannot coexist. "
-                "Use LocalMapConfig.in_grad_placements for modules "
-                "wrapped with local_map."
-            )
-
         lm = sharding_config.local_map
         in_dst = sharding_config.in_dst_shardings or {}
         pos_args = self._cache_pos_arg_names()
@@ -386,16 +378,14 @@ class Module(nn.Module, Configurable):
 
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
-        in_grad_shardings = sharding_config.local_input_grad_placements or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
-            grad_named_placements = in_grad_shardings.get(name)
             mesh = parallel_dims.resolve_shared_mesh(
-                [src_named_placements, dst_named_placements, grad_named_placements]
+                [src_named_placements, dst_named_placements]
             )
             if mesh is None:
                 continue
@@ -405,15 +395,11 @@ class Module(nn.Module, Configurable):
 
             if not isinstance(value, DTensor) and src_named_placements is not None:
                 layout = resolve_placements(src_named_placements, mesh)
-                grad_placements: tuple | None = None
-                if grad_named_placements is not None:
-                    grad_placements = resolve_placements(grad_named_placements, mesh)
                 value = DTensor.from_local(
                     value,
                     mesh,
                     layout,
                     run_check=False,
-                    grad_placements=grad_placements,
                 )
 
             if dst_named_placements is not None and isinstance(value, DTensor):
