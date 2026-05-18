@@ -1,17 +1,10 @@
-"""KernelAgent integration for FX graph kernel optimization.
+"""Offline kernel generation and benchmarking tooling.
 
 Workflow:
-  1. dump_graph_for_analysis(gm) — get graph summary for LLM to identify fusion candidates
-  2. extract_subgraph_as_problem(gm, nodes) — convert FX subgraph to KernelAgent problem
-  3. generate_kernel(problem) — call KernelAgent to produce a Triton kernel
-  4. register_triton_op(name, kernel_fn, ...) — register as torch custom op
-  5. Write a graph pass that replaces matched patterns with the custom op
+  1. Train with --compile.fused_kernel_dir to extract problems
+  2. python -m autoresearch.kernel_agent.run_all --dir <path> to generate kernels
+  3. python -m autoresearch.kernel_agent.benchmark_all --dir <path> to benchmark
+  4. Train again — auto-picks up best backend per op
 """
 
-from .extract_subgraph import (
-    dump_graph_for_analysis,
-    extract_subgraph_as_problem,
-    find_pattern_instances,
-)
 from .bridge import generate_kernel, optimize_kernel
-from .integrate import load_kernel, register_triton_op
