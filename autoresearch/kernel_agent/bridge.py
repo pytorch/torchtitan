@@ -43,27 +43,27 @@ def _ensure_proxy() -> None:
     SDK's httpx client to trust the Meta CA bundle so requests can go
     through the corporate forward proxy.
     """
-    if os.environ.get("HTTPS_PROXY"):
-        return
-    try:
-        result = subprocess.run(
-            ["with-proxy", "env"], capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    if k.lower() in ("http_proxy", "https_proxy", "no_proxy"):
-                        os.environ.setdefault(k, v)
-                        os.environ.setdefault(k.upper(), v)
-            logger.info("Configured Meta proxy via with-proxy")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    if not os.environ.get("HTTPS_PROXY"):
+        try:
+            result = subprocess.run(
+                ["with-proxy", "env"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        if k.lower() in ("http_proxy", "https_proxy", "no_proxy"):
+                            os.environ.setdefault(k, v)
+                            os.environ.setdefault(k.upper(), v)
+                logger.info("Configured Meta proxy via with-proxy")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
-    if os.path.exists(_META_CA_BUNDLE):
-        os.environ.setdefault("SSL_CERT_FILE", _META_CA_BUNDLE)
-        os.environ.setdefault("REQUESTS_CA_BUNDLE", _META_CA_BUNDLE)
+        if os.path.exists(_META_CA_BUNDLE):
+            os.environ.setdefault("SSL_CERT_FILE", _META_CA_BUNDLE)
+            os.environ.setdefault("REQUESTS_CA_BUNDLE", _META_CA_BUNDLE)
 
+    # Always patch — subprocesses inherit env vars but not in-memory patches
     _patch_anthropic_ssl()
 
 
