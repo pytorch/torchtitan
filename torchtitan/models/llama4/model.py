@@ -143,10 +143,10 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    td_cfg = layer_cfg.moe.experts.token_dispatcher
+                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
                     if (
                         isinstance(
-                            td_cfg,
+                            token_dispatcher_cfg,
                             (
                                 DeepEPTokenDispatcher.Config,
                                 HybridEPTokenDispatcher.Config,
@@ -155,7 +155,7 @@ class Llama4Model(Decoder):
                         and parallelism.expert_parallel_degree == 1
                     ):
                         raise ValueError(
-                            f"{type(td_cfg).__qualname__} requires expert parallelism "
+                            f"{type(token_dispatcher_cfg).__qualname__} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
 

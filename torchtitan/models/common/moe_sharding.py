@@ -138,8 +138,8 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             "expert_bias": dense_param_placement(tp=Replicate()),
             "tokens_per_expert": dense_param_placement(
                 tp=Partial() if enable_ep else Replicate(),
-                # dp=Partial(),
-                # cp=Partial(),
+                dp=Partial(),
+                cp=Partial(),
             ),
         },
         in_src_shardings={"x": dense_activation_placement(tp=sp_layout)},
