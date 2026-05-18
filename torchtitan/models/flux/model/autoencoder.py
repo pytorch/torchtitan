@@ -12,10 +12,8 @@ from einops import rearrange
 from safetensors.torch import load_file as load_sft
 from torch import nn, Tensor
 
+from torchtitan.models.common.nn_modules import Conv2d, GroupNorm
 from torchtitan.protocols.module import Module, ModuleList
-
-Conv2d = Module.from_nn_module(nn.Conv2d)
-GroupNorm = Module.from_nn_module(nn.GroupNorm)
 
 
 @dataclass

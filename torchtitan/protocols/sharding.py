@@ -49,10 +49,11 @@ class LocalMapConfig:
 
     Attributes:
         in_grad_placements: Per-input-gradient NamedPlacements (positional,
-            ordered by ``forward`` args).
+            ordered by ``forward`` args). ``None`` for non-tensor args (no
+            gradient flows through them).
     """
 
-    in_grad_placements: tuple[NamedPlacement, ...]
+    in_grad_placements: tuple[NamedPlacement | None, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -130,7 +131,9 @@ class ShardingConfig:
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
+    out_src_shardings: (
+        NamedPlacement | tuple[NamedPlacement | None, ...] | None
+    ) = None
     out_dst_shardings: NamedPlacement | None = None
     local_input_grad_placements: dict[str, NamedPlacement] | None = None
     local_output_grad_placements: NamedPlacement | None = None
