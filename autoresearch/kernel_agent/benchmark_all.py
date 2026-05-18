@@ -21,7 +21,8 @@ from pathlib import Path
 
 import torch
 
-GENERATED_DIR = Path(__file__).parent / "generated"
+DEFAULT_GENERATED_DIR = Path(__file__).parent / "generated"
+GENERATED_DIR = DEFAULT_GENERATED_DIR  # overridden by --dir
 
 # Tolerances per problem type (some involve f32 reductions / complex math)
 TOLERANCES = {
@@ -194,8 +195,14 @@ def run_one(name: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dir", type=Path, default=None,
+                        help="Directory with problem subdirs (default: autoresearch/kernel_agent/generated)")
     parser.add_argument("--problems", nargs="*")
     args = parser.parse_args()
+
+    global GENERATED_DIR
+    if args.dir is not None:
+        GENERATED_DIR = args.dir
 
     if args.problems:
         names = args.problems

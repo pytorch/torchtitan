@@ -19,7 +19,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 
-GENERATED_DIR = Path(__file__).parent / "generated"
+DEFAULT_GENERATED_DIR = Path(__file__).parent / "generated"
+GENERATED_DIR = DEFAULT_GENERATED_DIR  # overridden by --dir
 
 
 def _setup_env():
@@ -143,6 +144,8 @@ def optimize_one(name: str, opt_rounds: int = 5) -> dict:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dir", type=Path, default=None,
+                        help="Directory with problem subdirs (default: autoresearch/kernel_agent/generated)")
     parser.add_argument("--problems", nargs="*")
     parser.add_argument("--max-parallel", type=int, default=5)
     parser.add_argument("--sequential", action="store_true")
@@ -153,6 +156,10 @@ def main():
     parser.add_argument("--opt-rounds", type=int, default=5,
                         help="Max NCU optimization rounds per kernel (default: 5)")
     args = parser.parse_args()
+
+    global GENERATED_DIR
+    if args.dir is not None:
+        GENERATED_DIR = args.dir
 
     if args.problems:
         names = args.problems
