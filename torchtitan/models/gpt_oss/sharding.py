@@ -102,10 +102,9 @@ def _set_gpt_oss_layer_sharding(
     set_gqa_inner_attention_local_map(attention.inner_attention, return_lse=True)
 
     # MoE FFN (all GPT-OSS blocks are MoE).
-    if layer_cfg.moe is not None and (enable_tp or enable_ep):
+    if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
-            enable_tp=enable_tp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
