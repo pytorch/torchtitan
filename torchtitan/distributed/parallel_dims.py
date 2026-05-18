@@ -8,12 +8,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
 
 __all__ = ["ParallelDims"]
@@ -28,10 +32,14 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
-
-    _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
+    full_dtensor: bool = False
+    # Cache by axis name(s); DeviceMesh equality is by identity, so reuse
+    # is required for ``mesh in spmd_meshes()`` checks.
+    _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
+    _multi_axis_meshes: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
     _global_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
+    _spmd_meshes: list[DeviceMesh] = field(default_factory=list)
 
     @classmethod
     def from_config(
@@ -45,6 +53,7 @@ class ParallelDims:
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
+            full_dtensor=parallelism_config.full_dtensor,
         )
 
     def __post_init__(self):
@@ -76,6 +85,10 @@ class ParallelDims:
         if name == "fsdp":
             # Always keep fsdp mesh with real backend so fully_shard()
             # can apply MixedPrecisionPolicy even at degree 1.
+            return True
+        if name == "dp_shard":
+            # SPMD config-based model parallelism keeps dp_shard as its own
+            # storage axis instead of folding it into fsdp.
             return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
@@ -126,13 +139,13 @@ class ParallelDims:
             world_mesh: DeviceMesh,
             dim_names: tuple[str, ...],
             dim_degrees: tuple[int, ...],
-        ) -> DeviceMesh:
+        ):
             """Unflatten the world mesh to create the required mesh dimensions.
 
             Uses fake backend for dimensions with degree 1 or for 'batch' dimension
             to avoid unnecessary process group creation.
             """
-            backend_override: dict[str, str] = {}
+            backend_override = {}
             for name, degree in zip(dim_names, dim_degrees, strict=True):
                 if not self._mesh_exist(name, degree):
                     backend_override[name] = "fake"
@@ -165,15 +178,15 @@ class ParallelDims:
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
         dense_mesh = unflatten_mesh(
             self._world_mesh,
-            ("pp", "dp", "cp", "tp"),
-            (self.pp, batch, self.cp, self.tp),
+            ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
+            (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
         )
         fsdp_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "fsdp", "tp"),
             (self.pp, self.dp_replicate, fsdp, self.tp),
         )
-        sparse_mesh = unflatten_mesh(
+        full_sparse_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "efsdp", "ep"),
             (self.pp, self.dp_replicate, efsdp, self.ep),
@@ -184,24 +197,33 @@ class ParallelDims:
             "loss": loss_mesh,
             "dense": dense_mesh,
             "fsdp": fsdp_mesh,
-            "sparse": sparse_mesh,
+            "sparse": full_sparse_mesh,
         }
 
-        self._meshes = {
+        self._single_axis_meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
+            "dp_replicate": dense_mesh["dp_replicate"],
+            "dp_shard": dense_mesh["dp_shard"],
+            "fsdp": fsdp_mesh["fsdp"],
             "cp": dataloading_mesh["cp"],
             "tp": dataloading_mesh["tp"],
-            "ep": sparse_mesh["ep"],
-            "efsdp": sparse_mesh["efsdp"],
-            "dp_replicate": fsdp_mesh["dp_replicate"],
-            "fsdp": fsdp_mesh["fsdp"],
-            "dp": dense_mesh["dp"],
+            "ep": full_sparse_mesh["ep"],
+            "efsdp": full_sparse_mesh["efsdp"],
         }
 
-        # Validate mesh sizes
         self._validate_meshes()
+
+        candidate_spmd_dense_axes = ["dp_replicate", "dp_shard", "cp", "tp"]
+        candidate_spmd_sparse_axes = ["dp_replicate", "efsdp", "ep"]
+        activated_spmd_dense_mesh = self.get_activated_mesh(candidate_spmd_dense_axes)
+        activated_spmd_sparse_mesh = self.get_activated_mesh(candidate_spmd_sparse_axes)
+        self._spmd_meshes = [
+            m
+            for m in (activated_spmd_dense_mesh, activated_spmd_sparse_mesh)
+            if m is not None
+        ]
 
         logger.info(
             f"Successfully created meshes with active dimensions: "
@@ -217,16 +239,16 @@ class ParallelDims:
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
             "dp_replicate": self.dp_replicate,
+            "dp_shard": self.dp_shard,
             "fsdp": self.dp_shard * self.cp,
             "cp": self.cp,
             "tp": self.tp,
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // self.ep,
-            "dp": self.dp_replicate * self.dp_shard,
         }
 
         for mesh_name, expected_size in expected_sizes.items():
-            actual_size = self._meshes[mesh_name].size()
+            actual_size = self._single_axis_meshes[mesh_name].size()
             assert actual_size == expected_size, (
                 f"Mesh '{mesh_name}' has unexpected size: "
                 f"expected {expected_size}, got {actual_size}"
@@ -250,31 +272,44 @@ class ParallelDims:
         Raises:
             ValueError: If the requested dimension name(s) is not valid.
         """
-        if not self._meshes:
+        if not self._single_axis_meshes:
             self.build_mesh()
 
         if isinstance(dims, str):
             dims = [dims]
 
         for mesh_name in dims:
-            if mesh_name not in self._meshes:
+            if mesh_name not in self._single_axis_meshes:
                 raise ValueError(
                     f"Invalid mesh dim: '{mesh_name}'. "
-                    f"Valid dimensions are: {list(self._meshes.keys())}"
+                    f"Valid dimensions are: {list(self._single_axis_meshes.keys())}"
                 )
 
-        if any(not self._mesh_exist(dim, self._meshes[dim].size()) for dim in dims):
+        if any(
+            not self._mesh_exist(dim, self._single_axis_meshes[dim].size())
+            for dim in dims
+        ):
             return None
 
         if len(dims) == 1:
-            return self._meshes[dims[0]]
-        else:
-            for global_mesh in self._global_meshes.values():
-                assert global_mesh.mesh_dim_names is not None
-                if not set(dims).issubset(set(global_mesh.mesh_dim_names)):
-                    continue
-                return global_mesh[tuple(dims)]
+            return self._single_axis_meshes[dims[0]]
+
+        # Cache to ensure mesh equality by object identity.
+        key = tuple(dims)
+        if key in self._multi_axis_meshes:
+            return self._multi_axis_meshes[key]
+
+        candidates = [
+            (name, global_mesh)
+            for name, global_mesh in self._global_meshes.items()
+            if global_mesh.mesh_dim_names is not None
+            and set(dims).issubset(set(global_mesh.mesh_dim_names))
+        ]
+        if not candidates:
             raise ValueError(f"Invalid mesh name combinations {dims}.")
+        submesh = candidates[0][1][key]
+        self._multi_axis_meshes[key] = submesh
+        return submesh
 
     def get_mesh(self, dims: str | list[str]) -> DeviceMesh:
         """Get a device mesh by dimension name(s), raising if not available.
@@ -302,38 +337,97 @@ class ParallelDims:
             )
         return mesh
 
-    def resolve_mesh(self, axes: Iterable[str]) -> DeviceMesh | None:
-        """Resolve model sharding axes to one SPMD compute mesh.
+    def spmd_meshes(self) -> list[DeviceMesh]:
+        """Valid full-SPMD meshes, restricted to enabled axes.
 
-        Config-based SPMD modules execute under either the dense model mesh
-        (``dp/cp/tp``) or sparse expert mesh (``dp_replicate/efsdp/ep``). A
-        config with no axes has no mesh-local work. A config whose axes cannot
-        live on exactly one model mesh is invalid and should be split.
+        Returns the full-SPMD meshes; today we have dense and sparse.
         """
-        axes = set(axes)
-        if not axes:
+        if not self._spmd_meshes:
+            self.build_mesh()
+        return self._spmd_meshes
+
+    def get_activated_mesh(self, axes: list[str]) -> DeviceMesh | None:
+        """Submesh of ``axes`` filtered to those actually enabled in this run.
+
+        Returns a mesh containing the axes in ``axes`` that are enabled. If
+        none of the axes in ``axes`` is enabled, returns ``None``. This
+        differs from ``get_optional_mesh``, which returns ``None`` as soon
+        as any axis in ``axes`` is not enabled.
+        """
+        if not self._single_axis_meshes:
+            self.build_mesh()
+        axes = [
+            axis
+            for axis in axes
+            if axis in self._single_axis_meshes
+            and self.get_optional_mesh(axis) is not None
+        ]
+        return self.get_optional_mesh(axes) if axes else None
+
+    def resolve_mesh(self, axes: Iterable[MeshAxisName | str]) -> DeviceMesh | None:
+        """Resolve the device mesh for a set of mesh axis names.
+
+        Given the axes, query ``parallel_dims`` for the corresponding SPMD
+        mesh (dense or sparse).
+
+        ``axes`` is always a superset of the resolved mesh's axes: we always
+        specify every axis. Under full_dtensor the resolved mesh contains
+        every activated axis; under non-full_dtensor only ``tp`` and ``ep``
+        are kept (DP/CP stay out-of-band).
+
+        Returns ``None`` when no axis is enabled under non-``full_dtensor``.
+        Raises ``ValueError`` under ``full_dtensor`` if the resolved mesh is
+        not one of ``parallel_dims.spmd_meshes()``.
+        """
+        axes_set = {axis.value if hasattr(axis, "value") else str(axis) for axis in axes}
+        if not axes_set:
             return None
         if not self._global_meshes:
             self.build_mesh()
 
         candidates: list[DeviceMesh] = []
-        for mesh_name in ("dense", "sparse"):
-            mesh = self._global_meshes[mesh_name]
+        for mesh in self.spmd_meshes():
             mesh_axis_names = mesh.mesh_dim_names
             assert mesh_axis_names is not None
-            if axes.issubset(set(mesh_axis_names)):
+            active_axes = axes_set & set(mesh_axis_names)
+            if active_axes and active_axes.issubset(set(mesh_axis_names)):
                 candidates.append(mesh)
 
         if len(candidates) == 1:
             return candidates[0]
         if len(candidates) > 1:
             raise ValueError(
-                f"Model sharding axes {sorted(axes)} resolve to multiple meshes. "
-                "Use placements that identify either the dense or sparse mesh."
+                f"Model sharding axes {sorted(axes_set)} resolve to multiple SPMD "
+                "meshes. Use placements that identify either the dense or sparse mesh."
             )
-        raise ValueError(
-            f"Model sharding axes {sorted(axes)} do not fit a single model mesh."
-        )
+        return None
+
+    def resolve_shared_mesh(
+        self, placements: Iterable["NamedPlacement | None"]
+    ) -> DeviceMesh | None:
+        """Resolve the mesh shared by a list of NamedPlacements.
+
+        All non-``None`` entries must reference the same axis keys (placement
+        values may differ -- "redistribute on the same mesh" is exactly the
+        case of same axes, different placements). ``None`` entries are
+        skipped (e.g. LocalMapConfig non-tensor args, optional in/dst/grad
+        placements).
+
+        Returns ``None`` when every entry is ``None`` or when ``resolve_mesh``
+        filters every axis out (legacy non-``full_dtensor`` path); callers
+        should treat this as a no-op for the corresponding boundary.
+        """
+        non_none = [p for p in placements if p is not None]
+        if not non_none:
+            return None
+        axes = non_none[0].keys()
+        for p in non_none[1:]:
+            assert p.keys() == axes, (
+                f"Inconsistent mesh axes within a boundary: "
+                f"{sorted(k.value for k in axes)} vs "
+                f"{sorted(k.value for k in p.keys())}"
+            )
+        return self.resolve_mesh(axes)
 
     def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
         """Get all enabled one-dimensional device meshes.
@@ -357,10 +451,18 @@ class ParallelDims:
             >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
             >>> print(meshes.keys())
             dict_keys(['dp_replicate', 'fsdp', 'tp', 'batch', 'loss', 'efsdp'])
+
+        Note:
+            Under ``full_dtensor=True`` the dense shard axis appears as
+            ``'dp_shard'`` instead of the pre-flattened ``'fsdp'``.
         """
-        if not self._meshes:
+        if not self._single_axis_meshes:
             self.build_mesh()
-        return {k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1}
+        return {
+            k: v
+            for k, v in self._single_axis_meshes.items()
+            if v.ndim == 1 and v.size() > 1
+        }
 
     @property
     def world_mesh(self) -> DeviceMesh:

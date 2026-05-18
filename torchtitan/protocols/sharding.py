@@ -32,16 +32,10 @@ def _mesh_axis_name(axis_name: object) -> str:
 class LocalSpmdConfig:
     """Spec for modules computing on local tensors.
 
-    SPMD keeps tensors local and uses placements to assert boundary types
-    around a typechecked local computation region.
-
-    Attributes:
-        in_placements: Per-input NamedPlacements (positional: q, k, v).
-        out_placements: Per-output NamedPlacements.
+    Wraps forward with local SPMD typechecking. Input placements come from
+    ``ShardingConfig.in_dst_shardings`` and output placements from
+    ``ShardingConfig.out_src_shardings``.
     """
-
-    in_placements: tuple[NamedPlacement, ...]
-    out_placements: tuple[NamedPlacement, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -63,6 +57,9 @@ class ShardingConfig:
     Attributes:
         state_shardings: Parameter/buffer placements. Outer dict keys are
             param/buffer names, e.g. ``{"weight": {TP: spmd.S(0)}}``.
+        state_tp_ir: Local parameter names to convert from I@tp at rest to R@tp
+            during forward compute. Temporary SPMD escape hatch for replicated
+            parameters that need TP gradient reduction semantics.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
             arg name. Declares what the input's placement is before any
             redistribution.
@@ -77,9 +74,10 @@ class ShardingConfig:
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
+    state_tp_ir: set[str] = field(default_factory=set)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: NamedPlacement | None = None
+    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
     out_dst_shardings: NamedPlacement | None = None
     local_spmd: LocalSpmdConfig | None = None
 
@@ -97,15 +95,27 @@ class ShardingConfig:
             if shardings is not None:
                 for named in shardings.values():
                     add_axes(named)
-        add_axes(self.out_src_shardings)
+        if isinstance(self.out_src_shardings, tuple):
+            for named in self.out_src_shardings:
+                add_axes(named)
+        else:
+            add_axes(self.out_src_shardings)
         add_axes(self.out_dst_shardings)
-        if self.local_spmd is not None:
-            for named in self.local_spmd.in_placements:
-                add_axes(named)
-            for named in self.local_spmd.out_placements:
-                add_axes(named)
         return axes
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""
+        return {"repr": repr(self)}
+
+
+@dataclass(kw_only=True, slots=True)
+class SpmdInputConfig:
+    """Model-owned trainer input annotations for the SPMD path."""
+
+    inputs: NamedPlacement | None = None
+    labels: NamedPlacement | None = None
+    extra_inputs: dict[str, NamedPlacement] = field(default_factory=dict)
+    extra_kwargs: dict[str, NamedPlacement] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
         return {"repr": repr(self)}
