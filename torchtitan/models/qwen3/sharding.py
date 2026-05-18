@@ -43,7 +43,6 @@ def set_qwen3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    enable_tp: bool,
     enable_ep: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3 sub-configs.
@@ -60,16 +59,13 @@ def set_qwen3_sharding_config(
         config, loss_parallel=loss_parallel, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
-        _set_qwen3_layer_sharding(
-            layer_cfg, enable_sp=enable_sp, enable_tp=enable_tp, enable_ep=enable_ep
-        )
+        _set_qwen3_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
 
 
 def _set_qwen3_layer_sharding(
     layer_cfg: "Qwen3TransformerBlock.Config",
     *,
     enable_sp: bool,
-    enable_tp: bool,
     enable_ep: bool,
 ) -> None:
     """Set sharding on one Qwen3 transformer layer.
