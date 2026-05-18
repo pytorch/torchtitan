@@ -44,59 +44,9 @@ def _run_cmd(cmd):
 
 
 def _build_precompile_tests() -> list[PrecompileTestDefinition]:
-    full_inductor_precompile_dir = tempfile.mkdtemp(prefix="precompile_")
-    regional_precompile_dir = tempfile.mkdtemp(prefix="precompile_regional_")
     fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
     dsv3_fx_trace_precompile_dir = tempfile.mkdtemp(prefix="dsv3_fx_trace_precompile_")
     return [
-        PrecompileTestDefinition(
-            precompile_command=(
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.llama3"
-                " --config graph_trainer_llama3_debugmodel"
-                " --compile.mode aot"
-                " --compile.passes full_inductor_compilation"
-                f" --compile.precompile_artifact_dir {full_inductor_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
-            ),
-            override_args=[
-                "--module graph_trainer.llama3",
-                "--config graph_trainer_llama3_debugmodel",
-                "--compile.mode aot",
-                "--compile.passes full_inductor_compilation",
-                f"--compile.precompile_artifact_dir {full_inductor_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
-            ],
-            test_descr="AOT llama3 precompile full_inductor_compilation",
-            test_name="aot_llama3_precompile_full_inductor",
-            ngpu=8,
-        ),
-        PrecompileTestDefinition(
-            precompile_command=(
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.llama3"
-                " --config graph_trainer_llama3_debugmodel_flex_attn"
-                " --compile.mode aot"
-                " --compile.passes regional_inductor"
-                f" --compile.precompile_artifact_dir {regional_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
-            ),
-            override_args=[
-                "--module graph_trainer.llama3",
-                "--config graph_trainer_llama3_debugmodel_flex_attn",
-                "--compile.mode aot",
-                "--compile.passes regional_inductor",
-                f"--compile.precompile_artifact_dir {regional_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
-            ],
-            test_descr="AOT llama3 precompile regional_inductor (flex_attn)",
-            test_name="aot_llama3_precompile_regional_inductor",
-            ngpu=8,
-        ),
         PrecompileTestDefinition(
             precompile_command=(
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"

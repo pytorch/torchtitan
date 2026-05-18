@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import distribute_tensor, DTensor
 
@@ -22,6 +23,7 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_state import (
     current_mesh,
+    is_spmd_active,
     set_current_mesh,
 )
 from torchtitan.protocols.sharding import (
@@ -131,6 +133,7 @@ class Module(nn.Module, Configurable):
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
+    _parallelized: bool = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -262,30 +265,35 @@ class Module(nn.Module, Configurable):
         ]
         return self._pos_arg_list
 
-    # ------------------------------------------------------------------
-    # parallelize: distribute states, wrap local boundary, wrap forward
-    # ------------------------------------------------------------------
-
     def parallelize(self, parallel_dims: ParallelDims) -> None:
         """Parallelize this module and all Module children recursively.
 
         For each module with a ``sharding_config``:
 
-        1. Distribute params and buffers per ``state_shardings``.
-        2. Wrap ``self.forward`` with local execution boundary + redistribution.
+        1. Shard states (parameters and buffers).
+        2. Wrap the forward with:
+            ``reshard inputs -> [optional local_map] forward -> reshard outputs``.
 
-        fully_shard hooks on ``__call__`` fire around the wrapped ``forward``.
-        CP (applied before ``parallelize``) is captured inside the local execution
-        boundary.
+        ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
+
+        Each ``ShardingConfig`` field resolves its mesh independently via
+        ``resolve_mesh()`` and resolves its placements independently via
+        ``resolve_placements()``.
         """
-        # Recurse children first
+        if self._parallelized:
+            raise ValueError(
+                f"{type(self).__name__} has already been parallelized. "
+                "Module.parallelize() must be called at most once per instance."
+            )
+        self._parallelized = True
+
         queue = list(self.children())
         while queue:
             child = queue.pop()
             if isinstance(child, Module):
                 child.parallelize(parallel_dims)
             else:
-                # Look through non-Module wrappers, e.g., CheckpointWrapper
+                # Look through non-Module wrappers, e.g., CheckpointWrapper.
                 queue.extend(child.children())
 
         sharding_config = self._sharding_config
@@ -314,6 +322,9 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
 
+            if sharding_config.state_tp_ir:
+                self._install_spmd_tp_ir_param_hook(sharding_config.state_tp_ir)
+
             self._cache_pos_arg_names()
 
             fn = self.forward
@@ -327,6 +338,49 @@ class Module(nn.Module, Configurable):
                 return self._shard_outputs(outputs)
 
         self.forward = with_redistribution
+
+    def _install_spmd_tp_ir_param_hook(self, param_names: set[str]) -> None:
+        """Convert configured I@tp params to R@tp for forward compute."""
+        if not is_spmd_active():
+            return
+        mesh = current_mesh()
+        assert mesh is not None
+        if "tp" not in mesh.mesh_dim_names:
+            return
+        tp_pg = mesh.get_group("tp")
+        if dist.get_world_size(tp_pg) == 1:
+            return
+
+        param_names = set(param_names)
+        original_params: dict[str, torch.Tensor] = {}
+
+        def pre_hook(module, args):
+            original_params.clear()
+            for name in param_names:
+                param = module._parameters[name]
+                original_params[name] = param
+                device_type = param.device.type
+                op_dtype = (
+                    torch.get_autocast_dtype(device_type)
+                    if torch.is_autocast_enabled(device_type)
+                    else param.dtype
+                )
+                bwd = {"op_dtype": op_dtype, "out_dtype": param.dtype}
+                module._parameters[name] = spmd.convert(
+                    param,
+                    tp_pg,
+                    src=spmd.I,
+                    dst=spmd.R,
+                    backward_options=bwd,
+                )
+
+        def post_hook(module, args, output):
+            for name, param in original_params.items():
+                module._parameters[name] = param
+            original_params.clear()
+
+        self.register_forward_pre_hook(pre_hook, with_kwargs=False)
+        self.register_forward_hook(post_hook, always_call=True)
 
     def distribute_state(
         self,
@@ -380,17 +434,30 @@ class Module(nn.Module, Configurable):
         fn: Callable[..., Any],
         lm: LocalSpmdConfig,
     ) -> Callable[..., Any]:
-        resolved_in = tuple(named_placement_to_spmd(p) for p in lm.in_placements)
-        resolved_out = tuple(named_placement_to_spmd(p) for p in lm.out_placements)
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        pos_arg_names = self._cache_pos_arg_names()
+        in_dst = sharding_config.in_dst_shardings or {}
+        resolved_in: tuple[NamedPlacement | None, ...] = tuple(
+            named_placement_to_spmd(in_dst[name]) if name in in_dst else None
+            for name in pos_arg_names
+        )
+        out_src = sharding_config.out_src_shardings
+        if out_src is None:
+            resolved_out: tuple[NamedPlacement | None, ...] = ()
+        elif isinstance(out_src, tuple):
+            resolved_out = tuple(named_placement_to_spmd(p) for p in out_src)
+        else:
+            resolved_out = (named_placement_to_spmd(out_src),)
 
         def assert_types(
             tensors: Iterable[Any],
-            specs: Iterable[NamedPlacement],
+            specs: Iterable[NamedPlacement | None],
         ) -> None:
             if not spmd.is_type_checking():
                 return
             for t, types in zip(tensors, specs):
-                if isinstance(t, torch.Tensor) and types:
+                if isinstance(t, torch.Tensor) and types is not None and types:
                     local_type, partition_spec = named_placement_to_assert_type(
                         types,
                         t.ndim,
@@ -415,7 +482,14 @@ class Module(nn.Module, Configurable):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        """Apply optional input src -> dst redistributes."""
+        """Redistribute inputs to desired placements.
+
+        Per input present in ``in_src_shardings`` / ``in_dst_shardings``:
+        resolve a mesh from that input's NamedPlacements, then:
+        1. If plain tensor and ``in_src_shardings`` declared, wrap as
+           DTensor via ``DTensor.from_local`` on that mesh.
+        2. If ``in_dst_shardings`` declared, redistribute on the same mesh.
+        """
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
@@ -452,7 +526,14 @@ class Module(nn.Module, Configurable):
         self,
         outputs: Any,
     ) -> Any:
-        """Apply optional output src -> dst redistribute."""
+        """Redistribute output to desired placement.
+
+        TODO: Currently only handles a single DTensor output. Extend to
+        support nested outputs (tuples, dicts) when models with
+        multi-tensor forward returns (e.g., Flux, MoE) adopt config-based
+        sharding. ``out_dst_shardings`` would also need to become a nested
+        structure.
+        """
         sharding_config = self._sharding_config
         assert sharding_config is not None
 
