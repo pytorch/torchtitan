@@ -19,7 +19,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -107,10 +106,13 @@ class Qwen3Model(Decoder):
             if training is not None:
                 seq_len = training.seq_len
                 if seq_len > self.rope.max_seq_len:
-                    logger.warning(
-                        f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
+                    raise ValueError(
+                        f"Training sequence length {seq_len} exceeds model's "
+                        f"maximum supported sequence length "
+                        f"{self.rope.max_seq_len}. The model cannot produce "
+                        f"valid RoPE embeddings for positions beyond this "
+                        f"limit."
                     )
-                # Sync rope max_seq_len
                 self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             if debug is not None:

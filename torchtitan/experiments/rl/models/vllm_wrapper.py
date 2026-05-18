@@ -22,7 +22,6 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
-    DebugConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -184,23 +183,30 @@ class VLLMModelWrapper(Module):
         # Fill sharding configs on the config BEFORE build so every sub-module
         # is constructed with its ShardingConfig attached (required by the
         # declarative model.parallelize() API).
-        # TODO: Refactor update_from_config to accept ParallelismConfig
-        # directly instead of requiring a trainer_config wrapper.
+        # Only ``parallelism`` is needed here; ``training`` is intentionally
+        # omitted so the model's intrinsic ``rope.max_seq_len`` is preserved
+        # (the vLLM inference path must not shrink the RoPE cache to the
+        # trainer's default seq_len).
         from types import SimpleNamespace
 
         self.config.update_from_config(
-            trainer_config=SimpleNamespace(
-                training=TrainingConfig(),
-                parallelism=parallelism,
-                debug=DebugConfig(),
-            )
+            trainer_config=SimpleNamespace(parallelism=parallelism)
         )
+
+        # Enforce that vLLM's max_model_len does not exceed the model's
+        # intrinsic max_seq_len -- positions beyond this are invalid.
+        max_model_len = vllm_config.model_config.max_model_len
+        rope_max_seq_len = self.config.rope.max_seq_len
+        if max_model_len > rope_max_seq_len:
+            raise ValueError(
+                f"vLLM max_model_len ({max_model_len}) exceeds the model's "
+                f"maximum supported sequence length ({rope_max_seq_len}). "
+                f"Set max_model_len <= {rope_max_seq_len} in EngineArgs or "
+                f"use a model with a larger rope.max_seq_len."
+            )
 
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
-
-        # RoPE config from model for cache extension
-        self.rope_config = self.config.rope
 
         # With TP, collectives may return AsyncCollectiveTensor (overlap
         # path) or plain Tensor (sync path) depending on timing.  Dynamo
@@ -222,62 +228,9 @@ class VLLMModelWrapper(Module):
             skip_dp=True,
         )
 
-        # Pre-extend RoPE cache to cover vLLM's max model length (profiling
-        # may use up to 2x max_seq_len, so use max_model_len which already
-        # accounts for this). This avoids data-dependent control flow in
-        # forward() which is incompatible with torch.compile.
-        max_model_len = vllm_config.model_config.max_model_len
-        if self.model.freqs_cis.shape[0] < max_model_len:
-            self.model.freqs_cis = self._extend_rope_cache(
-                self.model.freqs_cis, max_model_len
-            )
-
         # Load initial weights based on checkpoint config.
         self._checkpoint_config = checkpoint_config
         self._maybe_initial_load_weights()
-
-    def _extend_rope_cache(
-        self, rope_cache: torch.Tensor, required_len: int
-    ) -> torch.Tensor:
-        """
-        Build an extended RoPE cache of at least ``required_len`` positions.
-
-        Args:
-            rope_cache: Current RoPE cache tensor
-            required_len: Minimum number of positions the cache must cover
-
-        Returns:
-            Extended RoPE cache tensor
-        """
-        # Handle DTensor case
-        is_dtensor = isinstance(rope_cache, DTensor)
-        if is_dtensor:
-            device_mesh = rope_cache.device_mesh
-            local_rope_cache = rope_cache.to_local()
-            device = local_rope_cache.device
-            dtype = local_rope_cache.dtype
-        else:
-            device = rope_cache.device
-            dtype = rope_cache.dtype
-
-        # Build a new RoPE module with extended max_seq_len
-        extended_rope_config = dataclasses.replace(
-            self.rope_config, max_seq_len=required_len
-        )
-        extended_rope = extended_rope_config.build()
-        extended_cache = extended_rope.cache.to(device=device, dtype=dtype)
-
-        # Convert back to DTensor if needed
-        if is_dtensor:
-            rope_cache = DTensor.from_local(
-                extended_cache,
-                device_mesh=device_mesh,
-                placements=[Replicate()],
-            )
-        else:
-            rope_cache = extended_cache
-
-        return rope_cache
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
