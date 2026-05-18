@@ -6,6 +6,7 @@
 
 import torch
 import torch.nn as nn
+from torch.utils import checkpoint as torch_checkpoint
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import (
@@ -99,6 +100,41 @@ class HFExpertParallel(ParallelStyle):
             partition_fn=self._partition_fn,
             input_fn=lambda m, inp, _mesh: m.token_dispatcher.dispatch(*inp),
             output_fn=lambda m, out, _mesh: m.token_dispatcher.combine(out),
+        )
+
+
+class NoParallelWithLocalTupleOutputs(NoParallel):
+    """NoParallel variant for modules whose tuple outputs mix DTensor and Tensor.
+
+    PhiMoE's router returns ``(router_logits, routing_weights,
+    selected_experts)``. ``router_logits`` remains a DTensor from the
+    replicated linear, while ``routing_weights`` and ``selected_experts`` are
+    intentionally local tensors after the sparsemixer DTensor escape hatch.
+
+    Delegates all DTensor processing to ``NoParallel._prepare_output_fn``
+    so that changes to the parent's redistribution or to_local logic are
+    picked up automatically.
+    """
+
+    @staticmethod
+    def _prepare_output_fn(
+        output_layout,
+        local_output_grad_placements,
+        mod,
+        outputs,
+        device_mesh,
+    ):
+        if isinstance(outputs, tuple):
+            return tuple(
+                NoParallel._prepare_output_fn(
+                    output_layout, local_output_grad_placements, mod, o, device_mesh
+                )
+                if isinstance(o, DTensor)
+                else o
+                for o in outputs
+            )
+        return NoParallel._prepare_output_fn(
+            output_layout, local_output_grad_placements, mod, outputs, device_mesh
         )
 
 
@@ -209,6 +245,25 @@ def _experts_restore_post_hook(module, args, output):
     return output
 
 
+def _ignore_profiler_ops_for_sac() -> None:
+    # TODO: Remove once profiler ops are added to SAC_IGNORED_OPS upstream in
+    # PyTorch. Profiler ops are pure side effects with no gradient impact and
+    # should always be skipped by SAC.
+    #
+    # FSDP hooks emit profiler ranges from inside HF expert calls. Those
+    # profiler side effects can appear with different invocation counts during
+    # SAC recompute, but they do not affect model values or gradients.
+    try:
+        profiler_ops = (
+            torch.ops.profiler._record_function_enter_new.default,
+            torch.ops.profiler._record_function_exit._RecordFunction,
+        )
+    except AttributeError:
+        return
+
+    torch_checkpoint.SAC_IGNORED_OPS.update(profiler_ops)
+
+
 # ---------------------------------------------------------------------------
 # Main parallelization entry point
 # ---------------------------------------------------------------------------
@@ -261,6 +316,7 @@ def parallelize_hf_transformers(
     )
 
     if ac_config.mode != "none":
+        _ignore_profiler_ops_for_sac()
         apply_ac(model, ac_config)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
@@ -579,14 +635,19 @@ def apply_moe_ep_tp(
             # backward does ``scatter_add_``. Custom autograd Functions
             # don't dispatch through DTensor, so we monkey-patch
             # ``sparsemixer`` to unwrap DTensor scores before the custom
-            # autograd Function runs. The ``NoParallel`` wrapping of the
-            # router itself is identical to the other routers.
+            # autograd Function runs. Since sparsemixer returns local routing
+            # tensors, Phi also needs an output hook that accepts mixed
+            # DTensor/local tuple outputs.
+            gate_parallel = NoParallel(local_output_grad_placements=(Partial(),))
             if _is_phimoe_router(gate):
                 _patch_phimoe_sparsemixer()
+                gate_parallel = NoParallelWithLocalTupleOutputs(
+                    local_output_grad_placements=(Partial(),)
+                )
             parallelize_module(
                 gate,
                 tp_mesh,
-                NoParallel(local_output_grad_placements=(Partial(),)),
+                gate_parallel,
             )
 
             # FSDP converts gate buffers (e.g. e_score_correction_bias in
