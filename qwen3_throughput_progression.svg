@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620" role="img" aria-labelledby="title desc">
+  <title id="title">Qwen3 14B throughput progression</title>
+  <desc id="desc">Line chart showing throughput improving from 5774 tokens per second at the initial FSDP bootstrap to 9384 tokens per second at the final fused bfloat16 optimizer-state configuration.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .grid { stroke: #d8dee9; stroke-width: 1; }
+    .axis { stroke: #2e3440; stroke-width: 1.5; }
+    .line { fill: none; stroke: #1f6feb; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+    .point { fill: #1f6feb; stroke: #ffffff; stroke-width: 2; }
+    .title { fill: #111827; font-family: Arial, sans-serif; font-size: 24px; font-weight: 700; }
+    .label { fill: #374151; font-family: Arial, sans-serif; font-size: 13px; }
+    .tick { fill: #4b5563; font-family: Arial, sans-serif; font-size: 12px; }
+    .value { fill: #111827; font-family: Arial, sans-serif; font-size: 12px; font-weight: 700; }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="1100" height="620"/>
+
+  <text class="title" x="80" y="34">Qwen3 14B Throughput Progression</text>
+  <text class="label" x="80" y="55">8x B200, tokens/sec, higher is better</text>
+
+  <!-- Plot area: x 80..1020, y 60..440. Y scale 5600..9600 tokens/sec. -->
+  <line class="grid" x1="80" y1="60" x2="1020" y2="60"/>
+  <line class="grid" x1="80" y1="136" x2="1020" y2="136"/>
+  <line class="grid" x1="80" y1="212" x2="1020" y2="212"/>
+  <line class="grid" x1="80" y1="288" x2="1020" y2="288"/>
+  <line class="grid" x1="80" y1="364" x2="1020" y2="364"/>
+  <line class="grid" x1="80" y1="440" x2="1020" y2="440"/>
+
+  <line class="axis" x1="80" y1="60" x2="80" y2="440"/>
+  <line class="axis" x1="80" y1="440" x2="1020" y2="440"/>
+
+  <text class="tick" x="37" y="444">5600</text>
+  <text class="tick" x="37" y="368">6400</text>
+  <text class="tick" x="37" y="292">7200</text>
+  <text class="tick" x="37" y="216">8000</text>
+  <text class="tick" x="37" y="140">8800</text>
+  <text class="tick" x="37" y="64">9600</text>
+
+  <path class="line" d="M 80 423.5 L 174 414.2 L 268 325.2 L 362 221.7 L 456 174.1 L 550 128.7 L 644 126.8 L 738 95.2 L 832 85.5 L 926 82.4 L 1020 80.5"/>
+
+  <circle class="point" cx="80" cy="423.5" r="5"/>
+  <circle class="point" cx="174" cy="414.2" r="5"/>
+  <circle class="point" cx="268" cy="325.2" r="5"/>
+  <circle class="point" cx="362" cy="221.7" r="5"/>
+  <circle class="point" cx="456" cy="174.1" r="5"/>
+  <circle class="point" cx="550" cy="128.7" r="5"/>
+  <circle class="point" cx="644" cy="126.8" r="5"/>
+  <circle class="point" cx="738" cy="95.2" r="5"/>
+  <circle class="point" cx="832" cy="85.5" r="5"/>
+  <circle class="point" cx="926" cy="82.4" r="5"/>
+  <circle class="point" cx="1020" cy="80.5" r="5"/>
+
+  <text class="value" x="62" y="411">5774</text>
+  <text class="value" x="156" y="402">5872</text>
+  <text class="value" x="250" y="313">6808</text>
+  <text class="value" x="344" y="209">7898</text>
+  <text class="value" x="438" y="162">8399</text>
+  <text class="value" x="532" y="116">8877</text>
+  <text class="value" x="626" y="114">8897</text>
+  <text class="value" x="720" y="83">9229</text>
+  <text class="value" x="814" y="73">9332</text>
+  <text class="value" x="908" y="70">9364</text>
+  <text class="value" x="1002" y="68">9384</text>
+
+  <text class="tick" transform="translate(80 470) rotate(35)">FSDP</text>
+  <text class="tick" transform="translate(174 470) rotate(35)">No reshard</text>
+  <text class="tick" transform="translate(268 470) rotate(35)">Selective AC</text>
+  <text class="tick" transform="translate(362 470) rotate(35)">Compile</text>
+  <text class="tick" transform="translate(456 470) rotate(35)">FP8 rowwise</text>
+  <text class="tick" transform="translate(550 470) rotate(35)">AC 0.9</text>
+  <text class="tick" transform="translate(644 470) rotate(35)">AC 0.95</text>
+  <text class="tick" transform="translate(738 470) rotate(35)">GW HP</text>
+  <text class="tick" transform="translate(832 470) rotate(35)">BF16 reduce</text>
+  <text class="tick" transform="translate(926 470) rotate(35)">AC 0.925</text>
+  <text class="tick" transform="translate(1020 470) rotate(35)">Fused opt</text>
+
+  <text class="label" x="466" y="600">Configuration iteration</text>
+  <text class="label" transform="translate(18 292) rotate(-90)">Tokens/sec</text>
+</svg>
