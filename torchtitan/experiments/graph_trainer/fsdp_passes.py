@@ -35,7 +35,6 @@ from torch._inductor.fx_passes.overlap_scheduling import (
     schedule_overlap_bucketing,
 )
 from torch.utils._ordered_set import OrderedSet
-from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
@@ -57,78 +56,6 @@ def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
                 return True
             n = n.all_input_nodes[0]
     return False
-
-
-def annotate_fsdp_all_gather(
-    gm: torch.fx.GraphModule, reshard_after_forward: bool
-) -> None:
-    """
-    Force recompute all_gather nodes from SimpleFSDP in the graph.
-    This pass should be added in torch._inductor.config.joint_custom_post_pass
-    """
-    graph = gm.graph
-
-    def force_recompute_node(node):
-        # Respect MUST_CPU_OFFLOAD set by ``tag_all_offloadable_activations``:
-        # the offload chain already keeps the activation off-GPU between
-        # forward and backward, so re-tagging as MUST_RECOMPUTE/MUST_SAVE
-        # would either undo the offload selection or re-save GPU memory we
-        # just freed.
-        if node.meta.get("recompute") == CheckpointPolicy.MUST_CPU_OFFLOAD:
-            return
-        if reshard_after_forward:
-            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
-        else:
-            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
-        # ac_graph_id is used in the partitioner to decide
-        # if two nodes which have AC applied come from a different
-        # AC regions. This is needed because nodes in the boundary
-        # of two AC regions are marked as MUST_SAVE. In our case
-        # we just add a large value of ac_graph_id so that
-        # all nodes we tag for recomputation do indeed get recomputed
-        # and are not influenced by other nodes in the graph with
-        # nearby ac_graph_id values
-        node.meta["ac_graph_id"] = 100000
-
-    # Make all-gather nodes (and related nodes) recomputable, to circumvent
-    # https://github.com/pytorch/pytorch/issues/136433
-    for node in graph.nodes:
-        if is_wait_tensor_from_fsdp(node):
-            ag_node = node.args[0]
-            force_recompute_node(ag_node)  # all_gather
-            force_recompute_node(node)  # wait_tensor
-            # Force-recompute slice that comes after wait
-            for user in node.users:
-                if (
-                    user.op == "call_function"
-                    and user.target == torch.ops.aten.slice.Tensor
-                ):
-                    force_recompute_node(user)
-            # Force-recompute potential dtype casts from all_gather
-            if (
-                ag_node.all_input_nodes[0].op == "call_function"
-                and ag_node.args[0].target
-                == torch.ops.prims.convert_element_type.default
-            ):
-                force_recompute_node(ag_node.all_input_nodes[0])
-
-    return gm
-
-
-def fsdp_reshard_after_fwd_pass(
-    gm: torch.fx.GraphModule,
-    example_inputs: tuple | None = None,
-    *,
-    reshard_after_forward: bool,
-) -> torch.fx.GraphModule:
-    # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
-    # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
-    #   to CheckpointPolicy.MUST_RECOMPUTE.
-    # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
-    #   to CheckpointPolicy.MUST_SAVE.
-    gm = annotate_fsdp_all_gather(gm, reshard_after_forward)
-    gm.recompile()
-    return gm
 
 
 # Maps an FSDP group_name to an extra group_name created by this pass.
@@ -166,41 +93,41 @@ def overlap_fsdp_ag_rs_pass(
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
     """
-    Reassign FSDP all-gather nodes to an extra NCCL process group for
+    Reassign FSDP all-gather nodes to extra NCCL process groups for
     AG/RS overlap in backward.
 
-    Discovers the FSDP PG by inspecting the graph, creates an extra
-    NCCL PG over the same ranks (giving it a separate CUDA stream),
-    and rewrites every all-gather using that source PG to the extra PG.
-    This separates all-gathers from reduce-scatters onto different streams,
-    enabling AG/RS overlap in backward.
+    Discovers all distinct FSDP PGs by inspecting the graph (e.g. one for
+    FSDP, another for expert-FSDP), creates an extra NCCL PG over the same
+    ranks for each (giving it a separate CUDA stream), and rewrites every
+    all-gather to the corresponding extra PG. This separates all-gathers
+    from reduce-scatters onto different streams, enabling AG/RS overlap in
+    backward.
 
     No-op when the graph has no FSDP all-gathers. Must be applied BEFORE
     bucketing passes so bucketed all-gathers inherit the new PG name.
     """
-    source_pg_name: str | None = None
+    source_pg_names: OrderedSet[str] = OrderedSet()
     for node in gm.graph.nodes:
         if is_wait_tensor_from_fsdp(node):
             ag_node = node.args[0]
-            source_pg_name = ag_node.args[2]
-            break
+            source_pg_names.add(ag_node.args[2])
 
-    if source_pg_name is None:
+    if not source_pg_names:
         return gm
 
-    target_pg_name = _get_or_create_extra_fsdp_pg(source_pg_name)
+    pg_mapping: dict[str, str] = {
+        pg: _get_or_create_extra_fsdp_pg(pg) for pg in source_pg_names
+    }
 
     count = 0
     for node in gm.graph.nodes:
-        if is_all_gather(node) and node.args[2] == source_pg_name:
+        if is_all_gather(node) and node.args[2] in pg_mapping:
             # AG args: (input_tensor, group_size, group_name)
-            node.args = (node.args[0], node.args[1], target_pg_name)
+            node.args = (node.args[0], node.args[1], pg_mapping[node.args[2]])
             count += 1
     if count > 0:
-        logger.info(
-            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
-            f"to PG {target_pg_name}"
-        )
+        for source, target in pg_mapping.items():
+            logger.info(f"Rewrote all-gather node(s) from PG {source} to PG {target}")
     gm.recompile()
     return gm
 

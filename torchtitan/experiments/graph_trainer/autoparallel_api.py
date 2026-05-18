@@ -7,7 +7,6 @@
 """AutoParallel helpers for graph_trainer's ``aot_fx_trace`` path."""
 
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -76,12 +75,6 @@ def _wrap_autoparallel_output(
 
 class AutoParallelGraph(AutoParallel):
     """AutoParallel variant for graph_trainer's ``aot_fx_trace`` pipeline."""
-
-    def apply_placement(self, *args: Any, **kwargs: Any) -> None:
-        raise RuntimeError(
-            "graph_trainer AutoParallel no longer supports the deprecated AOT "
-            "compiled path. Use apply_placement_for_fx_module()."
-        )
 
     def apply_placement_for_fx_module(
         self,

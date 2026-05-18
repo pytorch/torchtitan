@@ -42,11 +42,8 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     snapshot_graph,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
-    autobucketing_reordering_pass,
-    fsdp_reshard_after_fwd_pass,
     joint_transformer_block_bucketing_reordering_pass,
     overlap_fsdp_ag_rs_pass,
-    transformer_block_bucketing_reordering_pass,
 )
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
@@ -55,7 +52,6 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
-    tag_sac_policy,
     tag_with_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
@@ -234,21 +230,17 @@ def construct_default_graph_passes(
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.
     """
-    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
-
-    cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
-    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
+    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
         passes.extend(
-            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
+            compile_time_passes(traced_result, config, use_cudagraph=want_cudagraph)
         )
 
-    # cudagraph should be the last pass.
-    if use_cudagraph:
+    if want_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
@@ -380,20 +372,3 @@ def tlparse_log_graph_pass(
     )
 
     return gm
-
-
-# Registry mapping pass names to pass functions (for AOT mode fwd/bwd passes)
-AVAILABLE_COMPILER_PASSES = {
-    "auto_bucketing": autobucketing_reordering_pass,
-    "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
-    "regional_inductor": regional_inductor_pass,
-    "custom_codegen": custom_codegen_pass,
-    "cudagraph": cudagraph_pass,
-    "full_inductor_compilation": full_inductor_compilation_pass,
-}
-
-# Registry for joint custom passes (applied before partitioning, AOT mode only)
-AVAILABLE_JOINT_PASSES = {
-    "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
-    "apply_sac": tag_sac_policy,
-}
