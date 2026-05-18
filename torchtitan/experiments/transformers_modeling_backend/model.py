@@ -10,13 +10,9 @@ import math
 from dataclasses import dataclass, fields
 
 import torch
-import torch._dynamo.config
 from torch import nn
 from torch.nn import init
 
-# TP async collectives produce varying tensor types that trigger dynamo
-# recompilation. Increase the limit so guards stabilize after initial steps.
-torch._dynamo.config.cache_size_limit = 64
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
@@ -263,6 +259,10 @@ class HFTransformerModel(BaseModel):
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
             if attn_implementation == "flex_torchtitan":
+                # HF model code has more dynamo guards than native TorchTitan,
+                # causing extra recompilations during TP warmup.
+                import torch._dynamo.config
+                torch._dynamo.config.cache_size_limit = 64
                 AttentionInterface._global_mapping[
                     attn_implementation
                 ] = _flex_torchtitan_attention_forward
