@@ -148,7 +148,7 @@ def generate_kernel(
     _ensure_api_key()
     _ensure_kernel_agent_on_path()
     _ensure_proxy()
-    from triton_kernel_agent import TritonKernelAgent
+    from triton_kernel_gen import TritonKernelAgent
 
     kwargs: dict[str, Any] = {
         "num_workers": num_workers,
@@ -257,7 +257,7 @@ def optimize_kernel(
     _ensure_api_key()
     _ensure_kernel_agent_on_path()
     _ensure_proxy()
-    from triton_kernel_agent.opt_manager import OptimizationManager
+    from triton_kernel_gen.opt_manager import OptimizationManager
 
     problem_path = Path(problem_path)
     clean_problem = _clean_problem_source(problem_path)

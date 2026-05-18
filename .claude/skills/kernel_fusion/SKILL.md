@@ -23,7 +23,7 @@ problem files, and generates Triton kernels.
   kernel-level timing data.
 - KernelAgent must be installed at `~/local/KernelAgent` (or `$KERNEL_AGENT_ROOT`).
 - The `anthropic` pip package must be installed.
-- Output goes to `autoresearch/kernel_agent/generated/<pattern_name>/`.
+- Output goes to `autoresearch/kernel_gen/generated/<pattern_name>/`.
 
 ## Phase 1: Collect Inputs
 
@@ -99,7 +99,7 @@ no text-dump fragility.
 
 ```bash
 # Extract top 20 fusible patterns, then exit (no training):
-EXTRACT_KERNELS_DIR=autoresearch/kernel_agent/generated ./run_graph_trainer_llama3_8b.sh
+EXTRACT_KERNELS_DIR=autoresearch/kernel_gen/generated ./run_graph_trainer_llama3_8b.sh
 
 # Or directly:
 ./run_train.sh --compile.extract_fused_kernels_dir /tmp/extracted ...
@@ -181,7 +181,7 @@ Ensure the environment is ready:
 python3 -c "
 import sys, os
 sys.path.insert(0, os.path.expanduser('~/local/KernelAgent'))
-from autoresearch.kernel_agent.bridge import _ensure_api_key, _ensure_proxy
+from autoresearch.kernel_gen.bridge import _ensure_api_key, _ensure_proxy
 _ensure_api_key()
 _ensure_proxy()
 from utils.providers import get_model_provider
@@ -197,11 +197,11 @@ If this fails:
 
 ### 4b. Run the Agent
 
-Use the runner script at `autoresearch/kernel_agent/run_all.py`. By default it
+Use the runner script at `autoresearch/kernel_gen/run_all.py`. By default it
 runs **both** generation and NCU-guided optimization in sequence:
 
 ```bash
-python3 -m autoresearch.kernel_agent.run_all --max-parallel 5
+python3 -m autoresearch.kernel_gen.run_all --max-parallel 5
 ```
 
 This will:
@@ -219,22 +219,22 @@ The optimization step uses `bridge.optimize_kernel()` which:
 
 For specific problems only:
 ```bash
-python3 -m autoresearch.kernel_agent.run_all --problems rope_fwd swiglu_bwd
+python3 -m autoresearch.kernel_gen.run_all --problems rope_fwd swiglu_bwd
 ```
 
 For generation only (skip NCU optimization):
 ```bash
-python3 -m autoresearch.kernel_agent.run_all --skip-optimize
+python3 -m autoresearch.kernel_gen.run_all --skip-optimize
 ```
 
 For NCU optimization only (kernels already generated):
 ```bash
-python3 -m autoresearch.kernel_agent.run_all --optimize-only --opt-rounds 10
+python3 -m autoresearch.kernel_gen.run_all --optimize-only --opt-rounds 10
 ```
 
 For debugging a single problem:
 ```bash
-python3 -m autoresearch.kernel_agent.run_all --problems rope_fwd --sequential
+python3 -m autoresearch.kernel_gen.run_all --problems rope_fwd --sequential
 ```
 
 ### 4c. Handle Failures
@@ -261,8 +261,8 @@ The benchmark script is useful for quick validation without running the full
 optimizer, or to compare initial vs optimized kernels:
 
 ```bash
-python3 -m autoresearch.kernel_agent.benchmark_all
-python3 -m autoresearch.kernel_agent.benchmark_all --problems rope_fwd swiglu_bwd
+python3 -m autoresearch.kernel_gen.benchmark_all
+python3 -m autoresearch.kernel_gen.benchmark_all --problems rope_fwd swiglu_bwd
 ```
 
 This measures correctness (max error) and wall-clock timing (CUDA events, 100 iters)
@@ -298,7 +298,7 @@ Present the final summary to the user:
 3. **NCU benchmark table**: PyTorch eager, torch.compile, initial kernel,
    optimized kernel, and speedup vs eager for each
 4. Total estimated GPU time savings (sum of `(eager_ms - best_ms) * instances_per_step`)
-5. Next steps: integrate kernels as graph passes using `autoresearch.kernel_agent.integrate`
+5. Next steps: integrate kernels as graph passes using `autoresearch.kernel_gen.integrate`
    (see `example_swiglu.py` for the integration pattern)
 
 ## Don'ts
