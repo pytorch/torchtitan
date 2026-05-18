@@ -23,7 +23,7 @@ Usage:
   ./run_train.sh --compile.fused_kernel_dir /tmp/kernels
 
   # Offline: generate kernels
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.generate
 
   # Next run: same command, auto-picks up kernels
   ./run_train.sh --compile.fused_kernel_dir /tmp/kernels
@@ -410,7 +410,7 @@ def _select_best_backend(
 ) -> tuple[Callable, str]:
     """Select the fastest backend from offline benchmark results.
 
-    Reads benchmark.json (produced by benchmark_all.py) and picks the
+    Reads benchmark.json (produced by benchmark.py) and picks the
     winner. If no benchmark data exists, falls back to: triton if
     kernel.py exists, otherwise eager. No benchmarking or compilation
     happens at training time.

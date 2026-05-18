@@ -7,8 +7,8 @@ For each kernel in generated/<name>/:
   3. Report: speedup, max error, pass/fail
 
 Usage:
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark_all [--problems PROB1 PROB2 ...]
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark_all  # runs all
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark [--problems PROB1 PROB2 ...]
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark  # runs all
 """
 
 from __future__ import annotations

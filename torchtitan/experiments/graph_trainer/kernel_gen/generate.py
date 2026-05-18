@@ -6,9 +6,9 @@ For each problem in generated/<name>/:
   2. Optimize with NCU profiling (if optimized_kernel.py doesn't exist)
 
 Usage:
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all [--problems PROB1 PROB2 ...]
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all  # runs all
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all --skip-optimize  # generation only
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.generate [--problems PROB1 PROB2 ...]
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.generate  # runs all
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.generate --skip-optimize  # generation only
 """
 
 from __future__ import annotations

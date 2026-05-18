@@ -197,11 +197,11 @@ If this fails:
 
 ### 4b. Run the Agent
 
-Use the runner script at `torchtitan/experiments/graph_trainer/kernel_gen/run_all.py`. By default it
+Use the runner script at `torchtitan/experiments/graph_trainer/kernel_gen/generate.py`. By default it
 runs **both** generation and NCU-guided optimization in sequence:
 
 ```bash
-python3 -m torchtitan.experiments.graph_trainer.kernel_gen.run_all --max-parallel 5
+python3 -m torchtitan.experiments.graph_trainer.kernel_gen.generate --max-parallel 5
 ```
 
 This will:
@@ -219,22 +219,22 @@ The optimization step uses `bridge.optimize_kernel()` which:
 
 For specific problems only:
 ```bash
-python3 -m torchtitan.experiments.graph_trainer.kernel_gen.run_all --problems rope_fwd swiglu_bwd
+python3 -m torchtitan.experiments.graph_trainer.kernel_gen.generate --problems rope_fwd swiglu_bwd
 ```
 
 For generation only (skip NCU optimization):
 ```bash
-python3 -m torchtitan.experiments.graph_trainer.kernel_gen.run_all --skip-optimize
+python3 -m torchtitan.experiments.graph_trainer.kernel_gen.generate --skip-optimize
 ```
 
 For NCU optimization only (kernels already generated):
 ```bash
-python3 -m torchtitan.experiments.graph_trainer.kernel_gen.run_all --optimize-only --opt-rounds 10
+python3 -m torchtitan.experiments.graph_trainer.kernel_gen.generate --optimize-only --opt-rounds 10
 ```
 
 For debugging a single problem:
 ```bash
-python3 -m torchtitan.experiments.graph_trainer.kernel_gen.run_all --problems rope_fwd --sequential
+python3 -m torchtitan.experiments.graph_trainer.kernel_gen.generate --problems rope_fwd --sequential
 ```
 
 ### 4c. Handle Failures
@@ -261,8 +261,8 @@ The benchmark script is useful for quick validation without running the full
 optimizer, or to compare initial vs optimized kernels:
 
 ```bash
-python3 -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark_all
-python3 -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark_all --problems rope_fwd swiglu_bwd
+python3 -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark
+python3 -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark --problems rope_fwd swiglu_bwd
 ```
 
 This measures correctness (max error) and wall-clock timing (CUDA events, 100 iters)
