@@ -10,11 +10,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-import torch.distributed._functional_collectives as funcol
-import torch.distributed.distributed_c10d as c10d
+import torch.distributed.checkpoint as dcp
 import torchstore as ts
-from monarch.actor import Actor, current_rank, endpoint
-from torchtitan.components.checkpoint import CheckpointManager
+from monarch.actor import Actor, endpoint
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    set_model_state_dict,
+    StateDictOptions,
+)
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -31,13 +34,10 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
-    extract_response_logprobs,
-    PartialLogprobDrift,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
+from torchtitan.experiments.rl.types import TrainBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
-from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 class PolicyTrainer(Actor, Configurable):
     """Updates policy based on collected Episode using TorchTitan components.
 
-    Exposes separate `forward_backward` and `optim_step` endpoints, called
+    Exposes separate ``forward_backward`` and ``optim_step`` endpoints, called
     explicitly by the controller.
 
     Args:
@@ -78,9 +78,6 @@ class PolicyTrainer(Actor, Configurable):
         ac_config: ActivationCheckpointConfig = field(
             default_factory=lambda: ActivationCheckpointConfig(mode="none")
         )
-        checkpoint: CheckpointManager.Config = field(
-            default_factory=CheckpointManager.Config
-        )
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
 
@@ -92,16 +89,9 @@ class PolicyTrainer(Actor, Configurable):
         compile_config: CompileConfig,
         hf_assets_path: str = "",
         generator_dtype: str = "",
-        output_dir: str,
     ):
+
         init_logger()
-        sl.init_structured_logger(
-            source="rl_trainer",
-            output_dir=output_dir,
-            rank=current_rank().rank,
-            enable=config.debug.enable_structured_logging,
-        )
-        sl.log_trace_instant("structured_logger_started")
 
         self.config = config
         self.compile_config = compile_config
@@ -121,8 +111,7 @@ class PolicyTrainer(Actor, Configurable):
         # Enable batch-invariant mode BEFORE init_distributed
         set_batch_invariance(config.debug.batch_invariant)
 
-        with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(config.comm)
+        world_size = dist_utils.init_distributed(config.comm)
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
 
@@ -143,7 +132,7 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
-        model = self._build_model(model_spec, config, device_type)
+        model = self._build_model(model_spec, config, device_type, hf_assets_path)
         model.train()
         self.model = model
         self.model_parts = [model]
@@ -156,25 +145,6 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         self.policy_version = 0
-
-        # Always build CheckpointManager; enable is a field on the config.
-        # When enable=False (CI/debug), load() is a no-op and random init stands.
-        self.checkpointer = config.checkpoint.build(
-            dataloader=None,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states={"train_state": self},
-            sd_adapter=self.sd_adapter,
-            base_folder=config.dump_folder,
-        )
-        self.checkpointer.load()
-        if not self.checkpointer.enable:
-            logger.warning(
-                "Checkpoint disabled, skip weight loading and use random-initialized weights. "
-                "Set checkpoint.enable=True to load from a checkpoint."
-            )
-
         self.generator: Any | None = None
 
         # Data parallelism: mesh is available after _build_model triggers build_mesh
@@ -191,37 +161,63 @@ class PolicyTrainer(Actor, Configurable):
             f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
         )
 
-    def state_dict(self) -> dict[str, Any]:
-        return {"policy_version": self.policy_version}
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.policy_version = state_dict["policy_version"]
-
     @endpoint
     async def close(self) -> None:
         """Destroy the worker's torch.distributed process group."""
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
 
-    @sl.log_trace_span("build_model")
+    def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
+        """Load model weights from HF checkpoint using DCP and state_dict_adapter.
+
+        Args:
+            model: The model to load weights into.
+            checkpoint_path: Path to HF checkpoint directory.
+        """
+        if self.sd_adapter is None:
+            logger.warning(
+                "No state_dict_adapter available, skipping initial weight load"
+            )
+            return
+
+        if not os.path.isdir(checkpoint_path):
+            raise FileNotFoundError(
+                f"Checkpoint path '{checkpoint_path}' does not exist. "
+                "Please provide a valid path to a HuggingFace checkpoint directory."
+            )
+
+        storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_path)
+        hf_state_dict = self.sd_adapter.to_hf(model.state_dict())
+        dcp.load(hf_state_dict, storage_reader=storage_reader)
+        torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
+
+        set_model_state_dict(
+            model=model,
+            model_state_dict=torchtitan_state_dict,
+            options=StateDictOptions(strict=True),
+        )
+        logger.info(
+            f"Loaded initial weights from {checkpoint_path} "
+            f"({len(torchtitan_state_dict)} parameters)"
+        )
+
     def _build_model(
         self,
         model_spec: ModelSpec,
         config: Config,
         device_type: str,
+        hf_assets_path: str,
     ):
-        """Build, parallelize, and initialize a model with random weights.
-
-        Checkpoint loading (e.g. from HF) is handled separately by
-        CheckpointManager after model and optimizer construction.
+        """Build, parallelize, and initialize a model from checkpoint.
 
         Args:
             model_spec: Model specification for building and parallelizing.
-            config: Trainer config (used for dtype, parallelism, etc.).
+            config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
             device_type: Device type string (e.g. "cuda").
+            hf_assets_path: Path to HF assets folder for checkpoint loading.
 
         Returns:
-            Model with random-initialized weights.
+            Initialized model with weights loaded from checkpoint.
         """
 
         # TODO: Also support flex attention backend later.
@@ -232,8 +228,8 @@ class PolicyTrainer(Actor, Configurable):
         ), "Only varlen attention backend is allowed."
 
         # Fill sharding configs on the config BEFORE build via the
-        # model-agnostic `update_from_config` hook (RL's trainer bypasses
-        # `torchtitan.Trainer's` call, so we invoke it directly).
+        # model-agnostic ``update_from_config`` hook (RL's trainer bypasses
+        # ``torchtitan.Trainer``'s call, so we invoke it directly).
         model_spec.model.update_from_config(trainer_config=config)
 
         with torch.device("meta"):
@@ -254,184 +250,119 @@ class PolicyTrainer(Actor, Configurable):
         with torch.no_grad():
             model.init_weights(buffer_device=None)
 
+        # Load initial weights from HF
+        self._load_initial_hf_weights(model, hf_assets_path)
+
         return model
 
     @endpoint
-    async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
-        """Sync the structured-logger step counter from the controller."""
-        sl.set_step(step, relative_step=relative_step)
-
-    def reduce_forward_backward_metrics(
-        self,
-        *,
-        sum_reduced_metrics: dict[str, torch.Tensor],
-        max_reduced_metrics: dict[str, torch.Tensor],
-    ) -> dict[str, float]:
-        """Reduce forward/backward metrics across the loss mesh.
-
-        Args:
-            sum_reduced_metrics: Per-rank shares to be SUM-reduced. Each
-                value must be pre-normalized so that summing across ranks
-                reconstructs the global metric.
-            max_reduced_metrics: Per-rank values to be MAX-reduced.
-
-        Returns:
-            {key: float} after collective reduction.
-        """
-        # TODO: switch from plain tensors to DTensor / spmd_types so the
-        # reduction op is encoded in the placement instead of split across
-        # `sum_reduced_metrics` / `max_reduced_metrics` dicts.
-        loss_mesh = self.parallel_dims.get_optional_mesh("loss")
-
-        out: dict[str, float] = {}
-        for values_by_key, op in [
-            (sum_reduced_metrics, c10d.ReduceOp.SUM),
-            (max_reduced_metrics, c10d.ReduceOp.MAX),
-        ]:
-            if not values_by_key:
-                continue
-            keys = list(values_by_key)
-            stacked = torch.stack([values_by_key[key].detach() for key in keys])
-            if loss_mesh is not None:
-                stacked = funcol.all_reduce(stacked, reduceOp=op.name, group=loss_mesh)
-            for key, value in zip(keys, stacked.cpu().tolist(), strict=True):
-                out[key] = float(value)
-        return out
-
-    @endpoint
-    @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        train_data: list[TrainingBatch],
-        *,
-        num_global_valid_tokens: int,
-    ) -> dict[str, float]:
-        """Run forward pass, compute loss, call backward, and reduce metrics.
+        train_data: list[TrainBatch],
+        global_valid_tokens: int,
+    ) -> dict:
+        """Run forward pass, compute loss, and call backward.
 
         Args:
-            train_data: List of TrainingBatch, one per DP rank. Local rank
-                picks train_data[self.dp_rank].
-            num_global_valid_tokens: Total response tokens across all DP
-                ranks for this step. The controller computes this before
-                sharding episodes.
+            train_data: List of batches, one per DP rank.
+            global_valid_tokens: Total response tokens across the global batch
+                (sum over all DP ranks and gradient accumulation steps). Used
+                by the loss as the normalizing denominator so per-rank loss
+                contributions sum to the correct global mean.
 
         Returns:
-            dict[str, float]: Globally-reduced metrics.
+            dict with loss metrics, advantage stats, and logprob verification.
         """
         logger.debug(
             f"{os.getpid()=} PolicyTrainer forward_backward "
             f"step {self.policy_version}"
         )
 
-        # RL does not support pipeline parallelism yet, so the trainer
-        # owns one model part.
-        if len(self.model_parts) != 1:
-            raise ValueError(
-                f"PolicyTrainer expects exactly one model part, got "
-                f"{len(self.model_parts)} (pipeline parallelism is not yet "
-                "supported in RL)."
-            )
-        model = self.model_parts[0]
-
         local_batch = train_data[self.dp_rank]
         device = self.device
 
-        token_ids = local_batch.token_ids.to(device)
-        seq_lens = local_batch.seq_lens
-        prompt_lens = local_batch.prompt_lens
-        response_lens = local_batch.response_lens
-        advantages = local_batch.advantages.to(device)
+        token_ids = local_batch.token_ids.to(device)  # [B, L]
+        positions = local_batch.positions.to(device)  # [B, L]
+        ref_logprobs = local_batch.ref_logprobs.to(device)  # [B, L]
+        response_mask = local_batch.response_mask.to(device)  # [B, L]
+        advantages = local_batch.advantages.to(device)  # [B, L]
 
-        max_seq_len = max(seq_lens)
+        B, L = token_ids.shape
         rope_cache_len = self.model.freqs_cis.shape[0]
-        if max_seq_len > rope_cache_len:
+        if L > rope_cache_len:
             raise ValueError(
-                f"Episode length {max_seq_len} exceeds rope cache size "
+                f"Sequence length {L} exceeds rope cache size "
                 f"{rope_cache_len}. Increase model max_seq_len or reduce "
                 f"generation max_tokens."
             )
 
-        num_global_valid_tokens: torch.Tensor = torch.tensor(
-            float(max(num_global_valid_tokens, 1)),
-            device=device,
-            dtype=torch.float32,
-        )
-
-        positions = torch.cat(
-            [torch.arange(l, device=device) for l in seq_lens]
-        ).unsqueeze(0)
         attention_masks = create_varlen_metadata_for_document(positions)
 
-        with sl.log_trace_span("model_forward"):
-            logits = model(
-                token_ids, attention_masks=attention_masks, positions=positions
-            )
-        all_policy_logprobs = compute_logprobs(logits, token_ids)
-        policy_logprobs = extract_response_logprobs(
-            all_policy_logprobs, seq_lens, prompt_lens, response_lens
+        logits = self.model(
+            token_ids, attention_masks=attention_masks, positions=positions
+        )
+        policy_logprobs = compute_logprobs(logits, token_ids)  # [B, L-1]
+
+        # Align response_mask, advantages, ref_logprobs with shifted logprobs
+        response_mask = response_mask[:, 1:]  # [B, L-1]
+        advantages = advantages[:, 1:]  # [B, L-1]
+        ref_logprobs = ref_logprobs[:, 1:]  # [B, L-1]
+
+        loss, loss_metrics = self.loss_fn(
+            policy_logprobs=policy_logprobs,
+            response_mask=response_mask,
+            advantages=advantages,
+            global_valid_tokens=global_valid_tokens,
         )
 
-        with sl.log_trace_span("loss_fn"):
-            loss, loss_metrics = self.loss_fn(
-                policy_logprobs=policy_logprobs,
-                advantages=advantages,
-                num_global_valid_tokens=num_global_valid_tokens,
-            )
+        verification = verify_logprob_identity(
+            policy_logprobs, ref_logprobs, response_mask
+        )
 
+        logger.debug(
+            f"Logprob verification: "
+            f"bitwise_identical={verification['logprob_bitwise_identical']}, "
+            f"max_delta={verification['logprob_max_delta']:.6e}, "
+            f"diff_mean={verification['logprob_diff_mean']:.6e}, "
+            f"diff_max={verification['logprob_diff_max']:.6e}, "
+            f"tokens_checked={verification['total_tokens_checked']}"
+        )
+
+        # Backward pass
+        num_response_tokens = response_mask.sum().item()
         self.optimizers.zero_grad()
-        with sl.log_trace_span("model_backward"):
-            loss.backward()
+        loss.backward()
 
-        # Metrics for bitwise verification of policy logprobs.
-        verification: PartialLogprobDrift = verify_logprob_identity(
-            generator_token_logprobs=local_batch.token_logprobs,
-            trainer_token_logprobs=policy_logprobs,
-            num_global_valid_tokens=num_global_valid_tokens,
-            device=device,
-        )
-
-        # Per-rank pre-normalized metrics, so SUM-reducing reconstructs the global.
-        sum_reduced_metrics = {
+        return {
+            "loss": loss.item(),
+            "advantage_mean": (advantages * response_mask).sum().item()
+            / max(num_response_tokens, 1),
+            "advantage_std": advantages[response_mask.bool()].std().item()
+            if num_response_tokens > 0
+            else 0.0,
+            **verification,
             **loss_metrics,
-            "bit_wise/logprob_diff/mean": verification.logprob_diff_mean,
-            "bit_wise/ratio_tokens_different/mean": verification.ratio_tokens_different,
         }
-        max_reduced_metrics = {
-            "bit_wise/logprob_diff/max": verification.logprob_diff_max,
-        }
-
-        return self.reduce_forward_backward_metrics(
-            sum_reduced_metrics=sum_reduced_metrics,
-            max_reduced_metrics=max_reduced_metrics,
-        )
 
     @endpoint
-    @sl.log_trace_span("optim_step")
-    async def optim_step(self) -> OptimStepOutput:
-        """Clip gradients, step optimizer + LR scheduler, return updated state."""
+    async def optim_step(self) -> dict:
+        """Clip gradients, step optimizer and LR scheduler.
+
+        Returns:
+            dict with grad_norm and policy_version.
+        """
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules (see Tinker API).
 
-        # capture LR before step
-        current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
-        if len(current_lrs) != 1:
-            raise ValueError(
-                "RL metrics only support a single optimizer LR for "
-                f"train/lr; got {current_lrs}"
-            )
-        current_lr = float(current_lrs[0])
+        grad_norm = dist_utils.clip_grad_norm_(
+            [p for m in self.model_parts for p in m.parameters()],
+            self.config.training.max_norm,
+            foreach=True,
+            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+        )
 
-        with sl.log_trace_span("grad_clip"):
-            grad_norm = dist_utils.clip_grad_norm_(
-                [p for m in self.model_parts for p in m.parameters()],
-                self.config.training.max_norm,
-                foreach=True,
-                pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
-            )
-
-        with sl.log_trace_span("optim"):
-            self.optimizers.step()
-            self.lr_schedulers.step()
+        self.optimizers.step()
+        self.lr_schedulers.step()
 
         self.policy_version += 1
 
@@ -440,42 +371,36 @@ class PolicyTrainer(Actor, Configurable):
             f"policy_version={self.policy_version}"
         )
 
-        return OptimStepOutput(
-            policy_version=self.policy_version,
-            metrics={
-                "train/grad_norm/mean": float(grad_norm.item()),
-                "train/lr": current_lr,
-                "train/policy_version": float(self.policy_version),
-            },
-        )
+        return {
+            "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
+            "policy_version": self.policy_version,
+        }
 
     @endpoint
-    @sl.log_trace_span("save_checkpoint")
-    async def save_checkpoint(self, step: int, last_step: bool = False) -> bool:
-        """Save checkpoint via CheckpointManager.
+    async def save_checkpoint(self, path: str) -> None:
+        """Save model state dict to disk via DCP.
 
         Args:
-            step: Current training step number.
-            last_step: Whether this is the final step of training.
-
-        Returns:
-            True if a checkpoint was saved.
+            path: Directory to save the checkpoint to.
         """
-        return self.checkpointer.save(step, last_step=last_step)
+        # TODO: Reuse torchtitan's CheckpointManager for async saves, HF export,
+        # and checkpoint loading for resume support.
+        state_dict = {"model": get_model_state_dict(self.model)}
+        dcp.save(state_dict, checkpoint_id=path)
+        logger.info(f"Saved checkpoint to {path}")
 
     @endpoint
-    @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
         """Publish model weights for generator consumption via TorchStore.
 
-        When `direct_rdma=True`, weights are transferred directly from
+        When ``direct_rdma=True``, weights are transferred directly from
         GPU to GPU via one-sided RDMA reads, bypassing StorageVolumes
-        entirely. When `False`, data goes through StorageVolumes
+        entirely. When ``False``, data goes through StorageVolumes
         (which may themselves use RDMA as a transport internally).
 
-        Note: we couple `is_rdma_available()` with `direct_rdma` here,
+        Note: we couple ``is_rdma_available()`` with ``direct_rdma`` here,
         but the two concepts are not identical -- StorageVolumes can also
-        use RDMA as their transport layer. `direct_rdma` specifically
+        use RDMA as their transport layer. ``direct_rdma`` specifically
         means "skip StorageVolumes and let the destination read directly
         from the source's GPU memory".
 

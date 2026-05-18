@@ -86,15 +86,12 @@ class Episode:
 
 
 @dataclass(kw_only=True, slots=True)
-class TrainingBatch:
-    token_ids: torch.Tensor  # [1, total_tokens]
-    prompt_lens: list[int]  # [num_episodes]
-    response_lens: list[int]  # [num_episodes]
-    seq_lens: list[int]  # [num_episodes] (prompt_lens + response_lens)
-    advantages: torch.Tensor  # [num_episodes]
-    token_logprobs: list[
-        list[float]
-    ]  # [num_episodes][response_len_i] per-token logprobs from rollout
+class TrainBatch:
+    token_ids: torch.Tensor  # [B, L]
+    positions: torch.Tensor  # [B, L]
+    ref_logprobs: torch.Tensor  # [B, L] — 0.0 for prompt/padding
+    response_mask: torch.Tensor  # [B, L] — 1.0 for response, 0.0 for prompt/padding
+    advantages: torch.Tensor  # [B, L] — per-token, 0.0 for prompt/padding
 
 
 @dataclass(frozen=True, slots=True)
