@@ -375,8 +375,20 @@ def _create_subgraph_module(
 
 
 # ---------------------------------------------------------------------------
-# Kernel loading
+# Kernel loading + backend selection
 # ---------------------------------------------------------------------------
+
+def _load_module_from_file(path: Path, name: str) -> types.ModuleType:
+    """Load a Python module, stripping description preamble if present."""
+    content = path.read_text()
+    idx = content.find("import torch")
+    if idx > 0:
+        content = content[idx:]
+    mod = types.ModuleType(name)
+    mod.__file__ = str(path)
+    exec(compile(content, str(path), "exec"), mod.__dict__)
+    return mod
+
 
 def _load_kernel_fn(kernel_dir: Path) -> Callable | None:
     """Load kernel_function from kernel.py if it exists."""
@@ -395,6 +407,106 @@ def _load_kernel_fn(kernel_dir: Path) -> Callable | None:
     except Exception as e:
         logger.debug(f"Failed to load kernel from {kernel_path}: {e}")
         return None
+
+
+def _microbenchmark(fn: Callable, inputs: list[torch.Tensor], warmup: int = 5, iters: int = 20) -> float:
+    """Measure wall-clock time in ms. Returns inf on error."""
+    try:
+        for _ in range(warmup):
+            fn(*inputs)
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            fn(*inputs)
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) / iters
+    except Exception as e:
+        logger.debug(f"Benchmark failed: {e}")
+        return float("inf")
+
+
+def _try_compile(eager_fn: Callable) -> Callable | None:
+    """Try to torch.compile the eager function. Returns None on failure."""
+    try:
+        return torch.compile(eager_fn, fullgraph=True)
+    except Exception:
+        return None
+
+
+def _select_best_backend(
+    region_dir: Path,
+    eager_fn: Callable,
+    get_inputs_fn: Callable | None,
+) -> tuple[Callable, str]:
+    """Select the fastest backend for a fused region.
+
+    Candidates: eager (always), torch.compile (if compilable), triton (if kernel.py exists).
+    Uses benchmark.json as cache — if it exists and covers all available backends, skip
+    re-benchmarking. Otherwise run a quick microbenchmark and save results.
+
+    Returns (best_fn, backend_name).
+    """
+    import json
+
+    # Collect candidates
+    candidates: dict[str, Callable] = {"eager": eager_fn}
+
+    compiled_fn = _try_compile(eager_fn)
+    if compiled_fn is not None:
+        candidates["compile"] = compiled_fn
+
+    triton_fn = _load_kernel_fn(region_dir)
+    if triton_fn is not None:
+        candidates["triton"] = triton_fn
+
+    # If only eager, skip benchmarking
+    if len(candidates) == 1:
+        return eager_fn, "eager"
+
+    # Check for cached benchmark
+    bench_path = region_dir / "benchmark.json"
+    bench_data: dict[str, float] = {}
+    if bench_path.exists():
+        try:
+            bench_data = json.loads(bench_path.read_text())
+        except Exception:
+            pass
+
+    # Check if cache covers all current candidates
+    all_cached = all(f"{k}_ms" in bench_data for k in candidates)
+
+    if not all_cached and get_inputs_fn is not None:
+        # Run microbenchmark
+        try:
+            inputs = get_inputs_fn()
+        except Exception:
+            inputs = None
+
+        if inputs is not None:
+            for name, fn in candidates.items():
+                key = f"{name}_ms"
+                if key not in bench_data:
+                    bench_data[key] = _microbenchmark(fn, inputs)
+
+            # Save results
+            try:
+                bench_path.write_text(json.dumps(bench_data, indent=2))
+            except Exception:
+                pass
+
+    # Pick the fastest
+    best_name = "eager"
+    best_time = bench_data.get("eager_ms", float("inf"))
+    for name in candidates:
+        t = bench_data.get(f"{name}_ms", float("inf"))
+        if t < best_time:
+            best_time = t
+            best_name = name
+
+    return candidates[best_name], best_name
 
 
 # ---------------------------------------------------------------------------
@@ -625,10 +737,12 @@ def fused_kernel_pass(
     kernels_loaded = 0
     problems_written = 0
 
-    # Pre-build one template module + kernel per hash (shared across instances)
-    hash_kernel: dict[str, Callable | None] = {}
+    # Per-hash: write problem, select best backend, cache result
+    hash_best: dict[str, tuple[Callable | None, str]] = {}  # hash -> (best_fn, backend_name)
+    backend_counts: Counter[str] = Counter()
+
     for _, h, r in instances:
-        if h in hash_kernel:
+        if h in hash_best:
             continue
         region_dir = kdir / h
 
@@ -638,17 +752,29 @@ def fused_kernel_pass(
             _write_problem(r, region_dir, count)
             problems_written += 1
 
-        hash_kernel[h] = _load_kernel_fn(region_dir)
-        if hash_kernel[h] is not None:
-            kernels_loaded += 1
+        # Build eager baseline from the subgraph
+        eager_module = _create_subgraph_module(r)
+        eager_fn = eager_module.forward
+
+        # Load get_inputs from problem.py for benchmarking
+        get_inputs_fn = None
+        problem_path = region_dir / "problem.py"
+        if problem_path.exists():
+            try:
+                mod = _load_module_from_file(problem_path, f"_prob_{h}")
+                get_inputs_fn = getattr(mod, "get_inputs", None)
+            except Exception:
+                pass
+
+        best_fn, backend_name = _select_best_backend(region_dir, eager_fn, get_inputs_fn)
+        hash_best[h] = (best_fn if backend_name != "eager" else None, backend_name)
+        backend_counts[backend_name] += 1
 
     for pos, h, r in instances:
-        # Each instance gets its own subgraph module (same structure,
-        # different FX nodes), but shares the kernel if available
         subgraph_module = _create_subgraph_module(r)
-        kernel_fn = hash_kernel.get(h)
-        if kernel_fn is not None:
-            subgraph_module.forward = kernel_fn  # type: ignore[assignment]
+        best_fn, backend_name = hash_best.get(h, (None, "eager"))
+        if best_fn is not None:
+            subgraph_module.forward = best_fn  # type: ignore[assignment]
 
         module_name = f"_fused_{h}_{replaced}"
         _replace_region(gm, r, module_name, subgraph_module)
@@ -658,10 +784,12 @@ def fused_kernel_pass(
         gm.graph.lint()
         gm.recompile()
 
+    backend_summary = ", ".join(f"{k}={v}" for k, v in sorted(backend_counts.items()))
     logger.info(
-        f"Fused kernel pass: {replaced} replacements, "
-        f"{kernels_loaded} kernels loaded, "
-        f"{problems_written} problems written to {kdir}"
+        f"Fused kernel pass: {replaced} replacements across "
+        f"{len(hash_best)} unique patterns, "
+        f"backends: [{backend_summary}], "
+        f"{problems_written} new problems written to {kdir}"
     )
 
     return gm
