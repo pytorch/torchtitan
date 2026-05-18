@@ -630,7 +630,7 @@ class CheckpointManager(Configurable):
         if from_hf:
             assert (
                 self.sd_adapter is not None
-            ), "sd_adapter is required for initial_load_in_hf=True"
+            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
 
             # Prepare HF-compatible dictionary and reader
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
@@ -802,17 +802,21 @@ class CheckpointManager(Configurable):
 
             # Safety checks for HF/Quantization
             if from_hf:
-                assert model_only, "Only model can be loaded from HF safetensors."
+                assert (
+                    model_only
+                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
             if from_quantized:
-                assert from_hf, "Quantized checkpoints must be in HF format."
+                assert from_hf, "Quantized checkpoint can only be loaded from HF format"
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
-                    raise ValueError(f"initial_load_path is invalid: {checkpoint_id}")
+                    raise ValueError(
+                        f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
+                    )
                 if from_hf:
                     logger.info(
-                        f"Loading HF safetensors from checkpoint.initial_load_path: {checkpoint_id}"
+                        f"Loading from HF safetensors from --checkpoint.initial_load_path: {checkpoint_id}"
                     )
 
             elif from_hf:
@@ -826,7 +830,7 @@ class CheckpointManager(Configurable):
                         "Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                     )
                 logger.info(
-                    f"Loading HF safetensors from checkpoint.hf_assets_path: {checkpoint_id}"
+                    f"Loading HF safetensors from --model.hf_assets_path: {checkpoint_id}"
                 )
 
             else:
@@ -855,7 +859,7 @@ class CheckpointManager(Configurable):
 
             if not os.path.isdir(checkpoint_id):
                 raise FileNotFoundError(
-                    f"Checkpoint step {step} not found at {checkpoint_id}"
+                    f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                 )
 
         # -------------------- Checkpoint Loading --------------------
