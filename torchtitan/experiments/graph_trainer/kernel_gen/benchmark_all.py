@@ -7,8 +7,8 @@ For each kernel in generated/<name>/:
   3. Report: speedup, max error, pass/fail
 
 Usage:
-  python -m autoresearch.kernel_gen.benchmark_all [--problems PROB1 PROB2 ...]
-  python -m autoresearch.kernel_gen.benchmark_all  # runs all
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark_all [--problems PROB1 PROB2 ...]
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark_all  # runs all
 """
 
 from __future__ import annotations
@@ -202,7 +202,7 @@ def run_one(name: str) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", type=Path, default=None,
-                        help="Directory with problem subdirs (default: autoresearch/kernel_gen/generated)")
+                        help="Directory with problem subdirs (default: torchtitan/experiments/graph_trainer/kernel_gen/generated)")
     parser.add_argument("--problems", nargs="*")
     args = parser.parse_args()
 

@@ -23,7 +23,7 @@ Usage:
   ./run_train.sh --compile.fused_kernel_dir /tmp/kernels
 
   # Offline: generate kernels
-  python -m autoresearch.kernel_gen.run_all
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all
 
   # Next run: same command, auto-picks up kernels
   ./run_train.sh --compile.fused_kernel_dir /tmp/kernels

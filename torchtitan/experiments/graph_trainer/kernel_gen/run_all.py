@@ -6,9 +6,9 @@ For each problem in generated/<name>/:
   2. Optimize with NCU profiling (if optimized_kernel.py doesn't exist)
 
 Usage:
-  python -m autoresearch.kernel_gen.run_all [--problems PROB1 PROB2 ...]
-  python -m autoresearch.kernel_gen.run_all  # runs all
-  python -m autoresearch.kernel_gen.run_all --skip-optimize  # generation only
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all [--problems PROB1 PROB2 ...]
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all  # runs all
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.run_all --skip-optimize  # generation only
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _setup_env():
     import os
     os.environ.setdefault("LOG_LEVEL", "WARNING")
     sys.path.insert(0, os.path.expanduser("~/local/KernelAgent"))
-    from autoresearch.kernel_gen.bridge import _ensure_api_key, _ensure_proxy
+    from torchtitan.experiments.graph_trainer.kernel_gen.bridge import _ensure_api_key, _ensure_proxy
     _ensure_api_key()
     _ensure_proxy()
 
@@ -47,7 +47,7 @@ def generate_one(name: str) -> dict:
     problem_text = problem_file.read_text()
     log_dir = str(problem_dir / "logs")
 
-    from autoresearch.kernel_gen.bridge import generate_kernel
+    from torchtitan.experiments.graph_trainer.kernel_gen.bridge import generate_kernel
 
     print(f"[{name}] Generating kernel...", flush=True)
     try:
@@ -88,7 +88,7 @@ def optimize_one(name: str, opt_rounds: int = 5) -> dict:
     if not problem_path.exists():
         return {"name": name, "success": False, "message": "no problem.py"}
 
-    from autoresearch.kernel_gen.bridge import optimize_kernel
+    from torchtitan.experiments.graph_trainer.kernel_gen.bridge import optimize_kernel
 
     kernel_code = kernel_path.read_text()
     opt_dir = str(problem_dir / "opt_logs")
@@ -145,7 +145,7 @@ def optimize_one(name: str, opt_rounds: int = 5) -> dict:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", type=Path, default=None,
-                        help="Directory with problem subdirs (default: autoresearch/kernel_gen/generated)")
+                        help="Directory with problem subdirs (default: torchtitan/experiments/graph_trainer/kernel_gen/generated)")
     parser.add_argument("--problems", nargs="*")
     parser.add_argument("--max-parallel", type=int, default=5)
     parser.add_argument("--sequential", action="store_true")
