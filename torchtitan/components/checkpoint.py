@@ -284,7 +284,7 @@ class CheckpointManager(Configurable):
         with the next iteration's computation.
         The process then persists the data from pinned shared memory to disk.
         This eliminates GIL contention and minimizes the blocking window to near-zero (< 1s),
-        at the cost of significantly higher fixed CPU RAM usage.
+        at the cost of significantly higher fixed CPU RAM usage (pinned memory).
         If case of insufficient CPU memory, performance may degrade due to memory paging.
         For most users, "async" should suffice.
 
@@ -532,7 +532,7 @@ class CheckpointManager(Configurable):
 
         checkpoint_save_id = checkpoint_id
 
-        # ---------- 1. Format Adaptation (HF vs Standard) -----------
+        # ------------------- HF Format Adaptation -------------------
 
         if to_hf:
             assert self.sd_adapter is not None, "sd_adapter is required for to_hf=True"
@@ -560,7 +560,7 @@ class CheckpointManager(Configurable):
 
             checkpoint_save_id = None  # storage_writer handles the path
 
-        # ------------------ 2. Execution Dispatch -------------------
+        # -------------------- Execution Dispatch --------------------
 
         if async_mode == AsyncMode.DISABLED:
             ret = dcp.save(
@@ -585,7 +585,7 @@ class CheckpointManager(Configurable):
                 async_stager=async_stager,
             )
 
-        # ------- 3. Post-Processing (Consolidation & Cleanup) -------
+        # --------------------- Post-Processing ----------------------
 
         if to_hf and fqn_to_index_mapping:
             consolidate_safetensors_files_on_every_rank(
@@ -688,7 +688,7 @@ class CheckpointManager(Configurable):
 
         checkpoint_id = self._create_checkpoint_id(curr_step)
 
-        # ------------------ 1. Specialized Last Step ------------------
+        # ------------------ Specialized Last Step -------------------
 
         if last_step:
             self._save_last_step(curr_step)
@@ -697,7 +697,7 @@ class CheckpointManager(Configurable):
             )
             return True
 
-        # --------- 2. State Preparation & Memory Management  ----------
+        # -------------------- Execution Dispatch --------------------
 
         states = self._flattened_model_states_sd()
 
@@ -705,8 +705,6 @@ class CheckpointManager(Configurable):
             # Reclaim memory from the previous step's finished async operations
             # before allocating new buffers for the current step.
             GarbageCollection.collect("Preparing memory for async checkpoint staging.")
-
-        # ------------------- 3. Execution Dispatch --------------------
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             if self.stager is None:
@@ -758,7 +756,7 @@ class CheckpointManager(Configurable):
                 enable_garbage_collection=True,
             )
 
-        # ----------------- 4. Cleanup & Logging ------------------
+        # -------------------- Cleanup & Logging ---------------------
 
         self._purge_stale_checkpoints()
 
@@ -789,7 +787,7 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return False
 
-        # -------------------- 1. Checkpoint Path Resolution ---------------------
+        # ---------------- Checkpoint Path Resolution ----------------
 
         model_only = False
         from_hf = False
@@ -860,7 +858,7 @@ class CheckpointManager(Configurable):
                     f"Checkpoint step {step} not found at {checkpoint_id}"
                 )
 
-        # ------------------------ 2. Execution & Loading ------------------------
+        # -------------------- Checkpoint Loading --------------------
 
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin_t = time.monotonic()
@@ -880,7 +878,6 @@ class CheckpointManager(Configurable):
 
         return True
 
-    # TODO (andrei aksionau): better order methods
     def maybe_wait_for_staging(self) -> None:
         """
         Wait for the staging process to complete if it is active.
@@ -1029,8 +1026,6 @@ class CheckpointManager(Configurable):
         if model_only:
             return self.states[MODEL].state_dict()
 
-        # TODO (andrei aksionau): nothing prevents from excluding loading model.
-        #   Is this desirable?
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
                 raise ValueError(f"{exclude_key} not found in state_dict.")
@@ -1067,8 +1062,6 @@ class CheckpointManager(Configurable):
         if self.last_save_model_only:
             states = self.states[MODEL].state_dict()
 
-            # TODO (andrei aksionau): ask maintainers what if the model not in fp32
-            #   but a user wants to export to fp32
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
             logger.info(
