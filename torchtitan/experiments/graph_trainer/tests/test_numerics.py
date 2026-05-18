@@ -283,59 +283,13 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
     )
 
 
-# TODO: JIT and AOT tests are disabled due to an upstream PyTorch
-# partitioner regression ("Node tangents_2 was invalid, but is output")
-# triggered by the full DTensor change (#2149). Re-enable once resolved.
-# See https://www.internalfb.com/intern/paste/P2285018929/
-
-
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_dense_llama3_aot_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(test_options_extra="--compile.mode aot"),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_dense_llama3_auto_bucketing_aot_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(
-                test_options_extra="--compile.mode aot --compile.passes auto_bucketing"
-            ),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_dense_llama3_manual_bucketing_aot_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(
-                test_options_extra="--compile.mode aot --compile.passes transformer_block_bucketing"
-            ),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_dense_llama3_cudagraph_aot_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(
-                test_options_extra="--compile.mode aot --compile.passes cudagraph"
-            ),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_moe_dsv3_aot_vs_eager(self):
-        self.assertTrue(
-            _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode aot"),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_moe_dsv3_manual_bucketing_aot_vs_eager(self):
-        self.assertTrue(
-            _run_deepseek_v3_loss_compare(
-                test_options_extra="--compile.mode aot --compile.passes transformer_block_bucketing"
-            ),
-        )
-
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
@@ -378,6 +332,10 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_moe_dsv3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_deepseek_v3_loss_compare(
@@ -385,11 +343,19 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
         )
 
+    # TODO: Disabled due to upstream PyTorch nightly DTensor regression.
+    # Sharding propagation fails for aten.mm.default with mixed dtypes
+    # (bf16 activations, f32 weights) on the TP mesh. Re-enable once fixed.
+    @unittest.skip("upstream DTensor mixed-dtype sharding propagation regression")
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(
             _run_qwen3_moe_loss_compare(
@@ -405,9 +371,14 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
+    # TODO: Disabled due to upstream AutoParallel regression in PyTorch
+    # nightly dev20260508. AutoParallel rejects FakeTensor device
+    # mismatch (traced on meta vs actual cuda). Re-enable once fixed.
+    @unittest.skip("upstream AutoParallel FakeTensor device mismatch regression")
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 
+    @unittest.skip("upstream AutoParallel FakeTensor device mismatch regression")
     def test_deepseek_v3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_deepseek_v3_loss_compare())
 

@@ -300,7 +300,7 @@ def _collect_paired_and_instants(
 
         # Point-in-time records (log_trace_instant, log_trace_scalar) carry
         # log_type=instant. Branch on intent before suffix matching so that
-        # instants whose names happen to end in "_start" (binary_start,
+        # instants whose names happen to end in "_start" (structured_logger_started,
         # training_start) don't get wrongly routed to the span-pair stack.
         if log_type == str(LogType.INSTANT):
             if event_type == "metric_value":

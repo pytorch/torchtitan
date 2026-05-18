@@ -66,7 +66,8 @@ two-step process:
    - `apply_cpu_offload_pass` — inserts offload/reload/wait ops for
      `MUST_CPU_OFFLOAD` nodes.
    - `selective_activation_remat_pass` — duplicates `MUST_RECOMPUTE`
-     ops before backward and DCEs the originals.
+     ops in front of their backward consumers and erases originals whose
+     consumers were all backward.
 
 The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
