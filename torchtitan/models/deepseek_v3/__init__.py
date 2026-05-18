@@ -33,13 +33,19 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
+from .model import (
+    Attention,
+    DeepSeekV3Model,
+    DeepSeekV3TransformerBlock,
+    MTPTransformerBlock,
+)
 from .parallelize import parallelize_deepseekv3
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
     "parallelize_deepseekv3",
     "DeepSeekV3Model",
+    "MTPTransformerBlock",
     "deepseekv3_configs",
 ]
 

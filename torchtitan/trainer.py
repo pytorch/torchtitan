@@ -496,11 +496,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
+        # MTP needs extra future tokens for shifted inputs and labels, while
+        # config.training.seq_len remains the main transformer sequence length.
+        dataloader_seq_len = (
+            config.training.seq_len + config.training.num_mtp_modules
+        )
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
+            seq_len=dataloader_seq_len,
             local_batch_size=config.training.local_batch_size,
             snapshot_every_n_steps=(
                 config.checkpoint.interval * self.gradient_accumulation_steps
@@ -601,7 +606,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
-            ntokens_batch = labels.numel()
+            ntokens_batch = (
+                labels[:, : -self.config.training.num_mtp_modules].numel()
+                if self.config.training.num_mtp_modules > 0
+                else labels.numel()
+            )
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -647,6 +656,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         }
 
         positions = extra_kwargs.get("positions", None)
+        num_mtp_modules = self.config.training.num_mtp_modules
+        if positions is not None and num_mtp_modules > 0:
+            extra_kwargs["positions"] = positions[:, :-num_mtp_modules]
+            positions = extra_kwargs["positions"]
 
         # positions and attention_masks are optional (Decoder.forward defaults
         # both to None). Build attention masks only for the masked backends
@@ -674,6 +687,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
+                num_mtp_modules=num_mtp_modules,
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual
@@ -772,7 +786,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         for _microbatch in range(self.gradient_accumulation_steps):
             with sl.log_trace_span("fetching_batch"):
                 input_dict, labels = next(data_iterator)
-                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                loss_labels = (
+                    labels[:, : -self.config.training.num_mtp_modules]
+                    if self.config.training.num_mtp_modules > 0
+                    else labels
+                )
+                local_valid_tokens += (loss_labels != IGNORE_INDEX).sum()
                 microbatches.append((input_dict, labels))
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
 

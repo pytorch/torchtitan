@@ -65,6 +65,44 @@ def cross_entropy_loss(
     )
 
 
+def multi_token_cross_entropy_loss(
+    preds: list[torch.Tensor],
+    labels: torch.Tensor,
+    *,
+    num_mtp_modules: int,
+    mtp_loss_weight: float,
+    global_vocab_size: int | None = None,
+) -> torch.Tensor:
+    """Cross-entropy loss with DeepSeek-V3 multi-token prediction heads."""
+    if len(preds) != num_mtp_modules + 1:
+        raise ValueError(
+            f"Expected {num_mtp_modules + 1} predictions for "
+            f"{num_mtp_modules} MTP modules, got {len(preds)}."
+        )
+
+    seq_len = preds[0].shape[1]
+    if labels.shape[1] < seq_len + num_mtp_modules:
+        raise ValueError(
+            f"MTP labels must have at least {seq_len + num_mtp_modules} tokens, "
+            f"got {labels.shape[1]}."
+        )
+
+    main_loss = cross_entropy_loss(
+        preds[0],
+        labels[:, :seq_len],
+        global_vocab_size=global_vocab_size,
+    )
+    mtp_loss = preds[0].new_zeros((), dtype=torch.float32)
+    for label_offset, pred in enumerate(preds[1:], 1):
+        mtp_loss = mtp_loss + cross_entropy_loss(
+            pred,
+            labels[:, label_offset : label_offset + seq_len],
+            global_vocab_size=global_vocab_size,
+        ) / num_mtp_modules
+
+    return main_loss + mtp_loss * mtp_loss_weight
+
+
 @spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
@@ -375,6 +413,48 @@ class MSELoss(BaseLoss):
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = mse_loss
         self._maybe_compile(compile_config)
+
+
+class MTPLoss(BaseLoss):
+    """DeepSeek-V3 multi-token prediction loss."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseLoss.Config):
+        num_mtp_modules: int = 1
+        mtp_loss_weight: float = 0.3
+        global_vocab_size: int | None = None
+        """Full vocabulary size, needed for spmd_types loss-parallel CE."""
+
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        self.fn: LossFunction = cross_entropy_loss
+        self._maybe_compile(compile_config)
+        self.num_mtp_modules = config.num_mtp_modules
+        self.mtp_loss_weight = config.mtp_loss_weight
+        self.global_vocab_size = config.global_vocab_size
+
+    def __call__(
+        self,
+        pred: torch.Tensor | list[torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: float | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if isinstance(pred, list):
+            loss = multi_token_cross_entropy_loss(
+                pred,
+                labels,
+                num_mtp_modules=self.num_mtp_modules,
+                mtp_loss_weight=self.mtp_loss_weight,
+                global_vocab_size=self.global_vocab_size,
+            )
+        else:
+            loss = self.fn(
+                pred,
+                labels,
+                global_vocab_size=self.global_vocab_size,
+            )
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss, {}
 
 
 def compute_logprobs(

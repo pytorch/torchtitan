@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import math
 from dataclasses import dataclass, field
 
@@ -183,6 +184,40 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         return x
 
 
+class MTPTransformerBlock(DeepSeekV3TransformerBlock):
+    """Multi-token prediction transformer block for DeepSeek-V3."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(DeepSeekV3TransformerBlock.Config):
+        enorm: RMSNorm.Config
+        hnorm: RMSNorm.Config
+        eh_proj: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.enorm = config.enorm.build()
+        self.hnorm = config.hnorm.build()
+        self.eh_proj = config.eh_proj.build()
+
+    def forward(
+        self,
+        input_offset: torch.Tensor,
+        prev_embed: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ):
+        input_offset = self.enorm(input_offset)
+        prev_embed = self.hnorm(prev_embed)
+        h = self.eh_proj(torch.cat([input_offset, prev_embed], dim=-1))
+
+        h = h + self.attention(self.attention_norm(h), attention_masks, positions)
+        if self.moe_enabled:
+            h = h + self.moe(self.ffn_norm(h))
+        else:
+            h = h + self.feed_forward(self.ffn_norm(h))
+        return h
+
+
 class DeepSeekV3Model(Decoder):
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
@@ -192,6 +227,8 @@ class DeepSeekV3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
+        n_main_layers: int = 0
+        num_mtp_modules: int = 0
 
         def update_from_config(
             self,
@@ -201,6 +238,56 @@ class DeepSeekV3Model(Decoder):
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
+            training = getattr(config, "training", None)
+            num_mtp_modules = (
+                getattr(training, "num_mtp_modules", 0)
+                if training is not None
+                else self.num_mtp_modules
+            )
+            self.layers = [
+                layer
+                for layer in self.layers
+                if not isinstance(layer, MTPTransformerBlock.Config)
+            ]
+            self.num_mtp_modules = num_mtp_modules
+            self.n_main_layers = len(self.layers)
+
+            if num_mtp_modules > 0:
+                if parallelism.pipeline_parallel_degree > 1:
+                    raise NotImplementedError(
+                        "DeepSeek-V3 MTP does not support pipeline parallelism yet."
+                    )
+                if self.n_main_layers == 0:
+                    raise ValueError("DeepSeek-V3 MTP requires at least one layer.")
+
+                ref_layer = self.layers[-1]
+                for _ in range(num_mtp_modules):
+                    self.layers.append(
+                        MTPTransformerBlock.Config(
+                            attention=copy.deepcopy(ref_layer.attention),
+                            attention_norm=copy.deepcopy(ref_layer.attention_norm),
+                            ffn_norm=copy.deepcopy(ref_layer.ffn_norm),
+                            feed_forward=copy.deepcopy(ref_layer.feed_forward),
+                            moe=copy.deepcopy(ref_layer.moe),
+                            enorm=RMSNorm.Config(
+                                normalized_shape=self.dim,
+                                param_init=copy.deepcopy(
+                                    ref_layer.ffn_norm.param_init
+                                ),
+                            ),
+                            hnorm=RMSNorm.Config(
+                                normalized_shape=self.dim,
+                                param_init=copy.deepcopy(
+                                    ref_layer.ffn_norm.param_init
+                                ),
+                            ),
+                            eh_proj=Linear.Config(
+                                in_features=2 * self.dim,
+                                out_features=self.dim,
+                                param_init=copy.deepcopy(self.lm_head.param_init),
+                            ),
+                        )
+                    )
 
             from torchtitan.models.deepseek_v3.sharding import (
                 set_deepseek_v3_sharding_config,
@@ -226,3 +313,62 @@ class DeepSeekV3Model(Decoder):
                 + self.layers[0].attention.v_head_dim,
                 seq_len,
             )
+
+    def _forward_with_mtp(
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
+    ):
+        num_mtp_modules = self.config.num_mtp_modules
+        n_main_layers = self.config.n_main_layers
+        seq_len = tokens.shape[1] - num_mtp_modules
+        if seq_len <= 0:
+            raise ValueError(
+                f"Token sequence length ({tokens.shape[1]}) must be greater than "
+                f"num_mtp_modules ({num_mtp_modules})."
+            )
+
+        main_tokens = tokens[:, :seq_len]
+        main_positions = (
+            positions[:, :seq_len]
+            if positions is not None and positions.shape[1] != seq_len
+            else positions
+        )
+
+        h = (
+            self.tok_embeddings(main_tokens)
+            if self.tok_embeddings is not None
+            else main_tokens
+        )
+        layers = list(self.layers.values())
+        for layer in layers[:n_main_layers]:
+            h = layer(h, attention_masks, main_positions)
+
+        prev_embed = h
+        h = self.norm(h) if self.norm is not None else h
+        output = self.lm_head(h) if self.lm_head is not None else h
+        output_list = [output]
+
+        if self.tok_embeddings is None:
+            raise ValueError("DeepSeek-V3 MTP requires token embeddings.")
+
+        h = prev_embed
+        for mtp_idx, layer in enumerate(layers[n_main_layers:], 1):
+            input_offset = self.tok_embeddings(tokens[:, mtp_idx : mtp_idx + seq_len])
+            h = layer(input_offset, h, attention_masks, main_positions)
+            mtp_h = self.norm(h) if self.norm is not None else h
+            mtp_output = self.lm_head(mtp_h) if self.lm_head is not None else mtp_h
+            output_list.append(mtp_output)
+
+        return output_list
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
+    ):
+        if self.config.num_mtp_modules > 0:
+            return self._forward_with_mtp(tokens, positions, attention_masks)
+        return super().forward(tokens, positions, attention_masks)
