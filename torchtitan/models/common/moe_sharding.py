@@ -90,9 +90,9 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=Shard(1)),
-            # Rowwise bias is Partial to match the rowwise matmul output
-            # placement, avoiding an implicit Replicate→Partial redistribute.
-            "bias": dense_param_placement(tp=Partial()),
+            # Rowwise bias is Replicate — addmm implicitly converts to
+            # Partial to match the rowwise matmul output placement.
+            "bias": dense_param_placement(tp=Replicate()),
         },
         in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
         out_dst_shardings=dense_activation_placement(tp=Partial()),
@@ -122,6 +122,22 @@ def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
         )
 
 
+def _tokens_per_expert_placement(*, enable_ep: bool) -> NamedPlacement:
+    """Placement for the ``tokens_per_expert`` buffer.
+
+    Each DP/CP rank processes different data and accumulates partial token
+    counts, so DP/CP axes are ``Partial``. TP is ``Partial`` when EP is
+    enabled (TP axis doubles as SP, each rank sees different tokens) or
+    ``Replicate`` when EP is disabled (all TP ranks see the same tokens).
+    """
+    return {
+        DP_REPLICATE: Partial(),
+        DP_SHARD: Partial(),
+        CP: Partial(),
+        TP: Partial() if enable_ep else Replicate(),
+    }
+
+
 def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     """``ShardingConfig`` at the MoE boundary.
 
@@ -136,11 +152,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "expert_bias": dense_param_placement(tp=Replicate()),
-            "tokens_per_expert": dense_param_placement(
-                tp=Partial() if enable_ep else Replicate(),
-                dp=Partial(),
-                cp=Partial(),
-            ),
+            "tokens_per_expert": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
         in_src_shardings={"x": dense_activation_placement(tp=sp_layout)},
         in_dst_shardings={
