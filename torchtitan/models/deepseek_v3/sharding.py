@@ -20,13 +20,14 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.deepseek_v3.model import Attention, MTPTransformerBlock
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
         DeepSeekV3Model,
         DeepSeekV3TransformerBlock,
+        MTPTransformerBlock,
     )
 
 
@@ -63,7 +64,7 @@ def set_deepseek_v3_sharding_config(
 
 
 def _set_deepseek_v3_layer_sharding(
-    layer_cfg: "DeepSeekV3TransformerBlock.Config",
+    layer_cfg: "DeepSeekV3TransformerBlock.Config | MTPTransformerBlock.Config",
     *,
     enable_sp: bool,
     enable_ep: bool,
@@ -140,4 +141,21 @@ def _set_deepseek_v3_layer_sharding(
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
+        )
+
+    if isinstance(layer_cfg, MTPTransformerBlock.Config):
+        activation = (
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I)
+        )
+        layer_cfg.enorm.sharding_config = norm
+        layer_cfg.hnorm.sharding_config = norm
+        layer_cfg.eh_proj.sharding_config = ShardingConfig(
+            state_shardings={
+                "weight": dense_param_placement(tp=spmd.R),
+                "bias": dense_param_placement(tp=spmd.R),
+            },
+            in_src_shardings={"input": activation},
+            out_src_shardings=activation,
         )
