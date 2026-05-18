@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -25,6 +26,7 @@ from . import model_registry
 
 def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
     return TransformersBackendConfig(
+        loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
@@ -57,6 +59,7 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
 
 def transformers_modeling_backend_full() -> TransformersBackendConfig:
     return TransformersBackendConfig(
+        loss=CrossEntropyLoss.Config(),
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
         model_spec=model_registry("full"),

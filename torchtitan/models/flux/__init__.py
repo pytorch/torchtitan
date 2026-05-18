@@ -9,9 +9,11 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import build_mse_loss
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .flux_datasets import FluxDataLoader
@@ -543,15 +545,21 @@ flux_configs = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
+def model_registry(
+    flavor: str,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
     config = flux_configs[flavor]()
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
     return ModelSpec(
         name="flux",
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
-        build_loss_fn=build_mse_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=FluxStateDictAdapter,
     )

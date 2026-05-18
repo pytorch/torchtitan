@@ -9,10 +9,9 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.models.common import Embedding, Linear, RoPE, TransformerBlock
-from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import (
+    get_attention_config,
     make_experts_config,
     make_ffn_config,
     make_gqa_config,
@@ -22,6 +21,9 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
+from torchtitan.models.utils import validate_converter_order
+
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Qwen3VLModel
@@ -144,8 +146,10 @@ def _build_qwen3_vl_layers(
     n_kv_heads: int,
     head_dim: int,
     hidden_dim: int,
+    attn_backend: str,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3-VL models with depth-scaled inits."""
+    inner_attention, mask_type = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -159,8 +163,8 @@ def _build_qwen3_vl_layers(
                     head_dim=head_dim,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
-                    inner_attention=FlexAttention.Config(),
-                    mask_type="block_causal",
+                    inner_attention=inner_attention,
+                    mask_type=mask_type,
                     rope_backend="cos_sin",
                     qk_norm=_qwen3_vl_q_norm(head_dim),
                 ),
@@ -185,10 +189,12 @@ def _build_qwen3_vl_moe_layers(
     moe_hidden_dim: int,
     num_experts: int,
     top_k: int,
-    moe_comm_backend: str | None = None,
+    attn_backend: str,
+    moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3-VL models with depth-scaled inits."""
+    inner_attention, mask_type = get_attention_config(attn_backend)
     layers = []
     for layer_id in range(n_layers):
         layers.append(
@@ -202,8 +208,8 @@ def _build_qwen3_vl_moe_layers(
                     head_dim=head_dim,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
-                    inner_attention=FlexAttention.Config(),
-                    mask_type="block_causal",
+                    inner_attention=inner_attention,
+                    mask_type=mask_type,
                     rope_backend="cos_sin",
                     qk_norm=_qwen3_vl_q_norm(head_dim),
                 ),
@@ -233,7 +239,7 @@ def _build_qwen3_vl_moe_layers(
     return layers
 
 
-def _debugmodel() -> Qwen3VLModel.Config:
+def _debugmodel(attn_backend: str) -> Qwen3VLModel.Config:
     dim = 256
     head_dim = 64
     n_layers = 4
@@ -247,7 +253,7 @@ def _debugmodel() -> Qwen3VLModel.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -259,6 +265,7 @@ def _debugmodel() -> Qwen3VLModel.Config:
             backend="cos_sin",
         ),
         layers=_build_qwen3_vl_layers(
+            attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
             n_heads=4,
@@ -283,7 +290,8 @@ def _debugmodel() -> Qwen3VLModel.Config:
 
 
 def _debugmodel_moe(
-    moe_comm_backend: str | None = None,
+    attn_backend: str,
+    moe_comm_backend: str = "standard",
 ) -> Qwen3VLModel.Config:
     dim = 256
     head_dim = 64
@@ -298,7 +306,7 @@ def _debugmodel_moe(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -310,14 +318,15 @@ def _debugmodel_moe(
             backend="cos_sin",
         ),
         layers=_build_qwen3_vl_moe_layers(
+            attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
             n_heads=4,
             n_kv_heads=2,
             head_dim=head_dim,
             moe_hidden_dim=768,
-            num_experts=64,
-            top_k=8,
+            num_experts=8,
+            top_k=4,
             moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_vl_vision_encoder_config(
@@ -336,7 +345,7 @@ def _debugmodel_moe(
     )
 
 
-def _2b() -> Qwen3VLModel.Config:
+def _2b(attn_backend: str) -> Qwen3VLModel.Config:
     dim = 2048
     head_dim = 128
     n_layers = 28
@@ -351,7 +360,7 @@ def _2b() -> Qwen3VLModel.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -363,6 +372,7 @@ def _2b() -> Qwen3VLModel.Config:
             backend="cos_sin",
         ),
         layers=_build_qwen3_vl_layers(
+            attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
             n_heads=16,
@@ -386,7 +396,7 @@ def _2b() -> Qwen3VLModel.Config:
     )
 
 
-def _8b() -> Qwen3VLModel.Config:
+def _8b(attn_backend: str) -> Qwen3VLModel.Config:
     dim = 4096
     head_dim = 128
     n_layers = 36
@@ -400,7 +410,7 @@ def _8b() -> Qwen3VLModel.Config:
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -412,6 +422,7 @@ def _8b() -> Qwen3VLModel.Config:
             backend="cos_sin",
         ),
         layers=_build_qwen3_vl_layers(
+            attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
             n_heads=32,
@@ -439,7 +450,8 @@ def _8b() -> Qwen3VLModel.Config:
 
 
 def _30b_a3b(
-    moe_comm_backend: str | None = None,
+    attn_backend: str,
+    moe_comm_backend: str = "standard",
 ) -> Qwen3VLModel.Config:
     dim = 2048
     head_dim = 128
@@ -454,7 +466,7 @@ def _30b_a3b(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -466,6 +478,7 @@ def _30b_a3b(
             backend="cos_sin",
         ),
         layers=_build_qwen3_vl_moe_layers(
+            attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
             n_heads=32,
@@ -493,7 +506,8 @@ def _30b_a3b(
 
 
 def _235b_a22b(
-    moe_comm_backend: str | None = None,
+    attn_backend: str,
+    moe_comm_backend: str = "standard",
 ) -> Qwen3VLModel.Config:
     dim = 4096
     head_dim = 128
@@ -508,7 +522,7 @@ def _235b_a22b(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        output=Linear.Config(
+        lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
@@ -520,6 +534,7 @@ def _235b_a22b(
             backend="cos_sin",
         ),
         layers=_build_qwen3_vl_moe_layers(
+            attn_backend=attn_backend,
             n_layers=n_layers,
             dim=dim,
             n_heads=64,
@@ -560,18 +575,22 @@ def model_registry(
     flavor: str,
     attn_backend: str = "sdpa",
     moe_comm_backend: str | None = None,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    kwargs = {}
+    kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     config = qwen3_vl_configs[flavor](**kwargs)
+    if converters is not None:
+        validate_converter_order(converters)
+        for c in converters:
+            c.build().convert(config)
     return ModelSpec(
         name="qwen3_vl",
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_qwen3_vl,
         pipelining_fn=None,
-        build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3VLStateDictAdapter,
     )

@@ -17,7 +17,6 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -31,7 +30,6 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -40,7 +38,6 @@ def parallelize_hf_transformers(
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -64,23 +61,10 @@ def parallelize_hf_transformers(
         """
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converters)
-        enable_float8_linear = float8_config is not None
-        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
-        )
-
-        # For now, float8 all-gather with TP is only supported for tensorwise
-        # float8 scaling recipes. For rowwise recipes, we use regular TP and
-        # all-gather happens in high precision.
-        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
             enable_loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
@@ -124,7 +108,6 @@ def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     enable_loss_parallel: bool,
-    enable_float8_tensorwise_tp: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -154,13 +137,13 @@ def apply_non_moe_tp(
         else:
             root_plan["norm"] = SequenceParallel()
 
-    if hasattr(model, "output"):
-        if isinstance(model.output, nn.Identity):
-            root_plan["output"] = NoParallel(
+    if hasattr(model, "lm_head"):
+        if isinstance(model.lm_head, nn.Identity):
+            root_plan["lm_head"] = NoParallel(
                 local_output_grad_placements=(Replicate(),),
             )
         else:
-            root_plan["output"] = ColwiseParallel(
+            root_plan["lm_head"] = ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
                 use_local_output=not enable_loss_parallel,
@@ -168,33 +151,11 @@ def apply_non_moe_tp(
     if root_plan:  # Only call if there's something to parallelize
         parallelize_module(model, tp_mesh, root_plan)
 
-    # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears with tensorwise scaling.
-    if enable_float8_tensorwise_tp:
-        # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
-        from torchao.float8.float8_tensor_parallel import (
-            Float8ColwiseParallel,
-            Float8RowwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            Float8RowwiseParallel,
-            Float8ColwiseParallel,
-            PrepareFloat8ModuleInput,
-        )
-    else:
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
-            RowwiseParallel,
-            ColwiseParallel,
-            PrepareModuleInput,
-        )
-
     # Apply tensor + sequence parallelism to every transformer block
     for transformer_block in model.layers:
         layer_plan = {
             "input_layernorm": SequenceParallel(),
-            "self_attn": prepare_module_input(
+            "self_attn": PrepareModuleInput(
                 input_kwarg_layouts={"hidden_states": Shard(1)},
                 desired_input_kwarg_layouts={"hidden_states": Replicate()},
             ),
@@ -204,9 +165,9 @@ def apply_non_moe_tp(
         if getattr(transformer_block.self_attn, "q_lora_rank", None) is None:
             layer_plan.update(
                 {
-                    "self_attn.q_proj": colwise_parallel(),
-                    "self_attn.k_proj": colwise_parallel(),
-                    "self_attn.v_proj": colwise_parallel(),
+                    "self_attn.q_proj": ColwiseParallel(),
+                    "self_attn.k_proj": ColwiseParallel(),
+                    "self_attn.v_proj": ColwiseParallel(),
                 }
             )
         else:
@@ -218,14 +179,14 @@ def apply_non_moe_tp(
                     "self_attn.q_a_layernorm": NoParallel(
                         local_output_grad_placements=(Replicate(),),
                     ),
-                    "self_attn.q_b_proj": colwise_parallel(),
+                    "self_attn.q_b_proj": ColwiseParallel(),
                     "self_attn.kv_a_proj_with_mqa": NoParallel(
                         local_output_grad_placements=(Replicate(),),
                     ),
                     "self_attn.kv_a_layernorm": NoParallel(
                         local_output_grad_placements=(Replicate(),),
                     ),
-                    "self_attn.kv_b_proj": colwise_parallel(),
+                    "self_attn.kv_b_proj": ColwiseParallel(),
                 }
             )
 
@@ -233,7 +194,7 @@ def apply_non_moe_tp(
         o_proj_name = (
             "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"
         )
-        layer_plan[f"self_attn.{o_proj_name}"] = rowwise_parallel(
+        layer_plan[f"self_attn.{o_proj_name}"] = RowwiseParallel(
             output_layouts=Shard(1)
         )
         # For model that uses RMSNorm on Q and K (i.e. Qwen3)
@@ -249,7 +210,7 @@ def apply_non_moe_tp(
 
         if not transformer_block.moe_enabled:
             mlp_plan = {
-                "mlp": prepare_module_input(
+                "mlp": PrepareModuleInput(
                     input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
                 ),
@@ -258,17 +219,15 @@ def apply_non_moe_tp(
             gate_proj_name = (
                 "gate_proj" if hasattr(transformer_block.mlp, "gate_proj") else "fc1"
             )
-            mlp_plan[f"mlp.{gate_proj_name}"] = colwise_parallel()
+            mlp_plan[f"mlp.{gate_proj_name}"] = ColwiseParallel()
 
             if hasattr(transformer_block.mlp, "up_proj"):
-                mlp_plan["mlp.up_proj"] = colwise_parallel()
+                mlp_plan["mlp.up_proj"] = ColwiseParallel()
 
             down_proj_name = (
                 "down_proj" if hasattr(transformer_block.mlp, "down_proj") else "fc2"
             )
-            mlp_plan[f"mlp.{down_proj_name}"] = rowwise_parallel(
-                output_layouts=Shard(1)
-            )
+            mlp_plan[f"mlp.{down_proj_name}"] = RowwiseParallel(output_layouts=Shard(1))
             layer_plan.update(mlp_plan)
 
         # Some models like Phi-2 don't have post_attention_layernorm
@@ -281,10 +240,7 @@ def apply_non_moe_tp(
             parallelize_plan=layer_plan,
         )
 
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
-        "Tensor Parallelism to the model"
-    )
+    logger.info("Applied Tensor Parallelism to the model")
 
 
 def apply_fsdp(
@@ -374,9 +330,9 @@ def apply_fsdp(
 
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
+    if model.norm is not None and model.lm_head is not None:
         fully_shard(
-            [model.norm, model.output],
+            [model.norm, model.lm_head],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
@@ -410,17 +366,21 @@ def apply_fsdp(
                 transformer_block.set_modules_to_forward_prefetch(
                     [next_transformer_block]
                 )
-        elif model.norm is not None and model.output is not None:
+        elif model.norm is not None and model.lm_head is not None:
             transformer_block.set_modules_to_forward_prefetch(
-                [model.norm, model.output]
+                [model.norm, model.lm_head]
             )
 
     # backward
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
-    if model.norm is not None and model.output is not None and model.layers is not None:
-        model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
+    if (
+        model.norm is not None
+        and model.lm_head is not None
+        and model.layers is not None
+    ):
+        model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
         reversed_transformer_blocks, prev_transformer_blocks

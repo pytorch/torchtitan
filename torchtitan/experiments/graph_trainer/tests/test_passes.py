@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
+import sys
+from unittest.mock import patch
 
 import torch
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
@@ -12,21 +14,44 @@ from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
+from torch.cuda._graph_annotations import _is_tools_id_unavailable
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.traceback import preserve_node_meta
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.graph_trainer.common_utils import _AC_REGION_ID
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _MODULE_FQN,
+    annotate_module_fqns,
+)
+from torchtitan.experiments.graph_trainer.cudagraph import (
+    insert_kernel_annotations_pass,
+)
+from torchtitan.experiments.graph_trainer.fsdp_passes import overlap_fsdp_ag_rs_pass
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
+from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
+from torchtitan.experiments.graph_trainer.memory_policy import (
+    _make_default_memory_policy,
+    tag_sac_policy,
+)
 from torchtitan.experiments.graph_trainer.passes import (
-    apply_sac_pass,
-    reassign_to_pg_pass,
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
+    selective_activation_remat_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
+    TestCpuOffloadPass,
+)
+from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
+    TestCustomCodegenPass,
+)
+from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (  # noqa: F401
+    TestAnnotateRMSNormForRegionalInductorPass,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
@@ -56,8 +81,8 @@ class ToyModel(Module):
         return x
 
 
-class TestReassignToPgPass(FSDPTest):
-    """Integration tests: toy model + simple_fsdp + export_joint + reassign_to_pg_pass."""
+class TestOverlapFsdpAgRsPass(FSDPTest):
+    """Integration tests: toy model + simple_fsdp + export_joint + overlap_fsdp_ag_rs_pass."""
 
     def _setup(self):
         """Set up ParallelDims and device mesh for FSDP."""
@@ -68,7 +93,6 @@ class TestReassignToPgPass(FSDPTest):
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=self.world_size,
         )
 
@@ -120,14 +144,17 @@ class TestReassignToPgPass(FSDPTest):
                 count += 1
         return count
 
-    def test_reassign_rewrites_ag_nodes(self):
-        """Apply reassign_to_pg_pass on the real backward graph and verify
-        that all-gather nodes are rewritten to the target PG."""
+    def test_overlap_rewrites_ag_nodes(self):
+        """Apply overlap_fsdp_ag_rs_pass on the real backward graph and verify
+        that FSDP AG nodes are rewritten to the auto-created extra PG."""
+        from torchtitan.experiments.graph_trainer.fsdp_passes import (
+            _EXTRA_FSDP_PG_REGISTRY,
+        )
+
         self._setup()
         model = self._make_fsdp_model()
         inputs = torch.randn(4, 16).cuda()
         fsdp_pg_name = self._get_fsdp_pg_name()
-        target_pg_name = "test_target_pg"
 
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
@@ -135,45 +162,43 @@ class TestReassignToPgPass(FSDPTest):
         ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
         self.assertGreater(ag_before, 0, "Expected AG nodes with FSDP PG name")
 
-        # Apply the pass
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name=fsdp_pg_name,
-            target_pg_name=target_pg_name,
-        )
+        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
 
-        # After: AG nodes should use the target PG
+        extra_pg_name = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
         ag_with_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        ag_with_new = self._count_ag_nodes_with_pg(bw_gm, target_pg_name)
+        ag_with_new = self._count_ag_nodes_with_pg(bw_gm, extra_pg_name)
 
         self.assertEqual(ag_with_old, 0, "No AG nodes should still use the old PG")
         self.assertEqual(
-            ag_with_new, ag_before, "All AG nodes should now use the target PG"
+            ag_with_new,
+            ag_before,
+            "All AG nodes should now use the extra PG",
         )
 
-    def test_reassign_preserves_total_ag_count(self):
+    def test_overlap_preserves_total_ag_count(self):
         """The pass should not add or remove AG nodes, only rewrite PG names."""
         self._setup()
         model = self._make_fsdp_model()
         inputs = torch.randn(4, 16).cuda()
-        fsdp_pg_name = self._get_fsdp_pg_name()
 
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
         total_before = self._count_all_ag_nodes(bw_gm)
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name=fsdp_pg_name,
-            target_pg_name="new_pg",
-        )
+        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
         total_after = self._count_all_ag_nodes(bw_gm)
 
         self.assertEqual(total_before, total_after)
 
-    def test_reassign_with_non_matching_pg_is_noop(self):
-        """If the source PG name doesn't match any AG node, nothing changes."""
+    def test_overlap_rewrites_multiple_pgs(self):
+        """When the graph has AG nodes from multiple FSDP PGs (e.g. FSDP +
+        expert-FSDP), each source PG should be mapped to its own extra PG."""
+        import torch.distributed as dist
+
+        from torchtitan.experiments.graph_trainer.fsdp_passes import (
+            _EXTRA_FSDP_PG_REGISTRY,
+        )
+
         self._setup()
         model = self._make_fsdp_model()
         inputs = torch.randn(4, 16).cuda()
@@ -181,59 +206,60 @@ class TestReassignToPgPass(FSDPTest):
 
         bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
 
-        ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
+        # Create a second PG to simulate expert-FSDP
+        second_pg = dist.new_group(
+            ranks=list(range(self.world_size)),
+            use_local_synchronization=True,
+        )
+        second_pg_name = second_pg.group_name
 
-        # Use a non-matching source PG name
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name="nonexistent_pg",
-            target_pg_name="target_pg",
+        # Rewrite half the AG nodes to use the second PG
+        ag_nodes = [n for n in bw_gm.graph.nodes if is_all_gather(n)]
+        self.assertGreater(len(ag_nodes), 1)
+        half = len(ag_nodes) // 2
+        for node in ag_nodes[:half]:
+            node.args = (node.args[0], node.args[1], second_pg_name)
+
+        ag_pg1_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
+        ag_pg2_before = self._count_ag_nodes_with_pg(bw_gm, second_pg_name)
+        self.assertGreater(ag_pg1_before, 0)
+        self.assertGreater(ag_pg2_before, 0)
+
+        _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
+        _EXTRA_FSDP_PG_REGISTRY.pop(second_pg_name, None)
+        overlap_fsdp_ag_rs_pass(bw_gm, bw_example_inputs)
+
+        # Both source PGs should have their own extra PG
+        self.assertIn(fsdp_pg_name, _EXTRA_FSDP_PG_REGISTRY)
+        self.assertIn(second_pg_name, _EXTRA_FSDP_PG_REGISTRY)
+        extra_pg1 = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
+        extra_pg2 = _EXTRA_FSDP_PG_REGISTRY[second_pg_name]
+        self.assertNotEqual(
+            extra_pg1, extra_pg2, "Each source PG must map to a distinct extra PG"
         )
 
-        # FSDP AG nodes should be unchanged
-        ag_after = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        self.assertEqual(ag_before, ag_after)
+        # No AG nodes should still use original PGs
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name), 0)
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, second_pg_name), 0)
 
-    def test_reassign_with_extra_pg(self):
-        """Test the production-like flow: create an extra FSDP PG and
-        reassign AG nodes to it."""
+        # All AG nodes should use their respective extra PGs
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg1), ag_pg1_before)
+        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg2), ag_pg2_before)
+
+    def test_overlap_is_noop_when_no_fsdp_ag(self):
+        """If the graph has no FSDP all-gathers, the pass is a no-op."""
         self._setup()
-        model = self._make_fsdp_model()
-        inputs = torch.randn(4, 16).cuda()
-        fsdp_pg_name = self._get_fsdp_pg_name()
-
-        # Create an extra PG mirroring the FSDP topology
-        from torchtitan.experiments.graph_trainer.common_utils import (
-            create_extra_fsdp_pg,
-            get_extra_fsdp_pg_name,
-        )
-
-        create_extra_fsdp_pg(self.parallel_dims)
-        extra_pg_name = get_extra_fsdp_pg_name(fsdp_pg_name)
-
-        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
-
-        ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        self.assertGreater(ag_before, 0)
-
-        # Reassign to the real extra PG
-        reassign_to_pg_pass(
-            bw_gm,
-            bw_example_inputs,
-            source_pg_name=fsdp_pg_name,
-            target_pg_name=extra_pg_name,
-        )
-
-        ag_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        ag_new = self._count_ag_nodes_with_pg(bw_gm, extra_pg_name)
-
-        self.assertEqual(ag_old, 0)
-        self.assertEqual(ag_new, ag_before)
+        # Plain (non-FSDP) module: a graph without FSDP all-gathers.
+        gm = torch.fx.symbolic_trace(torch.nn.Linear(4, 4))
+        ag_before = self._count_all_ag_nodes(gm)
+        overlap_fsdp_ag_rs_pass(gm, ())
+        ag_after = self._count_all_ag_nodes(gm)
+        self.assertEqual(ag_before, 0)
+        self.assertEqual(ag_after, 0)
 
 
 class TestApplySACPass(TestCase):
-    """Unit tests for the apply_sac_pass joint graph pass."""
+    """Unit tests for the tag_sac_policy joint graph pass."""
 
     def _build_gm(self, op_targets):
         """Build a GraphModule with a chain of call_function nodes.
@@ -253,7 +279,10 @@ class TestApplySACPass(TestCase):
                 # If the next op is getitem, wrap in a tuple so getitem has
                 # a proper tuple/list input.
                 if i + 1 < len(op_targets) and op_targets[i + 1] is operator.getitem:
-                    _make_tuple = lambda x: (x, x)
+
+                    def _make_tuple(x):
+                        return (x, x)
+
                     last = graph.call_function(_make_tuple, args=(last,))
         graph.output(last)
         return torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -270,7 +299,7 @@ class TestApplySACPass(TestCase):
                 torch.ops.aten.relu.default,
             ]
         )
-        apply_sac_pass(gm)
+        tag_sac_policy(gm)
         for node in self._get_call_function_nodes(gm):
             self.assertEqual(node.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
 
@@ -278,13 +307,13 @@ class TestApplySACPass(TestCase):
         """Non-mm ops in the save list should be marked MUST_SAVE."""
         custom_save = {torch.ops.aten.add.Tensor}
         gm = self._build_gm([torch.ops.aten.add.Tensor])
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
         nodes = self._get_call_function_nodes(gm)
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
     def test_getitem_propagates_parent_tags(self):
-        """operator.getitem nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """operator.getitem nodes should inherit the parent's recompute tag."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -298,19 +327,14 @@ class TestApplySACPass(TestCase):
         self.assertEqual(nodes[0].target, torch.ops.aten.add.Tensor)
         self.assertEqual(nodes[2].target, operator.getitem)
 
-        # Set ac_region_id on the tuple-returning parent (the direct parent of getitem)
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 3}
-
-        apply_sac_pass(gm)
+        tag_sac_policy(gm)
 
         tuple_node = nodes[1]
         getitem_node = nodes[2]
         self.assertEqual(getitem_node.meta["recompute"], tuple_node.meta["recompute"])
-        self.assertEqual(tuple_node.meta["ac_graph_id"], 3)
-        self.assertEqual(getitem_node.meta["ac_graph_id"], 3)
 
     def test_wait_tensor_propagates_parent_tags(self):
-        """wait_tensor nodes should inherit the parent's recompute tag and ac_graph_id."""
+        """wait_tensor nodes should inherit the parent's recompute tag."""
         custom_save = {torch.ops._c10d_functional.reduce_scatter_tensor.default}
         gm = self._build_gm(
             [
@@ -319,33 +343,17 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 3}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.3.attention"}
 
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
 
         rs_node = nodes[0]
         wait_node = nodes[1]
         self.assertEqual(rs_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
         self.assertEqual(wait_node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
-        self.assertEqual(rs_node.meta["ac_graph_id"], 3)
-        self.assertEqual(wait_node.meta["ac_graph_id"], 3)
 
-    def test_ac_graph_id_defaults_to_zero(self):
-        """Nodes without ac_region_id annotation should have ac_graph_id = 0."""
-        gm = self._build_gm(
-            [
-                torch.ops.aten.add.Tensor,
-                torch.ops.aten.mm.default,
-                torch.ops.aten.relu.default,
-            ]
-        )
-        apply_sac_pass(gm)
-        for node in self._get_call_function_nodes(gm):
-            if node.target is not operator.getitem:
-                self.assertEqual(node.meta["ac_graph_id"], 0)
-
-    def test_ac_graph_id_from_annotation(self):
-        """Nodes with _AC_REGION_ID_KEY in custom metadata should use that as ac_graph_id."""
+    def test_boundary_nodes_forced_to_must_save(self):
+        """Nodes at AC region boundaries should be forced to MUST_SAVE."""
         gm = self._build_gm(
             [
                 torch.ops.aten.add.Tensor,
@@ -353,14 +361,14 @@ class TestApplySACPass(TestCase):
             ]
         )
         nodes = self._get_call_function_nodes(gm)
-        # Simulate annotate_fn setting custom metadata on different nodes
-        nodes[0].meta["custom"] = {_AC_REGION_ID: 1}
-        nodes[1].meta["custom"] = {_AC_REGION_ID: 2}
+        nodes[0].meta["custom"] = {_MODULE_FQN: "layers.0.feed_forward"}
+        nodes[1].meta["custom"] = {_MODULE_FQN: "layers.1.attention"}
 
-        apply_sac_pass(gm)
+        tag_sac_policy(gm)
 
-        self.assertEqual(nodes[0].meta["ac_graph_id"], 1)
-        self.assertEqual(nodes[1].meta["ac_graph_id"], 2)
+        # add is at the boundary (layer 0 -> layer 1), forced to MUST_SAVE
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(nodes[1].meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
 
     def test_custom_op_list_to_save(self):
         """A custom op_list_to_save should override the defaults."""
@@ -371,7 +379,7 @@ class TestApplySACPass(TestCase):
                 torch.ops.aten.relu.default,
             ]
         )
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
         policies = {
             n.target: n.meta["recompute"] for n in self._get_call_function_nodes(gm)
         }
@@ -387,19 +395,19 @@ class TestApplySACPass(TestCase):
         custom_save = {torch.ops.aten.mm.default, torch.ops.aten.max.default}
         gm = self._build_gm(
             [
-                torch.ops.aten.mm.default,  # 1st mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.max.default,  # in save list -> MUST_SAVE
-                torch.ops.aten.mm.default,  # 2nd mm -> PREFER_RECOMPUTE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
                 torch.ops.aten.add.Tensor,  # not in save list -> PREFER_RECOMPUTE
-                torch.ops.aten.mm.default,  # 3rd mm -> MUST_SAVE
+                torch.ops.aten.mm.default,  # in save list -> MUST_SAVE
             ]
         )
-        apply_sac_pass(gm, op_list_to_save=custom_save)
+        tag_sac_policy(gm, policy_fn=_make_default_memory_policy(custom_save))
         nodes = self._get_call_function_nodes(gm)
         expected = [
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.max.default, CheckpointPolicy.MUST_SAVE),
-            (torch.ops.aten.mm.default, CheckpointPolicy.PREFER_RECOMPUTE),
+            (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
             (torch.ops.aten.add.Tensor, CheckpointPolicy.PREFER_RECOMPUTE),
             (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
         ]
@@ -407,6 +415,203 @@ class TestApplySACPass(TestCase):
         for node, (target, policy) in zip(nodes, expected):
             self.assertEqual(node.target, target)
             self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
+
+    def test_remat_uses_autograd_backward_without_phase_annotation(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        fwd.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+        bwd.meta["autograd_backward"] = True
+
+        gm = selective_activation_remat_pass(gm)
+
+        recomputed_nodes = [
+            node for node in gm.graph.nodes if node.name == "add_tensor_recomputed"
+        ]
+        self.assertEqual(len(recomputed_nodes), 1)
+        self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
+
+
+class TestBucketingPrefetchOrder(FSDPTest):
+    """Guard that SAC + bucketing produces correct all_gather prefetch order.
+
+    Uses the real Llama3 debug model with FSDP via the GraphTrainer path.
+    Verifies that bucketed all_gather starts follow forward layer order
+    (0, 1, 2, ...) and not reverse order (which was a prior bug).
+    """
+
+    BATCH_SIZE = 4
+    SEQ_LEN = 128
+
+    @staticmethod
+    def _get_bucketed_ag_layer_order(gm):
+        """Extract layer IDs from bucketed all_gather_into_tensor_out nodes.
+
+        For each bucketed all_gather, searches its transitive users for
+        a node with module_fqn under ``layers.<N>`` and records N.
+        Returns deduplicated layer IDs in graph order.
+        """
+        layer_ids = []
+        for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
+            if "all_gather_into_tensor_out" not in str(node.target):
+                continue
+            # BFS through users to find a node with layers.N FQN
+            visited = set()
+            queue = list(node.users)
+            found_lid = None
+            while queue and found_lid is None:
+                u = queue.pop(0)
+                if u in visited:
+                    continue
+                visited.add(u)
+                fqn = u.meta.get("custom", {}).get(_MODULE_FQN, "")
+                parts = fqn.split(".")
+                if parts[0] == "layers" and len(parts) >= 2:
+                    try:
+                        found_lid = int(parts[1])
+                    except ValueError:
+                        pass
+                else:
+                    queue.extend(u.users)
+            if found_lid is not None and (not layer_ids or layer_ids[-1] != found_lid):
+                layer_ids.append(found_lid)
+        return layer_ids
+
+    def _run_and_get_layer_ids(self, fsdp_reshard_after_forward: str):
+        """Run a single forward+backward step and return bucketed AG layer ids."""
+        from torchtitan.components.tokenizer import HuggingFaceTokenizer
+        from torchtitan.experiments.graph_trainer.llama3 import (
+            model_registry as llama3_model_registry,
+        )
+        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
+            annotate_llama,
+        )
+        from torchtitan.experiments.graph_trainer.simple_fsdp import (
+            data_parallel,
+            MixedPrecisionPolicy,
+        )
+        from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
+            build_minimal_trainer,
+        )
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+        parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+
+        model_spec = llama3_model_registry("debugmodel")
+        model_config = model_spec.model
+        vocab_size = model_config.vocab_size
+
+        with torch.device("meta"):
+            model = model_config.build()
+
+        annotate_llama(model)
+        fsdp_mesh = parallel_dims.get_mesh("fsdp")
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
+        model = data_parallel(
+            model, device_mesh=fsdp_mesh, mode="fully_shard", mp_policy=mp_policy
+        )
+        model.to_empty(device="cuda")
+        with torch.no_grad():
+            model.init_states(buffer_device=None)
+        model.train()
+
+        # Use GraphTrainer's full path: trace + construct_default_graph_passes
+        trainer = build_minimal_trainer(
+            model,
+            model_config,
+            GraphTrainer,
+            tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
+            fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+        )
+
+        inputs = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
+        )
+        labels = torch.randint(
+            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
+        )
+        global_valid_tokens = torch.tensor(
+            self.BATCH_SIZE * self.SEQ_LEN, dtype=torch.float, device="cuda"
+        )
+
+        # One forward_backward_step triggers _make_fx_forward_backward_step
+        # which traces the model and applies all graph passes.
+        trainer.forward_backward_step(
+            input_dict={"input": inputs},
+            labels=labels,
+            global_valid_tokens=global_valid_tokens,
+        )
+
+        layer_ids = self._get_bucketed_ag_layer_order(trainer._traced_step.gm)
+        self.assertGreater(len(layer_ids), 0, "No layer all_gather nodes found")
+        return layer_ids
+
+    def test_forward_allgather_prefetch_follows_layer_order(self):
+        """Without reshard-after-forward, all all_gathers are in forward and
+        must appear in non-decreasing layer order 0 → N."""
+        layer_ids = self._run_and_get_layer_ids(fsdp_reshard_after_forward="never")
+
+        for i in range(1, len(layer_ids)):
+            self.assertGreaterEqual(
+                layer_ids[i],
+                layer_ids[i - 1],
+                f"Forward all_gather prefetch order violated: "
+                f"layer {layer_ids[i]} before layer {layer_ids[i - 1]} "
+                f"(full order: {layer_ids})",
+            )
+
+    def test_allgather_prefetch_with_reshard_after_forward(self):
+        """With reshard-after-forward, backward also issues all_gathers.
+        The graph-order sequence must be forward (0 → N) then backward (N → 0)."""
+        layer_ids = self._run_and_get_layer_ids(fsdp_reshard_after_forward="always")
+
+        # Split forward (ascending) and backward (descending) at the peak.
+        peak = max(range(len(layer_ids)), key=lambda i: layer_ids[i])
+        forward_ids = layer_ids[: peak + 1]
+        backward_ids = layer_ids[peak:]
+
+        # Backward all_gathers should exist when reshard-after-forward is on.
+        self.assertGreater(
+            len(backward_ids),
+            1,
+            f"Expected backward all_gathers with reshard-after-forward, "
+            f"got order: {layer_ids}",
+        )
+
+        for i in range(1, len(forward_ids)):
+            self.assertGreaterEqual(
+                forward_ids[i],
+                forward_ids[i - 1],
+                f"Forward all_gather prefetch order violated: "
+                f"layer {forward_ids[i]} before layer {forward_ids[i - 1]} "
+                f"(full order: {layer_ids})",
+            )
+
+        for i in range(1, len(backward_ids)):
+            self.assertLessEqual(
+                backward_ids[i],
+                backward_ids[i - 1],
+                f"Backward all_gather prefetch order violated: "
+                f"layer {backward_ids[i]} after layer {backward_ids[i - 1]} "
+                f"(full order: {layer_ids})",
+            )
 
 
 class TestRemoveDetachPass(TestCase):
@@ -895,11 +1100,680 @@ class TestRemoveIdentitySlicePass(TestCase):
         remove_identity_slice_pass(gm)
         self.assertEqual(self._count_slice_nodes(gm), 0)
 
+    def _build_dynamic_slice_gm(
+        self,
+        *,
+        dynamic_arg: str,
+    ) -> torch.fx.GraphModule:
+        """Build a slice graph where one of start/end/step is a Node."""
+        from torch._subclasses.fake_tensor import FakeTensorMode
 
-# Import TestCustomCodegenPass so it's discoverable when running this file
-from torchtitan.experiments.graph_trainer.tests.test_custom_codegen import (  # noqa: F401
-    TestCustomCodegenPass,
-)
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        # sym_size is just a convenient way to produce a Node — its concrete
+        # value is irrelevant, what matters is that the arg is an FX Node.
+        sym_node = graph.call_function(torch.ops.aten.sym_size.int, args=(x, 0))
+        start = sym_node if dynamic_arg == "start" else 0
+        end = sym_node if dynamic_arg == "end" else sys.maxsize
+        step = sym_node if dynamic_arg == "step" else 1
+        sliced = graph.call_function(
+            torch.ops.aten.slice.Tensor, args=(x, 0, start, end, step)
+        )
+        graph.output(sliced)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        with FakeTensorMode() as fake_mode:
+            fake_val = fake_mode.from_tensor(torch.empty(8, 16))
+        for node in gm.graph.nodes:
+            if node.op == "placeholder":
+                node.meta["val"] = fake_val
+        return gm
+
+    def test_dynamic_end_skipped(self):
+        """Slices whose ``end`` is an FX Node (dynamic shape at runtime) must
+        be left alone — we can't prove identity at pass time."""
+        gm = self._build_dynamic_slice_gm(dynamic_arg="end")
+        # Must not raise and must not remove the slice (can't prove identity).
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_dynamic_start_skipped(self):
+        """Slices whose ``start`` is an FX Node must be left alone."""
+        gm = self._build_dynamic_slice_gm(dynamic_arg="start")
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+    def test_dynamic_step_skipped(self):
+        """Slices whose ``step`` is an FX Node must be left alone."""
+        gm = self._build_dynamic_slice_gm(dynamic_arg="step")
+        remove_identity_slice_pass(gm)
+        self.assertEqual(self._count_slice_nodes(gm), 1)
+
+
+class TestAnnotateModuleFqns(TestCase):
+    """Unit tests for annotate_module_fqns and insert_kernel_annotations_pass."""
+
+    def _trace_and_get_fqns(self, model, *args):
+        """Trace fwd+bwd via minimal_fx_tracer and return module_fqn annotations."""
+
+        def fwd_step(*inputs):
+            pred = model(inputs[0])
+            loss = pred.sum()
+            params = [p for p in model.parameters() if p.requires_grad]
+            grads = torch.autograd.grad(loss, params)
+            return [loss] + list(grads)
+
+        traced = minimal_fx_tracer(fwd_step, module=model)(*args)
+        fqns = set()
+        for node in traced.gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+        return fqns
+
+    def test_annotate_transformer_like_model(self):
+        """Module FQNs survive minimal_fx_tracer for a transformer-like model
+        with distinct submodule classes (norm, attention, ffn)."""
+
+        class Norm(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.norm = torch.nn.LayerNorm(dim)
+
+            def forward(self, x):
+                return self.norm(x)
+
+        class Attention(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.wq = torch.nn.Linear(dim, dim, bias=False)
+                self.wo = torch.nn.Linear(dim, dim, bias=False)
+
+            def forward(self, x):
+                return self.wo(torch.relu(self.wq(x)))
+
+        class FFN(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.w1 = torch.nn.Linear(dim, dim * 2, bias=False)
+                self.w2 = torch.nn.Linear(dim * 2, dim, bias=False)
+
+            def forward(self, x):
+                return self.w2(torch.relu(self.w1(x)))
+
+        class TransformerBlock(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.attention_norm = Norm(dim)
+                self.attention = Attention(dim)
+                self.ffn_norm = Norm(dim)
+                self.feed_forward = FFN(dim)
+
+            def forward(self, x):
+                h = x + self.attention(self.attention_norm(x))
+                return h + self.feed_forward(self.ffn_norm(h))
+
+        class Model(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.layer = TransformerBlock(dim)
+
+            def forward(self, x):
+                return self.layer(x)
+
+        dim = 16
+        model = Model(dim)
+        annotate_module_fqns(model)
+        fqns = self._trace_and_get_fqns(model, torch.randn(4, dim))
+
+        # Verify key module paths are present.  The Norm wrapper has no
+        # ops of its own, so its inner LayerNorm gets the deepest path.
+        self.assertIn("layer.attention_norm.norm", fqns)
+        self.assertIn("layer.attention", fqns)
+        self.assertIn("layer.attention.wq", fqns)
+        self.assertIn("layer.attention.wo", fqns)
+        self.assertIn("layer.ffn_norm.norm", fqns)
+        self.assertIn("layer.feed_forward", fqns)
+        self.assertIn("layer.feed_forward.w1", fqns)
+        self.assertIn("layer.feed_forward.w2", fqns)
+
+    def test_same_class_instances_get_distinct_fqns(self):
+        """Two parameterless instances of the same class get distinct fqns.
+
+        Calls minimal_fx_tracer without ``module=`` because parameterless
+        models cannot produce gradients via autograd.grad.
+        """
+
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = Block()
+                self.b = Block()
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+
+        def fwd_only(x):
+            return model(x)
+
+        traced = minimal_fx_tracer(fwd_only)(torch.randn(4))
+        fqns = set()
+        for node in traced.gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def test_same_class_parameterless_works_with_make_fx(self):
+        """Same-class parameterless instances get distinct fqns with plain make_fx."""
+
+        class Block(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = Block()
+                self.b = Block()
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+
+        with preserve_node_meta():
+            gm = make_fx(model)(torch.randn(4))
+
+        fqns = set()
+        for node in gm.graph.nodes:
+            fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+            if fqn:
+                fqns.add(fqn)
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def test_same_class_instances_with_params_get_distinct_fqns(self):
+        """Two instances of the same class with parameters get distinct fqns."""
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a = torch.nn.Linear(4, 4)
+                self.b = torch.nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.b(self.a(x))
+
+        model = Model()
+        annotate_module_fqns(model)
+        fqns = self._trace_and_get_fqns(model, torch.randn(2, 4))
+
+        self.assertIn("a", fqns)
+        self.assertIn("b", fqns)
+
+    def _build_annotated_gm(self):
+        """Build a GraphModule with module_fqn annotations on its nodes."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        n1.meta["custom"] = {_MODULE_FQN: "attn"}
+        n2 = graph.call_function(torch.sigmoid, (n1,))
+        n2.meta["custom"] = {_MODULE_FQN: "attn"}
+        n3 = graph.call_function(torch.tanh, (n2,))
+        n3.meta["custom"] = {_MODULE_FQN: "ffn"}
+        graph.output(n3)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def test_insert_kernel_annotations_pass_inserts_calls(self):
+        """When tools ID is available, the pass inserts enter/exit calls."""
+        if _is_tools_id_unavailable():
+            self.skipTest("cudaGraphNodeGetToolsId not available")
+
+        gm = self._build_annotated_gm()
+        num_before = sum(1 for n in gm.graph.nodes if n.op == "call_function")
+
+        insert_kernel_annotations_pass(gm)
+
+        num_after = sum(1 for n in gm.graph.nodes if n.op == "call_function")
+        # 2 scopes (attn, ffn) = 2 enters + 2 exits = 4 new nodes
+        self.assertEqual(num_after - num_before, 4)
+
+    def test_insert_kernel_annotations_pass_noop_when_unavailable(self):
+        """When tools ID is unavailable, the pass leaves the graph unchanged."""
+        gm = self._build_annotated_gm()
+        num_before = len(list(gm.graph.nodes))
+
+        with patch(
+            "torch.cuda._graph_annotations._is_tools_id_unavailable",
+            return_value=True,
+        ):
+            insert_kernel_annotations_pass(gm)
+
+        num_after = len(list(gm.graph.nodes))
+        self.assertEqual(num_before, num_after)
+
+    def test_insert_kernel_annotations_pass_noop_without_metadata(self):
+        """The pass should not insert anything when no custom metadata exists."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        n1 = graph.call_function(torch.relu, (x,))
+        graph.output(n1)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        num_before = len(list(gm.graph.nodes))
+        insert_kernel_annotations_pass(gm)
+        num_after = len(list(gm.graph.nodes))
+
+        self.assertEqual(num_before, num_after)
+
+
+class TestNormalizeViewOpsAsReshape(TestCase):
+    def test_replaces_view_and_unsafe_view(self):
+        from torchtitan.experiments.graph_trainer.passes import (
+            normalize_view_ops_as_reshape,
+        )
+
+        aten = torch.ops.aten
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+        g.output(
+            g.call_function(
+                aten._unsafe_view.default,
+                args=(
+                    g.call_function(aten.view.default, args=(x, [4, 4])),
+                    [2, 8],
+                ),
+            )
+        )
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        normalize_view_ops_as_reshape(gm)
+        for n in gm.graph.nodes:
+            self.assertNotIn(n.target, {aten.view.default, aten._unsafe_view.default})
+
+
+class TestAsyncTensorParallelPass(FSDPTest):
+    """Verify async_tensor_parallel_pass produces fused ops."""
+
+    @property
+    def world_size(self):
+        return 2
+
+    def test_ag_mm_becomes_fused_op(self):
+        from torch.distributed._symmetric_memory import _test_mode
+
+        from torchtitan.experiments.graph_trainer.passes import (
+            async_tensor_parallel_pass,
+        )
+
+        pg = torch.distributed.distributed_c10d._get_default_group().group_name
+        aten, c10d = torch.ops.aten, torch.ops._c10d_functional
+
+        # shard[2048,4096] -> all_gather -> wait -> mm(w[4096,1024])
+        g = torch.fx.Graph()
+        s, w = g.placeholder("shard"), g.placeholder("weight")
+        ag = g.call_function(c10d.all_gather_into_tensor.default, args=(s, 2, pg))
+        wait = g.call_function(c10d.wait_tensor.default, args=(ag,))
+        g.output(g.call_function(aten.mm.default, args=(wait, w)))
+
+        # Shapes: shard, weight, ag, wait, mm
+        shapes = [(2048, 4096), (4096, 1024), (4096, 4096), (4096, 4096), (4096, 1024)]
+        with torch._subclasses.FakeTensorMode():
+            for node, shape in zip(g.nodes, shapes):
+                node.meta["val"] = torch.randn(shape)
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        with _test_mode({pg}):
+            async_tensor_parallel_pass(gm, ())
+
+        fused = torch.ops.symm_mem.fused_all_gather_matmul.default
+        self.assertTrue(any(n.target == fused for n in gm.graph.nodes))
+
+    def test_mm_rs_becomes_fused_op(self):
+        from torch.distributed._symmetric_memory import _test_mode
+
+        from torchtitan.experiments.graph_trainer.passes import (
+            async_tensor_parallel_pass,
+        )
+
+        pg = torch.distributed.distributed_c10d._get_default_group().group_name
+        aten, c10d = torch.ops.aten, torch.ops._c10d_functional
+
+        # mm(input[4096,4096], w[4096,1024]) -> reduce_scatter -> wait
+        g = torch.fx.Graph()
+        x, w = g.placeholder("x"), g.placeholder("w")
+        mm = g.call_function(aten.mm.default, args=(x, w))
+        rs = g.call_function(
+            c10d.reduce_scatter_tensor.default,
+            args=(mm, "sum", 2, pg),
+        )
+        g.output(g.call_function(c10d.wait_tensor.default, args=(rs,)))
+
+        # Shapes: x, w, mm, rs, wait
+        shapes = [
+            (4096, 4096),
+            (4096, 1024),
+            (4096, 1024),
+            (2048, 1024),
+            (2048, 1024),
+        ]
+        with torch._subclasses.FakeTensorMode():
+            for node, shape in zip(g.nodes, shapes):
+                node.meta["val"] = torch.randn(shape)
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), g)
+        with _test_mode({pg}):
+            async_tensor_parallel_pass(gm, ())
+
+        fused = torch.ops.symm_mem.fused_matmul_reduce_scatter.default
+        self.assertTrue(any(n.target == fused for n in gm.graph.nodes))
+
+
+class TestSelectiveActivationRematPass(TestCase):
+    """Unit tests for ``selective_activation_remat_pass``."""
+
+    def test_topological_insertion_order(self):
+        """
+        When multiple independent ``must_recompute`` deps share a downstream
+        consumer, duplicates must be inserted in graph (topological) order so
+        each dup's args reference upstream dups rather than the originals.
+        Without that ordering (e.g. naive DFS or unordered set iteration), a
+        downstream dup created before its upstream dup would fall back to the
+        original ``must_recompute`` node, defeating recompute.
+
+            a = clone(inp1)        # must_recompute
+            b = clone(inp2)        # must_recompute
+            d = clone(inp3)        # must_recompute
+            c = a + b              # must_recompute
+            e = c + d              # must_recompute
+            bwd = e + e            # autograd_backward
+        """
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        inp3 = graph.placeholder("inp3")
+        a = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        b = graph.call_function(torch.ops.aten.clone.default, args=(inp2,))
+        d = graph.call_function(torch.ops.aten.clone.default, args=(inp3,))
+        c = graph.call_function(torch.ops.aten.add.Tensor, args=(a, b))
+        e = graph.call_function(torch.ops.aten.add.Tensor, args=(c, d))
+        bwd = graph.call_function(torch.ops.aten.add.Tensor, args=(e, e))
+        graph.output(bwd)
+        for n in (a, b, c, d, e):
+            n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd.meta["autograd_backward"] = True
+
+        original_names_in_order = [n.name for n in (a, b, d, c, e)]
+        e_name = e.name
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+        dups = [n for n in nodes if n.name.endswith("_recomputed")]
+        # All 5 must_recompute nodes are transitive deps of bwd.
+        self.assertEqual(len(dups), 5)
+
+        # Dup graph order matches the forward order of the originals
+        # (a, b, d, c, e).
+        self.assertEqual(
+            [n.name for n in dups],
+            [name + "_recomputed" for name in original_names_in_order],
+        )
+
+        # The backward node's must_recompute input was redirected to the dup
+        # of e; the original e (now dead) was erased. Use the Python ``bwd``
+        # reference rather than searching by ``autograd_backward`` because
+        # dups also carry that flag.
+        for inp in bwd.all_input_nodes:
+            self.assertEqual(inp.name, e_name + "_recomputed")
+        self.assertNotIn(e_name, [n.name for n in nodes])
+
+    def test_forward_consumer_keeps_original(self):
+        """When a must_recompute node has both forward and backward
+        consumers, the original stays (forward needs it) and a dup is
+        inserted for the backward consumer. The original is not erased.
+
+            a = clone(inp)              # must_recompute, used by both fwd + bwd
+            fwd_use = a + a             # forward consumer
+            bwd = a * a                 # autograd_backward consumer
+        """
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp = graph.placeholder("inp")
+        a = graph.call_function(torch.ops.aten.clone.default, args=(inp,))
+        fwd_use = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(a, a))
+        graph.output((fwd_use, bwd))
+        a.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd.meta["autograd_backward"] = True
+
+        a_name = a.name
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        names = [n.name for n in result.graph.nodes]
+        # Original kept (forward consumer still needs it) and dup inserted.
+        self.assertIn(a_name, names)
+        self.assertIn(a_name + "_recomputed", names)
+
+        # bwd's args go to the dup; fwd_use still points to the original.
+        bwd_node = next(
+            n for n in result.graph.nodes if n.target is torch.ops.aten.mul.Tensor
+        )
+        for inp_node in bwd_node.all_input_nodes:
+            self.assertEqual(inp_node.name, a_name + "_recomputed")
+        fwd_use_node = next(
+            n for n in result.graph.nodes if n.target is torch.ops.aten.add.Tensor
+        )
+        for inp_node in fwd_use_node.all_input_nodes:
+            self.assertEqual(inp_node.name, a_name)
+
+    def test_offload_reload_chain_hoisted(self):
+        """Mirrors the graph the CPU-offload pass produces: a forward
+        offload chain (``ao.offload`` -> ``ao.wait_tensor``) and a backward
+        reload chain (``ao.reload`` -> ``ao.wait_tensor``). When a
+        recomputed node references the offloaded forward node F, the dup
+        must read from the backward wait_tensor on GPU, not from F's
+        freed-GPU storage. The remat pass discovers the offload chain
+        through graph structure and hoists the backward reload chain in
+        front of the dup's target.
+
+            # Forward (autograd_backward=False)
+            F           = clone(inp1)
+            offload_op  = ao.offload(F)
+            fwd_wait    = ao.wait_tensor(offload_op, F)
+            N           = add(F, inp2)             # must_recompute
+
+            # Backward (autograd_backward=True), placed after bwd_use so
+            # the hoist actually has work to do:
+            bwd_use     = mul(N, N)
+            reload_op   = ao.reload(fwd_wait, "cuda")
+            bwd_wait    = ao.wait_tensor(reload_op)
+            bwd_other   = mul(bwd_wait, bwd_wait)
+        """
+        # Importing this module registers the ao::offload / ao::reload /
+        # ao::wait_tensor ops with torch.ops.
+        import torch._functorch._activation_offloading.offload_ops  # noqa: F401
+
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        f = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        offload_op = graph.call_function(torch.ops.ao.offload.default, args=(f,))
+        fwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(offload_op, f)
+        )
+        n = graph.call_function(torch.ops.aten.add.Tensor, args=(f, inp2))
+        bwd_use = graph.call_function(torch.ops.aten.mul.Tensor, args=(n, n))
+        reload_op = graph.call_function(
+            torch.ops.ao.reload.default, args=(fwd_wait, "cuda")
+        )
+        bwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(reload_op,)
+        )
+        bwd_other = graph.call_function(
+            torch.ops.aten.mul.Tensor, args=(bwd_wait, bwd_wait)
+        )
+        graph.output((bwd_use, bwd_other))
+
+        n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        bwd_use.meta["autograd_backward"] = True
+        reload_op.meta["autograd_backward"] = True
+        bwd_wait.meta["autograd_backward"] = True
+        bwd_other.meta["autograd_backward"] = True
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+
+        # Backward reload chain has been moved in front of the dup's target
+        # (bwd_use) in topological order (reload_op before bwd_wait).
+        reload_idx = nodes.index(reload_op)
+        wait_idx = nodes.index(bwd_wait)
+        bwd_use_idx = nodes.index(bwd_use)
+        self.assertLess(reload_idx, wait_idx)
+        self.assertLess(wait_idx, bwd_use_idx)
+
+        # The forward offload chain stayed in forward (no hoist needed).
+        offload_idx = nodes.index(offload_op)
+        fwd_wait_idx = nodes.index(fwd_wait)
+        self.assertLess(offload_idx, fwd_wait_idx)
+        # Forward chain is also before the (hoisted) backward chain.
+        self.assertLess(fwd_wait_idx, reload_idx)
+
+        # The dup of N references bwd_wait (via the offload chain
+        # redirect), not the original offloaded forward node F.
+        dup = next(d for d in nodes if d.name.endswith("_recomputed"))
+        self.assertIn(bwd_wait, dup.all_input_nodes)
+        self.assertNotIn(f, dup.all_input_nodes)
+        # The dup itself is positioned after the hoisted chain and before
+        # its target.
+        dup_idx = nodes.index(dup)
+        self.assertLess(wait_idx, dup_idx)
+        self.assertLess(dup_idx, bwd_use_idx)
+
+        # bwd_use's args were redirected to the dup.
+        for inp in bwd_use.all_input_nodes:
+            self.assertIs(inp, dup)
+
+        # bwd_other still consumes the (now hoisted) bwd_wait.
+        for inp in bwd_other.all_input_nodes:
+            self.assertIs(inp, bwd_wait)
+
+    def test_offload_reload_chain_already_in_front_not_hoisted(self):
+        """The CPU offload pass deliberately places ``ao.reload`` well before
+        its ``ao.wait_tensor`` (via ``prefetch_reloads``) so the async H2D
+        overlaps with backward compute. If the reload chain is already in
+        front of the dup that needs it, ``ensure_offload_chain_before`` must
+        leave it alone — re-hoisting collapses that prefetch gap and
+        serializes the H2D against compute.
+
+            # Forward (autograd_backward=False):
+            F           = clone(inp1)
+            offload_op  = ao.offload(F)
+            fwd_wait    = ao.wait_tensor(offload_op, F)
+            N           = add(F, inp2)              # must_recompute
+
+            # Backward (autograd_backward=True), reload chain placed
+            # EARLY — before the dup's target — exactly as
+            # ``prefetch_reloads`` would arrange it:
+            early_bwd   = mul(inp1, inp1)
+            reload_op   = ao.reload(fwd_wait, "cuda")
+            bwd_wait    = ao.wait_tensor(reload_op)
+            middle_bwd  = mul(bwd_wait, bwd_wait)   # uses reload chain too
+            bwd_use     = mul(N, N)                 # consumes N (dup target)
+        """
+        import torch._functorch._activation_offloading.offload_ops  # noqa: F401
+
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        inp1 = graph.placeholder("inp1")
+        inp2 = graph.placeholder("inp2")
+        f = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
+        offload_op = graph.call_function(torch.ops.ao.offload.default, args=(f,))
+        fwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(offload_op, f)
+        )
+        n = graph.call_function(torch.ops.aten.add.Tensor, args=(f, inp2))
+        early_bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(inp1, inp1))
+        reload_op = graph.call_function(
+            torch.ops.ao.reload.default, args=(fwd_wait, "cuda")
+        )
+        bwd_wait = graph.call_function(
+            torch.ops.ao.wait_tensor.default, args=(reload_op,)
+        )
+        middle_bwd = graph.call_function(
+            torch.ops.aten.mul.Tensor, args=(bwd_wait, bwd_wait)
+        )
+        bwd_use = graph.call_function(torch.ops.aten.mul.Tensor, args=(n, n))
+        graph.output((middle_bwd, bwd_use))
+
+        n.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        early_bwd.meta["autograd_backward"] = True
+        reload_op.meta["autograd_backward"] = True
+        bwd_wait.meta["autograd_backward"] = True
+        middle_bwd.meta["autograd_backward"] = True
+        bwd_use.meta["autograd_backward"] = True
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        result = selective_activation_remat_pass(gm)
+
+        nodes = list(result.graph.nodes)
+        early_idx = nodes.index(early_bwd)
+        reload_idx = nodes.index(reload_op)
+        wait_idx = nodes.index(bwd_wait)
+        middle_idx = nodes.index(middle_bwd)
+        bwd_use_idx = nodes.index(bwd_use)
+
+        # The reload chain stayed at its original position (between early_bwd
+        # and middle_bwd), preserving the prefetch gap. If the pass had
+        # collapsed it next to bwd_use, reload_op/bwd_wait would land after
+        # middle_bwd — which would also be a topology violation since
+        # middle_bwd consumes bwd_wait.
+        self.assertLess(early_idx, reload_idx)
+        self.assertLess(reload_idx, wait_idx)
+        self.assertLess(wait_idx, middle_idx)
+        self.assertLess(middle_idx, bwd_use_idx)
+
+        # The dup of N references bwd_wait (at its original position) and
+        # is itself inserted right before bwd_use.
+        dup = next(d for d in nodes if d.name.endswith("_recomputed"))
+        self.assertIn(bwd_wait, dup.all_input_nodes)
+        dup_idx = nodes.index(dup)
+        self.assertLess(wait_idx, dup_idx)
+        self.assertLess(dup_idx, bwd_use_idx)
+
+        # middle_bwd still consumes bwd_wait at its original location.
+        for inp in middle_bwd.all_input_nodes:
+            self.assertIs(inp, bwd_wait)
 
 
 if __name__ == "__main__":

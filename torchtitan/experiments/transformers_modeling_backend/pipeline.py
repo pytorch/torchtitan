@@ -26,7 +26,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
+from torchtitan.distributed.pipeline_parallel import _build_pipeline_schedule
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList
@@ -60,7 +60,7 @@ def generate_llm_fqn_per_model_part(
     if num_stages == 1:
         # Single stage gets everything
         layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [["tok_embeddings"] + layer_names + ["norm", "output", "rotary_emb"]]
+        return [["tok_embeddings"] + layer_names + ["norm", "lm_head", "rotary_emb"]]
 
     # Calculate effective layers including weights
     num_effective_layers = num_layers + input_weight + output_weight
@@ -129,7 +129,7 @@ def generate_llm_fqn_per_model_part(
                     current_layer += 1
 
             # Add output modules
-            stage_modules.extend(["norm", "output"])
+            stage_modules.extend(["norm", "lm_head"])
 
         # Middle stages: only transformer layers
         else:
@@ -170,7 +170,7 @@ def pipeline_module_split(
                                - "tok_embeddings" for token embeddings
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
-                               - "output" for the output projection layer
+                               - "lm_head" for the output projection layer
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -180,7 +180,7 @@ def pipeline_module_split(
         module_names_per_stage = [
             ["tok_embeddings", "layers.0"],     # Stage 0: embeddings + first layer
             ["layers.1", "layers.2"],           # Stage 1: middle layers
-            ["norm", "output"]                  # Stage 2: final norm + output
+            ["norm", "lm_head"]                  # Stage 2: final norm + output
         ]
     """
     pp_rank = pp_mesh.get_local_rank()
@@ -291,7 +291,6 @@ def pipeline_hf_transformers(
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
-    model_converters: list,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointConfig,
@@ -389,7 +388,6 @@ def pipeline_hf_transformers(
             m,
             parallel_dims=parallel_dims,
             training=training,
-            model_converters=model_converters,
             parallelism=parallelism,
             compile_config=compile_config,
             ac_config=ac_config,
@@ -400,7 +398,7 @@ def pipeline_hf_transformers(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
-    pp_schedule = build_pipeline_schedule(
+    pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
         local_batch_size=training.local_batch_size,
         stages=stages,

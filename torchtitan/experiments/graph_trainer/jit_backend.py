@@ -4,32 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any
-
 import torch
-import torch._functorch.config as functorch_config
 
 from torchtitan.tools.logging import logger
 
 from .configs import GraphTrainerCompileConfig as CompileConfig
-from .passes import (
+from .fsdp_passes import (
     autobucketing_reordering_pass,
-    fsdp_reshard_after_fwd_pass,
     transformer_block_bucketing_reordering_pass,
 )
 
 
 def get_compile_backend_with_passes(
     compile_config: CompileConfig,
-    fsdp_reshard_after_forward: bool,
     fsdp_manual_buckets: list[list[str] | str] | None,
 ) -> callable:
     """
     Apply compile backend and additional graph passes.
     Args:
         compile_config: compile configs to apply torch.compile.
-        fsdp_reshard_after_forward: whether to enable reshard_after_forward in SimpleFSDP,
-            which is implemented via a customized AC graph pass.
         fsdp_manual_buckets: used in transformer_block_bucketing to define which modules should be bucketed.
     Returns:
         compile backend with applied graph passes.
@@ -144,17 +137,4 @@ def get_compile_backend_with_passes(
     else:
         logger.info("No bucketing or overlapping pass is applied")
 
-    def joint_ac_pass(
-        gm: torch.fx.GraphModule, example_inputs: Any
-    ) -> torch.fx.GraphModule:
-        return fsdp_reshard_after_fwd_pass(
-            gm, example_inputs, reshard_after_forward=fsdp_reshard_after_forward
-        )
-
-    def graph_trainer_custom_pass(*args, **kwargs):
-        # the ac pass has to operate in a joint graph before partitioner for ac
-        # annotation to take into effect.
-        with functorch_config.patch("joint_custom_pass", joint_ac_pass):
-            return backend(*args, **kwargs)
-
-    return graph_trainer_custom_pass
+    return backend

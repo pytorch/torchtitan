@@ -41,7 +41,7 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
         vocab_size=2048,
         tok_embeddings=Embedding.Config(num_embeddings=2048, embedding_dim=dim),
         norm=RMSNorm.Config(normalized_shape=dim),
-        output=Linear.Config(in_features=dim, out_features=2048),
+        lm_head=Linear.Config(in_features=dim, out_features=2048),
         rope=RoPE.Config(
             dim=dim // n_heads,
             max_seq_len=2048,
@@ -62,6 +62,7 @@ def _build_llama4_model(num_experts: int = 8) -> Llama4Model:
             interleave_moe_layer_step=1,
             fixed_attn_block_size=256,
             attn_backend="flex",
+            moe_comm_backend="standard",
         ),
     )
     return Llama4Model(config)

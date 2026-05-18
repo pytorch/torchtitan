@@ -72,12 +72,8 @@ class BaseTokenizer(ABC, Configurable):
             lstrip_blocks=True,
             extensions=[jinja2.ext.loopcontrols],
         )
-        env.globals[
-            "raise_exception"
-        ] = raise_exception  # pyrefly: ignore [unsupported-operation]
-        env.globals[
-            "strftime_now"
-        ] = strftime_now  # pyrefly: ignore [unsupported-operation]
+        env.globals["raise_exception"] = raise_exception
+        env.globals["strftime_now"] = strftime_now
         env.filters["tojson"] = tojson
         self._chat_template = env.from_string(template)
 
@@ -314,7 +310,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 if token_id is not None
                 else self.tokenizer.token_to_id(token_str)
             )
-        elif token_str == config_eos_token:
+        if token_str == config_eos_token:
             self.eos_token = token_str
             self.eos_id = (
                 token_id

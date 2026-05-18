@@ -132,6 +132,16 @@ def remove_identity_slice_pass(
         end = args[3] if len(args) > 3 else sys.maxsize
         step = args[4] if len(args) > 4 else 1
 
+        # Skip if start/end/step are dynamic graph values (FX Nodes) — we
+        # can't prove the slice is identity without concrete/symbolic values
+        # to compare.
+        if (
+            isinstance(start, torch.fx.Node)
+            or isinstance(end, torch.fx.Node)
+            or isinstance(step, torch.fx.Node)
+        ):
+            continue
+
         if start != 0 or step != 1:
             continue
 

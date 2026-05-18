@@ -114,16 +114,6 @@ class FaultTolerantTrainer(Trainer):
         ):
             model = model_config.build()
 
-        # Build the collection of model converters. No-op if converters empty
-        model_compile_enabled = (
-            config.compile.enable and "model" in config.compile.components
-        )
-        model_converters = config.model_converters.build(
-            parallel_dims=parallel_dims,
-            model_compile_enabled=model_compile_enabled,
-        )
-        model_converters.convert(model)
-
         # Verify all submodules satisfy the Module protocol
         model.verify_module_protocol()
 
@@ -161,9 +151,8 @@ class FaultTolerantTrainer(Trainer):
             init_device = device_type
             buffer_device = None
 
-        # FT addition: pass ft_manager to build_loss_fn
-        self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims, ft_manager=self.ft_manager
+        self.loss_fn = config.loss.build(
+            compile_config=config.compile,
         )
 
         # verify batch sizes
@@ -207,7 +196,6 @@ class FaultTolerantTrainer(Trainer):
                 model,
                 parallel_dims=parallel_dims,
                 training=config.training,
-                model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
@@ -239,7 +227,6 @@ class FaultTolerantTrainer(Trainer):
                 model,
                 parallel_dims=parallel_dims,
                 training=config.training,
-                model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
@@ -282,14 +269,6 @@ class FaultTolerantTrainer(Trainer):
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
-        )
-        # Post optimizer step model converters hook.
-        # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
-        # where it issues a single all-reduce for all parameters at once for better performance
-        self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
-                self.model_parts
-            )
         )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts

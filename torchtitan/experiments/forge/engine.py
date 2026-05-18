@@ -27,7 +27,6 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols import BaseModel
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -53,9 +52,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             default_factory=ActivationCheckpointConfig
         )
         compile: CompileConfig = field(default_factory=CompileConfig)
-        model_converters: ModelConvertersContainer.Config = field(
-            default_factory=ModelConvertersContainer.Config
-        )
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
 
@@ -165,7 +161,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.build_loss_fn(
+        self.loss_fn = self.train_spec.loss.build(
             config.compile, parallel_dims=parallel_dims
         )
 
@@ -209,7 +205,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model,
                 parallel_dims=parallel_dims,
                 training=config.training,
-                model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
@@ -234,7 +229,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model,
                 parallel_dims=parallel_dims,
                 training=config.training,
-                model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,

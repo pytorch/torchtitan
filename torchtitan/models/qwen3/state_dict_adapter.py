@@ -30,6 +30,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             model_config.layers[0].attention.qkv_linear, FusedQKVLinear.Config
         )
 
+        qkv_map: dict[str, str | None]
         if self.fuse_qkv:
             qkv_map = {
                 "model.layers.{}.self_attn.q_proj.weight": None,
@@ -46,7 +47,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
-            **qkv_map,  # pyrefly: ignore [invalid-argument]
+            **qkv_map,
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
             "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
             "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
@@ -64,7 +65,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.norm.weight": "norm.weight",
-            "lm_head.weight": "output.weight",
+            "lm_head.weight": "lm_head.weight",
         }
 
     def _get_attention_dims(self) -> tuple[int, int, int]:
@@ -167,7 +168,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 if key not in to_hf_map:
                     continue
                 # pyrefly: ignore [missing-attribute]
-                if self.model_config.enable_weight_tying and key == "output.weight":
+                if self.model_config.enable_weight_tying and key == "lm_head.weight":
                     continue
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
@@ -271,7 +272,8 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
             else:
                 new_key = self.from_hf_map[key]
-                # pyrefly: ignore [unsupported-operation]
+                if new_key is None:
+                    continue
                 state_dict[new_key] = value
 
         if self.fuse_qkv and pending_qkv:

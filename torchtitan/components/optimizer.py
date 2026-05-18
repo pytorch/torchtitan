@@ -7,9 +7,9 @@
 import functools
 import re
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, overload, TypeVar
 
 import torch
 import torch.distributed.tensor
@@ -251,14 +251,23 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     def __len__(self) -> int:
         return len(self.optimizers)
 
-    # pyrefly: ignore [bad-override]
-    def step(self, *args, **kwargs) -> None:
-        for optimizer in self.optimizers:
-            optimizer.step(*args, **kwargs)
+    @overload
+    def step(self, closure: None = None) -> None:
+        ...
 
-    def zero_grad(self, *args, **kwargs) -> None:
+    @overload
+    def step(self, closure: Callable[[], float]) -> float:
+        ...
+
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        assert closure is None, "OptimizersContainer does not support closures"
         for optimizer in self.optimizers:
-            optimizer.zero_grad(*args, **kwargs)
+            optimizer.step()
+        return None
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        for optimizer in self.optimizers:
+            optimizer.zero_grad(set_to_none=set_to_none)
 
     def state_dict(self) -> dict[str, Any]:
         func = functools.partial(
@@ -394,12 +403,18 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         )
         self._post_init(all_params, optimizer_kwargs)
 
-    # pyrefly: ignore [bad-override]
-    def step(self) -> None:
-        pass
+    @overload
+    def step(self, closure: None = None) -> None:
+        ...
 
-    # pyrefly: ignore [bad-override]
-    def zero_grad(self) -> None:
+    @overload
+    def step(self, closure: Callable[[], float]) -> float:
+        ...
+
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        return None
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
         pass
 
 

@@ -116,6 +116,9 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             GraphTrainer,
             activation_checkpoint_mode="selective",
         )
+        # Use eager-compatible SAC policy (alternating mm save/recompute)
+        # to match the eager AC path's memory behavior.
+        traced_trainer.config.compile.memory_policy = "eager"
 
         # Warm up both paths so allocator and one-time tracing setup do not skew
         # the measured peak memory.

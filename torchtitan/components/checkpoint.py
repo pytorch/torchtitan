@@ -41,6 +41,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
@@ -649,10 +650,10 @@ class CheckpointManager(Configurable):
         if MODEL in self.states:
             self.states[MODEL].load_state_dict(state_dict)
 
+    @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
-    def save(self, curr_step: int, last_step: bool = False) -> None:
-        """
-        Save the checkpoint for the current training step.
+    def save(self, curr_step: int, last_step: bool = False) -> bool:
+        """Save the checkpoint for the current step.
 
         This function manages the checkpointing lifecycle for the current step.
         A save is performed if any of the following conditions are met:
@@ -666,11 +667,14 @@ class CheckpointManager(Configurable):
             last_step (bool, optional): Whether this is the final step of training.
 
         Returns:
-            None
+            bool: True if a checkpoint was written (or staged, for async modes) on
+            this step.
         """
 
         if not self._should_save(curr_step, last_step):
-            return
+            return False
+
+        sl.add_step_tag("checkpoint_save")
 
         # Ensure the background thread/process of saving to disk is finished
         self.maybe_wait_for_saving()
@@ -690,7 +694,7 @@ class CheckpointManager(Configurable):
             logger.info(
                 f"Last step checkpoint completed in {time.monotonic() - begin_t:.2f}s"
             )
-            return
+            return True
 
         # --------- 2. State Preparation & Memory Management  ----------
 
@@ -760,7 +764,9 @@ class CheckpointManager(Configurable):
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in {time.monotonic() - begin_t:.2f} seconds."
         )
+        return True
 
+    @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.

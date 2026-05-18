@@ -13,7 +13,7 @@ Qwen3-VL combines:
 
 - `tok_embeddings` produces text token embeddings of shape `B×S`.
 - `vision_encoder` produces visual token embeddings of shape `N×L`.
-- Valid visual tokens (excluding padding) are scattered into the placeholder positions in the text sequence, as illustrated below (credit: @lkhphuc).
+- Valid visual tokens (excluding padding) are scattered into the placeholder positions in the text sequence, as illustrated below (credit: [@lkhphuc](https://github.com/lkhphuc)).
 
 <img width="1398" height="840" alt="VLM Architecture" src="https://github.com/user-attachments/assets/63fcbbc1-c587-4a63-8246-411cb72f5789" />
 
@@ -32,7 +32,7 @@ pip install av torchvision
 | Variant | LLM dim | Layers | ViT dim | ViT layers | Patch size | MoE |
 |---------|---------|--------|---------|------------|------------|-----|
 | debugmodel | 256 | 4 | 256 | 4 | 16 | No |
-| debugmodel_moe | 256 | 1 | 256 | 4 | 16 | Yes (64 experts) |
+| debugmodel_moe | 256 | 1 | 256 | 4 | 16 | Yes (8 experts) |
 | 2B | 2048 | 28 | 1024 | 24 | 16 | No |
 | 8B | 4096 | 36 | 1152 | 27 | 16 | No |
 | 30B-A3B | 2048 | 48 | 1152 | 27 | 16 | Yes (128 experts) |

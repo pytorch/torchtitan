@@ -46,7 +46,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 45
+      timeout: 60
       script: |
         set -eux
 
@@ -105,7 +105,7 @@ jobs:
           # But this is more an unknown issue that AMD people may want to
           # figure out the root cause or confirm that this is an expected
           # behavior.
-          LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
+          LOSS_FILE="tests/assets/losses/llama3_rocm_mi350x.txt"
           STEPS=1
         else
           echo "Error: Unknown GPU architecture type: ${{ matrix.gpu-arch-type }}"
@@ -120,6 +120,20 @@ jobs:
 
          echo "Checking FSDP8 loss from a new run v.s. FSDP8 loss from text file parity"
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+
+        # MoE loss comparison: verify Qwen3 MoE FSDP8 deterministic losses match reference
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_cuda.txt"
+        elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_rocm_mi350x.txt"
+        fi
+
+        echo "Checking Qwen3 MoE FSDP8 loss parity against reference"
+        python3 scripts/loss_compare.py . . \
+          --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
+          --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
+          --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8

@@ -192,8 +192,9 @@ class ConfigManager:
     def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
-        # pyrefly: ignore [missing-attribute]
-        if not os.path.exists(self.config.hf_assets_path):
+        if not os.path.exists(
+            self.config.hf_assets_path  # pyrefly: ignore[missing-attribute]
+        ):
             logger.warning(
                 f"HF assets path {self.config.hf_assets_path} does not exist!"
             )
@@ -201,16 +202,18 @@ class ConfigManager:
                 "torchtitan/datasets/tokenizer/original/tokenizer.model"
             )
             if os.path.exists(old_tokenizer_path):
-                # pyrefly: ignore [missing-attribute]
-                self.config.hf_assets_path = old_tokenizer_path
+                self.config.hf_assets_path = (  # pyrefly: ignore[missing-attribute]
+                    old_tokenizer_path
+                )
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
                     "Please download the new tokenizer files (python scripts/download_hf_assets.py) and update your config."
                 )
         else:
             # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
-            # pyrefly: ignore [missing-attribute]
-            if self.config.hf_assets_path.endswith("tokenizer.model"):
+            if self.config.hf_assets_path.endswith(  # pyrefly: ignore[missing-attribute]
+                "tokenizer.model"
+            ):
                 raise Exception(
                     "You are using the old tokenizer.model, please redownload the tokenizer ",
                     "(python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer) ",
@@ -253,7 +256,6 @@ if __name__ == "__main__":
     try:
 
         from rich import print as rprint
-
         from rich.pretty import Pretty
 
         config_manager = ConfigManager()

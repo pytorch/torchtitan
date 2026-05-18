@@ -43,7 +43,7 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
         tp_mesh,
         {
             "tok_embeddings": RowwiseParallel(input_layouts=Replicate()),
-            "output": ColwiseParallel(output_layouts=Replicate()),
+            "lm_head": ColwiseParallel(output_layouts=Replicate()),
         },
     )
 
@@ -107,12 +107,10 @@ def test_generate(
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
     tokenizer = HuggingFaceTokenizer.Config().build(
-        # pyrefly: ignore [missing-attribute]
-        tokenizer_path=config.hf_assets_path
+        tokenizer_path=config.hf_assets_path  # pyrefly: ignore [missing-attribute]
     )
 
-    # pyrefly: ignore [missing-attribute]
-    model_config = config.model_spec.model
+    model_config = config.model_spec.model  # pyrefly: ignore [missing-attribute]
     model_config.update_from_config(trainer_config=config)
 
     init_device = "meta" if world_size > 1 else device
@@ -123,8 +121,7 @@ def test_generate(
     parallel_dims = None
     # Init distributed env
     if world_size > 1:
-        # pyrefly: ignore [missing-attribute]
-        dist_utils.init_distributed(config.comm)
+        dist_utils.init_distributed(config.comm)  # pyrefly: ignore [missing-attribute]
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=-1,
@@ -132,7 +129,6 @@ def test_generate(
             tp=world_size,
             pp=1,
             ep=1,
-            etp=1,
             world_size=world_size,
         )
 
@@ -147,7 +143,6 @@ def test_generate(
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=1,
         )
 

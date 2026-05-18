@@ -7,10 +7,8 @@ on:
       - 'torchtitan/experiments/rl/**'
       - '.github/workflows/integration_test_4gpu_rl.yaml'
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl.yaml'
+    types: [labeled, synchronize]
+    branches: [ main ]
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -31,10 +29,13 @@ jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
     uses: ./.github/workflows/set-matrix.yaml
+    with:
+      is-experimental: true
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ciflow/rl')
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
@@ -64,7 +65,7 @@ jobs:
         pip install uv
 
         # 1. Install Monarch and TorchStore
-        uv pip install torchmonarch==0.3.0
+        uv pip install torchmonarch==0.4.1
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
         uv pip install pygtrie portpicker
 
@@ -80,7 +81,7 @@ jobs:
         uv pip install torchdata==0.12.0.dev20260327 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
 
         # 4. Install torchtitan in editable mode because integration test spawns
-        # python simple_grpo_sum_digits.py as a subprocess
+        # python grpo.py as a subprocess
         uv pip install -e .
 
         # 5. Download HF model checkpoint for tests
@@ -88,6 +89,11 @@ jobs:
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Install nvcc so FlashInfer can JIT compile its CUDA kernels.
+        # vLLM uses FlashInfer sampler by default (vllm-project/vllm#40376)
+        # but the CI docker image only has CUDA runtime, not the toolkit.
+        uv pip install nvidia-cuda-nvcc
 
         # Run E2E RL integration tests (TP=2 on 4 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \

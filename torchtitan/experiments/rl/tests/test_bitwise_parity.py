@@ -44,21 +44,23 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
+from torch.distributed.tensor import DTensor
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from torchtitan.components.checkpoint import CheckpointManager
+
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_batch_invariant
-from torchtitan.experiments.rl.models.parallelize import parallelize_qwen3
-from torchtitan.experiments.rl.plugin import (
-    register_model_to_vllm_model_registry,
+from torchtitan.experiments.rl.grpo import RLTrainer
+from torchtitan.experiments.rl.models.vllm_registry import (
+    registry_to_vllm,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.tools import utils
 
@@ -69,6 +71,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model and Engine setup
 # ---------------------------------------------------------------------------
+
 
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
@@ -94,7 +97,6 @@ def build_trainer_model(
         tp=parallelism.tensor_parallel_degree,
         pp=parallelism.pipeline_parallel_degree,
         ep=parallelism.expert_parallel_degree,
-        etp=parallelism.expert_tensor_parallel_degree,
         world_size=dist.get_world_size(),
     )
 
@@ -105,13 +107,28 @@ def build_trainer_model(
         distinct_seed_mesh_dims=["pp"],
     )
 
+    # Mirror PolicyTrainer._build_model: fill sharding configs (and any other
+    # parallelism-driven config mutations) on the model config BEFORE build,
+    # so each Module is constructed with its ShardingConfig / LocalMapConfig.
+    # Without this the trainer side would run un-parallelized while the vLLM
+    # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
+    model_spec.model.update_from_config(trainer_config=config.trainer)
+
     # Build on meta device, parallelize, then materialize
     with torch.device("meta"):
         with utils.set_default_dtype(TORCH_DTYPE_MAP[config.trainer.training.dtype]):
             model = model_spec.model.build()
 
-    model = parallelize_qwen3(
-        model, parallel_dims=parallel_dims, parallelism=parallelism
+    from torchtitan.config import ActivationCheckpointConfig, CompileConfig
+
+    model_spec.parallelize_fn(
+        model,
+        parallel_dims=parallel_dims,
+        training=config.trainer.training,
+        parallelism=parallelism,
+        compile_config=CompileConfig(enable=False),
+        ac_config=ActivationCheckpointConfig(mode="none"),
+        dump_folder="",
     )
     model.to_empty(device=device_type)
     with torch.no_grad():
@@ -167,7 +184,7 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.compile.is_eager,
+        enforce_eager=not gen_config.cudagraph.enable,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(
             backend=AttentionBackendEnum.CUSTOM,
@@ -180,7 +197,11 @@ def build_inference_engine(config: RLTrainer.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+    max_num_seqs = config.num_prompts_per_step * gen_config.sampling.n
+    engine_kwargs["max_num_seqs"] = max_num_seqs
+    vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
+        max_num_seqs=max_num_seqs,
+    )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.debug.seed is not None:
@@ -237,6 +258,12 @@ def compute_trainer_prefill_logprobs(model, token_ids, device):
     positions = torch.arange(max_len, device=device).unsqueeze(0).expand(len(seqs), -1)
 
     logits = model(padded, attention_masks=attention_masks, positions=positions)
+    # Config-based TP returns logits as a Replicate DTensor; downstream code
+    # (slicing per-sample, ``gather`` with plain-tensor indices) expects a
+    # plain tensor — materialize once here. Same pattern as ``compute_logprobs``
+    # in ``actors/utils.py``.
+    if isinstance(logits, DTensor):
+        logits = logits.to_local()
     log_probs = F.log_softmax(logits[:, :-1, :].float(), dim=-1)
 
     results = []
@@ -415,8 +442,16 @@ class TestBitwiseParity(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
-        config.model_spec.parallelize_fn = parallelize_qwen3
-        register_model_to_vllm_model_registry(config.model_spec)
+        registry_to_vllm(
+            config.model_spec,
+            parallelism=config.generator.parallelism,
+            compile_config=config.compile,
+            checkpoint_config=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                initial_load_path=config.hf_assets_path,
+            ),
+        )
 
         # Test runs trainer and generator in the same process, so limit
         # GPU memory for vLLM to leave room for the trainer model.

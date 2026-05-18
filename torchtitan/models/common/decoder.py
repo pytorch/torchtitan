@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import and_masks
 
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -67,7 +66,7 @@ class Decoder(BaseModel):
     class Config(BaseModel.Config):
         dim: int
         vocab_size: int
-        output: Linear.Config
+        lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
@@ -80,6 +79,12 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+
+    # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
+    # per-chunk inside the loss function instead of in forward().
+    # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
+    # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
+    _skip_lm_head: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -94,7 +99,7 @@ class Decoder(BaseModel):
             self.layers[str(i)] = layer_config.build()
 
         self.norm = config.norm.build()
-        self.output = config.output.build()
+        self.lm_head = config.lm_head.build()
 
     def init_states(
         self,
@@ -134,13 +139,18 @@ class Decoder(BaseModel):
             h = layer(h, self.freqs_cis, attention_masks, positions)
 
         h = self.norm(h) if self.norm is not None else h
-        output = self.output(h) if self.output is not None else h
+
+        # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
+        # calls .requires_grad on all stage inputs, which fails on bool kwargs.
+        # TODO: fix PP backward upstream to skip non-tensor inputs
+        if self._skip_lm_head:
+            return h
+        output = self.lm_head(h) if self.lm_head is not None else h
         return output
 
     def _get_flex_attention_masks(
         self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
+        positions: torch.Tensor,
         attn_config: BaseAttention.Config,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
@@ -149,42 +159,39 @@ class Decoder(BaseModel):
             case "causal":
                 B = 1
             case "block_causal":
-                B = input_batch.shape[0]
-                assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                B = positions.shape[0]
+                mask_mods.append(get_document_mask_mod(positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {attn_config.mask_type}"
                 )
 
+        seq_len = positions.shape[1]
         assert isinstance(attn_config.inner_attention, FlexAttention.Config)
         return create_attention_mask(
             and_masks(*mask_mods),
             B,
             None,
-            input_batch.shape[1],
-            input_batch.shape[1],
+            seq_len,
+            seq_len,
             BLOCK_SIZE=attn_config.inner_attention.block_size,
         )
 
     def get_attention_masks(
         self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
+        positions: torch.Tensor,
     ) -> AttentionMasksType:
         attn_config = self.config.layers[0].attention
         inner_attn = attn_config.inner_attention
         if isinstance(inner_attn, FlexAttention.Config):
-            return self._get_flex_attention_masks(input_batch, tokenizer, attn_config)
+            return self._get_flex_attention_masks(positions, attn_config)
         elif isinstance(inner_attn, VarlenAttention.Config):
             if attn_config.mask_type != "block_causal":
                 raise ValueError(
                     f"varlen attention is only supported with block_causal "
                     f"attention mask type, got {attn_config.mask_type}"
                 )
-            assert tokenizer.eos_id is not None
-            return create_varlen_metadata_for_document(input_batch, tokenizer.eos_id)
+            return create_varlen_metadata_for_document(positions)
         else:
             raise TypeError(
                 f"Only VarlenAttention and FlexAttention support attention masks, "

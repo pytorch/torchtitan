@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.validate import Validator
@@ -20,6 +21,7 @@ from . import model_registry
 
 def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
     return FaultTolerantTrainer.Config(
+        loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         profiler=Profiler.Config(
             enable_profiling=True,

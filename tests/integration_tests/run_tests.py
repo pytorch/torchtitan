@@ -7,7 +7,10 @@
 import argparse
 import os
 import subprocess
+import sys
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from torchtitan.tools.logging import logger
 
@@ -23,16 +26,80 @@ _TEST_SUITES_FUNCTION = {
     "h100": build_h100_tests_list,
 }
 
+# Held while a test writes its captured output so concurrent tests do not
+# interleave their lines.
+_OUTPUT_LOCK = threading.Lock()
 
-def _run_cmd(cmd, timeout=None):
-    return subprocess.run(
-        [cmd],
-        encoding="utf-8",
-        errors="replace",
-        shell=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+
+class GPUPool:
+    """Allocator for a fixed-size pool of physical GPU ids.
+
+    ``acquire(n)`` blocks until ``n`` GPUs are free and returns a sorted list
+    of ids; ``release`` returns them to the pool.
+    """
+
+    def __init__(self, total: int):
+        self._free: list[int] = list(range(total))
+        self._cond = threading.Condition()
+        self.total = total
+
+    def acquire(self, n: int) -> list[int]:
+        with self._cond:
+            while len(self._free) < n:
+                self._cond.wait()
+            chosen = sorted(self._free[:n])
+            self._free = self._free[n:]
+            return chosen
+
+    def release(self, gpus: list[int]) -> None:
+        with self._cond:
+            self._free.extend(gpus)
+            self._cond.notify_all()
+
+
+def _run_cmd(cmd: str, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Run ``cmd`` in a shell, capturing merged stdout/stderr into memory.
+
+    Output is *not* streamed to the parent in real time: when running tests
+    concurrently we want each test's log to appear as one contiguous block
+    rather than interleaved line-by-line with other tests.
+
+    On timeout, returns a synthetic ``CompletedProcess`` with ``returncode=-1``
+    and ``stdout`` populated with whatever the child had emitted so far, so
+    callers do not need to special-case ``TimeoutExpired``.
+    """
+    try:
+        return subprocess.run(
+            [cmd],
+            encoding="utf-8",
+            errors="replace",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        stdout = (
+            e.stdout.decode("utf-8", errors="replace")
+            if isinstance(e.stdout, bytes)
+            else (e.stdout or "")
+        )
+        return subprocess.CompletedProcess(cmd, -1, stdout=stdout, stderr=None)
+
+
+def _emit_block(prefix: str, header: str, body: str, footer: str = "") -> None:
+    """Atomically write a multi-line block prefixed with ``[prefix] ``.
+
+    Holds the global output lock for the entire block so concurrent tests do
+    not interleave their lines.
+    """
+    with _OUTPUT_LOCK:
+        sys.stderr.write(header)
+        for line in body.splitlines():
+            sys.stderr.write(f"[{prefix}] {line}\n")
+        if footer:
+            sys.stderr.write(footer)
+        sys.stderr.flush()
 
 
 def run_single_test(
@@ -40,6 +107,9 @@ def run_single_test(
     output_dir: str,
     module: str | None = None,
     config: str | None = None,
+    # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
+    # child process to use all visible GPUs.
+    gpu_ids: list[int] | None = None,
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
@@ -47,13 +117,27 @@ def run_single_test(
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
+    # When running in parallel, pin each test to a disjoint subset of physical
+    # GPUs. Setting both CUDA_/HIP_VISIBLE_DEVICES makes this a no-op for the
+    # arch that doesn't apply.
+    if gpu_ids is not None:
+        visible = ",".join(map(str, gpu_ids))
+        gpu_env_prefix = (
+            f"CUDA_VISIBLE_DEVICES={visible} HIP_VISIBLE_DEVICES={visible} "
+        )
+    else:
+        gpu_env_prefix = ""
+
     for idx, override_arg in enumerate(test_flavor.override_args):
         cmd = ""
         if module is not None:
             cmd += f"MODULE={module} "
         if config is not None:
             cmd += f"CONFIG={config} "
-        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
+        cmd += (
+            f"{gpu_env_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+            f"./run_train.sh"
+        )
 
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
@@ -61,72 +145,140 @@ def run_single_test(
         cmd += " " + dump_folder_arg
         if override_arg:
             cmd += " " + " ".join(override_arg)
-        logger.info(
-            f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
-        )
 
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
         if test_name == "test_generate" and idx == 1:
             cmd = (
-                f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"{gpu_env_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
                 "PROMPT='What is the meaning of life?' "
                 f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
             )
 
-        try:
-            result = _run_cmd(cmd, timeout=test_flavor.timeout)
-        except subprocess.TimeoutExpired as e:
+        start_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        result = _run_cmd(cmd, timeout=test_flavor.timeout)
+        returncode = result.returncode
+        captured = result.stdout or ""
+
+        end_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        header = (
+            f"===== [{test_name}] start {start_ts} end {end_ts} "
+            f"flavor: {test_flavor.test_descr} (rc={returncode}) =====\n"
+            f"===== [{test_name}] command: {cmd} =====\n"
+        )
+        footer = f"===== [{test_name}] end of output (rc={returncode}) =====\n"
+        _emit_block(test_name, header, captured, footer)
+
+        if returncode != 0:
+            tail = "\n".join(captured.splitlines()[-50:])
+            # ``_run_cmd`` returns rc=-1 to signal a timeout.
+            reason = (
+                f"timed out after {test_flavor.timeout}s"
+                if returncode == -1
+                else f"rc={returncode}"
+            )
             raise RuntimeError(
-                f"\nTest timed out after {test_flavor.timeout}s: {test_flavor.test_descr}.\n"
+                f"\nFailed test flavor: {test_flavor.test_descr} ({reason}).\n"
                 f"Command: {cmd}\n"
-            ) from e
-        if result.stdout:
-            logger.info(result.stdout)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"\nFailed test flavor: {test_flavor.test_descr}.\n"
-                f"Command: {cmd}\n"
-                f"stderr: {result.stderr}\n"
+                f"Last 50 lines:\n{tail}\n"
             )
 
 
-def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
-    """Run all integration tests to test the core features of TorchTitan"""
+def _filter_tests(
+    args, test_list: list[OverrideDefinitions]
+) -> tuple[list[OverrideDefinitions], list[OverrideDefinitions]]:
+    """Filter tests by --test_name / --exclude / disabled / arch / ngpu.
+
+    Returns (runnable, skipped_due_to_ngpu).
+    """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
-    ran_any_test = False
-    failed_tests: list[tuple[str, str]] = []
+    runnable: list[OverrideDefinitions] = []
+    skipped_ngpu: list[OverrideDefinitions] = []
     for test_flavor in test_list:
-        # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
-
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
-
-        # Skip the test for ROCm
         if (
             getattr(args, "gpu_arch_type", "cuda") == "rocm"
             and test_flavor.skip_rocm_test
         ):
             continue
-
-        # Check if we have enough GPUs
         if args.ngpu < test_flavor.ngpu:
+            skipped_ngpu.append(test_flavor)
+            continue
+        runnable.append(test_flavor)
+    return runnable, skipped_ngpu
+
+
+def run_tests(
+    args,
+    test_list: list[OverrideDefinitions],
+    module=None,
+    config=None,
+    parallel: bool = True,
+):
+    """Run all integration tests to test the core features of TorchTitan."""
+    runnable, skipped_ngpu = _filter_tests(args, test_list)
+    for test_flavor in skipped_ngpu:
+        logger.info(
+            f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
+            f" because --ngpu arg is {args.ngpu}"
+        )
+
+    failed_tests: list[tuple[str, str]] = []
+
+    if parallel and runnable:
+        # Schedule tests concurrently, packing them onto a fixed pool of
+        # physical GPUs. A test can run as soon as `test_flavor.ngpu` GPUs are
+        # free; the sum of in-flight test ngpu never exceeds `args.ngpu`.
+        pool = GPUPool(args.ngpu)
+        # Submit largest-first so the very first wave packs efficiently and
+        # avoids head-of-line blocking by an oversized test arriving late.
+        # NOTE: this only deterministically orders the *first* batch; once
+        # workers start finishing at different times, subsequent acquisition
+        # order is driven by completion times, not by ``ngpu``.
+        scheduled = sorted(runnable, key=lambda t: -t.ngpu)
+        # Worst case: every test wants 1 GPU and runs in parallel.
+        max_workers = max(1, min(len(scheduled), args.ngpu))
+
+        def _runner(test_flavor: OverrideDefinitions) -> None:
+            gpus = pool.acquire(test_flavor.ngpu)
             logger.info(
-                f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
-                f" because --ngpu arg is {args.ngpu}"
+                f"[parallel] {test_flavor.test_name}: acquired GPUs {gpus} "
+                f"(ngpu={test_flavor.ngpu})"
             )
-        else:
+            try:
+                run_single_test(
+                    test_flavor, args.output_dir, module, config, gpu_ids=gpus
+                )
+            finally:
+                pool.release(gpus)
+                logger.info(f"[parallel] {test_flavor.test_name}: released GPUs {gpus}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures: dict[Future, OverrideDefinitions] = {
+                ex.submit(_runner, t): t for t in scheduled
+            }
+            for fut in futures:
+                test_flavor = futures[fut]
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.error(str(e))
+                    failed_tests.append((test_flavor.test_name, str(e)))
+    else:
+        for test_flavor in runnable:
             try:
                 run_single_test(test_flavor, args.output_dir, module, config)
             except Exception as e:
                 logger.error(str(e))
                 failed_tests.append((test_flavor.test_name, str(e)))
-            ran_any_test = True
+
+    ran_any_test = bool(runnable)
 
     if failed_tests:
         failure_summary = "\n".join(
@@ -192,6 +344,15 @@ def main():
         default=None,
         help="Comma-separated list of test names to skip",
     )
+    parser.add_argument(
+        "--parallel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run tests concurrently, packing them onto the GPU pool. "
+        "At most --ngpu GPUs are in use at any time; each test is pinned to a "
+        "disjoint subset via CUDA_/HIP_VISIBLE_DEVICES. "
+        "Use --no-parallel to force sequential execution (default: parallel).",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
@@ -204,7 +365,7 @@ def main():
     ), f"Unknown test suite {args.test_suite}"
 
     test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
-    run_tests(args, test_list)
+    run_tests(args, test_list, parallel=args.parallel)
 
 
 if __name__ == "__main__":

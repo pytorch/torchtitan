@@ -38,7 +38,6 @@ class FakeParallelDims:
         self.dp_replicate = self.mesh_sizes.get("dp_replicate", 1)
         self.dp_shard = self.mesh_sizes.get("dp_shard", 1)
         self.ep = self.mesh_sizes.get("ep", 1)
-        self.etp = self.mesh_sizes.get("etp", 1)
 
         # For backward compatibility with 'dp' dimension name
         if "dp" in self.mesh_sizes:

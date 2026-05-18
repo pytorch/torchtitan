@@ -11,7 +11,7 @@ This module provides a cudagraph pass that can be applied to graph modules
 during compilation.
 """
 
-import logging
+import json
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -21,7 +21,9 @@ from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
-logger = logging.getLogger(__name__)
+from torchtitan.config.function import Function
+from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+from torchtitan.tools.logging import logger
 
 
 class _CUDAGraphManager:
@@ -31,6 +33,10 @@ class _CUDAGraphManager:
         self._initialized = False
         self._cudagraph_wrappers: list["CUDAGraphWrapper"] = []
         self._teardown_called = False
+        # toolsId (graph_id << 32 | node_id) -> list of annotation dicts
+        # (e.g. [{"module_fqn": "layers.0.attention.wq"}]).
+        self.all_annotations: dict[int, list] = {}
+        self.enable_annotations: bool = False
 
     def maybe_initialize(self) -> None:
         if self._initialized:
@@ -98,6 +104,54 @@ def cudagraph_teardown() -> None:
     See Note [explicit cudagraph teardown] for more details.
     """
     _cg_manager.teardown()
+
+
+def get_cudagraph_annotations() -> dict[int, list]:
+    """Return all kernel annotations accumulated across CUDA graph captures."""
+    return _cg_manager.all_annotations
+
+
+def enable_cudagraph_annotations() -> None:
+    """Enable kernel annotation capture on subsequent CUDA graph recordings."""
+    _cg_manager.enable_annotations = True
+
+
+def cudagraph_annotate_trace_post_processor() -> Function.Config:
+    """Return a ``Function.Config`` that merges captured CUDA graph kernel
+    annotations into a profiler trace file.
+
+    Attach this to ``Profiler.Config.trace_post_processor`` so that exported
+    profiler traces automatically carry ``module_fqn`` fields on graphed kernel
+    events.
+    """
+    return Function.Config(fn=_cudagraph_annotate_trace_file)
+
+
+def _cudagraph_annotate_trace_file(trace_path: str) -> None:
+    """Post-process a profiler trace with CUDA graph kernel annotations."""
+    annotations = _cg_manager.all_annotations
+    if not annotations:
+        return
+
+    try:
+        from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-import]
+            annotate_trace,
+        )
+    except ImportError:
+        logger.warning(
+            "torch.cuda._annotate_cuda_graph_trace not available. "
+            "Upgrade PyTorch to enable trace CUDA graph kernel annotation."
+        )
+        return
+
+    with open(trace_path) as f:
+        trace = json.load(f)
+
+    count = annotate_trace(trace, annotations)
+    if count > 0:
+        with open(trace_path, "w") as f:
+            json.dump(trace, f)
+        logger.info(f"Annotated {count} CUDAGraph kernel event(s) in profiler trace")
 
 
 class CUDAGraphWrapper:
@@ -219,9 +273,15 @@ class CUDAGraphWrapper:
                 self._cudagraph,
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
+                enable_annotations=_cg_manager.enable_annotations,
             ):
                 # `output` is managed by pytorch's cudagraph pool
                 self._output = self._runnable(*args)
+
+            if _cg_manager.enable_annotations:
+                from torch.cuda._graph_annotations import get_kernel_annotations
+
+                _cg_manager.all_annotations.update(get_kernel_annotations())
 
         if self._should_check_address:
             self._check_static_inputs_address()
@@ -257,6 +317,8 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
     - **``aten._grouped_mm``**: the grouped matmul kernel used by MoE may
       perform internal CPU↔CUDA copies (e.g. workspace allocation) that
       are invisible in the FX graph metadata, breaking CUDA graph capture.
+      On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
+      cudagraph-compatible.
     - **flex_attention HOPs**: flex_attention higher-order ops require
       torch.compile (e.g. regional_inductor) to lower them into fused
       Triton kernels.  Without compilation they fall back to an unfused
@@ -293,13 +355,17 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
         # _grouped_mm may perform internal CPU↔CUDA copies (e.g. workspace
         # allocation) that are not visible from the FX graph metadata, so we
         # cannot rely on checking input device types alone.
+        # On sm_100+ (GB200/Blackwell) this is resolved and _grouped_mm is
+        # cudagraph-compatible.
         if node.target == torch.ops.aten._grouped_mm.default:
-            logger.warning(
-                "Skipping cudagraph: graph contains aten._grouped_mm "
-                "which may perform internal CPU↔CUDA copies incompatible "
-                "with CUDA graph capture"
-            )
-            return False
+            capability = torch.cuda.get_device_capability()
+            if capability < (10, 0):
+                logger.warning(
+                    "Skipping cudagraph: graph contains aten._grouped_mm "
+                    "which may perform internal CPU↔CUDA copies incompatible "
+                    "with CUDA graph capture"
+                )
+                return False
 
     for node in gm.graph.nodes:
         if node.op == "call_function" and node.target in _FLEX_ATTENTION_OPS:
@@ -341,3 +407,144 @@ def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list
         static_input_indices = list(range(fixed))
 
     return static_input_indices
+
+
+def insert_kernel_annotations_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Insert mark_kernels() calls at module boundaries in the FX graph.
+
+    Reads ``node.meta["custom"]["module_fqn"]`` (set via
+    ``annotate_module_fqns``) and inserts enter/exit calls so that
+    CUDA graph capture records the annotations.
+
+    Requires ``cuda-python`` package and CUDA toolkit/driver >= 13.1
+    (or cuda-compat >= 13.1).  Returns the graph unchanged when unavailable.
+
+    Also enables annotation capture on :class:`CUDAGraphWrapper` so that
+    ``enable_annotations=True`` is passed to ``torch.cuda.graph()``.
+
+    Alternative approaches:
+
+    1. **fx.Interpreter**: During cudagraph capture, run the graph via an
+       ``fx.Interpreter`` subclass that reads ``module_fqn`` metadata and
+       calls ``mark_kernels`` enter/exit around each node — avoids mutating
+       the graph.
+    2. **Custom CodeGen**: Use a custom ``torch.fx.graph.CodeGen`` to emit
+       enter/exit lines (or ``with`` blocks) directly in the generated
+       Python code.
+
+    The current graph-pass approach is the least invasive.
+    """
+    from torch.cuda._graph_annotations import _is_tools_id_unavailable
+
+    def _enter(annotation: dict) -> object:
+        from torch.cuda._graph_annotations import mark_kernels
+
+        ctx = mark_kernels(annotation)
+        ctx.__enter__()
+        return ctx
+
+    def _exit(ctx: object) -> None:
+        ctx.__exit__(None, None, None)  # type: ignore[union-attr]
+
+    if _is_tools_id_unavailable():
+        return gm
+
+    enable_cudagraph_annotations()
+
+    graph = gm.graph
+    current_fqn: str | None = None
+    current_ctx_node = None
+
+    for node in list(graph.nodes):
+        fqn = (node.meta.get("custom") or {}).get(_MODULE_FQN)
+
+        if fqn != current_fqn:
+            # Close previous scope
+            if current_ctx_node is not None:
+                with graph.inserting_before(node):
+                    exit_node = graph.call_function(_exit, (current_ctx_node,))
+                    exit_node.meta["custom"] = {}
+                current_ctx_node = None
+
+            # Open new scope
+            if fqn is not None:
+                with graph.inserting_before(node):
+                    enter_node = graph.call_function(
+                        _enter,
+                        ({_MODULE_FQN: fqn},),
+                    )
+                    enter_node.meta["custom"] = {}
+                current_ctx_node = enter_node
+
+            current_fqn = fqn
+
+    # Close any trailing scope (before output/return)
+    if current_ctx_node is not None:
+        output_nodes = [n for n in graph.nodes if n.op == "output"]
+        if output_nodes:
+            with graph.inserting_before(output_nodes[0]):
+                exit_node = graph.call_function(_exit, (current_ctx_node,))
+                exit_node.meta["custom"] = {}
+
+    graph.lint()
+    gm.recompile()
+    return gm
+
+
+def cudagraph_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    is_forward: bool,
+    static_input_indices: list[int] | None = None,
+    tensor_input_indices: list[int] | None = None,
+) -> torch.fx.GraphModule:
+    """
+    Apply cudagraph.
+
+    This pass wraps the forward function with cudagraph during compilation and does
+    not record cudagraph until runtime.
+    - For the first run, it will warm up operators such as nccl.
+    - For the second run, it will record cudagraph and replay cudagraph.
+    - For the following runs, it will replay cudagraph.
+
+    Args:
+        gm: The graph module to wrap.
+        example_inputs: Example inputs for warmup/recording.
+        is_forward: Whether this is a forward graph (True) or backward graph
+            (False). Used to infer which inputs have stable tensor addresses
+            when ``static_input_indices`` is not provided.
+        static_input_indices: Explicit list of input indices with stable tensor
+            addresses. When provided, ``is_forward`` is not used for inference.
+        tensor_input_indices: Indices of graph inputs that are tensors (as
+            opposed to opaque values like DeviceMesh). Used to compute which
+            inputs need copying for cudagraph replay. When not provided, this
+            is inferred from ``example_inputs``.
+    """
+    if not isinstance(gm, torch.fx.GraphModule):
+        raise TypeError(
+            f"cudagraph_pass requires a GraphModule but got {type(gm).__name__}. "
+            f"Ensure cudagraph is not combined with passes that replace the "
+            f"GraphModule (e.g. full_inductor_compilation)."
+        )
+
+    if not is_cudagraph_compatible(gm):
+        logger.warning(
+            "Skipping cudagraph: graph is not compatible after all preceding "
+            "passes. Use --compile.disable_passes cudagraph_pass to silence."
+        )
+        return gm
+
+    if static_input_indices is None:
+        static_input_indices = get_static_input_indices(gm, is_forward)
+    gm.forward = CUDAGraphWrapper(
+        gm.forward,
+        example_inputs,
+        static_input_indices,
+        tensor_input_indices=tensor_input_indices,
+    )
+    logger.info("Applied cudagraph pass.")
+    return gm
