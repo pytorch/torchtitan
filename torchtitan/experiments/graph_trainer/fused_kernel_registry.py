@@ -35,7 +35,6 @@ import hashlib
 import importlib.util
 import operator
 import re
-import types
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -378,18 +377,6 @@ def _create_subgraph_module(
 # Kernel loading + backend selection
 # ---------------------------------------------------------------------------
 
-def _load_module_from_file(path: Path, name: str) -> types.ModuleType:
-    """Load a Python module, stripping description preamble if present."""
-    content = path.read_text()
-    idx = content.find("import torch")
-    if idx > 0:
-        content = content[idx:]
-    mod = types.ModuleType(name)
-    mod.__file__ = str(path)
-    exec(compile(content, str(path), "exec"), mod.__dict__)
-    return mod
-
-
 def _load_kernel_fn(kernel_dir: Path) -> Callable | None:
     """Load kernel_function from kernel.py if it exists."""
     kernel_path = kernel_dir / "kernel.py"
@@ -409,104 +396,49 @@ def _load_kernel_fn(kernel_dir: Path) -> Callable | None:
         return None
 
 
-def _microbenchmark(fn: Callable, inputs: list[torch.Tensor], warmup: int = 5, iters: int = 20) -> float:
-    """Measure wall-clock time in ms. Returns inf on error."""
-    try:
-        for _ in range(warmup):
-            fn(*inputs)
-        torch.cuda.synchronize()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(iters):
-            fn(*inputs)
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) / iters
-    except Exception as e:
-        logger.debug(f"Benchmark failed: {e}")
-        return float("inf")
-
-
-def _try_compile(eager_fn: Callable) -> Callable | None:
-    """Try to torch.compile the eager function. Returns None on failure."""
-    try:
-        return torch.compile(eager_fn, fullgraph=True)
-    except Exception:
-        return None
-
-
 def _select_best_backend(
     region_dir: Path,
     eager_fn: Callable,
-    get_inputs_fn: Callable | None,
 ) -> tuple[Callable, str]:
-    """Select the fastest backend for a fused region.
+    """Select the fastest backend from offline benchmark results.
 
-    Candidates: eager (always), torch.compile (if compilable), triton (if kernel.py exists).
-    Uses benchmark.json as cache — if it exists and covers all available backends, skip
-    re-benchmarking. Otherwise run a quick microbenchmark and save results.
+    Reads benchmark.json (produced by benchmark_all.py) and picks the
+    winner. If no benchmark data exists, falls back to: triton if
+    kernel.py exists, otherwise eager. No benchmarking or compilation
+    happens at training time.
 
     Returns (best_fn, backend_name).
     """
     import json
 
-    # Collect candidates
-    candidates: dict[str, Callable] = {"eager": eager_fn}
-
-    compiled_fn = _try_compile(eager_fn)
-    if compiled_fn is not None:
-        candidates["compile"] = compiled_fn
-
     triton_fn = _load_kernel_fn(region_dir)
-    if triton_fn is not None:
-        candidates["triton"] = triton_fn
 
-    # If only eager, skip benchmarking
-    if len(candidates) == 1:
-        return eager_fn, "eager"
-
-    # Check for cached benchmark
+    # Read offline benchmark results
     bench_path = region_dir / "benchmark.json"
-    bench_data: dict[str, float] = {}
     if bench_path.exists():
         try:
             bench_data = json.loads(bench_path.read_text())
         except Exception:
+            bench_data = {}
+
+        # Pick the fastest available backend
+        candidates: dict[str, tuple[float, Callable]] = {}
+        candidates["eager"] = (bench_data.get("eager_ms", float("inf")), eager_fn)
+        if "compile_ms" in bench_data:
+            # torch.compile fn is not available at training time — if compile
+            # wins, we fall through to triton or eager (the compiled version
+            # would need to be cached as an artifact to be usable here)
             pass
+        if triton_fn is not None:
+            candidates["triton"] = (bench_data.get("triton_ms", float("inf")), triton_fn)
 
-    # Check if cache covers all current candidates
-    all_cached = all(f"{k}_ms" in bench_data for k in candidates)
+        best_name = min(candidates, key=lambda k: candidates[k][0])
+        return candidates[best_name][1], best_name
 
-    if not all_cached and get_inputs_fn is not None:
-        # Run microbenchmark
-        try:
-            inputs = get_inputs_fn()
-        except Exception:
-            inputs = None
-
-        if inputs is not None:
-            for name, fn in candidates.items():
-                key = f"{name}_ms"
-                if key not in bench_data:
-                    bench_data[key] = _microbenchmark(fn, inputs)
-
-            # Save results
-            try:
-                bench_path.write_text(json.dumps(bench_data, indent=2))
-            except Exception:
-                pass
-
-    # Pick the fastest
-    best_name = "eager"
-    best_time = bench_data.get("eager_ms", float("inf"))
-    for name in candidates:
-        t = bench_data.get(f"{name}_ms", float("inf"))
-        if t < best_time:
-            best_time = t
-            best_name = name
-
-    return candidates[best_name], best_name
+    # No benchmark data — use triton if available, otherwise eager
+    if triton_fn is not None:
+        return triton_fn, "triton"
+    return eager_fn, "eager"
 
 
 # ---------------------------------------------------------------------------
@@ -737,8 +669,8 @@ def fused_kernel_pass(
     kernels_loaded = 0
     problems_written = 0
 
-    # Per-hash: write problem, select best backend, cache result
-    hash_best: dict[str, tuple[Callable | None, str]] = {}  # hash -> (best_fn, backend_name)
+    # Per-hash: write problem, select best backend from offline benchmarks
+    hash_best: dict[str, tuple[Callable | None, str]] = {}
     backend_counts: Counter[str] = Counter()
 
     for _, h, r in instances:
@@ -754,19 +686,9 @@ def fused_kernel_pass(
 
         # Build eager baseline from the subgraph
         eager_module = _create_subgraph_module(r)
-        eager_fn = eager_module.forward
 
-        # Load get_inputs from problem.py for benchmarking
-        get_inputs_fn = None
-        problem_path = region_dir / "problem.py"
-        if problem_path.exists():
-            try:
-                mod = _load_module_from_file(problem_path, f"_prob_{h}")
-                get_inputs_fn = getattr(mod, "get_inputs", None)
-            except Exception:
-                pass
-
-        best_fn, backend_name = _select_best_backend(region_dir, eager_fn, get_inputs_fn)
+        # Select best from offline benchmark results (no benchmarking at training time)
+        best_fn, backend_name = _select_best_backend(region_dir, eager_module.forward)
         hash_best[h] = (best_fn if backend_name != "eager" else None, backend_name)
         backend_counts[backend_name] += 1
 

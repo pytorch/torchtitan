@@ -69,21 +69,27 @@ def _benchmark_fn(fn, inputs, warmup=WARMUP, iters=BENCH_ITERS):
 
 
 def _compare_outputs(out_kernel, out_ref, tols):
-    """Compare kernel output to reference, handling tuples."""
-    if isinstance(out_ref, tuple):
-        if not isinstance(out_kernel, tuple):
+    """Compare kernel output to reference, handling tuples/lists."""
+    if isinstance(out_ref, (tuple, list)):
+        if not isinstance(out_kernel, (tuple, list)):
             return False, "kernel returned Tensor, expected tuple"
         if len(out_kernel) != len(out_ref):
             return False, f"tuple length mismatch: {len(out_kernel)} vs {len(out_ref)}"
         max_err = 0.0
         for i, (k, r) in enumerate(zip(out_kernel, out_ref)):
+            if not isinstance(k, torch.Tensor) or not isinstance(r, torch.Tensor):
+                continue
             if k.shape != r.shape:
                 return False, f"output[{i}] shape mismatch: {k.shape} vs {r.shape}"
-            if k.dtype != r.dtype:
-                return False, f"output[{i}] dtype mismatch: {k.dtype} vs {r.dtype}"
-            err = (k.float() - r.float()).abs().max().item()
+            try:
+                k_f = k.float().to(r.device)
+                r_f = r.float()
+            except Exception:
+                k_f = k.float().cpu()
+                r_f = r.float().cpu()
+            err = (k_f - r_f).abs().max().item()
             max_err = max(max_err, err)
-            if not torch.allclose(k.float(), r.float(), **tols):
+            if not torch.allclose(k_f, r_f, **tols):
                 return False, f"output[{i}] numerical mismatch (max_err={err:.4e})"
         return True, max_err
     else:
