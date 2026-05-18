@@ -462,6 +462,9 @@ def _format_arg_for_problem(
     if isinstance(arg, torch.dtype):
         return str(arg)
     if isinstance(arg, torch.device):
+        # Normalize to generic 'cuda' — problem.py runs on any GPU
+        if arg.type == "cuda":
+            return "torch.device('cuda')"
         return f"torch.device('{arg}')"
     if isinstance(arg, torch.memory_format):
         return str(arg)
