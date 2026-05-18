@@ -234,11 +234,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
+        # When MTP is enabled, extend seq_len by num_mtp_modules so the
+        # dataloader provides additional tokens for offset inputs and labels.
+        num_mtp = getattr(config.training, "num_mtp_modules", 0)
+        dataloader_seq_len = config.training.seq_len + num_mtp
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
+            seq_len=dataloader_seq_len,
             local_batch_size=config.training.local_batch_size,
         )
 
@@ -623,6 +627,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
+                num_mtp_modules=getattr(self.config.training, "num_mtp_modules", 0),
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual

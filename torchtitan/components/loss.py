@@ -36,6 +36,35 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
+def multi_token_cross_entropy_loss(
+    preds: list[torch.Tensor],
+    labels: torch.Tensor,
+    num_mtp_modules: int,
+    mtp_loss_weight: float,
+) -> torch.Tensor:
+    """Multi-token prediction loss: main CE loss + weighted MTP auxiliary losses.
+
+    Args:
+        preds: List of prediction tensors. preds[0] is the main model output,
+            preds[1:] are MTP module outputs. Each has shape [B, S, V].
+        labels: Label tensor of shape [B, S + num_mtp_modules] with extra tokens
+            for offset targets.
+        num_mtp_modules: Number of MTP modules.
+        mtp_loss_weight: Weight for the MTP auxiliary loss sum.
+    """
+    seq_len = preds[0].shape[1]
+    main_loss = cross_entropy_loss(preds[0], labels[:, :seq_len])
+
+    mtp_loss = torch.tensor(0.0, device=preds[0].device)
+    for label_offset, pred in enumerate(preds[1:], 1):
+        end_idx = label_offset + seq_len
+        loss = cross_entropy_loss(pred, labels[:, label_offset:end_idx])
+        loss = loss / num_mtp_modules
+        mtp_loss = mtp_loss + loss
+
+    return main_loss + mtp_loss * mtp_loss_weight
+
+
 def _cross_entropy_via_local_map(pred: DTensor, labels: DTensor) -> torch.Tensor:
     mesh = pred.device_mesh
     # Labels don't have a vocab dim.
@@ -177,6 +206,41 @@ class MSELoss(BaseLoss):
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
         self.fn: LossFunction = mse_loss
         self._maybe_compile(compile_config)
+
+
+class MTPLoss(BaseLoss):
+    """Multi-token prediction loss for DeepSeek-V3 MTP training.
+
+    Computes main CE loss + weighted sum of MTP auxiliary losses.
+    The model forward returns a list of tensors when MTP is enabled.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseLoss.Config):
+        num_mtp_modules: int = 1
+        mtp_loss_weight: float = 0.3
+
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        self.fn: LossFunction = cross_entropy_loss
+        self._maybe_compile(compile_config)
+        self.num_mtp_modules = config.num_mtp_modules
+        self.mtp_loss_weight = config.mtp_loss_weight
+
+    def __call__(
+        self,
+        pred: torch.Tensor | list[torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if isinstance(pred, list):
+            loss = multi_token_cross_entropy_loss(
+                pred, labels, self.num_mtp_modules, self.mtp_loss_weight
+            )
+        else:
+            loss = self.fn(pred, labels)
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss
 
 
 class GradAccumulator:

@@ -174,6 +174,49 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         return x
 
 
+class MTPTransformerBlock(DeepSeekV3TransformerBlock):
+    """Multi-Token Prediction (MTP) transformer block.
+
+    Each MTP block takes an offset token embedding and the previous layer's
+    hidden state, projects them via enorm/hnorm/eh_proj, then runs through a
+    standard attention + FFN/MoE block.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(DeepSeekV3TransformerBlock.Config):
+        enorm: RMSNorm.Config
+        hnorm: RMSNorm.Config
+        eh_proj: Linear.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.enorm = config.enorm.build()
+        self.hnorm = config.hnorm.build()
+        self.eh_proj = config.eh_proj.build()
+
+    def forward(
+        self,
+        input_offset: torch.Tensor,
+        prev_embed: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ):
+        input_offset = self.enorm(input_offset)
+        prev_embed = self.hnorm(prev_embed)
+        h = torch.cat([input_offset, prev_embed], dim=-1)
+        h = self.eh_proj(h)
+
+        h = h + self.attention(
+            self.attention_norm(h), freqs_cis, attention_masks, positions
+        )
+        if self.moe_enabled:
+            h = h + self.moe(self.ffn_norm(h))
+        else:
+            h = h + self.feed_forward(self.ffn_norm(h))
+        return h
+
+
 class DeepSeekV3Model(Decoder):
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
@@ -183,6 +226,8 @@ class DeepSeekV3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
+        n_main_layers: int = 0
+        num_mtp_modules: int = 0
 
         def update_from_config(
             self,
@@ -201,7 +246,42 @@ class DeepSeekV3Model(Decoder):
                 )
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            # Sync rope fields to attention for all layers.
+            # Read num_mtp_modules from training config (single source of truth)
+            num_mtp = getattr(training, "num_mtp_modules", 0)
+            self.num_mtp_modules = num_mtp
+
+            if num_mtp > 0:
+                # MTP layers are appended dynamically from training config.
+                # n_main_layers = number of layers already in the config
+                # (built by _build_dsv3_layers, which only creates main layers).
+                self.n_main_layers = len(self.layers)
+
+                ref_layer = self.layers[-1]
+                ref_attn = ref_layer.attention
+                ref_attn_norm = ref_layer.attention_norm
+                ref_ffn_norm = ref_layer.ffn_norm
+                ref_ffn = ref_layer.feed_forward
+                ref_moe = ref_layer.moe
+
+                # Create and append MTP layer configs
+                for mtp_idx in range(num_mtp):
+                    mtp_cfg = MTPTransformerBlock.Config(
+                        attention=ref_attn,
+                        attention_norm=ref_attn_norm,
+                        ffn_norm=ref_ffn_norm,
+                        feed_forward=ref_ffn,
+                        moe=ref_moe,
+                        enorm=ref_ffn_norm,
+                        hnorm=ref_ffn_norm,
+                        eh_proj=Linear.Config(
+                            in_features=2 * self.dim,
+                            out_features=self.dim,
+                            param_init=self.lm_head.param_init,
+                        ),
+                    )
+                    self.layers.append(mtp_cfg)
+
+            # Sync rope fields to attention for all layers (main + MTP).
             # Mutate in-place — simpler than replacing each config in the list.
             for layer_cfg in self.layers:
                 assert isinstance(layer_cfg.attention, Attention.Config)
@@ -262,3 +342,80 @@ class DeepSeekV3Model(Decoder):
                 + self.layers[0].attention.v_head_dim,
                 seq_len,
             )
+
+    def _forward_with_mtp(
+        self,
+        tokens: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
+    ):
+        num_mtp = self.config.num_mtp_modules
+        n_main = self.config.n_main_layers
+
+        if self.tok_embeddings is not None:
+            seq_len = tokens.shape[1] - num_mtp
+            assert seq_len > 0, (
+                f"Token sequence length ({tokens.shape[1]}) must be greater than "
+                f"num_mtp_modules ({num_mtp})"
+            )
+            if positions is not None and positions.shape[1] != seq_len:
+                main_positions = positions[:, :seq_len]
+            else:
+                main_positions = positions
+            h = self.tok_embeddings(tokens[:, :seq_len])
+        else:
+            h = tokens
+            seq_len = h.shape[1]
+            main_positions = positions
+
+        # Main layers
+        for i, layer in enumerate(self.layers.values()):
+            if i >= n_main:
+                break
+            h = layer(h, self.freqs_cis, attention_masks, main_positions)
+
+        # PP mid-stage without norm/lm_head: return hidden state
+        if n_main < len(self.layers) and self.norm is None and self.lm_head is None:
+            return h
+        
+        prev_embed = h
+        h = self.norm(h) if self.norm is not None else h
+        output = self.lm_head(h.float()) if self.lm_head is not None else h
+
+        if n_main >= len(self.layers):
+            return output
+
+        # MTP layers from the unified list (indices n_main .. end)
+        assert self.tok_embeddings is not None, (
+            "MTP layers require tok_embeddings for offset token embedding."
+        )
+        output_list = [output]
+        for mtp_idx, layer in enumerate(
+            list(self.layers.values())[n_main:]
+        ):
+            token_offset_id = mtp_idx + 1
+            token_end_idx = token_offset_id + seq_len
+            input_offset = self.tok_embeddings(
+                tokens[:, token_offset_id:token_end_idx]
+            )
+            h = layer(
+                input_offset, prev_embed, self.freqs_cis,
+                attention_masks, main_positions,
+            )
+            prev_embed = h
+            h = self.norm(h) if self.norm is not None else h
+            mtp_output = self.lm_head(h.float()) if self.lm_head is not None else h
+            output_list.append(mtp_output)
+
+        return output_list
+
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
+    ):
+        if self.config.num_mtp_modules > 0:
+            return self._forward_with_mtp(tokens, attention_masks, positions)
+        return super().forward(tokens, attention_masks, positions)
