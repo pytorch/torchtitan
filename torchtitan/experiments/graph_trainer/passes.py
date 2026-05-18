@@ -270,16 +270,17 @@ def construct_default_graph_passes(
             use_xpugraph = is_xpugraph_compatible(traced_result.gm)
             if use_xpugraph:
                 graph_capture_pass = xpugraph_pass
+    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
         passes.extend(
-            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
+            compile_time_passes(traced_result, config, use_cudagraph=want_cudagraph)
         )
 
-    if graph_capture_pass is not None:
+    if want_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
