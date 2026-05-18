@@ -42,7 +42,6 @@ def set_deepseek_v3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    enable_tp: bool,
     enable_ep: bool,
 ) -> None:
     """Fill ``sharding_config`` on all DeepSeek V3 sub-configs.
@@ -60,7 +59,7 @@ def set_deepseek_v3_sharding_config(
     )
     for layer_cfg in config.layers:
         _set_deepseek_v3_layer_sharding(
-            layer_cfg, enable_sp=enable_sp, enable_tp=enable_tp, enable_ep=enable_ep
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
         )
 
 
@@ -68,7 +67,6 @@ def _set_deepseek_v3_layer_sharding(
     layer_cfg: "DeepSeekV3TransformerBlock.Config",
     *,
     enable_sp: bool,
-    enable_tp: bool,
     enable_ep: bool,
 ) -> None:
     """Set sharding on one DeepSeek V3 transformer layer.

@@ -41,7 +41,6 @@ def set_gpt_oss_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    enable_tp: bool,
     enable_ep: bool,
 ) -> None:
     """Fill ``sharding_config`` on all GPT-OSS sub-configs.
@@ -57,16 +56,13 @@ def set_gpt_oss_sharding_config(
         config, loss_parallel=loss_parallel, enable_sp=enable_sp
     )
     for layer_cfg in config.layers:
-        _set_gpt_oss_layer_sharding(
-            layer_cfg, enable_sp=enable_sp, enable_tp=enable_tp, enable_ep=enable_ep
-        )
+        _set_gpt_oss_layer_sharding(layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep)
 
 
 def _set_gpt_oss_layer_sharding(
     layer_cfg: "GptOssTransformerBlock.Config",
     *,
     enable_sp: bool,
-    enable_tp: bool,
     enable_ep: bool,
 ) -> None:
     """Set sharding on one GPT-OSS transformer layer.
