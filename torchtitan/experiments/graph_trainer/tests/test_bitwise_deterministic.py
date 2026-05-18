@@ -431,11 +431,6 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-# TODO: All FlexAttn bitwise deterministic tests disabled due to upstream
-# PyTorch nightly regression in dev20260508. TransformGetItemToIndex mode
-# has no dispatch for torch.ops.higher_order.flex_attention.
-# Re-enable once the upstream fix lands.
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
@@ -498,7 +493,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
@@ -635,7 +629,6 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE with FlexAttention.
 
