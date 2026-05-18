@@ -30,7 +30,7 @@ def set_llama3_sharding_config(
     """Fill ``sharding_config`` on all Llama3 sub-configs.
 
     Specs are populated unconditionally — the mesh actually passed to
-    ``Module.parallelize(parallel_dims)`` at runtime determines which declarations
+    ``Module.parallelize()`` at runtime determines which declarations
     apply. Declarations for mesh axes that aren't enabled (e.g. ``TP``
     placements under FSDP-only) are skipped at parallelize time.
 
@@ -56,8 +56,9 @@ def _set_llama3_layer_sharding(
 
     ``enable_sp=True``  -> SP norms and Shard(1) activations around attention/FFN;
     ``attention.wo`` and ``feed_forward.w2`` reduce-scatter to Shard(1).
-    ``enable_sp=False`` -> norms stay Invariant, activations stay Invariant;
-    ``attention.wo`` and ``feed_forward.w2`` all-reduce to Invariant.
+    ``enable_sp=False`` -> norms stay Replicate (no parallelism), activations
+    stay Replicate; ``attention.wo`` and ``feed_forward.w2`` all-reduce to
+    Replicate.
     """
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm

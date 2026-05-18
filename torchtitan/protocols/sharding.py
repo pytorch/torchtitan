@@ -32,16 +32,10 @@ def _mesh_axis_name(axis_name: object) -> str:
 class LocalSpmdConfig:
     """Spec for modules computing on local tensors.
 
-    SPMD keeps tensors local and uses placements to assert boundary types
-    around a typechecked local computation region.
-
-    Attributes:
-        in_placements: Per-input NamedPlacements (positional: q, k, v).
-        out_placements: Per-output NamedPlacements.
+    Wraps forward with local SPMD typechecking. Input placements come from
+    ``ShardingConfig.in_dst_shardings`` and output placements from
+    ``ShardingConfig.out_src_shardings``.
     """
-
-    in_placements: tuple[NamedPlacement, ...]
-    out_placements: tuple[NamedPlacement, ...]
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -83,7 +77,7 @@ class ShardingConfig:
     state_tp_ir: set[str] = field(default_factory=set)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
-    out_src_shardings: NamedPlacement | None = None
+    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
     out_dst_shardings: NamedPlacement | None = None
     local_spmd: LocalSpmdConfig | None = None
 
@@ -101,13 +95,12 @@ class ShardingConfig:
             if shardings is not None:
                 for named in shardings.values():
                     add_axes(named)
-        add_axes(self.out_src_shardings)
+        if isinstance(self.out_src_shardings, tuple):
+            for named in self.out_src_shardings:
+                add_axes(named)
+        else:
+            add_axes(self.out_src_shardings)
         add_axes(self.out_dst_shardings)
-        if self.local_spmd is not None:
-            for named in self.local_spmd.in_placements:
-                add_axes(named)
-            for named in self.local_spmd.out_placements:
-                add_axes(named)
         return axes
 
     def to_dict(self) -> dict:
