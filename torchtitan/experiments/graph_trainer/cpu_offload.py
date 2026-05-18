@@ -411,10 +411,23 @@ def apply_cpu_offload_pass(
             offload_node.meta.update(src_meta)
             offload_node.meta["val"] = val.to(torch.device("cpu"))
 
+        # Find the last forward consumer of this node's storage (including
+        # through views) so the wait_tensor encodes the dependency directly.
+        chain_nodes, _ = _get_storage_chain(node)
+        last_consumer = node
+        last_consumer_pos = node_to_index[node]
+        for c in chain_nodes:
+            if c.target in _AO_OPS:
+                continue
+            c_pos = node_to_index.get(c)
+            if c_pos is not None and c_pos > last_consumer_pos:
+                last_consumer = c
+                last_consumer_pos = c_pos
+
         with gm.graph.inserting_after(offload_node):
             wait_offload_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(offload_node, node),
+                args=(offload_node, node, last_consumer),
             )
             wait_offload_node.meta.update(src_meta)
             wait_offload_node.meta["val"] = offload_node.meta["val"]
@@ -535,23 +548,19 @@ def defer_offload_waits(
 
     deferred = 0
     for node, wait_node in wait_offload_map.items():
-        consumer_idx = node_to_region_idx.get(node)
-        if consumer_idx is None:
+        node_idx = node_to_region_idx.get(node)
+        if node_idx is None:
             continue
 
-        # If storage chain extends to a later region (cross-layer views),
-        # use the latest consumer region.
-        chain_nodes, _ = _get_storage_chain(node)
-        real_consumers = {n for n in chain_nodes if n.target not in _AO_OPS}
-        for c in real_consumers:
-            idx = node_to_region_idx.get(c)
-            if idx is not None:
-                consumer_idx = max(consumer_idx, idx)
+        # The last_use_of_storage arg on wait_tensor encodes the last
+        # forward consumer of the offloaded node's storage (set during
+        # insertion).
+        last_use = wait_node.args[2] if len(wait_node.args) > 2 else node
+        last_use_idx = node_to_region_idx.get(last_use, node_idx)
 
-        # Defer N regions past the production site. The async D2H starts
-        # at the offload op (right after production), so deferring past
-        # the production region gives enough overlap.
-        target_idx = min(consumer_idx + n_layers, len(fwd_anchors) - 1)
+        # Defer at least n_layers past the node for D2H overlap, but
+        # never before the last consumer (correctness).
+        target_idx = min(max(node_idx + n_layers, last_use_idx), len(fwd_anchors) - 1)
         anchor = fwd_anchors[target_idx]
         anchor.append(wait_node)
         deferred += 1

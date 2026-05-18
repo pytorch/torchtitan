@@ -11,6 +11,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl --config <function_name>``.
 """
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -22,6 +23,7 @@ from torchtitan.config import (
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
 from torchtitan.models.qwen3 import model_registry
 
@@ -40,6 +42,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -52,6 +55,12 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -62,6 +71,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,
@@ -86,6 +96,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -98,6 +109,12 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -109,6 +126,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,
@@ -133,6 +151,7 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -145,6 +164,12 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 tensor_parallel_degree=8,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
             loss=GRPOLoss.Config(),
         ),
         generator=VLLMGenerator.Config(
@@ -155,55 +180,12 @@ def rl_grpo_qwen3_14b() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
-            ),
-        ),
-    )
-
-
-def rl_grpo_qwen3_debug() -> RLTrainer.Config:
-    """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
-    group_size = 4
-    return RLTrainer.Config(
-        model_spec=model_registry("debugmodel", attn_backend="varlen"),
-        num_steps=5,
-        num_prompts_per_step=5,
-        num_validation_samples=20,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
-        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
-        validation_env=SumDigitsEnv.Config(
-            seed=99, correctness_reward=1.0, format_reward=0.3
-        ),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=8e-4),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=1,
-                data_parallel_replicate_degree=1,
-            ),
-            loss=GRPOLoss.Config(),
-        ),
-        generator=VLLMGenerator.Config(
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=1,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-            sampling=SamplingConfig(
-                n=group_size,
-                temperature=1.0,
-                top_p=0.95,
-                max_tokens=50,
             ),
         ),
     )
@@ -227,6 +209,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         validation_env=SumDigitsEnv.Config(
             seed=99, correctness_reward=1.0, format_reward=0.3
         ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -242,6 +225,12 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
             debug=batch_invariant_config,
             loss=GRPOLoss.Config(),
         ),
@@ -253,6 +242,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
             ),
+            checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 n=group_size,
                 temperature=0.8,
