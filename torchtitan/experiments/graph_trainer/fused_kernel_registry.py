@@ -50,37 +50,40 @@ from torchtitan.tools.logging import logger
 # Op classification
 # ---------------------------------------------------------------------------
 
+# str(node.target) produces e.g. "aten.mm.default" (no "torch.ops." prefix)
 _UNFUSABLE_OPS = {
-    "torch.ops.bucketing._pre_bucket_all_gather.default",
-    "torch.ops.bucketing._pre_bucket_reduce_scatter.default",
-    "torch.ops.ao.offload.default",
-    "torch.ops.ao.reload.default",
-    "torch.ops.ao.wait_tensor.default",
-    "torch.ops.aten._scaled_dot_product_flash_attention.default",
-    "torch.ops.aten._scaled_dot_product_flash_attention_backward.default",
-    "torch.ops.aten.embedding.default",
-    "torch.ops.aten.embedding_dense_backward.default",
+    "bucketing._pre_bucket_all_gather.default",
+    "bucketing._pre_bucket_reduce_scatter.default",
+    "aten._scaled_dot_product_flash_attention.default",
+    "aten._scaled_dot_product_flash_attention_backward.default",
+    "aten.embedding.default",
+    "aten.embedding_dense_backward.default",
 }
 
+# Namespaces where ALL ops are unfusable
+_UNFUSABLE_NAMESPACES = {"_c10d_functional", "ao", "bucketing"}
+
 _ALREADY_OPTIMIZED_OPS = {
-    "torch.ops.aten.mm.default",
-    "torch.ops.aten.bmm.default",
-    "torch.ops.aten.addmm.default",
+    "aten.mm.default",
+    "aten.bmm.default",
+    "aten.addmm.default",
 }
 
 _METADATA_OPS = {
-    "torch.ops.aten.reshape.default",
-    "torch.ops.aten.view.default",
-    "torch.ops.aten._unsafe_view.default",
-    "torch.ops.aten.t.default",
-    "torch.ops.aten.transpose.int",
-    "torch.ops.aten.unsqueeze.default",
-    "torch.ops.aten.squeeze.dim",
-    "torch.ops.aten.squeeze.dims",
-    "torch.ops.aten.slice.Tensor",
-    "torch.ops.aten.expand.default",
-    "torch.ops.aten.permute.default",
-    "operator.getitem",
+    "aten.reshape.default",
+    "aten.view.default",
+    "aten._unsafe_view.default",
+    "aten.t.default",
+    "aten.transpose.int",
+    "aten.unsqueeze.default",
+    "aten.squeeze.dim",
+    "aten.squeeze.dims",
+    "aten.slice.Tensor",
+    "aten.expand.default",
+    "aten.permute.default",
+    "aten.clone.default",
+    "aten.view.dtype",
+    "<built-in function getitem>",
 }
 
 _DTYPE_MAP = {
@@ -125,7 +128,11 @@ def _get_tensor_info(node: torch.fx.Node) -> tuple[tuple[int, ...], torch.dtype 
 
 def _is_unfusable(node: torch.fx.Node) -> bool:
     target_str = str(node.target)
-    return target_str in _UNFUSABLE_OPS or "_c10d_functional" in target_str
+    if target_str in _UNFUSABLE_OPS:
+        return True
+    # Block entire namespaces (collectives, offload, bucketing)
+    ns = target_str.split(".")[0] if "." in target_str else ""
+    return ns in _UNFUSABLE_NAMESPACES
 
 
 def _iter_node_args(node: torch.fx.Node):
@@ -250,7 +257,7 @@ def _discover_regions(
             if any(_is_unfusable(n) for n in comp):
                 continue
             compute = {str(n.target) for n in comp if str(n.target) not in _METADATA_OPS}
-            if compute and compute <= {str(t) for t in _ALREADY_OPTIMIZED_OPS}:
+            if compute and compute <= _ALREADY_OPTIMIZED_OPS:
                 continue
 
             node_names = {n.name for n in comp}
@@ -281,16 +288,25 @@ def _discover_regions(
                 output_nodes=output_nodes,
             ))
 
-    # Deduplicate by hash, count instances
+    return all_regions
+
+
+def _filter_regions(
+    regions: list[_Region],
+    *,
+    min_ops: int = 2,
+    min_compute_ops: int = 1,
+    min_count: int = 2,
+) -> tuple[list[_Region], Counter[str]]:
+    """Filter and deduplicate regions. Returns (unique regions, hash counts)."""
     hash_counts: Counter[str] = Counter()
     hash_to_region: dict[str, _Region] = {}
-    for r in all_regions:
+    for r in regions:
         h = _compute_region_hash(r)
         hash_counts[h] += 1
         if h not in hash_to_region:
             hash_to_region[h] = r
 
-    # Filter by thresholds
     result: list[_Region] = []
     for h, count in hash_counts.items():
         r = hash_to_region[h]
@@ -302,7 +318,7 @@ def _discover_regions(
             continue
         result.append(r)
 
-    return result
+    return result, hash_counts
 
 
 # ---------------------------------------------------------------------------
@@ -579,35 +595,23 @@ def fused_kernel_pass(
     kdir = Path(kernel_dir)
     kdir.mkdir(parents=True, exist_ok=True)
 
-    # Discover regions
-    regions = _discover_regions(
-        gm, min_ops=min_ops, min_compute_ops=min_compute_ops,
+    # Discover all regions, then filter
+    all_regions = _discover_regions(gm)
+    unique_regions, hash_counts = _filter_regions(
+        all_regions, min_ops=min_ops, min_compute_ops=min_compute_ops,
         min_count=min_count,
     )
 
-    if not regions:
+    if not unique_regions:
         logger.info("Fused kernel pass: no fusible regions found")
         return gm
 
-    # Count instances per hash (for problem.py metadata)
-    hash_counts: Counter[str] = Counter()
-    all_raw = _discover_regions(gm, min_ops=1, min_compute_ops=0, min_count=1)
-    for r in all_raw:
-        hash_counts[_compute_region_hash(r)] += 1
+    valid_hashes = {_compute_region_hash(r) for r in unique_regions}
 
-    # Determine which hashes qualify
-    valid_hashes: set[str] = set()
-    for r in regions:
-        valid_hashes.add(_compute_region_hash(r))
-
-    # Collect ALL instances to replace, with their graph position
-    # (use the first node's position for ordering)
+    # Collect ALL instances (not just unique) for replacement
     node_order = {n: i for i, n in enumerate(gm.graph.nodes)}
     instances: list[tuple[int, str, _Region]] = []
-    all_candidates = _discover_regions(
-        gm, min_ops=min_ops, min_compute_ops=min_compute_ops, min_count=1,
-    )
-    for r in all_candidates:
+    for r in all_regions:
         h = _compute_region_hash(r)
         if h in valid_hashes:
             pos = node_order.get(r.nodes[0], 0)
@@ -621,25 +625,31 @@ def fused_kernel_pass(
     kernels_loaded = 0
     problems_written = 0
 
-    for pos, h, r in instances:
+    # Pre-build one template module + kernel per hash (shared across instances)
+    hash_kernel: dict[str, Callable | None] = {}
+    for _, h, r in instances:
+        if h in hash_kernel:
+            continue
         region_dir = kdir / h
 
-        # Write problem.py if not already written
+        # Write problem.py once per hash
         if not (region_dir / "problem.py").exists():
             count = hash_counts.get(h, 1)
             _write_problem(r, region_dir, count)
             problems_written += 1
 
-        # Create subgraph module
-        subgraph_module = _create_subgraph_module(r)
-
-        # Check for kernel
-        kernel_fn = _load_kernel_fn(region_dir)
-        if kernel_fn is not None:
-            subgraph_module.forward = kernel_fn  # type: ignore[assignment]
+        hash_kernel[h] = _load_kernel_fn(region_dir)
+        if hash_kernel[h] is not None:
             kernels_loaded += 1
 
-        # Replace in graph
+    for pos, h, r in instances:
+        # Each instance gets its own subgraph module (same structure,
+        # different FX nodes), but shares the kernel if available
+        subgraph_module = _create_subgraph_module(r)
+        kernel_fn = hash_kernel.get(h)
+        if kernel_fn is not None:
+            subgraph_module.forward = kernel_fn  # type: ignore[assignment]
+
         module_name = f"_fused_{h}_{replaced}"
         _replace_region(gm, r, module_name, subgraph_module)
         replaced += 1
