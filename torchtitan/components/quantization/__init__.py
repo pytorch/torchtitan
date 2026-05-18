@@ -15,24 +15,10 @@
 
 from dataclasses import dataclass
 
-from torchtitan.config import Configurable
-from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.model import ModelConfigConverter
 
 
-@dataclass(kw_only=True, slots=True)
-class QuantizedLinearConfig(Linear.Config):
-    """Base config for all quantized Linear variants."""
-
-    pass
-
-
-class _QuantizedGroupedExpertsConfig:
-    """Marker base for dynamically created quantized GroupedExperts configs."""
-
-    pass
-
-
-class QuantizationConverter(Configurable):
+class QuantizationConverter(ModelConfigConverter):
     """Base class for quantization converters.
 
     Subclasses define a nested Config and implement ``convert()``
@@ -40,12 +26,9 @@ class QuantizationConverter(Configurable):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(ModelConfigConverter.Config):
         model_compile_enabled: bool = False
         """Whether torch.compile is enabled for the model."""
-
-    def convert(self, model_config) -> None:
-        raise NotImplementedError
 
 
 # Re-export all public symbols so callers can import from the package directly.
@@ -68,6 +51,4 @@ __all__ = [
     "MXFP8Linear",
     "MXFP8LinearConverter",
     "QuantizationConverter",
-    "QuantizedLinearConfig",
-    "_QuantizedGroupedExpertsConfig",
 ]

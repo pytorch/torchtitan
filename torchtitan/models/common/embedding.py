@@ -38,7 +38,13 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight = self.weight
-        tp_pg = current_mesh().get_group("tp") if is_spmd_active() else None
+        tp_pg = None
+        if is_spmd_active():
+            mesh = current_mesh()
+            assert mesh is not None
+            assert mesh.mesh_dim_names is not None
+            if "tp" in mesh.mesh_dim_names:
+                tp_pg = mesh.get_group("tp")
         if tp_pg is None or dist.get_world_size(tp_pg) == 1:
             return F.embedding(
                 input,

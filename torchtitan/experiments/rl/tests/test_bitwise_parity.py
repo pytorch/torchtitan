@@ -50,13 +50,15 @@ from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from torchtitan.components.checkpoint import CheckpointManager
+
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.config_registry import rl_grpo_qwen3_0_6b_batch_invariant
 from torchtitan.experiments.rl.grpo import RLTrainer
 from torchtitan.experiments.rl.models.vllm_registry import (
-    register_model_to_vllm_model_registry,
+    registry_to_vllm,
     VLLM_MODEL_NAME,
 )
 from torchtitan.models.common.attention import VarlenMetadata
@@ -440,9 +442,15 @@ class TestBitwiseParity(unittest.TestCase):
         if not dist.is_initialized():
             dist_utils.init_distributed(CommConfig())
 
-        register_model_to_vllm_model_registry(
+        registry_to_vllm(
             config.model_spec,
+            parallelism=config.generator.parallelism,
             compile_config=config.compile,
+            checkpoint_config=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                initial_load_path=config.hf_assets_path,
+            ),
         )
 
         # Test runs trainer and generator in the same process, so limit

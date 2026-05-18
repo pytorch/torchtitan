@@ -81,7 +81,12 @@ def parallelize_autoparallel_llama(
             (global_batch_size, training.seq_len),
             device=torch.device("cuda"),
         )
-        return tokens
+        positions = torch.arange(
+            training.seq_len,
+            dtype=torch.int32,
+            device=torch.device("cuda"),
+        ).repeat(global_batch_size, 1)
+        return tokens, positions
 
     param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
     reduce_dtype = TORCH_DTYPE_MAP[training.mixed_precision_reduce]
@@ -135,7 +140,7 @@ def parallelize_autoparallel_llama(
         reshard_after_forward=reshard_after_forward,
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
-        autop.add_input_constraints([x_sharding])
+        autop.add_input_constraints([x_sharding, x_sharding])
         autop.add_output_constraints([output_sharding])
 
         t0 = time.time()

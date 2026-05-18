@@ -7,12 +7,15 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
-from typing import TYPE_CHECKING
-
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -31,9 +34,6 @@ from torchtitan.distributed.fsdp import (
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
-
-if TYPE_CHECKING:
-    from torch.distributed.fsdp import DataParallelMeshDims
 
 
 def parallelize_llama(
@@ -78,8 +78,6 @@ def parallelize_llama(
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
         apply_compile(model, compile_config)
-
-    from torch.distributed.fsdp import DataParallelMeshDims
 
     mesh_names = []
     if parallel_dims.dp_replicate_enabled:
@@ -140,7 +138,14 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
-
+        dp_mesh_dims: For SPMD meshes, ``fully_shard`` must flatten
+            ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
+            needs to know which axes of the multi-D SPMD mesh are
+            data-parallel. We pass this explicitly via ``dp_mesh_dims``
+            rather than letting FSDP infer it from mesh axis names: the
+            naming contract between ``fully_shard`` and torchtitan is not
+            strong enough to infer safely, and an explicit declaration
+            avoids silent miscategorization when new mesh axes appear.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,

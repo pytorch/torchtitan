@@ -11,16 +11,23 @@ from dataclasses import dataclass, field
 
 import torch
 import torchstore as ts
-from monarch.actor import Actor, endpoint
-from torchtitan.config import Configurable
-from torchtitan.config.configs import CompileConfig, DebugConfig, ParallelismConfig
+from monarch.actor import Actor, current_rank, endpoint
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.config import (
+    CompileConfig,
+    Configurable,
+    DebugConfig,
+    ParallelismConfig,
+)
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.models.vllm_registry import (
-    register_model_to_vllm_model_registry,
-    VLLM_MODEL_NAME,
+    registry_to_vllm,
+    TORCHTITAN_CONFIG_FORMAT,
 )
 from torchtitan.experiments.rl.types import Completion
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
@@ -134,12 +141,20 @@ class VLLMGenerator(Actor, Configurable):
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
+        checkpoint: CheckpointManager.Config = field(
+            default_factory=CheckpointManager.Config
+        )
+        """Controls whether the vLLM wrapper loads initial HF weights.
+        In the RL loop this should stay disabled (default ``enable=False``)
+        because weights arrive from TorchStore. For standalone inference,
+        set ``enable=True`` and ``initial_load_in_hf=True``."""
+
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            # Generator only supports TP. vLLM handles its own parallelism
-            # and we only apply TP via the core parallelize function.
+            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
+            # we only apply TP via the core parallelize function.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
@@ -161,6 +176,18 @@ class VLLMGenerator(Actor, Configurable):
                     f"Generator does not support expert parallelism, "
                     f"got ep={p.expert_parallel_degree}"
                 )
+            if p.enable_sequence_parallel:
+                raise ValueError(
+                    "Generator does not support sequence parallelism: "
+                    "spmd_types erasure mode requires sequence length to be "
+                    "evenly divisible by TP, which doesn't hold for inference "
+                    "(uneven batches). Set enable_sequence_parallel=False."
+                )
+            if not p.disable_loss_parallel:
+                raise ValueError(
+                    "Generator requires disable_loss_parallel=True, "
+                    f"got disable_loss_parallel={p.disable_loss_parallel}"
+                )
 
     def __init__(
         self,
@@ -170,7 +197,17 @@ class VLLMGenerator(Actor, Configurable):
         model_path: str,
         compile_config: CompileConfig,
         max_num_seqs: int,
+        output_dir: str,
     ):
+        init_logger()
+        sl.init_structured_logger(
+            source="rl_generator",
+            output_dir=output_dir,
+            rank=current_rank().rank,
+            enable=config.debug.enable_structured_logging,
+        )
+        sl.log_trace_instant("structured_logger_started")
+
         self.config = config
         self.model_spec = model_spec
 
@@ -181,14 +218,17 @@ class VLLMGenerator(Actor, Configurable):
         # (RLTrainer) as num_prompts_per_step * sampling.n.
         self._max_num_seqs = max_num_seqs
 
-        # Register TorchTitan model with vLLM before any engine creation
-        register_model_to_vllm_model_registry(
+        # Register TorchTitan model + parser with vLLM
+        registry_to_vllm(
             model_spec,
+            parallelism=config.parallelism,
             compile_config=compile_config,
+            checkpoint_config=config.checkpoint,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
         set_batch_invariance(config.debug.batch_invariant)
 
@@ -198,8 +238,17 @@ class VLLMGenerator(Actor, Configurable):
 
         # Build vLLM engine
         engine_kwargs = dict(
+            # ``model`` is the path to the HF checkpoint directory. The
+            # config is sourced from torchtitan's ModelSpec via
+            # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
+            # read), but vLLM still uses this path to locate the
+            # tokenizer assets and the safetensors weight shards.
             model=model_path,
             trust_remote_code=True,
+            # Use the torchtitan custom config parser (registered by
+            # registry_to_vllm above). It builds PretrainedConfig from
+            # ModelSpec instead of reading config.json from disk.
+            config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
@@ -207,7 +256,6 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.CUSTOM,
             ),
@@ -226,9 +274,10 @@ class VLLMGenerator(Actor, Configurable):
             engine_kwargs["seed"] = config.debug.seed
         engine_args = EngineArgs(**engine_kwargs)
 
-        logger.info("Initializing LLMEngine from EngineArgs...")
-        self._engine = LLMEngine.from_engine_args(engine_args)
-        logger.info("vLLM rollout engine initialized")
+        with sl.log_trace_span("vllm_init"):
+            logger.info("Initializing LLMEngine from EngineArgs...")
+            self._engine = LLMEngine.from_engine_args(engine_args)
+            logger.info("vLLM rollout engine initialized")
 
         self.policy_version = 0
 
@@ -254,11 +303,17 @@ class VLLMGenerator(Actor, Configurable):
 
     def _get_model(self):
         """Access the model from the vLLM engine.
-        Returns a TorchTitanVLLMModelWrapper instance.
+        Returns a VLLMModelWrapper instance.
         """
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
+    async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
+        """Sync the structured-logger step counter from the controller."""
+        sl.set_step(step, relative_step=relative_step)
+
+    @endpoint
+    @sl.log_trace_span("generate")
     async def generate(
         self,
         prompts: list[str],
@@ -300,8 +355,9 @@ class VLLMGenerator(Actor, Configurable):
                 self._engine.add_request(str(i), prompt, sampling_params)
 
             all_outputs = []
-            while self._engine.has_unfinished_requests():
-                all_outputs.extend(self._engine.step())
+            with sl.log_trace_span("engine_steps"):
+                while self._engine.has_unfinished_requests():
+                    all_outputs.extend(self._engine.step())
 
             # vLLM may return requests out of order; sort by the integer
             # request_id we assigned so prompt_idx lines up with the input.
@@ -324,6 +380,7 @@ class VLLMGenerator(Actor, Configurable):
                             text=sample.text,
                             token_ids=sample.token_ids,
                             token_logprobs=per_token_logprobs,
+                            finish_reason=sample.finish_reason,
                         )
                     )
 
@@ -333,6 +390,7 @@ class VLLMGenerator(Actor, Configurable):
         return completions
 
     @endpoint
+    @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
         """Pull latest weights from TorchStore.
 

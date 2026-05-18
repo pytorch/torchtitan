@@ -71,10 +71,13 @@ jobs:
         # Pinned to a known-good commit on the hybrid-ep branch to avoid
         # breakage from upstream changes. Update the commit hash when
         # upgrading to a newer DeepEP version.
+        # Non-fatal: DeepEP may fail to compile against newer PyTorch
+        # nightlies (ABI changes). HybridEP tests are skipped when
+        # DeepEP is unavailable.
         DEEPEP_COMMIT=1b8f467
         git clone --branch hybrid-ep https://github.com/deepseek-ai/deepep.git /tmp/deepep
         pushd /tmp/deepep && git checkout $DEEPEP_COMMIT
-        CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST="9.0" pip install --no-build-isolation -e .
+        CUDA_HOME=/usr/local/cuda TORCH_CUDA_ARCH_LIST="9.0" pip install --no-build-isolation -e . || echo "WARNING: DeepEP installation failed; HybridEP tests will be skipped"
         popd
 
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
