@@ -90,9 +90,9 @@ def _shared_expert_rowwise_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=Shard(1)),
-            # Rowwise bias is replicated (not sharded) -- the rowwise matmul
-            # sums across TP ranks, then the bias add is a per-rank add.
-            "bias": dense_param_placement(tp=Replicate()),
+            # Rowwise bias is Partial to match the rowwise matmul output
+            # placement, avoiding an implicit Replicate→Partial redistribute.
+            "bias": dense_param_placement(tp=Partial()),
         },
         in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
         out_dst_shardings=dense_activation_placement(tp=Partial()),
@@ -138,8 +138,8 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             "expert_bias": dense_param_placement(tp=Replicate()),
             "tokens_per_expert": dense_param_placement(
                 tp=Partial() if enable_ep else Replicate(),
-                dp=Partial(),
-                cp=Partial(),
+                # dp=Partial(),
+                # cp=Partial(),
             ),
         },
         in_src_shardings={"x": dense_activation_placement(tp=sp_layout)},
@@ -154,7 +154,6 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
 def set_moe_sharding_config(
     moe_cfg,
     *,
-    enable_tp: bool,
     enable_ep: bool,
     enable_sp: bool,
     expert_param_layout: dict[str, Placement],
@@ -183,32 +182,32 @@ def set_moe_sharding_config(
 
     Args:
         moe_cfg: The ``MoE.Config`` instance to populate.
-        tp_enabled: Whether tensor parallelism is enabled.
-        ep_enabled: Whether expert parallelism is enabled.
+        enable_ep: Whether expert parallelism is enabled.
         enable_sp: Whether sequence parallelism is enabled (affects the
             wrapper's enter/exit TP layout).
         expert_param_layout: ``{param_name: tp_placement}`` for the
             routed experts' weight params (used on the EP-disabled +
             TP-enabled path).
     """
-    if enable_tp:
-        moe_cfg.sharding_config = _moe_sharding_config(
+    # Always set sharding configs regardless of whether TP is enabled.
+    # ``resolve_mesh`` filters out disabled axes at runtime.
+    moe_cfg.sharding_config = _moe_sharding_config(
+        enable_ep=enable_ep, enable_sp=enable_sp
+    )
+
+    # Router gate: dense-family TP plan with Partial output grad.
+    moe_cfg.router.gate.sharding_config = _router_gate_config(enable_ep=enable_ep)
+
+    # Shared experts: optional. Use Partial-flow variants so the
+    # Partial->sp_layout reduce only happens once at the MoE boundary.
+    if getattr(moe_cfg, "shared_experts", None) is not None:
+        moe_cfg.shared_experts.w1.sharding_config = _shared_expert_colwise_config(
             enable_ep=enable_ep, enable_sp=enable_sp
         )
-
-        # Router gate: dense-family TP plan with Partial output grad.
-        moe_cfg.router.gate.sharding_config = _router_gate_config(enable_ep=enable_ep)
-
-        # Shared experts: optional. Use Partial-flow variants so the
-        # Partial->sp_layout reduce only happens once at the MoE boundary.
-        if getattr(moe_cfg, "shared_experts", None) is not None:
-            moe_cfg.shared_experts.w1.sharding_config = _shared_expert_colwise_config(
-                enable_ep=enable_ep, enable_sp=enable_sp
-            )
-            moe_cfg.shared_experts.w2.sharding_config = _shared_expert_rowwise_config()
-            moe_cfg.shared_experts.w3.sharding_config = _shared_expert_colwise_config(
-                enable_ep=enable_ep, enable_sp=enable_sp
-            )
+        moe_cfg.shared_experts.w2.sharding_config = _shared_expert_rowwise_config()
+        moe_cfg.shared_experts.w3.sharding_config = _shared_expert_colwise_config(
+            enable_ep=enable_ep, enable_sp=enable_sp
+        )
 
     # Routed experts: local_map converts DTensor inputs to local for
     # dispatch/compute/combine, then wraps local output as DTensor(Partial).
@@ -221,16 +220,13 @@ def set_moe_sharding_config(
         }
         experts_in_layout = dense_activation_placement(tp=Shard(0))
         experts_in_grad_layout = dense_activation_placement(tp=Shard(0))
-    elif enable_tp:
+    else:
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)
             for name, placement in expert_param_layout.items()
         }
         experts_in_layout = dense_activation_placement(tp=Replicate())
         experts_in_grad_layout = dense_activation_placement(tp=Partial())
-    else:
-        # EP and TP both disabled -- experts stay plain tensors.
-        return
 
     moe_cfg.experts.sharding_config = ShardingConfig(
         state_shardings=state_shardings,

@@ -107,10 +107,9 @@ def _set_qwen3_layer_sharding(
         )
 
     # MoE FFN (MoE-enabled layers only).
-    if layer_cfg.moe is not None and (enable_tp or enable_ep):
+    if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
-            enable_tp=enable_tp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
