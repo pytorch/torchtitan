@@ -42,7 +42,6 @@ class Completion:
 
     policy_version: int
     prompt_idx: int
-    prompt_token_ids: list[int]
     text: str
     token_ids: list[int]
     token_logprobs: list[float]
@@ -55,11 +54,12 @@ class Trajectory:
     """One rollout: a sequence of ``(Completion, Step)`` transitions.
 
     Single-turn tasks produce trajectories with one transition. The
-    Completion carries the generator's token-level metadata; the Step
-    carries the env's reward and done flag.
+    Completion carries the generator's response-side metadata; the Step
+    carries the env's reward and done flag;
     """
 
     sample_idx: int
+    prompt_token_ids: list[int]
     transitions: list[tuple[Completion, Step]]
 
     @property

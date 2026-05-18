@@ -24,6 +24,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     registry_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
+from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -32,10 +33,69 @@ from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+
+def _prepare_generation_request_metrics(
+    output: RequestOutput, *, prefix: str
+) -> list[m.Metric]:
+    """Prepare vLLM metrics from a RequestOutput.
+
+    For `[num_prompts]` submitted prompts, vLLM returns `[num_prompts]`
+    per parent `RequestOutput`s (one per `add_request` call), each carrying
+    a single `RequestStateStats` on `.metrics`.
+
+    Caveat under `SamplingParams.n > 1`: vLLM stores one `RequestStateStats`
+    per child request; the parent output exposes the **last-finishing**
+    child's timeline. `arrival_time` is shared across siblings, but
+    [`queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`,
+    `num_generation_tokens`] describe one specific child — not an aggregate,
+    not the first sibling's. The other `n-1` siblings' stats are dropped by
+    vLLM at ``output_processor._finish_request``.
+    """
+
+    # TODO: Per-request fields here come from RequestOutput.metrics
+    # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
+    # prefix-cache hit rate, preemptions, and batch occupancy, live in
+    # SchedulerStats / IterationStats and require registering a
+    # vllm.v1.metrics.loggers.StatLoggerBase via
+    # LLMEngine.from_engine_args(..., stat_loggers=[...]).
+
+    metric_values: dict[str, float] = {}
+    if output.num_cached_tokens is not None:
+        metric_values[f"{prefix}/num_cached_tokens"] = output.num_cached_tokens
+
+    stats = output.metrics
+    if stats is not None:
+        metric_values[f"{prefix}/queue_time_ms"] = (
+            stats.scheduled_ts - stats.queued_ts
+        ) * 1000
+
+        if stats.num_generation_tokens > 0:
+            metric_values[f"{prefix}/time_to_first_token_ms"] = (
+                stats.first_token_latency * 1000
+            )
+            metric_values[f"{prefix}/prefill_time_ms"] = (
+                stats.first_token_ts - stats.scheduled_ts
+            ) * 1000
+
+        if stats.num_generation_tokens > 1:
+            first_to_last_token_ms = (stats.last_token_ts - stats.first_token_ts) * 1000
+            metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
+            metric_values[
+                f"{prefix}/inter_token_latency_ms"
+            ] = first_to_last_token_ms / (stats.num_generation_tokens - 1)
+
+    # Emit each value with both Mean and Max aggregators.
+    return [
+        metric
+        for key, value in metric_values.items()
+        for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
+    ]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -259,7 +319,8 @@ class VLLMGenerator(Actor, Configurable):
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.CUSTOM,
             ),
-            disable_log_stats=True,
+            # Enables RequestOutput.metrics, so generator metrics can be returned
+            disable_log_stats=False,
         )
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         # FA2 requires block_size to be a multiple of 256
@@ -316,21 +377,25 @@ class VLLMGenerator(Actor, Configurable):
     @sl.log_trace_span("generate")
     async def generate(
         self,
-        prompts: list[str],
+        tokenized_prompts: list[list[int]],
         *,
         sampling_config: SamplingConfig | None = None,
-    ) -> list[Completion]:
-        """Generate completions for the given prompts.
+        metrics_prefix: str = "generator",
+    ) -> tuple[list[Completion], list[m.Metric]]:
+        """Generate completions and generator metrics for tokenized prompts.
 
-        Returns a flat list of length ``len(prompts) * sampling.n``
-        ordered by ``prompt_idx``, with ``sampling.n`` consecutive
-        completions per prompt.
+        Takes ``tokenized_prompts`` as ``[num_prompts][prompt_tokens]``.
+        Returns completions as ``[num_prompts * n]`` plus generator metrics,
+        where ``n`` is the resolved ``SamplingConfig.n`` completions per prompt.
 
         Args:
-            prompts: List of prompt strings.
+            tokenized_prompts: Tokenized prompts shaped ``[num_prompts][prompt_tokens]``.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig. ``seed`` always comes from
                 ``config.debug.seed`` (not part of SamplingConfig).
+            metrics_prefix: Namespace prepended to every returned metric key
+                (default ``"generator"``). Callers that need to keep streams
+                separate, e.g. ``"validation/generator"``, can override it.
         """
         _sampling_config = (
             sampling_config if sampling_config is not None else self.config.sampling
@@ -351,8 +416,19 @@ class VLLMGenerator(Actor, Configurable):
                 output_kind=RequestOutputKind.FINAL_ONLY,
             )
 
-            for i, prompt in enumerate(prompts):
-                self._engine.add_request(str(i), prompt, sampling_params)
+            # render_cmpl is vLLM's input-pipeline entry.
+            # The tokenize step is a no-op for already-tokenized prompts. The
+            # lower-level alternative is vllm.inputs.tokens_input; we use the
+            # high-level API to stay resilient to vLLM internal changes.
+            engine_inputs = self._engine.renderer.render_cmpl(
+                [{"prompt_token_ids": ids} for ids in tokenized_prompts]
+            )
+            for i, engine_input in enumerate(engine_inputs):
+                self._engine.add_request(
+                    request_id=str(i),
+                    prompt=engine_input,
+                    params=sampling_params,
+                )
 
             all_outputs = []
             with sl.log_trace_span("engine_steps"):
@@ -364,30 +440,45 @@ class VLLMGenerator(Actor, Configurable):
             all_outputs.sort(key=lambda o: int(o.request_id))
 
             completions: list[Completion] = []
+            generation_metrics: list[m.Metric] = []
+            output_token_counts: list[int] = []
             for output in all_outputs:
                 prompt_idx = int(output.request_id)
-                prompt_token_ids = output.prompt_token_ids
+                generation_metrics.extend(
+                    _prepare_generation_request_metrics(output, prefix=metrics_prefix)
+                )
                 for sample in output.outputs:
                     per_token_logprobs = [
                         list(logprob_dict.values())[0].logprob
                         for logprob_dict in sample.logprobs
                     ]
+                    output_token_counts.append(len(sample.token_ids))
                     completions.append(
                         Completion(
                             policy_version=self.policy_version,
                             prompt_idx=prompt_idx,
-                            prompt_token_ids=prompt_token_ids,
                             text=sample.text,
                             token_ids=sample.token_ids,
                             token_logprobs=per_token_logprobs,
                             finish_reason=sample.finish_reason,
                         )
                     )
+            generation_metrics.append(
+                m.Metric(
+                    f"{metrics_prefix}/output_tokens",
+                    m.Sum.from_list(output_token_counts),
+                )
+            )
 
         logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
-        return completions
+
+        # TODO: consider passing metrics as an arg to Completion and Trajectory,
+        # e.g. Completion(metrics=generation_metrics), so when we log the rollouts
+        # to a json or database,  we can associate each rollout with its metrics
+        # I am keeping like this for now for simplicity.
+        return completions, generation_metrics
 
     @endpoint
     @sl.log_trace_span("pull_model_state_dict")
