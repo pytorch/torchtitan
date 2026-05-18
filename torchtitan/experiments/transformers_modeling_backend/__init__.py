@@ -6,6 +6,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
+from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import HFTransformerModel
 from .parallelize import parallelize_hf_transformers
@@ -68,6 +69,9 @@ class TitanMoeModelConfig(TitanModelConfig):
     (numerical reference for debugging).
     """
 
+    load_balance_coeff: float | None = 1e-3
+    """Step size for auxiliary-loss-free MoE load balancing. None disables it."""
+
 
 flavors = {
     "debugmodel": HFTransformerModel.Config(
@@ -117,6 +121,6 @@ def model_registry(flavor: str) -> ModelSpec:
         model=flavors[flavor],
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
-        post_optimizer_build_fn=None,
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=None,
     )

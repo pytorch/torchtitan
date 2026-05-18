@@ -21,6 +21,7 @@ from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import ModuleDict
 from torchtitan.tools.logging import logger
+from .moe_load_balancing import attach_hf_moe_load_balancing
 
 
 class SliceableModuleDict(ModuleDict):
@@ -463,6 +464,11 @@ class HFTransformerModel(BaseModel):
             # Detect MoE layers by checking for gate/router and experts sub-modules
             has_gate = hasattr(layer.mlp, "gate") or hasattr(layer.mlp, "router")
             layer.moe_enabled = has_gate and hasattr(layer.mlp, "experts")
+            if layer.moe_enabled:
+                attach_hf_moe_load_balancing(
+                    layer,
+                    load_balance_coeff=getattr(config, "load_balance_coeff", None),
+                )
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh

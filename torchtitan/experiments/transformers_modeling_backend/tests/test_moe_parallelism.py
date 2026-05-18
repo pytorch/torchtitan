@@ -17,6 +17,13 @@ import unittest
 
 import torch
 
+from torchtitan.components.optimizer import (
+    OptimizersContainer,
+    register_moe_load_balancing_hook,
+)
+from torchtitan.experiments.transformers_modeling_backend.moe_load_balancing import (
+    attach_hf_moe_load_balancing,
+)
 from torchtitan.experiments.transformers_modeling_backend.parallelize import (
     apply_moe_ep_tp,
 )
@@ -70,6 +77,163 @@ def _create_tiny_qwen3moe_model(
     )
     model = AutoModelForCausalLM.from_config(config)
     return model
+
+
+def _create_tiny_deepseek_v3_model(
+    num_experts=4,
+    num_experts_per_tok=2,
+    hidden_size=64,
+    moe_intermediate_size=32,
+    intermediate_size=128,
+    num_hidden_layers=1,
+    num_attention_heads=4,
+    vocab_size=256,
+    max_position_embeddings=64,
+):
+    """Create a minimal DeepSeek-V3 MoE model for testing."""
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.for_model(
+        "deepseek_v3",
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        moe_intermediate_size=moe_intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_attention_heads,
+        vocab_size=vocab_size,
+        max_position_embeddings=max_position_embeddings,
+        first_k_dense_replace=0,
+        n_routed_experts=num_experts,
+        num_local_experts=num_experts,
+        num_experts_per_tok=num_experts_per_tok,
+        n_group=2,
+        topk_group=1,
+        n_shared_experts=1,
+        q_lora_rank=None,
+        kv_lora_rank=16,
+        qk_rope_head_dim=8,
+        qk_nope_head_dim=8,
+        v_head_dim=16,
+        attn_implementation="sdpa",
+        use_cache=False,
+    )
+    model = AutoModelForCausalLM.from_config(config)
+    return model
+
+
+def _prepare_hf_moe_layers(model, load_balance_coeff=1e-3):
+    from torchtitan.experiments.transformers_modeling_backend.model import (
+        SliceableModuleDict,
+    )
+
+    model.model.layers = SliceableModuleDict(
+        {str(i): layer for i, layer in enumerate(model.model.layers)}
+    )
+    for layer in model.model.layers.values():
+        layer.moe_enabled = hasattr(layer.mlp, "gate") and hasattr(
+            layer.mlp, "experts"
+        )
+        if layer.moe_enabled:
+            attach_hf_moe_load_balancing(
+                layer,
+                load_balance_coeff=load_balance_coeff,
+            )
+
+
+class _FakeParallelDims:
+    def get_optional_mesh(self, _mesh_axis_names):
+        return None
+
+
+class TestMoeLoadBalancingAdapter(unittest.TestCase):
+    """Test HF MoE adapter contract used by register_moe_load_balancing_hook."""
+
+    def test_qwen3_exposes_native_moe_contract_and_counts_tokens(self):
+        model = _create_tiny_qwen3moe_model(num_hidden_layers=1)
+        _prepare_hf_moe_layers(model)
+        layer = model.model.layers["0"]
+
+        self.assertTrue(layer.moe_enabled)
+        self.assertEqual(layer.moe.load_balance_coeff, 1e-3)
+        self.assertEqual(layer.moe.tokens_per_expert.shape, (4,))
+        self.assertEqual(layer.moe.expert_bias.shape, (4,))
+
+        x = torch.randn(2, 8, 64)
+        layer.mlp(x)
+        self.assertEqual(layer.moe.tokens_per_expert.sum().item(), 2 * 8 * 2)
+
+    def test_qwen3_expert_bias_only_affects_expert_choice(self):
+        model = _create_tiny_qwen3moe_model(num_hidden_layers=1)
+        _prepare_hf_moe_layers(model)
+        layer = model.model.layers["0"]
+        gate = layer.mlp.gate
+
+        with torch.no_grad():
+            gate.weight.zero_()
+            layer.moe.expert_bias.zero_()
+            layer.moe.expert_bias[3] = 1.0
+
+        _, routing_weights, selected_experts = gate(torch.randn(5, 64))
+        self.assertTrue((selected_experts == 3).any().item())
+        self.assertTrue(
+            torch.allclose(routing_weights, torch.full_like(routing_weights, 0.25))
+        )
+
+    def test_deepseek_reuses_existing_correction_bias_and_counts_tokens(self):
+        model = _create_tiny_deepseek_v3_model()
+        _prepare_hf_moe_layers(model)
+        layer = model.model.layers["0"]
+
+        self.assertIs(
+            layer.moe.expert_bias,
+            layer.mlp.gate._buffers["e_score_correction_bias"],
+        )
+
+        x = torch.randn(2, 8, 64)
+        layer.mlp(x)
+        self.assertEqual(layer.moe.tokens_per_expert.sum().item(), 2 * 8 * 2)
+
+    def test_optimizer_hook_updates_expert_bias_and_resets_counts(self):
+        model = _create_tiny_qwen3moe_model(num_hidden_layers=1)
+        _prepare_hf_moe_layers(model)
+        layer = model.model.layers["0"]
+
+        with torch.no_grad():
+            layer.moe.tokens_per_expert.copy_(torch.tensor([10.0, 0.0, 0.0, 0.0]))
+
+        optimizers = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+        ).build(model_parts=[model.model])
+        register_moe_load_balancing_hook(
+            optimizers,
+            [model.model],
+            _FakeParallelDims(),
+        )
+
+        optimizers.step()
+        self.assertTrue(torch.equal(layer.moe.tokens_per_expert, torch.zeros(4)))
+        self.assertFalse(torch.equal(layer.moe.expert_bias, torch.zeros(4)))
+
+    def test_load_balance_coeff_none_disables_hook(self):
+        model = _create_tiny_qwen3moe_model(num_hidden_layers=1)
+        _prepare_hf_moe_layers(model, load_balance_coeff=None)
+        layer = model.model.layers["0"]
+
+        self.assertIsNone(layer.moe.load_balance_coeff)
+        self.assertIsNone(layer.moe.expert_bias)
+
+        optimizers = OptimizersContainer.Config(
+            lr=1e-3,
+            implementation="for-loop",
+        ).build(model_parts=[model.model])
+        register_moe_load_balancing_hook(
+            optimizers,
+            [model.model],
+            _FakeParallelDims(),
+        )
+        optimizers.step()
 
 
 class TestMoeBlockForward(unittest.TestCase):
