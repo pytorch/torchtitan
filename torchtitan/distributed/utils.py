@@ -248,7 +248,9 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Register batch-invariant ATen overrides via upstream package
     # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
+    from batch_invariant_ops import (  # pyrefly: ignore [missing-import]
+        enable_batch_invariant_mode as _upstream_enable,
+    )
 
     _upstream_enable()
 
@@ -414,7 +416,7 @@ def init_distributed(
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
-            import torchcomms  # noqa: F401
+            import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
         except ImportError as err:
             raise ImportError(
                 "torchcomms package is required for --comm.mode=torchcomms."

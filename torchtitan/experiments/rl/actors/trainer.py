@@ -303,15 +303,18 @@ class PolicyTrainer(Actor, Configurable):
         )
         policy_logprobs = compute_logprobs(logits, token_ids)  # [B, L-1]
 
-        # Align response_mask, advantages, ref_logprobs with shifted logprobs
+        # Align response_mask, advantages, ref_logprobs, positions with
+        # shifted logprobs
         response_mask = response_mask[:, 1:]  # [B, L-1]
         advantages = advantages[:, 1:]  # [B, L-1]
         ref_logprobs = ref_logprobs[:, 1:]  # [B, L-1]
+        positions_shifted = positions[:, 1:]  # [B, L-1]
 
         loss, loss_metrics = self.loss_fn(
             policy_logprobs=policy_logprobs,
             response_mask=response_mask,
             advantages=advantages,
+            positions=positions_shifted,
             global_valid_tokens=global_valid_tokens,
         )
 

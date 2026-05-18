@@ -420,7 +420,6 @@ class ChatDataset(IterableDataset, Stateful):
 
     def __iter__(self):
         """Yield packed (input_dict, labels) using shared pack()."""
-        token_keys = ["input_ids", "label_ids"]
         pad_values: dict[str, int | float] = {
             "input_ids": self._eos_id,
             "label_ids": IGNORE_INDEX,
@@ -430,7 +429,6 @@ class ChatDataset(IterableDataset, Stateful):
         while True:
             for packed in pack(
                 self._tokenized_samples(),
-                token_keys=token_keys,
                 max_seq_length=self.seq_len,
                 pad_values=pad_values,
             ):

@@ -20,7 +20,7 @@ class _FakeRLTrainer:
         self.events = []
         self.instances.append(self)
 
-    async def setup(self):
+    async def setup_async(self):
         self.events.append("setup")
         if getattr(self.config, "fail_setup", False):
             raise RuntimeError("setup failed")
@@ -36,8 +36,19 @@ class _FakeRLTrainer:
         self.events.append("close")
 
 
+class _FakeDebug:
+    enable_structured_logging = False
+
+
+class _FakeTrainerConfig:
+    debug = _FakeDebug()
+
+
 class _FakeConfig:
     """Fake config whose build() returns a _FakeRLTrainer."""
+
+    dump_folder = "/tmp/test_rl"
+    trainer = _FakeTrainerConfig()
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
