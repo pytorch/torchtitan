@@ -222,17 +222,61 @@ def main():
         if opt_results:
             print(f"\nOptimization: {opt_ok}/{len(opt_results)} succeeded\n")
 
+    # --- Phase 3: Benchmark all kernels (eager vs compile vs triton) ---
+    import torchtitan.experiments.graph_trainer.kernel_gen.benchmark as bench_mod
+    bench_mod.GENERATED_DIR = GENERATED_DIR
+    benchmark_one = bench_mod.run_one
+
+    to_benchmark = [
+        n for n in names
+        if (GENERATED_DIR / n / "kernel.py").exists()
+        and not (GENERATED_DIR / n / "benchmark.json").exists()
+    ]
+    bench_results = []
+    if to_benchmark:
+        print(f"\nBenchmarking {len(to_benchmark)} kernels...\n")
+        for n in to_benchmark:
+            print(f"  {n}...", end=" ", flush=True)
+            r = benchmark_one(n)
+            bench_results.append(r)
+            if r["status"] == "PASS" and "kern_ms" in r:
+                comp_str = f"  compile={r['compile_ms']:.3f}ms" if r.get("compile_ms") else ""
+                print(
+                    f"PASS  eager={r['ref_ms']:.3f}ms{comp_str}  triton={r['kern_ms']:.3f}ms  "
+                    f"speedup={r['speedup']:.2f}x"
+                )
+            elif r["status"] == "PASS":
+                print(f"PASS  (no benchmark)")
+            else:
+                print(f"{r['status']}  {r.get('reason', '')[:60]}")
+
     # --- Summary ---
-    print("=" * 100)
+    print("\n" + "=" * 100)
     print("SUMMARY")
     print("=" * 100)
 
     if gen_results:
-        print("\nGeneration:")
+        gen_ok = sum(1 for r in gen_results if r["success"])
+        print(f"\nGeneration: {gen_ok}/{len(gen_results)}")
         for r in gen_results:
             status = "OK" if r["success"] else "FAIL"
             msg = f"  ({r.get('message', '')[:60]})" if not r["success"] else ""
             print(f"  {status:>4}  {r['name']}{msg}")
+
+    if bench_results:
+        print(f"\n{'Kernel':<16} {'Status':<6} {'Eager':>8} {'Compile':>8} {'Triton':>8} {'vs Eager':>9} {'vs Compile':>11}")
+        print("-" * 80)
+        for r in bench_results:
+            ref = f"{r['ref_ms']:.3f}" if "ref_ms" in r else "-"
+            comp = f"{r['compile_ms']:.3f}" if r.get("compile_ms") else "-"
+            kern = f"{r['kern_ms']:.3f}" if "kern_ms" in r else "-"
+            spd = f"{r['speedup']:.2f}x" if "speedup" in r else "-"
+            if r.get("compile_ms") and r.get("kern_ms") and r["kern_ms"] > 0:
+                vs_comp = f"{r['compile_ms'] / r['kern_ms']:.2f}x"
+            else:
+                vs_comp = "-"
+            reason = f"  ({r.get('reason', '')[:40]})" if r["status"] != "PASS" else ""
+            print(f"  {r['name']:<14} {r['status']:<6} {ref:>8} {comp:>8} {kern:>8} {spd:>9} {vs_comp:>11}{reason}")
 
     if opt_results:
         print(f"\n{'Kernel':<28} {'Status':<6} {'Eager':>9} {'Compile':>9} {'Initial':>9} {'Best':>9} {'vs Eager':>9}")
