@@ -15,7 +15,6 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 from .vision_encoder import Qwen3VLVisionEncoder
 
@@ -65,22 +64,28 @@ class Qwen3VLModel(Qwen3Model):
             trainer_config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
             parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+            training = getattr(trainer_config, "training", None)
+            debug = getattr(trainer_config, "debug", None)
 
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
+            if training is not None:
+                seq_len = training.seq_len
+                if seq_len > self.rope.max_seq_len:
+                    raise ValueError(
+                        f"Training sequence length {seq_len} exceeds "
+                        f"model's maximum supported sequence length "
+                        f"{self.rope.max_seq_len}. The model cannot "
+                        f"produce valid RoPE embeddings for positions "
+                        f"beyond this limit."
                     )
+                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+
+            if debug is not None:
+                for layer_cfg in self.layers:
+                    if layer_cfg.moe is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
 
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
 

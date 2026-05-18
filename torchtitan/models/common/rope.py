@@ -21,6 +21,22 @@ __all__ = [
 ]
 
 
+def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
+    """Async bounds check: verify all position values <= max_valid_pos.
+
+    Uses ``torch._assert_async`` to avoid a device-host sync while still
+    catching out-of-bounds positions (the assertion failure surfaces at a
+    later kernel launch).  Skipped entirely under ``torch.compile``.
+    """
+    if torch.compiler.is_compiling():
+        return
+    pos_local = positions.to_local() if isinstance(positions, DTensor) else positions
+    torch._assert_async(
+        torch.all(pos_local <= max_valid_pos),
+        f"position_ids exceed {max_valid_pos=}",
+    )
+
+
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
@@ -227,7 +243,8 @@ def _reshape_for_broadcast_complex(
         assert freqs_cis.shape == (seqlen, x.shape[-1])
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
-    elif positions.size(0) == 1:
+    _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
+    if positions.size(0) == 1:
         assert positions.shape == (1, seqlen)
         freqs_cis = freqs_cis[positions.squeeze(0)]
         assert freqs_cis.shape == (seqlen, x.shape[-1])
@@ -264,7 +281,8 @@ def _reshape_for_broadcast_cos_sin(
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
-    elif positions.size(0) == 1:
+    _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
+    if positions.size(0) == 1:
         assert positions.shape == (1, seqlen)
         rope_cache = rope_cache[positions.squeeze(0)]
         assert rope_cache.shape == (seqlen, head_dim * 2)

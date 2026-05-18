@@ -22,7 +22,6 @@ from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 
 class Attention(BaseAttention):
@@ -191,29 +190,43 @@ class DeepSeekV3Model(Decoder):
             **kwargs,
         ) -> None:
 
-            training = trainer_config.training
             parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+            training = getattr(trainer_config, "training", None)
+            debug = getattr(trainer_config, "debug", None)
 
-            # Sync rope fields to attention for all layers.
-            # Mutate in-place — simpler than replacing each config in the list.
-            for layer_cfg in self.layers:
-                assert isinstance(layer_cfg.attention, Attention.Config)
-                layer_cfg.attention.rope_max_seq_len = seq_len
-                layer_cfg.attention.rope_factor = self.rope.rope_factor
-                layer_cfg.attention.rope_original_seq_len = self.rope.original_seq_len
+            if training is not None:
+                seq_len = training.seq_len
+                if seq_len > self.rope.max_seq_len:
+                    raise ValueError(
+                        f"Training sequence length {seq_len} exceeds "
+                        f"model's maximum supported sequence length "
+                        f"{self.rope.max_seq_len}. The model cannot "
+                        f"produce valid RoPE embeddings for positions "
+                        f"beyond this limit."
+                    )
+                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+
+            if training is not None:
+                # Sync rope fields to attention for all layers.
+                # Mutate in-place — simpler than replacing each config
+                # in the list.
+                for layer_cfg in self.layers:
+                    assert isinstance(layer_cfg.attention, Attention.Config)
+                    layer_cfg.attention.rope_max_seq_len = seq_len
+                    layer_cfg.attention.rope_factor = self.rope.rope_factor
+                    layer_cfg.attention.rope_original_seq_len = (
+                        self.rope.original_seq_len
+                    )
+
+            if debug is not None:
+                for layer_cfg in self.layers:
+                    if layer_cfg.moe is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
-                    )
                     comm_backend = getattr(
                         layer_cfg.moe.experts.token_dispatcher,
                         "comm_backend",

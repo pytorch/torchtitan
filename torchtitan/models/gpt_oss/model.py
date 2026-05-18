@@ -27,7 +27,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 
 class Attention(BaseAttention):
@@ -189,16 +188,20 @@ class GptOssModel(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
             parallelism = trainer_config.parallelism
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
+            training = getattr(trainer_config, "training", None)
 
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+            if training is not None:
+                seq_len = training.seq_len
+                if seq_len > self.rope.max_seq_len:
+                    raise ValueError(
+                        f"Training sequence length {seq_len} exceeds "
+                        f"model's maximum supported sequence length "
+                        f"{self.rope.max_seq_len}. The model cannot "
+                        f"produce valid RoPE embeddings for positions "
+                        f"beyond this limit."
+                    )
+                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
