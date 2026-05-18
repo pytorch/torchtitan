@@ -396,6 +396,14 @@ def _load_kernel_fn(kernel_dir: Path) -> Callable | None:
         return None
 
 
+def _try_compile(fn: Callable) -> Callable | None:
+    """Try to torch.compile a function. Returns None on failure."""
+    try:
+        return torch.compile(fn, fullgraph=True)
+    except Exception:
+        return None
+
+
 def _select_best_backend(
     region_dir: Path,
     eager_fn: Callable,
@@ -425,10 +433,9 @@ def _select_best_backend(
         candidates: dict[str, tuple[float, Callable]] = {}
         candidates["eager"] = (bench_data.get("eager_ms", float("inf")), eager_fn)
         if "compile_ms" in bench_data:
-            # torch.compile fn is not available at training time — if compile
-            # wins, we fall through to triton or eager (the compiled version
-            # would need to be cached as an artifact to be usable here)
-            pass
+            compiled_fn = _try_compile(eager_fn)
+            if compiled_fn is not None:
+                candidates["compile"] = (bench_data["compile_ms"], compiled_fn)
         if triton_fn is not None:
             candidates["triton"] = (bench_data.get("triton_ms", float("inf")), triton_fn)
 
