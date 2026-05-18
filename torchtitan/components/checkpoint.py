@@ -69,9 +69,10 @@ class ModelWrapper(Stateful):
     distributed parameters (e.g., DTensors).
 
     By caching the state_dict object, this class:
-        1. Minimizes repeated CPU work during the checkpoint "planning" phase.
-        2. Reuses a consistent state_dict object across calls, which can help
-        downstream checkpointing utilities (e.g., `dcp.save`) reuse internal plans.
+        1. Reduces repeated CPU work during checkpoint planning.
+        2. Reuses the same state_dict object across calls, which may help
+           downstream checkpointing utilities (e.g., `dcp.save`) avoid
+           redundant planning work.
 
     Notes:
         - Calling `load_state_dict` updates the underlying modules and
@@ -82,7 +83,7 @@ class ModelWrapper(Stateful):
 
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.cache_state_dict = self._get_state_dict()
+        self.cached_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
         state_dict = {
@@ -91,7 +92,7 @@ class ModelWrapper(Stateful):
         return state_dict
 
     def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
+        return self.cached_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -102,7 +103,7 @@ class ModelWrapper(Stateful):
         list(map(func, self.model))
         # `set_model_state_dict()` does change the keys of the input state_dict,
         # we will need to reinitialize the cache_state_dict.
-        self.cache_state_dict = self._get_state_dict()
+        self.cached_state_dict = self._get_state_dict()
 
 
 class Terminate:
@@ -271,7 +272,7 @@ class CheckpointManager(Configurable):
         Which async checkpoint mode to use. Currently there are 3 different modes.
 
         - "disabled": Synchronized checkpointing. The training loop is blocked until all
-        data is successfully persisted to the persistence storage device (disk).
+        data is successfully saved to the persistence storage device (disk).
 
         - "async": Uses threading and `torch.distributed.checkpoint.async_save`.
         The training loop is blocked only during the GPU-to-CPU memory transfer (typically on the order of tens of seconds).
@@ -284,7 +285,7 @@ class CheckpointManager(Configurable):
         The process then persists the data from pinned shared memory to disk.
         This eliminates GIL contention and minimizes the blocking window to near-zero (< 1s),
         at the cost of significantly higher fixed CPU RAM usage.
-        If insufficient CPU memory is available, performance may degrade due to memory paging.
+        If case of insufficient CPU memory, performance may degrade due to memory paging.
         For most users, "async" should suffice.
 
         "disabled" is the default mode.
