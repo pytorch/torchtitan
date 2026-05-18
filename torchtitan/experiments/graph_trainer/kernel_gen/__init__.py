@@ -7,4 +7,4 @@ Workflow:
   4. Train again — auto-picks up best backend per op
 """
 
-from .bridge import generate_kernel, optimize_kernel
+from .kernelagent_bridge import generate_kernel, optimize_kernel

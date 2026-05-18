@@ -28,7 +28,7 @@ def _setup_env():
     import os
     os.environ.setdefault("LOG_LEVEL", "WARNING")
     sys.path.insert(0, os.path.expanduser("~/local/KernelAgent"))
-    from torchtitan.experiments.graph_trainer.kernel_gen.bridge import _ensure_api_key, _ensure_proxy
+    from torchtitan.experiments.graph_trainer.kernel_gen.kernelagent_bridge import _ensure_api_key, _ensure_proxy
     _ensure_api_key()
     _ensure_proxy()
 
@@ -47,7 +47,7 @@ def generate_one(name: str) -> dict:
     problem_text = problem_file.read_text()
     log_dir = str(problem_dir / "logs")
 
-    from torchtitan.experiments.graph_trainer.kernel_gen.bridge import generate_kernel
+    from torchtitan.experiments.graph_trainer.kernel_gen.kernelagent_bridge import generate_kernel
 
     print(f"[{name}] Generating kernel...", flush=True)
     try:
@@ -88,7 +88,7 @@ def optimize_one(name: str, opt_rounds: int = 5) -> dict:
     if not problem_path.exists():
         return {"name": name, "success": False, "message": "no problem.py"}
 
-    from torchtitan.experiments.graph_trainer.kernel_gen.bridge import optimize_kernel
+    from torchtitan.experiments.graph_trainer.kernel_gen.kernelagent_bridge import optimize_kernel
 
     kernel_code = kernel_path.read_text()
     opt_dir = str(problem_dir / "opt_logs")
