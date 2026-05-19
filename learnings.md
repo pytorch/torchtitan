@@ -455,3 +455,27 @@ Interpretation:
 - Local batch 5 is the practical memory boundary for the current FSDP+compile+BF16 setup.
 - The OOM happens in the loss projection rather than in the optimizer, so increasing batch size further needs a real memory reduction or a different sharding strategy for the output projection/loss path.
 - Current best remains the compile+BF16 local-batch-5 command at 8,391 tps and 35.06% MFU.
+
+## Experiment 13: Compile Model Blocks Only
+
+Source state: `620b4bb`, using the `51369ea` compile-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components '["model"]' --training.dtype=bfloat16 --training.local_batch_size=5 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run13-compile-model-only-bf16-lbs5 > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The command parsed correctly and initialized with local batch size 5, global batch size 40, and model-block compile enabled.
+- Loss compile was disabled, and the run OOMed before completing step 1 during `ChunkedCELoss` backward.
+- The failing allocation was 1.45 GiB. Rank 0 reported about 177.63 GiB already in use, with 617 MiB free.
+- No throughput, MFU, loss, or peak-memory metric was emitted.
+
+Interpretation:
+
+- Compiling the loss is not optional for the current best local-batch-5 setup; it appears to reduce memory enough for the first backward to fit.
+- This also confirms that the loss/output projection path is the memory-critical boundary, not optimizer state.
+- The next useful memory-reduction idea should shard the output projection/loss path rather than remove loss compile.

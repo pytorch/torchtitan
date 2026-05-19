@@ -150,3 +150,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current-best command plus `--compile.components '["model"]'`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no memory regression. Risk is that compiled loss was beneficial and disabling it lowers throughput.
+  Result: crashed at source state `620b4bb`; disabling loss compile made local batch size 5 OOM during first-step loss backward.
+
+- Idea: TP=2 with FSDP=4, compile, BF16, and local batch 5
+  Current best source commit: 620b4bb
+  Source: memory-bound follow-up from loss-path OOMs
+  Expected mechanism: Tensor parallelism should shard attention/FFN projections and the output projection. With loss parallel enabled, the loss path should no longer materialize the full vocabulary logits per rank, reducing the memory pressure that blocked local batch 6 and model-only compile.
+  Supporting evidence: The latest OOMs happen in `lm_head`/loss backward before optimizer state matters. Existing common decoder sharding helpers already encode colwise, rowwise, sequence-parallel, inner-attention local-map, and loss-parallel placements for dense decoder models.
+  Planned source/config changes: Implement Qwen3 dense sharding config for TP and call `model.parallelize(tp_mesh)` before compile and FSDP wrapping. Keep CP/PP/EP unsupported for this experiment.
+  Planned command or config overrides: Current-best command plus `--parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4`.
+  Success criteria and expected risk: Success is a 10-step run with finite decreasing loss and tps above 8,391. Risk is DTensor placement mismatch in Qwen3 qk norm, attention, or chunked loss.
