@@ -5,11 +5,19 @@
 # LICENSE file in the root directory of this source tree.
 
 from .owned import Owned, param_boundary_placements
+from .ragged_shard import (
+    make_ragged_placement_fn,
+    per_param_ragged_placements,
+    RaggedShard,
+)
 from .shard import per_param_placements, Shard
 
 __all__ = [
+    "make_ragged_placement_fn",
     "Owned",
     "param_boundary_placements",
+    "per_param_ragged_placements",
     "per_param_placements",
+    "RaggedShard",
     "Shard",
 ]
