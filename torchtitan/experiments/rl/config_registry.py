@@ -46,7 +46,8 @@ def _trainer(
     train_tp: int,
     lr: float,
     warmup_steps: int,
-    clip_eps: float = 0.2,
+    kl_tau: float = 1e-3,
+    dppo_mask: float = 0.2,
     training_dtype: str = "float32",
     checkpoint_interval: int = 10,
     debug: DebugConfig | None = None,
@@ -74,7 +75,9 @@ def _trainer(
             interval=checkpoint_interval,
             last_save_model_only=False,
         ),
-        loss=GRPOLoss.Config(clip_eps=clip_eps),
+        loss=GRPOLoss.Config(
+            kl_tau=kl_tau, dppo_mask_high=dppo_mask, dppo_mask_low=dppo_mask
+        ),
         debug=debug or DebugConfig(),
     )
 
@@ -273,7 +276,7 @@ def rl_grpo_qwen3_0_6b_alphabet() -> RLTrainer.Config:
             max_trajectory_tokens=2048,
             max_generation_tokens=768,
         ),
-        trainer=_trainer(train_tp=2, lr=2e-6, warmup_steps=2, clip_eps=0.1),
+        trainer=_trainer(train_tp=2, lr=2e-6, warmup_steps=2),
         generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
         replay_buffer=_replay(batch_size=4, max_buffer_size=256),
     )
@@ -336,7 +339,87 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
             lr=2e-6,
             warmup_steps=4,
             checkpoint_interval=50,
-            clip_eps=0.1,
+        ),
+        generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
+        replay_buffer=_replay(batch_size=4, max_buffer_size=512),
+    )
+
+
+def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
+    """AlphabetSort acceptance gate — Qwen3-4B-Instruct-2507, 25 steps.
+
+    Mirrors prime-rl's recipe
+    (``frameworks/prime-rl/examples/alphabet_sort/rl.toml``) as closely
+    as a full-finetune (no LoRA) torchtitan run can:
+
+    | knob | prime-rl | here | reason for delta |
+    | --- | --- | --- | --- |
+    | model | Qwen3-4B-Instruct-2507 | same | identical |
+    | lr | 1e-5 (LoRA) | 5e-6 | LoRA-equivalent step size is ~2x our full-FT |
+    | optimizer | AdamW (default) | AdamW | identical |
+    | weight_decay | 0.01 (default) | 0.01 (titan default) | identical |
+    | max_norm | 1.0 (default) | 1.0 (titan default) | identical |
+    | batch_size | 512 prompts | 8 prompts (=32 rollouts on bs=4) | OOMs on 2xH100 full-FT at 512 |
+    | rollouts_per_example | 8 | 8 | identical |
+    | max_completion_tokens | 768 | 768 | identical |
+    | min/max_turns | 3/5 | 3/5 | identical |
+    | power_per_turn | false | false | identical |
+    | similarity_power (train) | (default 4) | 4 | identical |
+    | similarity_power (eval) | 8 | 8 | identical |
+    | loss | DPPO+KL (kl_tau=1e-3) | DPPO+KL (kl_tau=1e-3) | identical |
+    | num_rollout_tasks | n/a (sync) | 8 | stress-test gen parallelism per Felipe's note |
+
+    25 steps is a fast first-pass; once stable, bump to 100 for the
+    full prime-rl reproduction (0.30 -> ~0.85).
+    """
+    return RLTrainer.Config(
+        model_spec=model_registry("4B", attn_backend="varlen"),
+        hf_assets_path=(
+            "torchtitan/experiments/rl/example_checkpoint/Qwen3-4B-Instruct-2507"
+        ),
+        num_steps=25,
+        num_prompts_per_step=8,
+        rollout_group_size=8,
+        num_rollout_tasks=8,
+        max_rollout_turns=5,
+        num_validation_samples=20,
+        log_samples=True,
+        # Same s59 empty-sources torch.compile bug as 1.7B layer shapes.
+        compile=CompileConfig(enable=False),
+        train_dataset=AlphabetSortDataset.Config(
+            seed=1337420,
+            min_turns=3,
+            max_turns=5,
+            min_names_per_turn=1,
+            max_names_per_turn=5,
+        ),
+        train_builder=AlphabetSortBuilder.Config(
+            similarity_power=4,
+            power_per_turn=False,
+        ),
+        validation_dataset=AlphabetSortDataset.Config(
+            seed=99,
+            min_turns=3,
+            max_turns=3,
+            min_names_per_turn=1,
+            max_names_per_turn=4,
+        ),
+        validation_builder=AlphabetSortBuilder.Config(
+            similarity_power=8,
+            power_per_turn=False,
+        ),
+        renderer=RendererConfig(name="auto"),
+        token_env=TokenEnvConfig(
+            error_reward=0.0,
+            truncation_reward=0.0,
+            max_trajectory_tokens=2048,
+            max_generation_tokens=768,
+        ),
+        trainer=_trainer(
+            train_tp=2,
+            lr=5e-6,
+            warmup_steps=4,
+            checkpoint_interval=25,
         ),
         generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
         replay_buffer=_replay(batch_size=4, max_buffer_size=512),

@@ -90,33 +90,54 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# GRPO loss — per-token, mask-aware, DAPO global-token-mean normalization
+# DPPO+KL loss — per-token, mask-aware, DAPO global-token-mean normalization
 # ---------------------------------------------------------------------------
 
 
 class GRPOLoss(Configurable):
-    """Clipped GRPO surrogate loss with per-token importance weighting.
+    """Prime-rl's DPPO+KL loss with DAPO global-token-mean normalization.
 
-    Operates on shifted, per-token tensors (``[1, T - 1]``). The mask
-    selects loss positions; the loss is summed over masked tokens and
-    divided by the global-across-DP-ranks mask sum (DAPO normalization).
-    Importance weighting uses the per-token ratio
-    ``exp(policy_logprob - behavior_logprob)`` clipped to
-    ``[1 - clip_eps, 1 + clip_eps]``.
+    Two components per loss-mask token:
 
-    Example metrics emitted (all SUM-reduced across DP ranks):
-        loss/mean              -- the scalar loss
-        loss/ratio/mean        -- mean ratio across loss tokens
-        loss/ratio/clipped_frac -- fraction of loss tokens clipped
+    - **Policy gradient (DPPO)**: ``advantage * importance_ratio`` with a
+      sign-aware trust-region DROP mask instead of PPO ratio clipping.
+      A token is dropped when ``trainer_prob - inference_prob`` exceeds
+      ``dppo_mask_high`` on positive advantages or falls below
+      ``-dppo_mask_low`` on negative ones.
+    - **KL penalty**: ``kl_tau * log_importance_ratio**2`` on every
+      loss-mask token. This is the load-bearing stability term — GRPO
+      without it diverges within ~25 train steps on multi-turn reward
+      surfaces like AlphabetSort.
+
+    Final loss = ``(-pg + kl_tau * kl).sum() / num_global_valid_tokens``.
+
+    Ported from prime-rl's ``default_loss_fn``
+    (``src/prime_rl/trainer/rl/loss.py``). Their version uses raw
+    per-batch sum; we divide by ``num_global_valid_tokens`` to keep
+    gradients independent of how the batch is sharded.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        clip_eps: float = 0.2
-        """PPO/GRPO probability-ratio clip epsilon."""
+        dppo_mask_high: float = 0.2
+        """Drop tokens with positive advantage whose ``prob_diff`` exceeds
+        this threshold (trust-region violation in the upweight direction)."""
+
+        dppo_mask_low: float = 0.2
+        """Drop tokens with negative advantage whose ``prob_diff`` falls
+        below ``-dppo_mask_low`` (trust-region violation in downweight)."""
+
+        kl_tau: float = 1e-3
+        """KL penalty coefficient on ``log_importance_ratio**2``."""
+
+        adv_tau: float = 1.0
+        """Multiplier on advantages before the PG term (1.0 = unchanged)."""
 
     def __init__(self, config: Config) -> None:
-        self.clip_eps = config.clip_eps
+        self.dppo_mask_high = config.dppo_mask_high
+        self.dppo_mask_low = config.dppo_mask_low
+        self.kl_tau = config.kl_tau
+        self.adv_tau = config.adv_tau
 
     def __call__(
         self,
@@ -129,34 +150,61 @@ class GRPOLoss(Configurable):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         # Compute the log-ratio only at loss positions; off-mask
         # positions carry stale ``behavior_logprobs=0.0`` (prompts).
-        # Clamp the diff so a ``-inf`` logprob from vLLM (bf16
-        # softmax underflow on an unlikely sampled token) doesn't
-        # explode the ratio and NaN-poison the sum.
+        # Clamp the diff so a ``-inf`` logprob from vLLM (bf16 softmax
+        # underflow on an unlikely sampled token) doesn't explode the
+        # ratio and NaN-poison the sum (NaN * 0 == NaN in IEEE 754).
         mask_bool = loss_mask > 0.5
-        logprob_diff = torch.where(
+        log_importance_ratio = torch.where(
             mask_bool,
             policy_logprobs - behavior_logprobs,
             torch.zeros_like(policy_logprobs),
         )
-        logprob_diff = torch.clamp(logprob_diff, min=-20.0, max=20.0)
-        ratio = torch.exp(logprob_diff)
-        clipped = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
-        per_token_pg = -torch.minimum(
-            ratio * advantages_per_token,
-            clipped * advantages_per_token,
+        log_importance_ratio = torch.clamp(log_importance_ratio, min=-20.0, max=20.0)
+        importance_ratio = torch.exp(log_importance_ratio)
+
+        # DPPO sign-aware trust-region drop. ``inference_prob`` is
+        # ``exp(behavior_logprobs)`` but masked to 0 at off-mask
+        # positions so a stale behavior_logprob=0 doesn't produce a
+        # spurious prob_diff there.
+        trainer_prob = torch.where(
+            mask_bool, torch.exp(policy_logprobs), torch.zeros_like(policy_logprobs)
         )
-        masked = per_token_pg * loss_mask
-        loss = masked.sum() / num_global_valid_tokens
+        inference_prob = torch.where(
+            mask_bool,
+            torch.exp(behavior_logprobs),
+            torch.zeros_like(behavior_logprobs),
+        )
+        prob_diff = trainer_prob - inference_prob
+        positive_adv = advantages_per_token > 0
+        negative_adv = advantages_per_token < 0
+        dppo_high = prob_diff > self.dppo_mask_high
+        dppo_low = prob_diff < -self.dppo_mask_low
+        dppo_invalid = torch.where(positive_adv, dppo_high, dppo_low & negative_adv)
+        keep_mask = mask_bool & ~dppo_invalid
+
+        # PG term + KL stability term, summed over loss positions.
+        adv = self.adv_tau * advantages_per_token
+        pg_per_token = keep_mask.float() * adv * importance_ratio
+        kl_per_token = loss_mask * log_importance_ratio**2
+        loss = (
+            -pg_per_token.sum() + self.kl_tau * kl_per_token.sum()
+        ) / num_global_valid_tokens
 
         with torch.no_grad():
-            ratio_masked = ratio * loss_mask
-            clipped_frac = (
-                ((ratio - clipped).abs() > 1e-6).float() * loss_mask
-            ).sum() / num_global_valid_tokens
+            ratio_masked = importance_ratio * loss_mask
+            dppo_dropped = (
+                dppo_invalid & mask_bool
+            ).float().sum() / num_global_valid_tokens
             metrics = {
                 "loss/mean": loss.detach(),
-                "loss/ratio/mean": ratio_masked.sum() / num_global_valid_tokens,
-                "loss/ratio/clipped_frac": clipped_frac,
+                "loss/pg/mean": -pg_per_token.sum().detach() / num_global_valid_tokens,
+                "loss/kl/mean": kl_per_token.sum().detach() / num_global_valid_tokens,
+                "loss/importance_ratio/mean": ratio_masked.sum()
+                / num_global_valid_tokens,
+                "loss/importance_ratio/max": (ratio_masked.detach().max()),
+                "loss/dppo_dropped_frac": dppo_dropped,
+                # Legacy alias so the controller's existing log line still works.
+                "loss/ratio/clipped_frac": dppo_dropped,
             }
         return loss, metrics
 
