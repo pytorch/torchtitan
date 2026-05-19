@@ -6,17 +6,14 @@
 
 """AlphabetSort grading helpers.
 
-Port of verifiers' ``score_response`` and ``eval_turn``
-(``frameworks/verifiers/environments/alphabet_sort/alphabet_sort.py``,
-2026-05). Similarity is ``difflib.SequenceMatcher.ratio()`` on
-``"\\n".join(lower(stripped(names)))`` — Ratcliff/Obershelp, **not**
-Levenshtein.
-
 The model emits a name list inside an XML tag
 (``<alphabetical_sorted>`` on turn 1, ``<combined_alphabetical_sorted>``
-on later turns). If multiple tag blocks appear in one response, all
-subsequent ones must strictly improve, else the turn scores 0; only
-the last attempt's score counts. This matches verifiers verbatim.
+on later turns). Similarity is ``difflib.SequenceMatcher.ratio()`` on
+``"\\n".join(lower(stripped(names)))`` — Ratcliff/Obershelp.
+
+If multiple tag blocks appear in one response, all subsequent ones
+must strictly improve, else the turn scores 0; only the last attempt's
+score counts.
 """
 
 from __future__ import annotations

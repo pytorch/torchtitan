@@ -174,8 +174,8 @@ class Provisioner:
     def allocate(self, num_gpus: int) -> Callable[[], None]:
         if num_gpus > self.available:
             raise RuntimeError(
-                f"Requested {num_gpus} GPUs but only {self.available} available "
-                f"(total={self.total_gpus}, allocated={self.next_gpu})"
+                f"Requested {num_gpus} GPUs; only {self.available} of "
+                f"{self.total_gpus} free."
             )
         gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
         self.next_gpu += num_gpus

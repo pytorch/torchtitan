@@ -281,6 +281,6 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
             warmup_steps=4,
             checkpoint_interval=50,
         ),
-        generator=_generator(gen_tp=2, max_tokens=768),
+        generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
         replay_buffer=_replay(batch_size=8, max_buffer_size=512),
     )

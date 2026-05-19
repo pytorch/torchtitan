@@ -6,18 +6,9 @@
 
 """Token-level adapter around a :class:`MessageEnv`.
 
-Owns four terminal cases the env author shouldn't have to handle:
-
-- **parse failure** — ``renderer.parse_response`` raised → ``EnvStep(status=ERROR)``.
-- **length-stop** — ``finish_reason == "length"`` → ``EnvStep(status=TRUNCATED)``.
-- **context overflow** — next prompt + generation reserve exceeds
-  ``max_trajectory_tokens`` → ``EnvStep(status=TRUNCATED)``.
-- **step timeout** — ``env.step`` doesn't return inside ``step_timeout_s``
-  → ``EnvStep(status=ERROR)``.
-
-Tokenization runs in :func:`asyncio.to_thread` so N concurrent rollouts
-on one event loop can render in parallel (HF fast tokenizers release
-the GIL during Rust encode).
+Owns the four terminal cases (parse failure, length-stop, context
+overflow, step timeout) so the env author writes message-level game
+logic and ``TokenEnv`` translates it into a uniform :class:`EnvStep`.
 """
 
 from __future__ import annotations

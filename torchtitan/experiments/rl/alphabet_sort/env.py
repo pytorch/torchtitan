@@ -7,15 +7,10 @@
 """AlphabetSortEnv — multi-turn name-sorting MessageEnv.
 
 Each episode introduces ``num_turns`` batches of CamelCase names; the
-model must respond with the *cumulative* sorted list at each turn,
-marking the newly-introduced names with ``// new name!``. Reward is
-the sequence-similarity score (Ratcliff/Obershelp) of the model's
-extracted XML tag content against the expected sorted prefix,
-aggregated across turns per ``power_per_turn``.
-
-Reproduces prime-rl's ``examples/alphabet_sort`` env (in turn ported
-from verifiers' ``environments/alphabet_sort/alphabet_sort.py``).
-Single deterministic local name pool — no network access required.
+model responds with the cumulative sorted list at each turn, marking
+new names with ``// new name!``. Reward is the Ratcliff/Obershelp
+similarity of the model's tagged content against the expected sorted
+prefix, aggregated across turns per ``power_per_turn``.
 """
 
 from __future__ import annotations

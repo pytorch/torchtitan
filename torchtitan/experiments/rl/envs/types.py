@@ -4,23 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Environment contract.
-
-The rollout loop talks to environments via three small types and one
-``Protocol``. Each env instance is **single-use**: the controller
-constructs one per rollout, drives it through ``reset → step → step → …``,
-and discards it.
-
-Building envs from dataset rows is the ``EnvBuilder`` / ``EnvDataset``
-side: ``EnvDataset.sample_groups`` returns ``EnvExample`` rows, and
-``EnvBuilder.make_envs(example, group_size=G)`` instantiates a group of
-``G`` sibling envs for GRPO group-mean centering.
-
-Token-level concerns (parse failure, length-stop, context overflow,
-step timeout) live in ``envs.token_env.TokenEnv`` — the env author
-writes message-level game logic and the adapter wraps it for the
-rollout driver.
-"""
+"""Environment contract: ``MessageEnv`` + the dataset/builder side."""
 
 from __future__ import annotations
 

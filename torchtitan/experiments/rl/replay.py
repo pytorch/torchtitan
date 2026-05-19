@@ -4,19 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Rollout -> :class:`ReplaySample` conversion + the :class:`ReplayBuffer`.
-
-Three pieces:
-
-- :func:`rollout_to_replay_samples` — walk a multi-turn rollout and
-  emit one :class:`ReplaySample` per contiguous prefix-runnable span.
-- :func:`compute_advantages` — group-mean baseline; returns
-  ``{(group_id, sample_idx): advantage}``.
-- :class:`ReplayBuffer` — bounded FIFO held on the controller (plain
-  Python class, not a Monarch actor). Producer rollout tasks and the
-  consumer training task share it through :class:`asyncio.Condition`
-  so the trainer awaits until samples land rather than sleep-polling.
-"""
+"""Rollout-to-sample conversion + the in-process FIFO replay buffer."""
 
 from __future__ import annotations
 
@@ -36,9 +24,8 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Pure functions
-# ---------------------------------------------------------------------------
+class BufferClosedError(RuntimeError):
+    """Raised by ``ReplayBuffer.sample`` when ``close`` fires mid-wait."""
 
 
 def rollout_to_replay_samples(r: RolloutOutput) -> list[ReplaySample]:
@@ -227,7 +214,3 @@ class ReplayBuffer(Configurable):
             (s for s in self._buffer if s.policy_version >= cutoff),
             maxlen=self.config.max_buffer_size,
         )
-
-
-class BufferClosedError(RuntimeError):
-    """Raised by ``ReplayBuffer.sample`` when ``close`` fires mid-wait."""
