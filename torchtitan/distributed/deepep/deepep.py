@@ -20,7 +20,13 @@ from torch.utils._python_dispatch import _disable_current_modes
 try:
     from deep_ep import Buffer
 
-    from deep_ep.utils import EventHandle, EventOverlap
+    try:
+        from deep_ep.utils import EventHandle, EventOverlap
+    except ImportError:
+        # Compatibility fallback for DeepEP versions where EventOverlap
+        # is not re-exported from deep_ep.utils.__init__.
+        from deep_ep.utils import EventHandle
+        from deep_ep.utils.event import EventOverlap
 except ImportError as e:
     raise ImportError(
         "DeepEP is required for this module. "
