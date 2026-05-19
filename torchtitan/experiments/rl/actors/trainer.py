@@ -309,6 +309,36 @@ class PolicyTrainer(Actor, Configurable):
             )
         policy_logprobs = compute_logprobs(logits, token_ids)  # [1, T-1]
 
+        # TODO(nan-debug): remove once AlphabetSort 4B is reliably stable.
+        # Pinpoint which input is non-finite when the loss explodes.
+        if (
+            logger.isEnabledFor(logging.DEBUG)
+            or not torch.isfinite(policy_logprobs).all()
+        ):
+            with torch.no_grad():
+                logger.warning(
+                    "nan-debug: logits finite=%s min=%s max=%s | "
+                    "policy_logprobs finite=%s min=%s max=%s | "
+                    "behavior_logprobs finite=%s min=%s max=%s | "
+                    "advantages_per_token finite=%s min=%s max=%s | "
+                    "loss_mask sum=%d | seq_lens[0:3]=%s max_seq_len=%d",
+                    torch.isfinite(logits).all().item(),
+                    float(logits.min()),
+                    float(logits.max()),
+                    torch.isfinite(policy_logprobs).all().item(),
+                    float(policy_logprobs.min()),
+                    float(policy_logprobs.max()),
+                    torch.isfinite(behavior_logprobs).all().item(),
+                    float(behavior_logprobs.min()),
+                    float(behavior_logprobs.max()),
+                    torch.isfinite(advantages_per_token).all().item(),
+                    float(advantages_per_token.min()),
+                    float(advantages_per_token.max()),
+                    int(loss_mask.sum().item()),
+                    seq_lens[:3],
+                    max_seq_len,
+                )
+
         with sl.log_trace_span("loss_fn"):
             loss_out = self.loss_fn(
                 policy_logprobs=policy_logprobs,
@@ -329,6 +359,19 @@ class PolicyTrainer(Actor, Configurable):
             num_global_valid_tokens=num_global_valid_tokens_t,
         )
 
+        # Peak memory after forward+backward — useful to size batch.
+        mem_alloc_gb = torch.tensor(
+            torch.cuda.max_memory_allocated(device) / 1e9,
+            device=device,
+            dtype=torch.float32,
+        )
+        mem_reserved_gb = torch.tensor(
+            torch.cuda.max_memory_reserved(device) / 1e9,
+            device=device,
+            dtype=torch.float32,
+        )
+        torch.cuda.reset_peak_memory_stats(device)
+
         sum_reduced_metrics = {
             **loss_out.sum_metrics,
             "bit_wise/logprob_diff/mean": drift.logprob_diff_mean,
@@ -337,6 +380,8 @@ class PolicyTrainer(Actor, Configurable):
         max_reduced_metrics = {
             **loss_out.max_metrics,
             "bit_wise/logprob_diff/max": drift.logprob_diff_max,
+            "memory/trainer/peak_allocated_gb": mem_alloc_gb,
+            "memory/trainer/peak_reserved_gb": mem_reserved_gb,
         }
         return self._reduce_forward_backward_metrics(
             sum_reduced_metrics=sum_reduced_metrics,

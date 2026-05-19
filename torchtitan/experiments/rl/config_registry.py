@@ -348,31 +348,28 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
-    """AlphabetSort acceptance gate — Qwen3-4B-Instruct-2507, 25 steps.
+    """AlphabetSort gate — Qwen3-4B-Instruct-2507, 25 steps, 2 GPUs.
 
-    Mirrors prime-rl's recipe
+    Single-GPU trainer + single-GPU generator (TP=1 both) to fit the
+    Opus 2-GPU budget. Mirrors prime-rl's recipe
     (``frameworks/prime-rl/examples/alphabet_sort/rl.toml``) as closely
-    as a full-finetune (no LoRA) torchtitan run can:
+    as a full-finetune (no LoRA) 2-GPU run can:
 
     | knob | prime-rl | here | reason for delta |
     | --- | --- | --- | --- |
     | model | Qwen3-4B-Instruct-2507 | same | identical |
-    | lr | 1e-5 (LoRA) | 5e-6 | LoRA-equivalent step size is ~2x our full-FT |
-    | optimizer | AdamW (default) | AdamW | identical |
-    | weight_decay | 0.01 (default) | 0.01 (titan default) | identical |
-    | max_norm | 1.0 (default) | 1.0 (titan default) | identical |
-    | batch_size | 512 prompts | 8 prompts (=32 rollouts on bs=4) | OOMs on 2xH100 full-FT at 512 |
+    | lr | 1e-5 (LoRA) | 5e-6 | LoRA-equivalent step ~2x our full-FT |
+    | batch_size | 512 prompts | 4 prompts | full-FT 4B fits batch=4 in 1xH100 |
     | rollouts_per_example | 8 | 8 | identical |
     | max_completion_tokens | 768 | 768 | identical |
     | min/max_turns | 3/5 | 3/5 | identical |
+    | similarity_power (train) | 4 | 4 | identical |
     | power_per_turn | false | false | identical |
-    | similarity_power (train) | (default 4) | 4 | identical |
-    | similarity_power (eval) | 8 | 8 | identical |
-    | loss | DPPO+KL (kl_tau=1e-3) | DPPO+KL (kl_tau=1e-3) | identical |
-    | num_rollout_tasks | n/a (sync) | 8 | stress-test gen parallelism per Felipe's note |
+    | loss | DAPO | DAPO | identical (clip 0.2/0.28, dual c=3.0) |
+    | num_rollout_tasks | sync | 4 | concurrent producers feeding the buffer |
 
-    25 steps is a fast first-pass; once stable, bump to 100 for the
-    full prime-rl reproduction (0.30 -> ~0.85).
+    25 steps as a fast first-pass; bump to 100 for the full prime-rl
+    reproduction (0.30 -> ~0.85) once 25 looks healthy.
     """
     return RLTrainer.Config(
         model_spec=model_registry("4B", attn_backend="varlen"),
@@ -380,9 +377,9 @@ def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
             "torchtitan/experiments/rl/example_checkpoint/Qwen3-4B-Instruct-2507"
         ),
         num_steps=25,
-        num_prompts_per_step=8,
+        num_prompts_per_step=4,
         rollout_group_size=8,
-        num_rollout_tasks=8,
+        num_rollout_tasks=4,
         max_rollout_turns=5,
         num_validation_samples=20,
         log_samples=True,
@@ -418,11 +415,11 @@ def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
             max_generation_tokens=768,
         ),
         trainer=_trainer(
-            train_tp=2,
+            train_tp=1,
             lr=5e-6,
             warmup_steps=4,
             checkpoint_interval=25,
         ),
-        generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
+        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.7),
         replay_buffer=_replay(batch_size=4, max_buffer_size=512),
     )

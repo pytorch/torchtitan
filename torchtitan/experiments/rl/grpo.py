@@ -98,14 +98,34 @@ logger = logging.getLogger(__name__)
 class Provisioner:
     """Allocates non-overlapping GPU ranges for Monarch proc meshes.
 
-    Trainer and generator run on disjoint GPU meshes (e.g. trainer on
-    0..3, generator on 4..7 single-host). ``allocate(n)`` returns a
-    bootstrap callable that sets ``CUDA_VISIBLE_DEVICES`` before CUDA
-    initializes in the spawned process.
+    Trainer and generator run on disjoint GPU meshes. ``allocate(n)``
+    returns a bootstrap callable that sets ``CUDA_VISIBLE_DEVICES``
+    before CUDA initializes in the spawned process.
+
+    Honors the parent process's ``CUDA_VISIBLE_DEVICES`` so multiple
+    tenants can co-exist on one host — e.g. with
+    ``CUDA_VISIBLE_DEVICES=4,5`` in the parent shell, ``total_gpus``
+    defaults to 2 and ``allocate(1)`` returns the physical GPU id ``4``
+    (not the logical ``0``), preventing a clash with another job on
+    physical GPUs 0-3.
     """
 
-    def __init__(self, total_gpus: int = 8) -> None:
-        self.total_gpus = total_gpus
+    def __init__(self, total_gpus: int | None = None) -> None:
+        # Pick up the parent's visible GPU list at init time; fall back
+        # to all 8 if unset (single-tenant host).
+        parent_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if parent_cvd:
+            self._visible: list[str] = [
+                g.strip() for g in parent_cvd.split(",") if g.strip()
+            ]
+        else:
+            self._visible = [str(i) for i in range(total_gpus or 8)]
+        if total_gpus is not None and total_gpus > len(self._visible):
+            raise RuntimeError(
+                f"Requested total_gpus={total_gpus} but parent only exposes "
+                f"{len(self._visible)} GPUs (CUDA_VISIBLE_DEVICES={parent_cvd!r})."
+            )
+        self.total_gpus = total_gpus if total_gpus is not None else len(self._visible)
         self.next_gpu = 0
 
     @property
@@ -118,11 +138,14 @@ class Provisioner:
                 f"Requested {num_gpus} GPUs; only {self.available} of "
                 f"{self.total_gpus} free."
             )
-        gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
+        # Map logical slots to the parent's physical GPU ids so the
+        # spawned worker doesn't accidentally land on a GPU the parent
+        # hid (e.g. another tenant's GPU 0).
+        gpu_ids = self._visible[self.next_gpu : self.next_gpu + num_gpus]
         self.next_gpu += num_gpus
 
         def _bootstrap() -> None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
             # TODO(monarch): Remove once concurrent-import-during-unpickling is fixed.
             import torch  # noqa: F401
 
@@ -821,12 +844,15 @@ class RLTrainer(Configurable):
                     shutdown.set()
                     break
                 logger.info(
-                    "Step %2d | Loss: %+.4f | ratio_clip=%.3f | grad_norm=%.3f | time=%.1fs",
+                    "Step %2d | Loss: %+.4f | ratio_clip=%.3f | grad_norm=%.3f | "
+                    "time=%.1fs | trainer_mem alloc=%.1fGB reserved=%.1fGB",
                     self._train_step,
                     metrics.get("loss/mean", 0.0),
                     metrics.get("loss/ratio/clipped_frac", 0.0),
                     metrics.get("train/grad_norm/mean", 0.0),
                     step_time,
+                    metrics.get("memory/trainer/peak_allocated_gb", 0.0),
+                    metrics.get("memory/trainer/peak_reserved_gb", 0.0),
                 )
 
         # Fail-fast: any task error triggers shutdown.
