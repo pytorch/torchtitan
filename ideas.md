@@ -294,6 +294,16 @@
   Planned source/config changes: Restore `Float8LinearConverter` in `qwen3_14b()` and remove `filter_fqns=["auto_filter_small_kn"]`.
   Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is slower training if extra small linear layers add dynamic quantization overhead or harm numerics.
+  Result: discarded at source state `582d685`; 7,814 tps, MFU N/A, 129.0 GiB. Same-batch throughput is worse, but memory headroom is much larger.
+
+- Idea: FP8 rowwise without auto-filter local batch size 8
+  Current best source commit: 5681e36
+  Source: memory-headroom follow-up from broad FP8 conversion
+  Expected mechanism: Broad FP8 conversion is slower at local batch 5 but uses only 129.0 GiB. Raising local batch size to 8 may convert that memory headroom into enough extra tokens per step to overcome the dynamic quantization overhead.
+  Supporting evidence: The current best auto-filter FP8 path uses 168.7 GiB at local batch 5. The broad FP8 path uses 128.96 GiB at the same batch, leaving about 39.8 GiB of headroom on B200.
+  Planned source/config changes: None beyond the no-auto-filter FP8 source from `582d685`.
+  Planned command or config overrides: Broad FP8 command with `--training.local_batch_size=8`, keeping `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are OOM if activation scaling is nonlinear, or worse numerics/throughput from broader FP8 conversion.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

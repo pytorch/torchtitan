@@ -978,6 +978,35 @@ Interpretation:
 - MXFP8 is not currently runnable for this Qwen3 14B command and installed TorchAO/PyTorch stack.
 - Restore to the FP8 rowwise best before continuing. The next FP8 variant is to remove `auto_filter_small_kn` and convert all dimension-compatible linear layers.
 
+## Experiment 33: FP8 Rowwise Without Auto-Filter, Local Batch 5
+
+Source state: `582d685`.
+
+Source/config change:
+
+- `qwen3_14b()` restored `Float8LinearConverter.Config(recipe_name="rowwise", model_compile_enabled=True)` without `filter_fqns=["auto_filter_small_kn"]`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run33-fp8-rowwise-no-auto-filter-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,814, below the 8,469 current best.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 128.96 GiB, 72.31%.
+- Loss moved from 12.42634 at step 1 to 10.49628 at step 10; finite and decreasing.
+- The run emitted an FSDP warning that `FSDPFloat8Linear` returned a view tensor, which can be risky for in-place users.
+
+Interpretation:
+
+- Broad FP8 conversion is slower at the same batch size, so auto-filtering was important for throughput.
+- However, broad conversion also reduces peak memory by about 39.8 GiB versus the current best, leaving room to test a larger local batch.
+- The next direct follow-up is local batch size 8 on the no-auto-filter FP8 path to see whether extra tokens per step can amortize the broader-conversion overhead.
+
 ## Manager Review After Experiment 29
 
 Current best:
