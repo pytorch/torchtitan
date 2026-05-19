@@ -200,3 +200,13 @@
   Planned source/config changes: Add the existing `apply_ac(model, ac_config, model_compile_enabled=...)` hook before compile and FSDP wrapping in Qwen3 parallelize.
   Planned command or config overrides: Current-best command with `--training.local_batch_size=6 --activation_checkpoint.mode=selective`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no OOM. Risk is selective AC overhead still outweighing the larger batch.
+  Result: discarded at source state `a593f3a`; 7,701 tps and 91.7 GiB. It fixed memory but was slower.
+
+- Idea: selective activation checkpointing with local batch 10
+  Current best source commit: a593f3a
+  Source: follow-up from selective AC memory headroom
+  Expected mechanism: Selective AC local batch 6 used only 91.7 GiB. Raising local batch size to 10 should use the memory headroom and may amortize selective AC recompute overhead enough to beat the no-AC local-batch-5 best.
+  Supporting evidence: TP batch scaling improved from local batch 5 to 8 but was communication-limited; selective AC avoids TP communication and has more memory headroom than TP batch 8. The risk threshold is memory, not correctness, because selective AC batch 6 trained normally.
+  Planned source/config changes: None beyond the existing AC hook source.
+  Planned command or config overrides: Selective AC compile+BF16 command with `--training.local_batch_size=10`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and memory below the OOM cliff. Risk is that recompute cost still dominates or batch 10 exceeds memory.

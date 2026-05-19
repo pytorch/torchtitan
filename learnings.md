@@ -588,3 +588,33 @@ Interpretation:
 - The async TP knob was enabled but did not find useful fusion patterns for this Qwen3 DTensor graph.
 - TP=2 remains useful as a memory-reduction path but is not the throughput winner on this 8xB200, 10-step objective.
 - Current best remains no-TP FSDP with compile, BF16, and local batch size 5: 8,391 tps, 35.06% MFU, 168.7 GiB.
+
+## Experiment 18: Selective AC, Compile+BF16 Local Batch 6
+
+Source state: `a593f3a`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --activation_checkpoint.mode=selective --dump_folder=outputs/autoresearch/may19-qwen3-14b/run18-selective-ac-compile-bf16-lbs6 > run.log 2>&1
+```
+
+What changed:
+
+- Added the existing `apply_ac` hook to Qwen3 parallelization.
+- Overrode Qwen3 14B's default full AC mode to selective AC.
+- Raised local batch size from the current best's 5 to 6.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,701, below the 8,391 current best.
+- Step 10 MFU: 32.17%.
+- Step 10 peak memory: 91.66 GiB, 51.40%.
+- Loss moved from 12.34556 at step 1 to 8.54983 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Selective AC fixes the local-batch-6 OOM and gives large memory headroom.
+- At batch size 6, the recompute overhead dominates the extra tokens.
+- The remaining question is whether a much larger local batch can amortize the selective AC overhead before hitting the memory limit.
