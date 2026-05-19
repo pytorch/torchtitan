@@ -233,3 +233,13 @@
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is OOM if 0.9 saves too little memory.
   Result: invalid at source state `14a0c41`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
   Result: invalid again at source state `7ef6201`; OOM was contaminated by a transient external 151 GiB process on GPU 0. Retry on a clear node.
+  Result: discarded on valid retry at source state `78002e0`; 8,331 tps, 34.81% MFU, 146.2 GiB, finite decreasing loss. Close, but still below the 8,391 tps best.
+
+- Idea: memory-budget activation checkpointing budget 0.95 with compile, BF16, and local batch 6
+  Current best source commit: 78002e0
+  Source: direct tuning of memory-budget AC after valid 0.8 and 0.9 runs
+  Expected mechanism: A 0.95 budget may reduce rematerialization overhead compared with 0.9 while preserving enough checkpointing to avoid the no-AC local-batch-6 loss-path OOM.
+  Supporting evidence: Budget 0.8 reached 8,312 tps and budget 0.9 reached 8,331 tps, both at 146.2 GiB. The best is only 60 tps higher, and reported peak memory is still well below the no-AC local-batch-5 memory.
+  Planned source/config changes: None.
+  Planned command or config overrides: Same memory-budget AC local-batch-6 command with `--activation_checkpoint.memory_budget=0.95`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is OOM if the compiler stores too many activations or no speed change if the selected rematerialization plan is unchanged.

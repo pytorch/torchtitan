@@ -733,3 +733,27 @@ Interpretation:
 
 - This is another contaminated run. Do not use it to judge budget 0.9.
 - Retry budget 0.9 once the node is clear.
+
+## Experiment 24: Memory-Budget AC 0.9 Retry 2, Compile+BF16 Local Batch 6
+
+Source state: `78002e0`, using the `a593f3a` AC-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run24-memory-budget-ac09-compile-bf16-lbs6-retry2 > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,331, below the 8,391 current best.
+- Step 10 MFU: 34.81%.
+- Step 10 peak memory: 146.23 GiB, 81.99%.
+- Loss moved from 12.23870 at step 1 to 6.82095 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Memory-budget AC remains close but does not beat the no-AC local-batch-5 best.
+- Budget 0.9 is only 19 tps faster than budget 0.8, and both report the same peak memory.
+- The next direct test is budget 0.95: if the compiler saves fewer activations, it may recover the remaining overhead while still fitting.
