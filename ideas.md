@@ -284,6 +284,16 @@
   Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are torchao/MXFP8 compatibility, slower dynamic quantization overhead, or numerical instability.
   Result: cublas recipe crashed at source state `ed317a2`; installed TorchAO does not recognize `mxfp8_cublas`. Retry the same MXFP8 line with the valid default `mxfp8_rceil` recipe.
+  Result: default rceil recipe crashed at source state `92e0502`; compiled forward failed in `torchao.mxfp8_quantize` with `RuntimeError: invalid argument`. Abandon MXFP8 on this stack for now.
+
+- Idea: FP8 rowwise without auto-filter on current best
+  Current best source commit: 5681e36
+  Source: Manager review after FP8 win
+  Expected mechanism: The H100-derived `auto_filter_small_kn` heuristic may skip Qwen3 linear layers that are still profitable on B200. Removing it converts every dimension-compatible linear layer to Float8 rowwise and may improve GEMM coverage.
+  Supporting evidence: FP8 rowwise with auto-filter improved throughput to 8,429, and with flight recorder disabled to 8,469. MXFP8 is not runnable on this stack, so the next quantization search should stay within the working Float8 path.
+  Planned source/config changes: Restore `Float8LinearConverter` in `qwen3_14b()` and remove `filter_fqns=["auto_filter_small_kn"]`.
+  Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is slower training if extra small linear layers add dynamic quantization overhead or harm numerics.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

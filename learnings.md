@@ -953,6 +953,31 @@ Interpretation:
 - This installed TorchAO build does not support the docs-mentioned `mxfp8_cublas` recipe.
 - The MXFP8 line is not exhausted; retry with the valid default `mxfp8_rceil` recipe.
 
+## Experiment 32: MXFP8 Rceil Recipe
+
+Source state: `92e0502`.
+
+Source/config change:
+
+- `qwen3_14b()` used `MXFP8LinearConverter.Config(model_compile_enabled=True)`, which selects the default `mxfp8_rceil` recipe.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run32-mxfp8-rceil-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run built the model and reached compiled forward, then failed before step 1 completed.
+- Error: `RuntimeError: invalid argument` from `torch.ops.torchao.mxfp8_quantize.default(..., 'rceil')`.
+
+Interpretation:
+
+- MXFP8 is not currently runnable for this Qwen3 14B command and installed TorchAO/PyTorch stack.
+- Restore to the FP8 rowwise best before continuing. The next FP8 variant is to remove `auto_filter_small_kn` and convert all dimension-compatible linear layers.
+
 ## Manager Review After Experiment 29
 
 Current best:
