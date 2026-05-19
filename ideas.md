@@ -273,6 +273,43 @@
   Planned source/config changes: None.
   Planned command or config overrides: FP8 best command plus `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,429 with finite decreasing loss and similar memory. Risk is no effect or a small slowdown; timeout flight-recorder diagnostics are disabled for the run.
+  Result: kept at source state `477f662`; 8,469 tps, 35.39% MFU, 168.7 GiB, finite decreasing loss. This is the new best command.
+
+- Idea: replace Float8 rowwise with MXFP8 linear converter
+  Current best source commit: 5681e36
+  Source: B200 quantization follow-up
+  Expected mechanism: MXFP8 is targeted at Blackwell/B200 tensor cores and may accelerate the same dense linear GEMMs more than Float8 rowwise dynamic quantization while preserving the compile+FSDP layout.
+  Supporting evidence: Float8 rowwise improved throughput from 8,391 to 8,429, and the current best with flight recorder disabled is 8,469. TorchTitan's MXFP8 docs state B200 support and expected dense-GEMM speedups; Qwen3 14B dimensions are multiples of 32 for the major linear layers.
+  Planned source/config changes: Edit only `qwen3_14b()` to replace `Float8LinearConverter` with `MXFP8LinearConverter` using `model_compile_enabled=True`; keep the rest of the source and command unchanged.
+  Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are torchao/MXFP8 compatibility, slower dynamic quantization overhead, or numerical instability.
+
+- Idea: profile FP8 best after flight-recorder test
+  Current best source commit: 5681e36
+  Source: profile follow-up after new best
+  Expected mechanism: FP8 changed the matmul implementation enough that the old compile+BF16 profile may no longer identify the next bottleneck. A profile should show whether the remaining limit is still GEMM, NCCL collectives, attention, loss/lm_head, allocator pressure, or launch overhead.
+  Supporting evidence: Run29 improved tps from 8,391 to 8,429 with unchanged 168.7 GiB peak memory. The improvement is small but real, and the next source change should be informed by where FP8 did and did not help.
+  Planned source/config changes: None.
+  Planned command or config overrides: Profile whichever FP8 command is best after the flight-recorder test: add `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1` to the best FP8 command.
+  Success criteria and expected risk: Success is trace generation plus a new bottleneck note in `learnings.md`. Profiled tps is diagnostic only and should not be ranked against unprofiled candidates.
+
+- Idea: MXFP8 cublas linear converter on current best
+  Current best source commit: 5681e36
+  Source: quantization follow-up and Blackwell roofline
+  Expected mechanism: MXFP8 is designed for SM100/B200 and uses block-scaled FP8 kernels. Replacing the kept Float8 rowwise converter with `MXFP8LinearConverter` may improve dense GEMM throughput more than the H100-oriented rowwise FP8 recipe while keeping the same compile+BF16 FSDP layout.
+  Supporting evidence: The run29 FP8 win shows quantized GEMMs can help this Qwen3 workload. TorchTitan's MXFP8 docs specifically target B200 dense models, and the current hardware is 8x B200. Memory remains the immediate batch-size limiter, so the next throughput path should continue attacking compute efficiency rather than raising batch size.
+  Planned source/config changes: Edit only `qwen3_14b()` to replace the Float8 converter with `MXFP8LinearConverter.Config(recipe_name="mxfp8_cublas", model_compile_enabled=True)`, with the required import from `torchtitan.components.quantization`.
+  Planned command or config overrides: Current FP8-best command shape unchanged: `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5`.
+  Success criteria and expected risk: Success is tps above 8,429 with finite decreasing loss. Risks are MXFP8 compile/runtime incompatibility, worse short-run loss, or slower kernels if conversion overhead exceeds GEMM speedup.
+
+- Idea: FP8 rowwise without auto-filter
+  Current best source commit: 5681e36
+  Source: quantization coverage follow-up
+  Expected mechanism: The kept FP8 run used `auto_filter_small_kn`, whose thresholds are based on H100 microbenchmarks. On B200, some Qwen3 linear layers that were auto-filtered may now benefit from FP8 tensor cores; removing the auto-filter tests whether broader conversion raises throughput.
+  Supporting evidence: Run29 logs show `_auto_filter_for_recipe` was active and the converter improved throughput without changing peak memory. Because B200 has stronger FP8 throughput than H100, the auto-filter may be conservative for this machine.
+  Planned source/config changes: Edit only `qwen3_14b()` to keep `Float8LinearConverter.Config(recipe_name="rowwise", model_compile_enabled=True)` but remove `"auto_filter_small_kn"` from `filter_fqns`.
+  Planned command or config overrides: Current FP8-best command shape unchanged: `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5`.
+  Success criteria and expected risk: Success is tps above 8,429 with finite decreasing loss and no memory regression. Risk is slower throughput if extra dynamically quantized linears are too small to amortize quantization overhead.
 
 - Idea: memory-budget AC 0.9 with local batch 7
   Current best source commit: f6ae44e

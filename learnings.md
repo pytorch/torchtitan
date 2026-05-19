@@ -902,3 +902,49 @@ Interpretation:
 - FP8 rowwise conversion gives a small but real throughput win without changing the memory boundary.
 - Structured rank 0 timings show a modest end-to-end improvement versus run10: average `step_end` decreased from 2,440.60 ms to 2,429.64 ms, and last `step_end` decreased from 3,360.20 ms to 3,319.71 ms.
 - Since memory is still the immediate limiter and FP8 did not reduce peak memory, local-batch-6 remains risky. The next low-risk follow-up is to add the previously close `--comm.trace_buf_size=0` command-only knob on top of the FP8 best.
+
+## Experiment 30: Disable NCCL Flight Recorder on FP8 Best
+
+Source state: `477f662`, using the FP8 rowwise converter source from `5681e36`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run30-fp8-rowwise-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep, new best.
+- Step 10 `tps`: 8,469, above the previous 8,429 FP8 best.
+- Step 10 MFU: 35.39%.
+- Step 10 peak memory: 168.74 GiB, 94.61%.
+- Loss moved from 12.56713 at step 1 to 9.04841 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Disabling the flight recorder is beneficial on the FP8 path even though it was just below best before FP8.
+- Structured rank 0 timings improved versus run29: average `step_end` decreased from 2,429.64 ms to 2,418.11 ms, and last `step_end` decreased from 3,319.71 ms to 3,279.57 ms.
+- The current best command is FP8 rowwise, compile, BF16 training dtype, local batch size 5, and `--comm.trace_buf_size=0`.
+- The next distinct compute-efficiency variant is MXFP8 linear conversion on B200, replacing Float8 rowwise with the B200-targeted MXFP8 converter.
+
+## Manager Review After Experiment 29
+
+Current best:
+
+- Source state `5681e36`.
+- Command shape: FP8 rowwise linear converter, compile enabled, BF16 training dtype, local batch size 5, TP/CP/PP/EP disabled, FSDP across 8 B200s.
+- Metrics: 8,429 tps, 35.22% MFU, 168.74 GiB peak memory, finite decreasing loss.
+
+Search state:
+
+- FP8 rowwise is the first successful compute-efficiency source change after compile+BF16. It improves throughput by 38 tps over run10 without changing the memory boundary.
+- Peak memory remains 94.61%, so no-AC local batch 6 is still expected to be risky. FP8 did not create meaningful batch-size headroom.
+- Run28 showed disabling NCCL flight recorder was close on the pre-FP8 best but did not win. Retesting it on the FP8 best is still valid as a single command-only follow-up, but if it does not win, flight-recorder overhead should be deprioritized.
+- The profile diagnosis should be refreshed after FP8 because the kernel mix changed. A profile should be diagnostic only and should not be ranked against unprofiled runs.
+
+Next implications:
+
+- After the queued FP8 + `--comm.trace_buf_size=0` run, profile whichever FP8 command is best unless the result clearly points to a different immediate bottleneck.
+- Try a B200-native MXFP8 linear converter as a distinct quantization hypothesis; docs claim MXFP8 is intended for Blackwell and can outperform plain FP8 on dense GEMMs.
+- If MXFP8 is not viable or is slower, refine the kept FP8 rowwise converter by changing conversion coverage rather than changing unrelated training knobs.
