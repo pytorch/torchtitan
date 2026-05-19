@@ -861,8 +861,17 @@ class RLTrainer(Configurable):
                     )
 
                 step_time = time.perf_counter() - step_start
-                if not math.isfinite(metrics.get("loss/mean", 0.0)):
-                    logger.error("Loss is NaN/Inf; training diverged")
+                # Trip fail-fast on NaN/Inf in *any* health-bearing metric.
+                # ``loss/mean`` catches a forward-side blow-up; ``grad_norm``
+                # catches a backward-side NaN that didn't surface in the
+                # loss scalar (e.g. bf16 underflow in an attention path).
+                health_metrics = {
+                    "loss/mean": metrics.get("loss/mean", 0.0),
+                    "train/grad_norm/mean": metrics.get("train/grad_norm/mean", 0.0),
+                }
+                bad = [k for k, v in health_metrics.items() if not math.isfinite(v)]
+                if bad:
+                    logger.error("Non-finite %s; training diverged", ", ".join(bad))
                     shutdown.set()
                     break
                 logger.info(

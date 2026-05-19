@@ -243,6 +243,7 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
         num_rollout_tasks=4,
         max_rollout_turns=8,
         num_validation_samples=20,
+        log_samples=True,
         # Same torch.compile aot_eager s59-empty-sources bug as the 1.7B
         # SumDigits config; disabled here too.
         compile=CompileConfig(enable=False),
@@ -277,7 +278,10 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
         ),
         trainer=_trainer(
             train_tp=2,
-            lr=1e-5,
+            # Lower than prime-rl's 1e-5 because our effective batch is
+            # 8 rather than 64; per-rollout step size needs the same
+            # scaling for stability. Step 3 -> 4 saw NaN at lr=1e-5.
+            lr=5e-6,
             warmup_steps=4,
             checkpoint_interval=50,
         ),
