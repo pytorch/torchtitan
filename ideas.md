@@ -140,3 +140,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current-best command with `--training.local_batch_size=6`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Main risk is OOM during first backward.
+  Result: crashed at source state `d26bddb`; OOM before completing step 1 in `lm_head(h_chunk)` inside `ChunkedCELoss`, with about 176.62 GiB already in use.
+
+- Idea: compile only model blocks, not loss
+  Current best source commit: d26bddb
+  Source: result-driven narrowing after batch-size boundary
+  Expected mechanism: The current best compiles both model blocks and the loss by default. Disabling loss compilation may reduce compile/runtime overhead or memory pressure in the output projection path while retaining the model-block speedup.
+  Supporting evidence: Batch size 6 OOMed in the compiled loss path at `lm_head(h_chunk)`, and the best command is close to the memory limit. The Qwen3 source compile hook only controls model-block compile; the existing core loss compile remains controlled by `compile.components`.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current-best command plus `--compile.components '["model"]'`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no memory regression. Risk is that compiled loss was beneficial and disabling it lowers throughput.

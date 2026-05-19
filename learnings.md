@@ -431,3 +431,27 @@ Roofline conclusion:
 
 - The current best is still mixed compute/communication bound, but memory is now the immediate constraint: 94.61% leaves little room for larger batches or no-reshard.
 - Local batch 6 is a reasonable boundary test because batch 5 improved throughput and remains barely below the memory warning threshold. It is expected to OOM unless compile memory behavior scales sublinearly.
+
+## Experiment 12: Compile+BF16 Local Batch 6
+
+Source state: `d26bddb`, using the `51369ea` compile-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run12-compile-bf16-lbs6 > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run initialized with local batch size 6, global batch size 48, and compile enabled for both loss and model blocks.
+- It OOMed before completing step 1 in `ChunkedCELoss`, at `lm_head(h_chunk)`.
+- The failing allocation was 892 MiB. The first-observed rank reported about 176.62 GiB already in use by the process, with only 117 MiB free on GPU 2.
+- No throughput, MFU, loss, or peak-memory metric was emitted.
+
+Interpretation:
+
+- Local batch 5 is the practical memory boundary for the current FSDP+compile+BF16 setup.
+- The OOM happens in the loss projection rather than in the optimizer, so increasing batch size further needs a real memory reduction or a different sharding strategy for the output projection/loss path.
+- Current best remains the compile+BF16 local-batch-5 command at 8,391 tps and 35.06% MFU.
