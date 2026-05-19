@@ -549,6 +549,15 @@
   Success criteria and expected risk: Keep if it beats 8,835 with finite decreasing loss; otherwise record as diagnostic variance/discard while preserving run59 as the best measured result.
   Result: discarded at source state `025f0c3`; 8,829 tps with finite decreasing loss, close to but below the 8,835 prefetch best.
 
+- Idea: profile prefetch flex best
+  Current best source commit: 7c1c351
+  Source: bottleneck refresh after FSDP prefetch became the best
+  Expected mechanism: Profiling the current best should show how much of the old NCCL bucket was hidden by explicit prefetch, and whether the next target should be GEMM, attention, loss/lm_head, remaining collectives, or CPU launch overhead.
+  Supporting evidence: The pre-prefetch flex profile showed about 1.80 s nvjet GEMMs, 0.94 s NCCL kernels, and 0.66 s flex attention kernels. Explicit prefetch improved throughput from 8,489 to 8,835 and reran at 8,829, so the bottleneck mix has likely changed.
+  Planned source/config changes: None; use current prefetch source with flex attention and no FP8 converter.
+  Planned command or config overrides: Add `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1` to the exact prefetch best command.
+  Success criteria and expected risk: Success is trace generation and a concrete bottleneck note in `learnings.md`. Profiled throughput is diagnostic only and should not be ranked against unprofiled candidates.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
