@@ -305,3 +305,35 @@ Interpretation:
 - Disabling FSDP resharding does not recover enough communication time to offset full AC recompute.
 - The communication bucket in the profile is meaningful, but this particular memory/communication tradeoff is not a path to the current objective.
 - Current best remains the FSDP-only source at `01d1f8e` / restored branch state.
+
+## Experiment 8: Enable Per-Block Compile
+
+Commit: `51369ea`
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --dump_folder=outputs/autoresearch/may19-qwen3-14b/run08-compile > run.log 2>&1
+```
+
+What changed:
+
+- Added a guarded `apply_compile(model, compile_config)` call in `parallelize_qwen3()`.
+- The hook only runs when `compile_config.enable` is true and `"model"` is in `compile_config.components`.
+- The command enabled the existing TorchTitan compile config; it also compiled the loss because the default compile components are `["model", "loss"]`.
+- No FSDP, AC, dtype, batch-size, sequence-length, optimizer, or parallelism changes.
+
+Result:
+
+- Status: keep, new current best.
+- Step 10 `tps`: 7,545, up from 7,254.
+- Step 10 MFU: 31.53%, up from 30.31%.
+- Step 10 peak memory: 153.72 GiB, down from 173.91 GiB.
+- Loss moved from 12.44588 at step 1 to 10.53577 at step 10; finite and decreasing.
+- Later-step fwd/bwd time dropped to about 1.12-1.16 s from about 1.60-1.63 s in the uncompiled best.
+- Optimizer time rose to about 35-41 ms from about 21-24 ms, but the fwd/bwd gain dominates.
+
+Interpretation:
+
+- Compile directly attacks the largest profile bucket and improves both throughput and memory. This is the new best source state.
+- Lower memory headroom reopens command-only follow-ups that were too risky from the uncompiled best, especially BF16 dtype or a small local batch increase.
