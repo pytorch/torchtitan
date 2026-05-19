@@ -139,57 +139,56 @@ class TestDiamondInheritance(unittest.TestCase):
             nn.Module.__init__ = orig_init
 
 
-class TestFromNnModule(unittest.TestCase):
-    """Tests for Module.from_nn_module utility."""
+class TestNnModuleWrappers(unittest.TestCase):
+    """Tests for native Module wrappers in nn_modules.py."""
 
     def test_is_subclass(self):
-        """Created class is subclass of both original and Module."""
-        Conv2d = Module.from_nn_module(nn.Conv2d)
+        """Wrapper class is subclass of both original and Module."""
+        from torchtitan.models.common.nn_modules import Conv2d
+
         self.assertTrue(issubclass(Conv2d, nn.Conv2d))
         self.assertTrue(issubclass(Conv2d, Module))
 
     def test_isinstance(self):
-        """Instance satisfies isinstance checks for both original and Module."""
-        Conv2d = Module.from_nn_module(nn.Conv2d)
-        m = Conv2d(3, 16, 3)
+        """Instance satisfies isinstance checks."""
+        from torchtitan.models.common.nn_modules import Conv2d
+
+        m = Conv2d.Config(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=3,
+        ).build()
         self.assertIsInstance(m, nn.Conv2d)
         self.assertIsInstance(m, Module)
 
-    def test_init_states_calls_reset_parameters(self):
-        """For classes with reset_parameters, init_states delegates to it."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
-        m = LayerNorm(32)
-        nn.init.zeros_(m.weight)
-        m.init_states()
-        self.assertTrue(torch.allclose(m.weight, torch.ones(32)))
-
     def test_init_states_noop_for_parameterless(self):
-        """For classes without reset_parameters, init_states is a no-op."""
-        GELU = Module.from_nn_module(nn.GELU)
-        m = GELU()
+        """Parameterless modules handle init_states without error."""
+        from torchtitan.models.common.nn_modules import GELU
+
+        m = GELU.Config(approximate="tanh").build()
         m.init_states()  # should not raise
 
-    def test_cache(self):
-        """Repeated calls return the same class object."""
-        cls1 = Module.from_nn_module(nn.Conv2d)
-        cls2 = Module.from_nn_module(nn.Conv2d)
-        self.assertIs(cls1, cls2)
-
     def test_forward_unchanged(self):
-        """Forward output is identical to original class."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
+        """Forward output is identical to plain nn module."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+
         torch.manual_seed(42)
         orig = nn.LayerNorm(16)
-        wrapped = LayerNorm(16)
+        wrapped = LayerNorm.Config(normalized_shape=16).build()
         wrapped.load_state_dict(orig.state_dict())
         x = torch.randn(2, 16)
         torch.testing.assert_close(orig(x), wrapped(x))
 
     def test_state_dict_unchanged(self):
-        """state_dict keys and values match the original class."""
-        Conv2d = Module.from_nn_module(nn.Conv2d)
+        """state_dict keys and values match the plain nn module."""
+        from torchtitan.models.common.nn_modules import Conv2d
+
         orig = nn.Conv2d(3, 16, 3)
-        wrapped = Conv2d(3, 16, 3)
+        wrapped = Conv2d.Config(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=3,
+        ).build()
         wrapped.load_state_dict(orig.state_dict())
         for key in orig.state_dict():
             self.assertIn(key, wrapped.state_dict())
@@ -197,14 +196,48 @@ class TestFromNnModule(unittest.TestCase):
                 orig.state_dict()[key], wrapped.state_dict()[key]
             )
 
+    def test_config_has_typed_fields(self):
+        """Config classes have proper typed fields."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+        from torchtitan.protocols.sharding import ShardingConfig
+
+        self.assertTrue(issubclass(LayerNorm.Config, Module.Config))
+        cfg = LayerNorm.Config(normalized_shape=16, eps=1e-5)
+        self.assertIsNone(cfg.sharding_config)
+        self.assertIsNone(cfg.param_init)
+
+        cfg = LayerNorm.Config(
+            normalized_shape=16,
+            sharding_config=ShardingConfig(),
+        )
+        self.assertIsInstance(cfg.sharding_config, ShardingConfig)
+
+    def test_config_build_propagates_sharding(self):
+        """Config.build propagates sharding_config to instance."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+        from torchtitan.protocols.sharding import ShardingConfig
+
+        sc = ShardingConfig()
+        instance = LayerNorm.Config(
+            normalized_shape=16,
+            eps=1e-5,
+            sharding_config=sc,
+        ).build()
+        self.assertIsInstance(instance, LayerNorm)
+        self.assertEqual(instance.normalized_shape, (16,))
+        self.assertEqual(instance.eps, 1e-5)
+        self.assertIs(instance._sharding_config, sc)
+
 
 class TestContainerInitStates(unittest.TestCase):
     """Tests for ModuleList, ModuleDict, Sequential init_states."""
 
     def test_module_list_init_states(self):
         """ModuleList.init_states initializes children."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
-        norms = ModuleList([LayerNorm(8) for _ in range(3)])
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        ln_cfg = LayerNorm.Config(normalized_shape=8)
+        norms = ModuleList([ln_cfg.build() for _ in range(3)])
         for n in norms:
             nn.init.zeros_(n.weight)
         norms.init_states()
@@ -213,8 +246,10 @@ class TestContainerInitStates(unittest.TestCase):
 
     def test_module_dict_init_states(self):
         """ModuleDict.init_states initializes children."""
-        LayerNorm = Module.from_nn_module(nn.LayerNorm)
-        norms = ModuleDict({"a": LayerNorm(8), "b": LayerNorm(8)})
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        ln_cfg = LayerNorm.Config(normalized_shape=8)
+        norms = ModuleDict({"a": ln_cfg.build(), "b": ln_cfg.build()})
         for n in norms.values():
             nn.init.zeros_(n.weight)
         norms.init_states()
@@ -223,8 +258,9 @@ class TestContainerInitStates(unittest.TestCase):
 
     def test_sequential_init_states(self):
         """Sequential.init_states recurses into children."""
-        GELU = Module.from_nn_module(nn.GELU)
-        seq = Sequential(GELU())
+        from torchtitan.models.common.nn_modules import GELU
+
+        seq = Sequential(GELU.Config().build())
         seq.init_states()  # should not raise
 
     def test_containers_are_module(self):

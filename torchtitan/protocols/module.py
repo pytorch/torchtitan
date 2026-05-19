@@ -21,12 +21,6 @@ from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 from torchtitan.protocols.types import NamedPlacement
 
 
-# Cache: maps nn.Module subclass -> created Module wrapper class.
-# Module classes are typically created at import time and live for
-# the process lifetime.
-_created_classes: dict[type, type] = {}
-
-
 class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
@@ -460,45 +454,6 @@ class Module(nn.Module, Configurable):
             grad_placements = resolve_placements(out_grad_named_placements, mesh)
             outputs = outputs.to_local(grad_placements=grad_placements)
         return outputs
-
-    @classmethod
-    def from_nn_module(cls, nn_module_cls: type[nn.Module]) -> type["Module"]:
-        """Create a ``Module``-protocol-compatible version of *nn_module_cls*.
-
-        The returned class inherits from ``(nn_module_cls, Module)`` and has the
-        same constructor signature as *nn_module_cls*.
-
-        * If *nn_module_cls* defines ``reset_parameters``, the injected
-          ``_init_self_parameters`` delegates to it.
-        * Otherwise ``_init_self_parameters`` is the inherited default from
-          ``Module``.
-
-        Results are cached so that repeated calls with the same class return
-        the identical class object.
-
-        Usage::
-
-            Conv2d = Module.from_nn_module(nn.Conv2d)
-            LayerNorm = Module.from_nn_module(nn.LayerNorm)
-            # Then use Conv2d / LayerNorm exactly like nn.Conv2d / nn.LayerNorm
-        """
-        if nn_module_cls in _created_classes:
-            return _created_classes[nn_module_cls]
-
-        attrs: dict[str, Any] = {}
-        if hasattr(nn_module_cls, "reset_parameters"):
-
-            def _init_self_parameters(self: Any) -> None:
-                self.reset_parameters()
-
-            attrs["_init_self_parameters"] = _init_self_parameters
-
-        name = f"Module({nn_module_cls.__name__})"
-        new_cls = type(name, (nn_module_cls, Module), attrs)
-        new_cls.__module__ = __name__
-        new_cls.__qualname__ = name
-        _created_classes[nn_module_cls] = new_cls
-        return new_cls
 
 
 class ModuleList(nn.ModuleList, Module):
