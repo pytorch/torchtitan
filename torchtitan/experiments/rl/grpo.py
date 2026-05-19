@@ -423,13 +423,17 @@ class RLTrainer(Configurable):
                 output_dir=config.dump_folder,
             )
 
-            # ReplayBuffer runs on the trainer mesh (cheap; just a deque).
-            self.replay_buffer = trainer_mesh.spawn(
+            # ReplayBuffer is a singleton (deque + RNG). Spawn on a
+            # dedicated single-proc mesh so add/sample serialize on the
+            # actor loop with no DP/TP fanout.
+            buffer_mesh = this_host().spawn_procs(per_host={"gpus": 1})
+            self._proc_meshes.append(buffer_mesh)
+            self.replay_buffer = buffer_mesh.spawn(
                 "replay_buffer",
                 ReplayBuffer,
                 config.replay_buffer,
             )
-            await self.replay_buffer.setup.call()
+            await self.replay_buffer.setup.call_one()
 
         # Initialize torchstore (used by trainer.push / generator.pull).
         with sl.log_trace_span("torchstore_init"):
@@ -586,6 +590,14 @@ class RLTrainer(Configurable):
         all_adv: list[float] = []
         seq_lens: list[int] = []
         for s in samples:
+            # Load-bearing invariant for the global-shift alignment: the
+            # first token of every sample MUST be unmasked (prompt). If
+            # this ever breaks (e.g., a future assistant-prefix env),
+            # cross-boundary positions would leak gradient.
+            assert s.loss_mask and s.loss_mask[0] == 0, (
+                f"loss_mask[0] must be 0 (got {s.loss_mask[:5]}); the global-"
+                "shift collate relies on every sample starting with a prompt token."
+            )
             all_ids.extend(s.token_ids)
             all_mask.extend(s.loss_mask)
             all_lp.extend(s.behavior_logprobs)
@@ -669,7 +681,7 @@ class RLTrainer(Configurable):
                     rollouts = await self._rollout_one_group(example)
                 samples = self._build_replay_samples(rollouts)
                 if samples:
-                    await self.replay_buffer.add.call(samples)
+                    await self.replay_buffer.add.call_one(samples)
 
                 # Light per-group logging — full metrics live in structured_logger.
                 if cfg.log_samples and local_step % 4 == 0:
@@ -679,10 +691,9 @@ class RLTrainer(Configurable):
         async def continuous_training() -> None:
             nonlocal train_step
             while train_step < num_steps and not shutdown.is_set():
-                buf_value = await self.replay_buffer.sample.call(
+                batches_or_none = await self.replay_buffer.sample.call_one(
                     curr_policy_version=train_step,
                 )
-                batches_or_none = self._get_rank_0_value(buf_value, has_gpus=False)
                 if batches_or_none is None:
                     await asyncio.sleep(0.05)
                     continue
