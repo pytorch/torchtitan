@@ -341,6 +341,13 @@ class VLLMGenerator(Actor, Configurable):
         # requests. We never reuse IDs because vLLM keeps a finished-set
         # internally even after we drain.
         self._next_request_id: int = 0
+        # Serializes concurrent ``generate_tokens`` invocations on the
+        # actor's event loop. Monarch's Direct dispatch lets multiple
+        # endpoint coroutines run concurrently; without this lock,
+        # two ``generate_tokens`` calls interleave ``engine.step``
+        # invocations, which corrupts vLLM's continuous-batching state
+        # and hangs NCCL on a subsequent TP collective.
+        self._engine_lock: asyncio.Lock | None = None
 
     @staticmethod
     def _set_determinism(debug: DebugConfig) -> None:
@@ -389,6 +396,11 @@ class VLLMGenerator(Actor, Configurable):
                 :class:`SamplingConfig`. ``seed`` comes from
                 ``config.debug.seed`` (not per-call).
         """
+        if not prompts:
+            return []
+        if self._engine_lock is None:
+            self._engine_lock = asyncio.Lock()
+
         sc = sampling_config or self.config.sampling
         params = SamplingParams(
             n=sc.n,
@@ -400,37 +412,39 @@ class VLLMGenerator(Actor, Configurable):
             logprobs=1,
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
-        if not prompts:
-            return []
 
-        engine_inputs = self._engine.renderer.render_cmpl(
-            [{"prompt_token_ids": p} for p in prompts]
-        )
-        first_id = self._next_request_id
-        self._next_request_id += len(prompts)
-        for i, engine_input in enumerate(engine_inputs):
-            self._engine.add_request(
-                request_id=str(first_id + i),
-                prompt=engine_input,
-                params=params,
+        # Serialize: concurrent generate_tokens invocations must not
+        # interleave engine.add_request / engine.step pairs (would
+        # corrupt vLLM's continuous-batching state across TP ranks).
+        async with self._engine_lock:
+            engine_inputs = self._engine.renderer.render_cmpl(
+                [{"prompt_token_ids": p} for p in prompts]
             )
+            first_id = self._next_request_id
+            self._next_request_id += len(prompts)
+            for i, engine_input in enumerate(engine_inputs):
+                self._engine.add_request(
+                    request_id=str(first_id + i),
+                    prompt=engine_input,
+                    params=params,
+                )
 
-        # Drain the engine in-process; yield between steps so other
-        # endpoints (sync_log_step, pull_model_state_dict) can land.
-        finished: dict[str, RequestOutput] = {}
-        target = {str(first_id + i) for i in range(len(prompts))}
-        with sl.log_trace_span("engine_steps"):
-            while target - finished.keys():
-                outputs = self._engine.step()
-                await asyncio.sleep(0)
-                for o in outputs:
-                    if o.finished and o.request_id in target:
-                        finished[o.request_id] = o
+            # Drain the engine in-process; yield between steps so other
+            # endpoints (sync_log_step, pull_model_state_dict) can land.
+            finished: dict[str, RequestOutput] = {}
+            target = {str(first_id + i) for i in range(len(prompts))}
+            with sl.log_trace_span("engine_steps"):
+                while target - finished.keys():
+                    outputs = self._engine.step()
+                    await asyncio.sleep(0)
+                    for o in outputs:
+                        if o.finished and o.request_id in target:
+                            finished[o.request_id] = o
 
-        return [
-            self._to_generate_output(finished[str(first_id + i)])
-            for i in range(len(prompts))
-        ]
+            return [
+                self._to_generate_output(finished[str(first_id + i)])
+                for i in range(len(prompts))
+            ]
 
     @endpoint
     @sl.log_trace_span("pull_model_state_dict")
