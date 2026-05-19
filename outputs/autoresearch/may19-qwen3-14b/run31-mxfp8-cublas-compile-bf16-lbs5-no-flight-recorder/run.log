@@ -1,0 +1,670 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run31-mxfp8-cublas-compile-bf16-lbs5-no-flight-recorder
+W0519 14:17:47.627000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 14:17:47.627000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 14:17:47.627000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 14:17:47.627000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 14:17:55.251000 3508287 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 14:17:56,120 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 14:17:56,128 - root - INFO - Converted modules to use dynamic mxfp8_cublas quantization for grouped_mm and linear ops
+[rank0]:[titan] 2026-05-19 14:17:56,188 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run31-mxfp8-cublas-compile-bf16-lbs5-no-flight-recorder/structured_logs/training.global_rank_0.20260519-141756-GILQFF.jsonl
+[rank0]:[titan] 2026-05-19 14:17:57,357 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 14:17:57,359 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 14:17:57,367 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 14:17:57,367 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 14:18:01,956 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 14:18:01,962 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-19 14:18:01,989 - root - INFO - Building qwen3 14B
+[rank0]:[rank0]:W0519 14:18:02.056000 3508287 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[rank0]: Traceback (most recent call last):
+[rank0]:[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:[rank0]:     main()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 51, in main
+[rank0]:[rank0]:     trainer = config.build()  # pyrefly: ignore [missing-attribute]
+[rank0]:[rank0]:               ^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+[rank0]:[rank0]:     return f(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+[rank0]:[rank0]:     model = model_config.build()
+[rank0]:[rank0]:             ^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+[rank0]:[rank0]:     super().__init__(config)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+[rank0]:[rank0]:     self.layers[str(i)] = layer_config.build()
+[rank0]:[rank0]:                           ^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+[rank0]:[rank0]:     self.attention = config.attention.build()
+[rank0]:[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+[rank0]:[rank0]:     self.qkv_linear = config.qkv_linear.build()
+[rank0]:[rank0]:                       ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+[rank0]:[rank0]:     self.wq = config.wq.build()
+[rank0]:[rank0]:               ^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+[rank0]:[rank0]:     recipe = MXFP8TrainingRecipe(config._recipe_name)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+[rank0]:[rank0]:     return cls.__new__(cls, value)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+[rank0]:[rank0]:     raise ve_exc
+[rank0]:[rank0]: ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+[rank0]:[rank0]:[W519 14:18:02.490891301 ProcessGroupNCCL.cpp:1648] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+W0519 14:18:03.919000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3508287 closing signal SIGTERM
+W0519 14:18:03.920000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3508291 closing signal SIGTERM
+W0519 14:18:03.922000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3508300 closing signal SIGTERM
+W0519 14:18:03.922000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3508307 closing signal SIGTERM
+W0519 14:18:03.922000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3508325 closing signal SIGTERM
+W0519 14:18:03.923000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3508332 closing signal SIGTERM
+W0519 14:18:03.923000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3508347 closing signal SIGTERM
+E0519 14:18:05.700000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 6 (pid: 3508340) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0519 14:18:05.704000 3503257 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/6/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : -15 (pid: 3508287)  (SIGTERM)
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/0/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+[2]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 3508291) 
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/1/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+[3]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 3508300) 
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/2/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+[4]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : -15 (pid: 3508307)  (SIGTERM)
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/3/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+[5]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : 1 (pid: 3508325) 
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+[6]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : -15 (pid: 3508332)  (SIGTERM)
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+[7]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 3508347) 
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-19_14:18:02
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : 1 (pid: 3508340) 
+  error_file: /tmp/torchelastic_514rl7i9/none__j93xmef/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 622, in __init__
+      self.qkv_linear = config.qkv_linear.build()
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 522, in __init__
+      self.wq = config.wq.build()
+                ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/mx.py", line 37, in __init__
+      recipe = MXFP8TrainingRecipe(config._recipe_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 751, in __call__
+      return cls.__new__(cls, value)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/enum.py", line 1170, in __new__
+      raise ve_exc
+  ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe
+  
+============================================================

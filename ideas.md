@@ -283,6 +283,7 @@
   Planned source/config changes: Edit only `qwen3_14b()` to replace `Float8LinearConverter` with `MXFP8LinearConverter` using `model_compile_enabled=True`; keep the rest of the source and command unchanged.
   Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are torchao/MXFP8 compatibility, slower dynamic quantization overhead, or numerical instability.
+  Result: cublas recipe crashed at source state `ed317a2`; installed TorchAO does not recognize `mxfp8_cublas`. Retry the same MXFP8 line with the valid default `mxfp8_rceil` recipe.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

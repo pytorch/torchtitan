@@ -928,6 +928,31 @@ Interpretation:
 - The current best command is FP8 rowwise, compile, BF16 training dtype, local batch size 5, and `--comm.trace_buf_size=0`.
 - The next distinct compute-efficiency variant is MXFP8 linear conversion on B200, replacing Float8 rowwise with the B200-targeted MXFP8 converter.
 
+## Experiment 31: MXFP8 Cublas Recipe
+
+Source state: `ed317a2`.
+
+Source/config change:
+
+- `qwen3_14b()` replaced `Float8LinearConverter` with `MXFP8LinearConverter.Config(recipe_name="mxfp8_cublas", model_compile_enabled=True)`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run31-mxfp8-cublas-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run failed during model build before training.
+- Error: `ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe`.
+
+Interpretation:
+
+- This installed TorchAO build does not support the docs-mentioned `mxfp8_cublas` recipe.
+- The MXFP8 line is not exhausted; retry with the valid default `mxfp8_rceil` recipe.
+
 ## Manager Review After Experiment 29
 
 Current best:
