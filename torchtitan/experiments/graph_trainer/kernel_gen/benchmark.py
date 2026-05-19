@@ -64,17 +64,31 @@ def _detect_tolerance(problem_path: Path) -> tuple[dict, str]:
 
 
 def _load_module(path: Path, module_name: str):
-    """Load a Python module from path. For problem.py files, strip the
-    description text before 'import' since they aren't valid Python as-is."""
+    """Load a Python module from path.
+
+    For problem.py files with a description preamble, writes a clean
+    temp copy then imports it via importlib (not exec) — this is required
+    because @triton.jit needs inspect.getsourcelines() to find the source.
+    """
+    import importlib.util
+    import tempfile
+
     content = path.read_text()
-    # problem.py files have description text before 'import torch'
     idx = content.find("import torch")
     if idx > 0:
-        content = content[idx:]
-    import types
-    mod = types.ModuleType(module_name)
-    mod.__file__ = str(path)
-    exec(compile(content, str(path), "exec"), mod.__dict__)
+        # Has preamble — write a clean temp file
+        clean = content[idx:]
+        tmp = Path(tempfile.gettempdir()) / f"_bench_{module_name}_{path.parent.name}.py"
+        tmp.write_text(clean)
+        load_path = tmp
+    else:
+        load_path = path
+
+    spec = importlib.util.spec_from_file_location(module_name, str(load_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {load_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
     return mod
 
 
