@@ -424,6 +424,9 @@ def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
             warmup_steps=0,
             checkpoint_interval=25,
         ),
-        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.7),
+        # gpu_memory_limit=0.2 lets vLLM coexist with heavy external
+        # tenants on the same physical GPU; once we're on a quiet host
+        # bump back up to 0.7+ to give the KV cache more room.
+        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.2),
         replay_buffer=_replay(batch_size=4, max_buffer_size=512),
     )
