@@ -305,6 +305,9 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
         rollout_group_size=8,
         num_rollout_tasks=8,
         max_rollout_turns=8,
+        # Halve weight-sync overhead — see 4B config; the ~25s
+        # torchstore TCP-fallback pull was 50% of pre-CP38 step time.
+        pull_every_n_steps=2,
         num_validation_samples=20,
         log_samples=True,
         # Same torch.compile aot_eager s59-empty-sources bug as the 1.7B
