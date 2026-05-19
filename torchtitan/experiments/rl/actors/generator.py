@@ -4,28 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""vLLM-backed generator actor with a submit-queue / background-pump shape.
+"""vLLM-backed generator actor.
 
-This is the SHAPE C refactor from the v6 design: instead of one
-endpoint that batches all prompts and drains synchronously, each
-``generate_tokens`` call submits ONE request, registers an
-:class:`asyncio.Future`, and parks on it. A single background
-``_run()`` coroutine continuously pumps ``engine.step()`` and resolves
-the per-request futures as outputs finish.
+``generate_tokens`` is a submit-queue endpoint: each call adds one
+request to vLLM's engine, registers an :class:`asyncio.Future`, and
+parks on it. A background ``_run`` coroutine pumps ``engine.step()``
+and resolves the per-request futures as outputs finish.
 
-This lets the controller fire N concurrent ``generate_tokens`` calls
-and have vLLM see ``bsz=N`` in flight — the prerequisite for truly-async
-rollouts. Modelled on forge's v0 generator
-(``forge/src/forge/actors/vllm/v0/generator.py``, BSD-licensed).
-
-Weight sync is drain-and-load: ``pull_model_state_dict`` flips the
-``accepting_requests`` gate off, waits for the in-flight set to empty,
-swaps weights, flips the gate on. New requests queued during the load
-park in :meth:`generate_tokens` on the ``request_lock``.
-
-The actor still uses sync ``LLMEngine`` (not ``AsyncLLM``); ``engine.step``
-is called via :func:`asyncio.to_thread` so the actor's event loop stays
-responsive for new submissions and weight-pull endpoints.
+Weight sync is drain-and-load: ``pull_model_state_dict`` closes the
+``accepting_requests`` gate, waits for in-flight to empty, swaps
+weights, opens the gate. Sync ``LLMEngine`` throughout — no
+``AsyncLLM``.
 """
 
 from __future__ import annotations
@@ -65,13 +54,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
-__all__ = [
-    "GenerateOutput",
-    "GenerateOutput",
-    "SamplingConfig",
-    "VLLMCudagraphConfig",
-    "VLLMGenerator",
-]
+__all__ = ["GenerateOutput", "SamplingConfig", "VLLMGenerator"]
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +412,7 @@ class VLLMGenerator(Actor, Configurable):
         assert self._request_lock is not None, "call setup() before generate_tokens"
         request_id = str(self._next_request_id)
         self._next_request_id += 1
-        fut: asyncio.Future[GenerateOutput] = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future[GenerateOutput] = asyncio.get_running_loop().create_future()
 
         async with self._request_lock:
             await self._request_lock.wait_for(lambda: self._accepting_requests)
@@ -516,24 +499,27 @@ class VLLMGenerator(Actor, Configurable):
     async def _run(self) -> None:
         """Background pump: drive ``engine.step()`` and fan out outputs.
 
-        ``engine.step()`` is sync CPU+CUDA work; we wrap it in
-        :func:`asyncio.to_thread` so the actor's event loop keeps
-        servicing new ``generate_tokens`` submissions and weight pulls.
-
-        Idle behaviour: when the engine has no requests, ``await
-        asyncio.sleep(0.001)`` keeps the loop responsive without
-        burning CPU.
+        ``engine.step()`` runs on the actor's event loop (not a worker
+        thread) so it never races with ``add_request``. ``await
+        asyncio.sleep(0)`` between steps yields the loop so concurrent
+        ``generate_tokens`` calls can land their submissions before the
+        next step.
         """
+        assert self._request_lock is not None
         while not self._shutting_down:
             if not self._engine.has_unfinished_requests():
-                # Drain notifier so weight-pull waiters wake up.
-                assert self._request_lock is not None
+                # Wake drainers waiting on an empty request set, then idle.
                 async with self._request_lock:
                     self._request_lock.notify_all()
                 await asyncio.sleep(0.001)
                 continue
 
-            outputs: list[RequestOutput] = await asyncio.to_thread(self._engine.step)
+            outputs: list[RequestOutput] = self._engine.step()
+            # Yield AFTER step so the next iteration's add_request side
+            # has a chance to run before we step again.
+            await asyncio.sleep(0)
+
+            resolved_any = False
             for output in outputs:
                 if not output.finished:
                     continue
@@ -545,6 +531,15 @@ class VLLMGenerator(Actor, Configurable):
                     )
                     continue
                 fut.set_result(self._to_generate_output(output))
+                resolved_any = True
+
+            # If we drained any request, notify weight-pull waiters
+            # immediately rather than waiting for the next empty-engine
+            # iteration. Self-recovers within one cycle but explicit
+            # notify avoids a stutter under heavy concurrent traffic.
+            if resolved_any:
+                async with self._request_lock:
+                    self._request_lock.notify_all()
 
     def _to_generate_output(self, output: RequestOutput) -> GenerateOutput:
         """Build a :class:`GenerateOutput` from one finished ``RequestOutput``.

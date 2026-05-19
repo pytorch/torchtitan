@@ -24,54 +24,33 @@ from __future__ import annotations
 import difflib
 import re
 
-__all__ = ["score_completion_text", "score_response"]
+__all__ = ["score_completion_text"]
 
 
-def score_response(
-    predicted: list[str],
-    expected: list[str],
-    *,
-    similarity_power: int,
-    apply_power: bool,
-) -> float:
-    """Sequence-similarity score for one (predicted, expected) name list pair.
-
-    Both lists are lowercased + stripped, joined by newline, then
-    compared with ``difflib.SequenceMatcher``. The ratio is optionally
-    raised to ``similarity_power`` (heavily penalizes small mistakes
-    at high powers; verifiers default ``similarity_power=4`` but
-    prime-rl's RL run uses ``power_per_turn=False`` so the power is
-    applied to the per-turn-mean, not here).
-
-    Returns ``0.0`` when either list is empty.
-    """
+def _similarity(predicted: list[str], expected: list[str]) -> float:
+    """Raw Ratcliff/Obershelp ratio over ``\\n``-joined, lowercased lists."""
     if not predicted or not expected:
         return 0.0
     pred = "\n".join(s.strip().lower() for s in predicted)
     exp = "\n".join(s.strip().lower() for s in expected)
-    similarity = difflib.SequenceMatcher(None, pred, exp).ratio()
-    return similarity**similarity_power if apply_power else similarity
+    return difflib.SequenceMatcher(None, pred, exp).ratio()
 
 
 def score_completion_text(
-    completion_text: str,
-    expected: list[str],
-    *,
-    turn_idx: int,
-    similarity_power: int,
-    apply_power: bool,
+    completion_text: str, expected: list[str], *, turn_idx: int
 ) -> float:
     """Score one assistant turn's text against the cumulative expected list.
 
     Extracts the XML tag (``<alphabetical_sorted>`` on turn 0, else
-    ``<combined_alphabetical_sorted>``), splits on newline, scores via
-    :func:`score_response`.
+    ``<combined_alphabetical_sorted>``), splits on newline, returns the
+    Ratcliff/Obershelp similarity. The env applies the
+    ``similarity_power`` aggregation; this helper only emits the raw
+    ratio.
 
-    Multiple tag blocks in one response are handled like verifiers:
-    each successive attempt must strictly improve, otherwise the turn
-    scores ``0.0``; only the LAST attempt's score is returned when
-    monotonic. Strips ``// new name!`` markers before scoring (the
-    marker is metadata, not part of the answer).
+    Multiple tag blocks in one response: each successive attempt must
+    strictly improve, otherwise the turn scores ``0.0``; only the LAST
+    attempt's score is returned when monotonic. Strips ``// new name!``
+    markers before scoring.
     """
     tag = "alphabetical_sorted" if turn_idx == 0 else "combined_alphabetical_sorted"
     pattern = f"<{tag}>(.*?)</{tag}>"
@@ -89,18 +68,10 @@ def score_completion_text(
             for line in content.strip().split("\n")
             if line.strip()
         ]
-        attempts.append(
-            score_response(
-                predicted,
-                expected,
-                similarity_power=similarity_power,
-                apply_power=apply_power,
-            )
-        )
+        attempts.append(_similarity(predicted, expected))
 
     if len(attempts) == 1:
         return attempts[0]
-    # Multiple attempts: all subsequent must strictly improve.
     for a, b in zip(attempts, attempts[1:], strict=True):
         if b <= a:
             return 0.0

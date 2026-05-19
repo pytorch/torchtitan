@@ -22,11 +22,5 @@ from torchtitan.experiments.rl.alphabet_sort.env import (
     AlphabetSortDataset,
     AlphabetSortEnv,
 )
-from torchtitan.experiments.rl.alphabet_sort.grading import score_completion_text
 
-__all__ = [
-    "AlphabetSortBuilder",
-    "AlphabetSortDataset",
-    "AlphabetSortEnv",
-    "score_completion_text",
-]
+__all__ = ["AlphabetSortBuilder", "AlphabetSortDataset", "AlphabetSortEnv"]

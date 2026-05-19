@@ -123,8 +123,7 @@ class AlphabetSortEnv(MessageEnv):
         self._power_per_turn = power_per_turn
 
         self._turn_idx: int = 0
-        self._similarities: list[float] = []
-        self._raw_similarities: list[float] = []
+        self._similarities: list[float] = []  # raw per-turn similarities
 
     async def reset(self) -> EnvReset:
         first_batch = self._names[: self._names_per_turn[0]]
@@ -147,24 +146,18 @@ class AlphabetSortEnv(MessageEnv):
             key=lambda c: _sort_key(c, by_last=self._sort_by_last),
         )
 
-        # Score this turn — raw (no power) for the holistic-power mode,
-        # and powered for the per-turn-power mode. Both are cheap.
-        raw = score_completion_text(
-            text,
-            expected,
-            turn_idx=self._turn_idx,
-            similarity_power=self._similarity_power,
-            apply_power=False,
+        # Store the raw similarity; aggregation applies the power once
+        # at episode end.
+        self._similarities.append(
+            score_completion_text(text, expected, turn_idx=self._turn_idx)
         )
-        powered = raw**self._similarity_power if self._power_per_turn else raw
-        self._raw_similarities.append(raw)
-        self._similarities.append(powered)
 
         self._turn_idx += 1
         if self._turn_idx >= len(self._names_per_turn):
+            reward = self._aggregate_reward()
             return EnvStep(
-                reward=self._aggregate_reward(),
-                reward_components={"similarity": self._aggregate_reward()},
+                reward=reward,
+                reward_components={"similarity": reward},
                 done=True,
                 status=RolloutStatus.COMPLETED,
             )
@@ -190,10 +183,14 @@ class AlphabetSortEnv(MessageEnv):
         if not self._similarities:
             return 0.0
         if self._power_per_turn:
-            return sum(self._similarities) / len(self._similarities)
-        # holistic power: mean of raw similarities, then power
-        mean_raw = sum(self._raw_similarities) / len(self._raw_similarities)
-        return mean_raw**self._similarity_power
+            # Per-turn power then mean: mean_i(sim_i^p).
+            return sum(s**self._similarity_power for s in self._similarities) / len(
+                self._similarities
+            )
+        # Holistic: mean of raw similarities, then power.
+        return (
+            sum(self._similarities) / len(self._similarities)
+        ) ** self._similarity_power
 
 
 class AlphabetSortBuilder(Configurable):

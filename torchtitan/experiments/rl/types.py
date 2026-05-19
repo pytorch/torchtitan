@@ -60,12 +60,10 @@ class RolloutStatus(StrEnum):
 
 @dataclass(kw_only=True, slots=True)
 class Completion:
-    """Pure generator artifact — one vLLM sample.
+    """One vLLM sample exposed via the standalone ``generate.py`` CLI.
 
-    Used by the legacy single-shot ``generate(tokenized_prompts)`` endpoint.
-    The submit-queue path (``generate_tokens(request)``) returns the
-    lighter ``GenerateOutput`` shape; both carry the same per-token
-    logprobs.
+    Not used by the rollout driver; the per-rollout path uses the
+    slimmer :class:`actors.generator.GenerateOutput`.
     """
 
     policy_version: int
@@ -74,7 +72,6 @@ class Completion:
     token_ids: list[int]
     token_logprobs: list[float]
     finish_reason: str | None = None
-    """vLLM ``CompletionOutput.finish_reason`` — ``"stop" | "length" | "abort"``."""
 
 
 # ---------------------------------------------------------------------------
@@ -86,39 +83,31 @@ class Completion:
 class RolloutTurn:
     """One generator call + the env response to that call.
 
-    ``policy_version`` is stamped at generation time; a rollout that
-    spans a weight swap surfaces as turns with different versions, and
-    the replay-sample builder takes the conservative ``min`` so the
-    buffer's age policy can drop the whole sample.
+    The terminal ``status`` / ``reward`` / ``reward_components`` live on
+    the enclosing :class:`RolloutOutput`; per-turn fields here are
+    exactly what the replay builder needs to emit one or more
+    :class:`ReplaySample`\\ s.
 
-    ``finish_reason`` mirrors vLLM's ``"stop" | "length"``; the rollout
-    driver does NOT branch on it (the ``TokenEnv`` adapter owns the
-    length-stop terminal case).
+    ``policy_version`` is the weight version that produced this turn's
+    response tokens. ``RolloutOutput.behavior_version`` takes the
+    conservative ``min`` across turns when a rollout spans a swap.
     """
 
     prompt_token_ids: list[int]  # [prompt_tokens]
     response_token_ids: list[int]  # [response_tokens]
     response_logprobs: list[float]  # [response_tokens]
+    policy_version: int
+    """Weight version that produced ``response_token_ids``."""
+
     prompt_messages: list["Message"] = field(default_factory=list)  # [prompt_messages]
     response_messages: list["Message"] = field(
         default_factory=list
     )  # [response_messages]
-    status: RolloutStatus = RolloutStatus.COMPLETED
-    reward_components: dict[str, float] = field(default_factory=dict)
-    policy_version: int = 0
-    finish_reason: str | None = None
 
 
 @dataclass(kw_only=True, slots=True)
 class RolloutOutput:
     """One rollout: ordered turns + terminal reward + group identity.
-
-    Pure rollout artifact — immutable after construction. Advantages
-    are computed at collate time from groups of rollouts and live on
-    ``ReplaySample``.
-
-    Shape legend:
-        K: number of turns.
 
     Example::
 
@@ -138,16 +127,25 @@ class RolloutOutput:
     status: RolloutStatus = RolloutStatus.COMPLETED
     reward: float | None = None
     reward_components: dict[str, float] = field(default_factory=dict)
-    metadata: dict[str, JsonValue] = field(default_factory=dict)
+    """Per-component breakdown of ``reward`` (env-specific keys; e.g.
+    ``{"correctness": 1.0, "format": 0.5}`` for SumDigits)."""
+
+    @property
+    def behavior_version(self) -> int:
+        """Min ``policy_version`` across turns — the conservative stamp
+        used by the replay buffer's age policy. Rollouts that span a
+        weight swap are treated as stale on the older of the two
+        versions.
+        """
+        return min((t.policy_version for t in self.turns), default=-1)
 
 
 def validate_rollout_output(o: RolloutOutput) -> None:
-    """Cheap structural check. Raises ``ValueError`` on misalignment that
-    would otherwise surface as NaN/Inf inside the trainer.
+    """Cheap structural check; raises ``ValueError`` on shape mismatch.
 
-    Called by ``do_single_rollout`` at the end of each rollout; consumers
-    may call it again before training to defend against in-memory
-    corruption.
+    Allows a missing ``reward`` only on ``status=ERROR`` (a parse or
+    timeout failure inside the adapter); a terminal ``COMPLETED`` /
+    ``TRUNCATED`` rollout must stamp it.
     """
     for i, t in enumerate(o.turns):
         if len(t.response_token_ids) != len(t.response_logprobs):
@@ -155,10 +153,10 @@ def validate_rollout_output(o: RolloutOutput) -> None:
                 f"turn {i}: response_token_ids [{len(t.response_token_ids)}] != "
                 f"response_logprobs [{len(t.response_logprobs)}]"
             )
-    if o.turns and o.reward is None:
+    if o.turns and o.reward is None and o.status != RolloutStatus.ERROR:
         raise ValueError(
             f"rollout {o.group_id!r}/{o.sample_idx} has turns but no reward; "
-            "terminal EnvStep must stamp ``reward``."
+            "terminal EnvStep must stamp ``reward`` (unless status=ERROR)."
         )
 
 

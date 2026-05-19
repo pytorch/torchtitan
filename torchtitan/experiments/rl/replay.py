@@ -4,34 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Rollout → :class:`ReplaySample` conversion + the :class:`ReplayBuffer` actor.
+"""Rollout -> :class:`ReplaySample` conversion + the :class:`ReplayBuffer` actor.
 
 Three pieces:
 
-1. :func:`rollout_to_replay_samples` — walks a multi-turn rollout's
-   turns left-to-right, accumulating into one :class:`ReplaySample`
-   per contiguous prefix-runnable span. A turn whose ``prompt_tokens``
-   doesn't extend the running buffer flushes the current sample and
-   starts a new one (e.g. when a thinking-strip renderer breaks
-   prefix continuity).
-2. :func:`compute_advantages` — group-mean baseline. Maps
-   ``(group_id, sample_idx) → advantage`` for a batch of rollouts;
-   the controller copies these onto :class:`ReplaySample`s at collate
-   time.
-3. :class:`ReplayBuffer` — bounded FIFO Monarch actor. Producer-
-   consumer between ``continuous_rollouts`` tasks and
-   ``continuous_training``. Drops samples older than ``max_policy_age``
-   training steps before sampling. Borrowed structurally from forge's
-   ``ReplayBuffer`` (``forge/actors/replay_buffer.py``, BSD-licensed).
-
-Why a buffer at all under TBR sync-checkpoint? Because the trainer's
-weight-push drains the **generator** but does NOT stall the
-**controller**: the next ``continuous_rollouts`` iteration begins
-issuing requests against the freshly-loaded weights immediately,
-while previous rollouts are still landing in the buffer stamped with
-the older version. ``max_policy_age=1`` lets one-step-stale samples
-flow into training; ``max_policy_age=0`` is strict on-policy at the
-cost of buffer starvation.
+- :func:`rollout_to_replay_samples` — walk a multi-turn rollout and
+  emit one :class:`ReplaySample` per contiguous prefix-runnable span.
+- :func:`compute_advantages` — group-mean baseline; returns
+  ``{(group_id, sample_idx): advantage}``.
+- :class:`ReplayBuffer` — bounded FIFO actor; ``sample`` evicts entries
+  older than ``max_policy_age`` train steps before returning a batch.
 """
 
 from __future__ import annotations
@@ -78,14 +60,15 @@ def rollout_to_replay_samples(r: RolloutOutput) -> list[ReplaySample]:
     the conservative choice when a sample spans a weight swap.
     """
     samples: list[ReplaySample] = []
-    if not r.turns:
+    if not r.turns or r.reward is None:
+        # Empty rollouts and ERROR-status rollouts (parse / timeout
+        # failures) have no learning signal — skip them entirely.
         return samples
 
     tokens: list[int] = []
     mask: list[int] = []
     logprobs: list[float] = []
     turn_versions: list[int] = []
-    expected_prefix: list[int] = []
 
     def _flush() -> None:
         if not tokens:
@@ -99,15 +82,13 @@ def rollout_to_replay_samples(r: RolloutOutput) -> list[ReplaySample]:
                 group_id=r.group_id,
                 sample_idx=r.sample_idx,
                 policy_version=min(turn_versions),
-                reward=float(r.reward or 0.0),
+                reward=float(r.reward),
                 reward_components=dict(r.reward_components),
             )
         )
 
     for i, turn in enumerate(r.turns):
-        is_continuation = (
-            i > 0 and turn.prompt_token_ids[: len(expected_prefix)] == expected_prefix
-        )
+        is_continuation = i > 0 and turn.prompt_token_ids[: len(tokens)] == tokens
         if not is_continuation:
             _flush()
             tokens = list(turn.prompt_token_ids)
@@ -124,7 +105,6 @@ def rollout_to_replay_samples(r: RolloutOutput) -> list[ReplaySample]:
         tokens.extend(turn.response_token_ids)
         mask.extend([1] * len(turn.response_token_ids))
         logprobs.extend(turn.response_logprobs)
-        expected_prefix = list(tokens)
 
     _flush()
     return samples
@@ -146,12 +126,14 @@ def compute_advantages(
     """
     by_group: dict[str, list[RolloutOutput]] = defaultdict(list)
     for r in rollouts:
+        if r.reward is None:
+            continue  # skip ERROR-status rollouts; no learning signal
         by_group[r.group_id].append(r)
 
     out: dict[tuple[str, int], float] = {}
     for group in by_group.values():
-        rewards = [float(r.reward or 0.0) for r in group]
-        mean = sum(rewards) / len(rewards) if rewards else 0.0
+        rewards = [float(r.reward) for r in group]
+        mean = sum(rewards) / len(rewards)
         for r, rew in zip(group, rewards, strict=True):
             out[(r.group_id, r.sample_idx)] = rew - mean
     return out
@@ -162,69 +144,53 @@ def compute_advantages(
 # ---------------------------------------------------------------------------
 
 
-@dataclass(kw_only=True, slots=True)
-class _BufferEntry:
-    sample: ReplaySample
-    sample_count: int = 0
-
-
 class ReplayBuffer(Actor, Configurable):
-    """Bounded FIFO buffer mediating producer ``continuous_rollouts`` tasks
-    and consumer ``continuous_training``.
+    """Bounded FIFO between ``continuous_rollouts`` and ``continuous_training``.
 
-    Lives as a Monarch actor so its ``add`` / ``sample`` endpoints
-    serialize automatically — no controller-side lock needed. Returns
-    ``None`` from ``sample`` when underfilled so the trainer can
-    ``await asyncio.sleep(0.1); continue`` until more rollouts land.
-
-    The eviction policy is age-based: every call to ``sample`` first
-    drops entries whose ``policy_version`` is more than ``max_policy_age``
-    behind the trainer's ``curr_policy_version``. With sync-checkpoint
-    + per-rollout drain in the generator, a sample cannot span more
-    than two weight versions; ``max_policy_age=1`` accepts one-step-
-    stale samples (which is what you get when a rollout that started
-    on V is added to the buffer right after the trainer pushed V+1).
+    ``sample`` returns ``None`` when underfilled so the trainer can
+    poll with a short sleep until rollouts land. Each call to
+    ``sample`` first evicts entries older than ``max_policy_age`` train
+    steps; with the generator's drain-on-pull, a rollout is at most
+    one weight version behind, so ``max_policy_age=1`` is the safe
+    default.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         batch_size: int = 8
-        """Number of :class:`ReplaySample`s per DP rank per train step."""
+        """Number of :class:`ReplaySample`\\ s per DP rank per train step."""
 
         dp_size: int = 1
         """Trainer data-parallel degree; ``sample`` returns one batch per rank."""
 
         max_policy_age: int | None = 1
-        """Drop samples whose policy_version is more than this many train
-        steps behind the trainer's current step. ``None`` disables aging."""
+        """Drop samples whose ``policy_version`` is more than this many
+        train steps behind ``curr_policy_version``. ``None`` disables aging."""
 
         max_buffer_size: int = 2048
-        """Hard cap on stored samples; oldest are dropped on overflow."""
+        """Hard cap on stored samples; oldest fall off on overflow."""
 
         seed: int = 0
         """Seed for the in-actor sampling RNG."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
-        self._buffer: deque[_BufferEntry] = deque(maxlen=config.max_buffer_size)
+        self._buffer: deque[ReplaySample] = deque(maxlen=config.max_buffer_size)
         self._rng = random.Random(config.seed)
 
     @endpoint
     async def add(self, samples: list[ReplaySample]) -> None:
         """Append samples (oldest fall off when ``max_buffer_size`` is exceeded)."""
-        for s in samples:
-            self._buffer.append(_BufferEntry(sample=s))
+        self._buffer.extend(samples)
 
     @endpoint
     async def sample(
         self, *, curr_policy_version: int
     ) -> list[list[ReplaySample]] | None:
-        """Pop a batch sharded by ``dp_size``, or ``None`` if underfilled.
+        """Return one batch per DP rank or ``None`` if underfilled.
 
-        Evicts stale samples first, then random-samples
-        ``dp_size * batch_size`` survivors. Returns
-        ``list[list[ReplaySample]]`` of shape ``[dp_size][batch_size]``
-        so the trainer can fan out one batch per DP rank.
+        Returns shape ``[dp_size][batch_size]``: the trainer fans out
+        one batch per rank for round-robin DP.
         """
         self._evict(curr_policy_version)
         total = self.config.dp_size * self.config.batch_size
@@ -232,11 +198,7 @@ class ReplayBuffer(Actor, Configurable):
             return None
 
         indices = self._rng.sample(range(len(self._buffer)), k=total)
-        chosen: list[ReplaySample] = []
-        for i in indices:
-            self._buffer[i].sample_count += 1
-            chosen.append(self._buffer[i].sample)
-
+        chosen = [self._buffer[i] for i in indices]
         return [
             chosen[r * self.config.batch_size : (r + 1) * self.config.batch_size]
             for r in range(self.config.dp_size)
@@ -244,12 +206,10 @@ class ReplayBuffer(Actor, Configurable):
 
     @endpoint
     async def size(self) -> int:
-        """Current buffer length (for logging / debugging)."""
         return len(self._buffer)
 
     @endpoint
     async def clear(self) -> None:
-        """Drop everything. Used by validation to reset between runs."""
         self._buffer.clear()
 
     # ------------------------------------------------------------------ internal
@@ -259,6 +219,6 @@ class ReplayBuffer(Actor, Configurable):
             return
         cutoff = curr_policy_version - self.config.max_policy_age
         self._buffer = deque(
-            (e for e in self._buffer if e.sample.policy_version >= cutoff),
+            (s for s in self._buffer if s.policy_version >= cutoff),
             maxlen=self.config.max_buffer_size,
         )

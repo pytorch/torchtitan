@@ -114,12 +114,9 @@ class MessageEnv(Protocol):
     uniform shape lets the adapter wrap any env in ``asyncio.wait_for``
     for per-step timeouts.
 
-    Why no separate ``reset()`` from constructor? Because each env is
-    single-use, the constructor IS the seed (it picks the task from the
-    dataset row). ``reset()`` returns the *initial observation*; calling
-    it twice is undefined behaviour. This matches tinker
-    (``tinker_cookbook/rl/types.py:113-119``) and keeps the protocol
-    deterministic: one instance, one episode.
+    Single-use: the constructor seeds the task; ``reset()`` returns
+    the initial observation. Calling ``reset()`` twice is undefined
+    behaviour — start a fresh env instead.
     """
 
     async def reset(self) -> EnvReset:

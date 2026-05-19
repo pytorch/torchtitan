@@ -6,22 +6,17 @@
 
 """The rollout driver + the group fanout helper.
 
-:func:`do_single_rollout` drives one :class:`TokenEnv` to completion.
-Termination policy (parse failure, length-stop, context overflow,
-step timeout) lives in :class:`TokenEnv`; this body stays focused on
+:func:`do_single_rollout` drives one :class:`TokenEnv` to completion;
+termination policy lives in :class:`TokenEnv`, so this body is just
 render → sample → step → append.
 
-:func:`do_rollout_group` wraps N envs in ``asyncio.gather`` with
-``try/finally`` cleanup. The producer task calls this once per
+:func:`do_rollout_group` wraps N sibling envs in ``asyncio.gather``
+with ``try/finally`` cleanup. The producer task calls this once per
 group.
 
-Concurrency is the caller's job. The completion function is injected
-so the driver doesn't import Monarch or vLLM — its contract is pure
-``(prompt_token_ids, sampling) → GenerateOutput``.
-
-Modelled on tinker-cookbook's ``do_single_rollout``
-(``tinker_cookbook/rl/rollouts.py:153-200``, Apache-2.0) and forge's
-``do_rollout_group``.
+The completion function is injected so the driver has no Monarch or
+vLLM dependency — its contract is pure
+``(prompt_token_ids, sampling) -> GenerateOutput``.
 """
 
 from __future__ import annotations
@@ -91,7 +86,6 @@ async def do_single_rollout(
             final_reward = float(env_step.reward)
             final_components = dict(env_step.reward_components)
 
-        turn_status = env_step.status or RolloutStatus.COMPLETED
         turns.append(
             RolloutTurn(
                 prompt_token_ids=prompt_token_ids,
@@ -99,15 +93,12 @@ async def do_single_rollout(
                 response_logprobs=list(completion.response_logprobs),
                 prompt_messages=prompt_messages,
                 response_messages=response_messages,
-                status=turn_status,
-                reward_components=dict(env_step.reward_components),
                 policy_version=completion.policy_version,
-                finish_reason=completion.finish_reason,
             )
         )
 
         if env_step.done:
-            overall_status = turn_status
+            overall_status = env_step.status or RolloutStatus.COMPLETED
             break
 
         prompt_token_ids, prompt_messages = await token_env.next_observation()

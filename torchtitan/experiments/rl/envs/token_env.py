@@ -6,30 +6,18 @@
 
 """Token-level adapter around a :class:`MessageEnv`.
 
-The rollout driver wants a token-in / token-out interface: render the
-current conversation to tokens, call the sampler, parse the sampled
-tokens back to a :class:`Message`, hand it to the env, render the next
-conversation, repeat. :class:`TokenEnv` owns that boilerplate plus four
-edge cases the env author shouldn't have to handle:
+Owns four terminal cases the env author shouldn't have to handle:
 
-1. **parse failure** — ``renderer.parse_response`` raised. Terminal
-   :class:`EnvStep` with ``status=ERROR``.
-2. **length-stop** — the sampler returned ``finish_reason="length"``.
-   Terminal :class:`EnvStep` with ``status=TRUNCATED``.
-3. **context overflow** — the next prompt + generation reserve would
-   exceed ``max_trajectory_tokens``. Terminal :class:`EnvStep` with
-   ``status=TRUNCATED``.
-4. **step timeout** — ``env.step`` didn't return inside
-   ``step_timeout_s`` seconds. Terminal :class:`EnvStep` with
-   ``status=ERROR``.
+- **parse failure** — ``renderer.parse_response`` raised → ``EnvStep(status=ERROR)``.
+- **length-stop** — ``finish_reason == "length"`` → ``EnvStep(status=TRUNCATED)``.
+- **context overflow** — next prompt + generation reserve exceeds
+  ``max_trajectory_tokens`` → ``EnvStep(status=TRUNCATED)``.
+- **step timeout** — ``env.step`` doesn't return inside ``step_timeout_s``
+  → ``EnvStep(status=ERROR)``.
 
-Modelled on tinker-cookbook's ``EnvFromMessageEnv``
-(``tinker_cookbook/rl/message_env.py:49-164``, Apache-2.0) with the
-length / parse / context / timeout knobs preserved verbatim.
-Tokenization runs in :func:`asyncio.to_thread` because HuggingFace
-fast tokenizers release the GIL during Rust encoding; with N
-concurrent rollouts on one event loop, threading gives real CPU
-parallelism rather than just event-loop responsiveness.
+Tokenization runs in :func:`asyncio.to_thread` so N concurrent rollouts
+on one event loop can render in parallel (HF fast tokenizers release
+the GIL during Rust encode).
 """
 
 from __future__ import annotations
@@ -197,19 +185,16 @@ class TokenEnv:
             )
 
     async def _render_prompt(self) -> list[int]:
-        # ``asyncio.to_thread`` keeps the controller's event loop
-        # responsive across N concurrent rollouts. HF fast tokenizers
-        # release the GIL during Rust encoding so threading also
-        # buys real CPU parallelism.
-        return await asyncio.to_thread(
-            lambda: list(
-                self._renderer.render_ids(
-                    self._messages,
-                    tools=self._tools or None,
-                    add_generation_prompt=True,
-                )
-            )
+        # Off-load to a thread: HF fast tokenizers release the GIL
+        # during Rust encoding, so N concurrent rollouts on one event
+        # loop get real CPU parallelism + a responsive loop.
+        tokens = await asyncio.to_thread(
+            self._renderer.render_ids,
+            self._messages,
+            tools=self._tools or None,
+            add_generation_prompt=True,
         )
+        return list(tokens)
 
     async def _exceeds_context(self) -> bool:
         budget = self._config.max_trajectory_tokens

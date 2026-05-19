@@ -187,6 +187,29 @@ class Provisioner:
         return _bootstrap
 
 
+def _check_batch_invariant(
+    trainer: PolicyTrainer.Config, generator: VLLMGenerator.Config
+) -> None:
+    """Enforce the four bfloat16/determinism preconditions for batch invariance."""
+    if not trainer.debug.deterministic:
+        raise ValueError("batch_invariant requires deterministic=True")
+    if trainer.training.dtype != "bfloat16":
+        raise ValueError(
+            f"batch_invariant requires bfloat16 training dtype, "
+            f"got {trainer.training.dtype!r}"
+        )
+    if generator.model_dtype != "bfloat16":
+        raise ValueError(
+            f"batch_invariant requires bfloat16 generator dtype, "
+            f"got {generator.model_dtype!r}"
+        )
+    if trainer.parallelism.enable_sequence_parallel:
+        raise ValueError(
+            "batch_invariant does not support SP "
+            "(NCCL reduce-scatter Ring is the only deterministic mode)."
+        )
+
+
 # ---------------------------------------------------------------------------
 # RLTrainer
 # ---------------------------------------------------------------------------
@@ -262,31 +285,13 @@ class RLTrainer(Configurable):
         replay_buffer: ReplayBuffer.Config = field(default_factory=ReplayBuffer.Config)
 
         def __post_init__(self) -> None:
-            # SamplingConfig.n must be 1 — siblings come from the env builder.
             if self.generator.sampling.n != 1:
                 raise ValueError(
-                    "SamplingConfig.n must be 1 (siblings come from "
-                    f"rollout_group_size). Got n={self.generator.sampling.n}; "
-                    f"set rollout_group_size={self.generator.sampling.n} instead."
+                    "generator.sampling.n must be 1; siblings come from "
+                    "rollout_group_size."
                 )
             if self.trainer.debug.batch_invariant:
-                if not self.trainer.debug.deterministic:
-                    raise ValueError("batch_invariant requires deterministic=True")
-                if self.trainer.training.dtype != "bfloat16":
-                    raise ValueError(
-                        f"batch_invariant requires bfloat16 training dtype, "
-                        f"got {self.trainer.training.dtype!r}"
-                    )
-                if self.generator.model_dtype != "bfloat16":
-                    raise ValueError(
-                        f"batch_invariant requires bfloat16 generator dtype, "
-                        f"got {self.generator.model_dtype!r}"
-                    )
-                if self.trainer.parallelism.enable_sequence_parallel:
-                    raise ValueError(
-                        "batch_invariant does not support SP "
-                        "(NCCL reduce-scatter Ring is the only deterministic mode)."
-                    )
+                _check_batch_invariant(self.trainer, self.generator)
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -433,7 +438,6 @@ class RLTrainer(Configurable):
                 ReplayBuffer,
                 config.replay_buffer,
             )
-            await self.replay_buffer.setup.call_one()
 
         # Initialize torchstore (used by trainer.push / generator.pull).
         with sl.log_trace_span("torchstore_init"):
@@ -508,33 +512,38 @@ class RLTrainer(Configurable):
     # ------------------------------------------------------------------ rollout-side helpers
 
     def _build_completion_fn(self):
-        """Build the closure handed to ``do_single_rollout``.
+        """Closure handed to ``do_single_rollout``; hides Monarch + the
+        rank-0 unmesh from the driver.
 
-        The closure captures ``generator``, ``stop_token_ids``, and the
-        rank-0 unmesh helper, so the rollout driver has no direct
-        Monarch dependency.
+        The renderer-derived stop tokens are merged into the train and
+        validation sampling configs ONCE at setup (see :attr:`_train_sampling`
+        / :attr:`_greedy_sampling`), so each call just forwards the
+        merged config to the generator.
         """
         generator = self.generator
-        stop_token_ids = self._stop_token_ids
 
         async def completion_fn(
             prompt_token_ids: list[int], sampling: SamplingConfig
         ) -> GenerateOutput:
-            # Inject renderer-derived stop tokens (per-call, not actor-cached).
-            sampling_with_stops = SamplingConfig(
-                n=sampling.n,
-                temperature=sampling.temperature,
-                top_p=sampling.top_p,
-                max_tokens=sampling.max_tokens,
-                stop_token_ids=stop_token_ids,
-            )
             mesh = await generator.generate_tokens.call(
                 prompt_token_ids,
-                sampling_config=sampling_with_stops,
+                sampling_config=sampling,
             )
             return self._get_rank_0_value(mesh)
 
         return completion_fn
+
+    def _sampling_with_stops(self, sampling: SamplingConfig) -> SamplingConfig:
+        """Inject renderer-derived stop tokens; idempotent."""
+        if sampling.stop_token_ids:
+            return sampling
+        return SamplingConfig(
+            n=sampling.n,
+            temperature=sampling.temperature,
+            top_p=sampling.top_p,
+            max_tokens=sampling.max_tokens,
+            stop_token_ids=list(self._stop_token_ids),
+        )
 
     async def _rollout_one_group(self, example: EnvExample) -> list[RolloutOutput]:
         """Build envs, run the group, return rollouts."""
@@ -658,8 +667,7 @@ class RLTrainer(Configurable):
         cfg = self.config
         num_steps = cfg.num_steps
         shutdown = asyncio.Event()
-        train_step = 0  # local to the closure via container hack
-        step_holder = {"step": 0}
+        self._train_step = 0
 
         logger.info("Pre-training validation")
         pre_validation = await self.validate()
@@ -671,7 +679,7 @@ class RLTrainer(Configurable):
             local_step = 0
             while not shutdown.is_set():
                 examples = train_dataset.sample_groups(
-                    step=step_holder["step"],
+                    step=self._train_step,
                     num_groups=1,
                 )
                 if not examples:
@@ -683,16 +691,14 @@ class RLTrainer(Configurable):
                 if samples:
                     await self.replay_buffer.add.call_one(samples)
 
-                # Light per-group logging — full metrics live in structured_logger.
                 if cfg.log_samples and local_step % 4 == 0:
                     _log_first_sample(rollouts)
                 local_step += 1
 
         async def continuous_training() -> None:
-            nonlocal train_step
-            while train_step < num_steps and not shutdown.is_set():
+            while self._train_step < num_steps and not shutdown.is_set():
                 batches_or_none = await self.replay_buffer.sample.call_one(
-                    curr_policy_version=train_step,
+                    curr_policy_version=self._train_step,
                 )
                 if batches_or_none is None:
                     await asyncio.sleep(0.05)
@@ -718,14 +724,13 @@ class RLTrainer(Configurable):
                     opt = self._get_rank_0_value(await self.trainer.optim_step.call())
                 metrics = {**fb, **opt.metrics}
 
-                train_step += 1
-                step_holder["step"] = train_step
-                sl.set_step(train_step)
+                self._train_step += 1
+                sl.set_step(self._train_step)
 
                 with sl.log_trace_span("trainer_push_model_state_dict"):
                     await self.trainer.push_model_state_dict.call()
                 with sl.log_trace_span("generator_pull_model_state_dict"):
-                    await self.generator.pull_model_state_dict.call(train_step)
+                    await self.generator.pull_model_state_dict.call(self._train_step)
 
                 step_time = time.perf_counter() - step_start
                 if not math.isfinite(metrics.get("loss/mean", 0.0)):
@@ -734,7 +739,7 @@ class RLTrainer(Configurable):
                     break
                 logger.info(
                     "Step %2d | Loss: %+.4f | ratio_clip=%.3f | grad_norm=%.3f | time=%.1fs",
-                    train_step,
+                    self._train_step,
                     metrics.get("loss/mean", 0.0),
                     metrics.get("loss/ratio/clipped_frac", 0.0),
                     metrics.get("train/grad_norm/mean", 0.0),
@@ -794,19 +799,20 @@ class RLTrainer(Configurable):
 def _aggregate_rewards(
     rollouts: Sequence[RolloutOutput],
 ) -> dict[str, float | dict[str, float]]:
-    """Per-rollout mean reward + per-component mean across the batch."""
-    rewards = [float(r.reward or 0.0) for r in rollouts]
+    """Mean reward + per-component mean across non-ERROR rollouts."""
+    scored = [r for r in rollouts if r.reward is not None]
+    rewards = [float(r.reward) for r in scored]  # type: ignore[arg-type]
     components: dict[str, list[float]] = defaultdict(list)
-    for r in rollouts:
+    for r in scored:
         for k, v in r.reward_components.items():
             components[k].append(float(v))
+    total = len(rollouts) or 1
     return {
-        "mean_reward": sum(rewards) / max(len(rewards), 1),
-        "components": {k: sum(v) / max(len(v), 1) for k, v in components.items()},
+        "mean_reward": sum(rewards) / total,
+        "components": {k: sum(v) / total for k, v in components.items()},
         "total": len(rollouts),
         "fraction_truncated": (
-            sum(1 for r in rollouts if r.status == RolloutStatus.TRUNCATED)
-            / max(len(rollouts), 1)
+            sum(1 for r in rollouts if r.status == RolloutStatus.TRUNCATED) / total
         ),
     }
 
@@ -828,11 +834,12 @@ def _log_first_sample(rollouts: Sequence[RolloutOutput]) -> None:
         return
     msg = r.turns[-1].response_messages[0]
     content = str(msg.get("content") or "")[:200].replace("\n", " ")
+    reward_str = "n/a" if r.reward is None else f"{r.reward:+.3f}"
     logger.info(
-        "  [%s/%d] reward=%+.3f  A: %s",
+        "  [%s/%d] reward=%s  A: %s",
         r.group_id,
         r.sample_idx,
-        float(r.reward or 0.0),
+        reward_str,
         content,
     )
 
