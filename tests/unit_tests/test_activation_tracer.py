@@ -19,22 +19,31 @@ import torch
 import torch.nn as nn
 
 from torchtitan.tools.activation_tracer import (
-    ActivationTracer,
-    CapturedActivation,
-    NumericsDebugger,
     _clean_fqn,
     _is_filtered_frame,
     _parse_stack_trace,
-    _resolve_module_location,
     _should_capture,
+    CapturedActivation,
+    DebugModeTracer,
     dump_captures_to_file,
     is_numerics_capture_active,
-    set_numerics_capture_active,
+    NumericsDebugger,
 )
-from torchtitan.tools.compare_numerics import naive_compare_captures
 
 
 BATCH = 32
+
+
+def _fake_func(op_name: str) -> object:
+    """Build a stand-in for ``torch._ops.OpOverload`` whose ``_schema.name``
+    attribute matches the format ``_get_op_name`` parses (``ns::op``).
+
+    Used by ``_should_capture`` tests to exercise the op-name filter
+    without dispatching a real op.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(_schema=SimpleNamespace(name=op_name))
 
 
 def _make_model(device="cpu"):
@@ -84,21 +93,59 @@ class TestIsFilteredFrame(unittest.TestCase):
     """Frame filtering for stack traces."""
 
     def test_filters_torch_nn(self):
-        self.assertTrue(_is_filtered_frame("/home/user/pytorch/torch/nn/modules/linear.py"))
+        self.assertTrue(
+            _is_filtered_frame("/home/user/pytorch/torch/nn/modules/linear.py")
+        )
         self.assertTrue(_is_filtered_frame("/home/user/pytorch/torch/nn/functional.py"))
 
     def test_filters_torch_autograd(self):
-        self.assertTrue(_is_filtered_frame("/home/user/pytorch/torch/autograd/graph.py"))
+        self.assertTrue(
+            _is_filtered_frame("/home/user/pytorch/torch/autograd/graph.py")
+        )
 
     def test_filters_activation_tracer(self):
-        self.assertTrue(_is_filtered_frame("/home/user/torchtitan/tools/activation_tracer.py"))
+        self.assertTrue(
+            _is_filtered_frame("/home/user/torchtitan/tools/activation_tracer.py")
+        )
+
+    def test_filters_fqn_interpreter(self):
+        # FQNInterpreter wraps every node in traced replay, so its
+        # super().run_node line appears in the live traceback when
+        # node.meta["stack_trace"] is empty — never useful to surface.
+        self.assertTrue(
+            _is_filtered_frame(
+                "/home/u/torchtitan/experiments/graph_trainer/debug_utils.py"
+            )
+        )
+
+    def test_filters_dispatcher_and_runtime(self):
+        # Dispatcher / compile / debug-mode / AC plumbing — these
+        # otherwise drown out user-code frames in DebugMode's live
+        # tracebacks under FSDP + activation checkpoint.
+        self.assertTrue(_is_filtered_frame("/home/user/pytorch/torch/_ops.py"))
+        self.assertTrue(_is_filtered_frame("/home/user/pytorch/torch/_compile.py"))
+        self.assertTrue(
+            _is_filtered_frame("/home/user/pytorch/torch/_dynamo/eval_frame.py")
+        )
+        self.assertTrue(
+            _is_filtered_frame("/home/user/pytorch/torch/utils/_debug_mode/_mode.py")
+        )
+        self.assertTrue(
+            _is_filtered_frame("/home/user/pytorch/torch/utils/checkpoint.py")
+        )
 
     def test_keeps_model_code(self):
-        self.assertFalse(_is_filtered_frame("/home/user/torchtitan/models/common/attention.py"))
-        self.assertFalse(_is_filtered_frame("/home/user/torchtitan/models/llama3/model.py"))
+        self.assertFalse(
+            _is_filtered_frame("/home/user/torchtitan/models/common/attention.py")
+        )
+        self.assertFalse(
+            _is_filtered_frame("/home/user/torchtitan/models/llama3/model.py")
+        )
 
     def test_keeps_torchtitan(self):
-        self.assertFalse(_is_filtered_frame("/home/user/torchtitan/torchtitan/trainer.py"))
+        self.assertFalse(
+            _is_filtered_frame("/home/user/torchtitan/torchtitan/trainer.py")
+        )
 
 
 class TestParseStackTrace(unittest.TestCase):
@@ -107,7 +154,7 @@ class TestParseStackTrace(unittest.TestCase):
     def test_parses_file_line_func(self):
         trace = (
             '  File "/home/user/models/attention.py", line 534, in forward\n'
-            '    xq, xk, xv = self.qkv_linear(x)\n'
+            "    xq, xk, xv = self.qkv_linear(x)\n"
         )
         frames = _parse_stack_trace(trace)
         self.assertEqual(len(frames), 1)
@@ -117,9 +164,9 @@ class TestParseStackTrace(unittest.TestCase):
     def test_filters_nn_modules(self):
         trace = (
             '  File "/pytorch/torch/nn/modules/module.py", line 1789, in _call_impl\n'
-            '    return forward_call(*args, **kwargs)\n'
+            "    return forward_call(*args, **kwargs)\n"
             '  File "/home/user/models/attention.py", line 534, in forward\n'
-            '    xq = self.wq(x)\n'
+            "    xq = self.wq(x)\n"
         )
         frames = _parse_stack_trace(trace)
         self.assertEqual(len(frames), 1)
@@ -128,36 +175,13 @@ class TestParseStackTrace(unittest.TestCase):
     def test_filters_activation_tracer(self):
         trace = (
             '  File "/home/user/tools/activation_tracer.py", line 100, in wrapped\n'
-            '    return orig(*args)\n'
+            "    return orig(*args)\n"
             '  File "/home/user/models/decoder.py", line 140, in forward\n'
-            '    h = layer(h)\n'
+            "    h = layer(h)\n"
         )
         frames = _parse_stack_trace(trace)
         self.assertEqual(len(frames), 1)
         self.assertIn("decoder.py", frames[0].filename)
-
-
-class TestResolveModuleLocation(unittest.TestCase):
-    """Change 4: Source location via inspect."""
-
-    def test_returns_location_for_custom_module(self):
-        # _resolve_module_location uses inspect.getfile which works on
-        # modules defined in real files. Modules in this test file work.
-        model = _FeedForward()
-        frames = _resolve_module_location(model)
-        # This may be empty if running from <string> — skip in that case
-        if frames:
-            self.assertIn("test_activation_tracer", frames[0].filename)
-
-    def test_filters_nn_linear(self):
-        linear = nn.Linear(4, 4)
-        frames = _resolve_module_location(linear)
-        self.assertEqual(len(frames), 0)
-
-    def test_filters_nn_relu(self):
-        relu = nn.ReLU()
-        frames = _resolve_module_location(relu)
-        self.assertEqual(len(frames), 0)
 
 
 class TestShouldCapture(unittest.TestCase):
@@ -166,36 +190,28 @@ class TestShouldCapture(unittest.TestCase):
     def test_captures_float_tensor(self):
         t = torch.randn(100, 100)
 
-        class FakeFunc:
-            class _schema:
-                name = "aten::mm"
+        FakeFunc = _fake_func("aten::mm")
 
         self.assertTrue(_should_capture(FakeFunc, t, 1000, None))
 
     def test_skips_small_tensor(self):
         t = torch.randn(5, 5)
 
-        class FakeFunc:
-            class _schema:
-                name = "aten::mm"
+        FakeFunc = _fake_func("aten::mm")
 
         self.assertFalse(_should_capture(FakeFunc, t, 1000, None))
 
     def test_skips_int_tensor(self):
         t = torch.randint(0, 10, (100, 100))
 
-        class FakeFunc:
-            class _schema:
-                name = "aten::mm"
+        FakeFunc = _fake_func("aten::mm")
 
         self.assertFalse(_should_capture(FakeFunc, t, 1000, None))
 
     def test_skips_excluded_ops(self):
         t = torch.randn(100, 100)
 
-        class FakeFunc:
-            class _schema:
-                name = "aten::view"
+        FakeFunc = _fake_func("aten::view")
 
         self.assertFalse(_should_capture(FakeFunc, t, 1000, None))
 
@@ -205,213 +221,29 @@ class TestShouldCapture(unittest.TestCase):
         with FakeTensorMode():
             t = torch.randn(100, 100)
 
-        class FakeFunc:
-            class _schema:
-                name = "aten::mm"
+        FakeFunc = _fake_func("aten::mm")
 
         self.assertFalse(_should_capture(FakeFunc, t, 1000, None))
 
 
-class TestActivationTracer(unittest.TestCase):
-    """Core ActivationTracer functionality."""
-
-    def test_captures_forward_ops(self):
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            model(x)
-        self.assertGreater(len(caps), 0)
-        # Should have mm ops from the two Linear layers
-        mm_keys = [k for k in caps if "mm" in k]
-        self.assertGreaterEqual(len(mm_keys), 2)
-
-    def test_captures_with_backward(self):
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            out = model(x)
-            out.sum().backward()
-        # Should capture both forward and backward ops
-        self.assertGreater(len(caps), 2)
-
-    def test_module_fqn_in_keys(self):
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            model(x)
-        # Keys should contain module names like "0" (first Linear)
-        keys = list(caps.keys())
-        has_module = any("0/" in k for k in keys)
-        self.assertTrue(has_module, f"No module FQN in keys: {keys}")
-
-    def test_captures_ops_without_module_fqn(self):
-        """Change 5: ops without module context use <none>."""
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            out = model(x)
-            # Loss is outside any module
-            loss = out.sum()
-            loss.backward()
-        none_keys = [k for k in caps if "<none>" in k]
-        # There should be at least some <none> ops from backward
-        # (depends on autograd graph mapping)
-        self.assertIsInstance(none_keys, list)
-
-    def test_double_exit_guard(self):
-        """Change 8: double-exit doesn't crash."""
-        model = _make_model()
-        tracer = ActivationTracer(model)
-        caps = tracer.__enter__()
-        model(torch.randn(BATCH, 64))
-        # Simulate dispatch mode exiting early
-        tracer._dispatch_mode._exited = True
-        # Should not crash
-        tracer.__exit__(None, None, None)
-
-    def test_detect_anomaly_enabled(self):
-        """Change 10: detect_anomaly is enabled during tracing."""
-        model = _make_model()
-        self.assertFalse(torch.is_anomaly_enabled())
-        with ActivationTracer(model) as caps:
-            self.assertTrue(torch.is_anomaly_enabled())
-        self.assertFalse(torch.is_anomaly_enabled())
-
-
-class TestPhaseTagging(unittest.TestCase):
-    """Change 2 & 7: phase tagging (forward/backward)."""
-
-    def test_forward_ops_tagged_forward(self):
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            model(x)
-        for cap in caps.values():
-            self.assertEqual(cap.phase, "forward")
-
-    def test_backward_ops_tagged_backward(self):
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            out = model(x)
-            out.sum().backward()
-        phases = {cap.phase for cap in caps.values()}
-        self.assertIn("backward", phases)
-
-    def test_backward_sticky_flag(self):
-        """Once backward starts, all subsequent ops are tagged backward."""
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            out = model(x)
-            out.sum().backward()
-        # Find the first backward op
-        keys = list(caps.keys())
-        first_bwd = None
-        for i, k in enumerate(keys):
-            if caps[k].phase == "backward":
-                first_bwd = i
-                break
-        # All ops after the first backward should be backward
-        if first_bwd is not None:
-            for k in keys[first_bwd:]:
-                self.assertEqual(
-                    caps[k].phase, "backward",
-                    f"Op {k} after first backward should be backward"
-                )
-
-
-class TestBackwardFQNMapping(unittest.TestCase):
-    """Change 9: backward module FQN via autograd graph mapping."""
-
-    def test_backward_ops_have_module_fqn(self):
-        model = _make_model()
-        x = torch.randn(BATCH, 64)
-        with ActivationTracer(model) as caps:
-            out = model(x)
-            out.sum().backward()
-        bwd_ops = {k: v for k, v in caps.items() if v.phase == "backward"}
-        # At least some backward ops should have module FQN (not <none>)
-        fqn_ops = [k for k in bwd_ops if "<none>" not in k]
-        self.assertGreater(
-            len(fqn_ops), 0,
-            "No backward ops with module FQN"
-        )
-
-    def test_parent_claims_ops_between_children(self):
-        """For ``w2(silu(w1(x)) * w3(x))``, the silu and mul that live
-        directly inside the parent forward must be attributed to the
-        parent in BOTH forward and backward — not to any child — and
-        the child mm ops must still be attributed to their own
-        modules (the parent must not stomp on them).
-
-        This is the FeedForward-shaped case the autograd-graph
-        traversal in ``_record_grad_fn`` is built to handle: the
-        parent's silu/mul are sandwiched between child subgraphs in
-        the reverse graph, so without "walk through already-claimed
-        nodes" they would stay unattributed, and without
-        "claim only unclaimed" the parent would overwrite the
-        children.
-        """
-        model = _FeedForward()
-        x = torch.randn(4, 32, requires_grad=True)
-        # min_numel=1 so the small test tensors aren't filtered out.
-        with ActivationTracer(model, min_numel=1) as caps:
-            out = model(x)
-            out.sum().backward()
-
-        # Group keys by op name and module prefix.
-        def has_op(prefix: str, op_substr: str, phase: str) -> bool:
-            return any(
-                k.startswith(prefix + "/") and op_substr in k and v.phase == phase
-                for k, v in caps.items()
-            )
-
-        # Root module's FQN is the empty string, which renders as
-        # "<none>" in the key.
-        ROOT = "<none>"
-
-        # Forward: parent ops live under root, child mms under their modules.
-        self.assertTrue(has_op(ROOT, "silu", "forward"),
-                        "parent's silu should be attributed to root")
-        self.assertTrue(has_op(ROOT, "mul", "forward"),
-                        "parent's mul should be attributed to root")
-        self.assertTrue(has_op("w1", "mm", "forward"),
-                        "w1's mm should stay attributed to w1")
-        self.assertTrue(has_op("w2", "mm", "forward"),
-                        "w2's mm should stay attributed to w2")
-        self.assertTrue(has_op("w3", "mm", "forward"),
-                        "w3's mm should stay attributed to w3")
-
-        # Backward: same attributions, recovered via _grad_fn_to_module.
-        self.assertTrue(has_op(ROOT, "silu_backward", "backward"),
-                        "silu_backward must be attributed to root, not a child")
-        self.assertTrue(has_op("w1", "mm", "backward"),
-                        "w1's backward mm should stay attributed to w1")
-        self.assertTrue(has_op("w2", "mm", "backward"),
-                        "w2's backward mm should stay attributed to w2")
-        self.assertTrue(has_op("w3", "mm", "backward"),
-                        "w3's backward mm should stay attributed to w3")
-
-        # Negative: nothing on the silu path should leak under any child.
-        for k, v in caps.items():
-            if "silu" in k:
-                for child in ("w1/", "w2/", "w3/"):
-                    self.assertNotIn(
-                        child, k,
-                        f"silu op leaked under child {child}: {k} ({v.phase})",
-                    )
-
-
 class TestDumpCaptures(unittest.TestCase):
-    """Change 6: deterministic stat computation and dump format."""
+    """Stat fields are written from the pre-computed ``stats`` dict.
+
+    Stats are computed inline at capture time (see ``_compute_stats``)
+    so the dump is just a write-through; no tensor is retained.
+    """
+
+    _SAMPLE_STATS = {
+        "Shape": "torch.Size([100, 100]), Dtype: torch.float32",
+        "L1 norm": "1.234e+02",
+        "L2 norm": "5.678e+01",
+        "Min": "-1.0e+00",
+        "Max": "1.0e+00",
+        "Mean": "0.0e+00",
+    }
 
     def test_writes_file(self):
-        caps = {
-            "mod/op_0_mm": CapturedActivation(
-                tensor=torch.randn(100, 100)
-            ),
-        }
+        caps = {"mod/op_0_mm": CapturedActivation(stats=self._SAMPLE_STATS)}
         with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
             path = f.name
         try:
@@ -427,10 +259,9 @@ class TestDumpCaptures(unittest.TestCase):
             os.unlink(path)
 
     def test_cleans_fqn_in_output(self):
-        """Change 3: _checkpoint_wrapped_module stripped at dump time."""
         caps = {
             "layers.0._checkpoint_wrapped_module.wq/op_0_mm": CapturedActivation(
-                tensor=torch.randn(100, 100)
+                stats=self._SAMPLE_STATS
             ),
         }
         with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
@@ -443,25 +274,32 @@ class TestDumpCaptures(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_deterministic_norms(self):
-        """Change 6: CPU float64 gives deterministic results."""
-        t = torch.randn(1000, 1000, device="cpu")
-        caps = {"test/op_0_mm": CapturedActivation(tensor=t)}
+    def test_inplace_capture_writes_no_stats(self):
+        """In-place op captures (no ``stats``) still get a header and
+        any hash info, but skip the Shape/L1/L2/Min/Max/Mean lines."""
+        caps = {
+            "<none>/op_0__fused_adam_": CapturedActivation(
+                stats={},
+                output_hash="",
+                input_hashes="1.0e+02, 2.0e+02",
+            ),
+        }
         with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
             path = f.name
         try:
             dump_captures_to_file(caps, path)
-            content1 = open(path).read()
-            dump_captures_to_file(caps, path)
-            content2 = open(path).read()
-            self.assertEqual(content1, content2)
+            content = open(path).read()
+            self.assertIn("[<none>/op_0__fused_adam_]", content)
+            self.assertNotIn("Shape:", content)
+            self.assertNotIn("L1 norm:", content)
+            self.assertIn("Input hashes:", content)
         finally:
             os.unlink(path)
 
     def test_phase_in_output(self):
         caps = {
             "mod/op_0_mm": CapturedActivation(
-                tensor=torch.randn(100, 100), phase="backward"
+                stats=self._SAMPLE_STATS, phase="backward"
             ),
         }
         with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
@@ -476,7 +314,7 @@ class TestDumpCaptures(unittest.TestCase):
     def test_forward_phase_not_in_output(self):
         caps = {
             "mod/op_0_mm": CapturedActivation(
-                tensor=torch.randn(100, 100), phase="forward"
+                stats=self._SAMPLE_STATS, phase="forward"
             ),
         }
         with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
@@ -487,37 +325,6 @@ class TestDumpCaptures(unittest.TestCase):
             self.assertNotIn("Phase:", content)
         finally:
             os.unlink(path)
-
-
-class TestCompareCaptures(unittest.TestCase):
-    """naive_compare_captures function."""
-
-    def test_identical_captures_match(self):
-        t = torch.randn(100, 100)
-        caps_a = {"mod/op_0_mm": CapturedActivation(tensor=t.clone())}
-        caps_b = {"mod/op_0_mm": CapturedActivation(tensor=t.clone())}
-        results = naive_compare_captures(caps_a, caps_b, verbose=False)
-        self.assertTrue(results["mod/op_0_mm"]["match"])
-
-    def test_different_captures_mismatch(self):
-        caps_a = {"mod/op_0_mm": CapturedActivation(tensor=torch.randn(100, 100))}
-        caps_b = {"mod/op_0_mm": CapturedActivation(tensor=torch.randn(100, 100))}
-        results = naive_compare_captures(caps_a, caps_b, verbose=False)
-        self.assertFalse(results["mod/op_0_mm"]["match"])
-
-    def test_tolerance(self):
-        t = torch.randn(100, 100)
-        caps_a = {"mod/op_0_mm": CapturedActivation(tensor=t)}
-        caps_b = {"mod/op_0_mm": CapturedActivation(tensor=t + 1e-6)}
-        results = naive_compare_captures(caps_a, caps_b, atol=1e-5, verbose=False)
-        self.assertTrue(results["mod/op_0_mm"]["match"])
-
-    def test_shape_mismatch(self):
-        caps_a = {"mod/op_0_mm": CapturedActivation(tensor=torch.randn(10, 10))}
-        caps_b = {"mod/op_0_mm": CapturedActivation(tensor=torch.randn(10, 20))}
-        results = naive_compare_captures(caps_a, caps_b, verbose=False)
-        self.assertFalse(results["mod/op_0_mm"]["match"])
-        self.assertIn("error", results["mod/op_0_mm"])
 
 
 class TestNumericsDebugger(unittest.TestCase):
@@ -544,8 +351,10 @@ class TestNumericsDebugger(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             debugger = NumericsDebugger(
-                enabled=True, model=model,
-                dump_dir=tmpdir, capture_step=1,
+                enabled=True,
+                model=model,
+                dump_dir=tmpdir,
+                capture_step=1,
             )
             debugger.__enter__()
 
@@ -571,6 +380,158 @@ class TestNumericsDebugger(unittest.TestCase):
         debugger.__exit__(None, None, None)
 
 
+class TestDebugModeTracer(unittest.TestCase):
+    """DebugMode-backed tracer.
+
+    Verifies it produces captures keyed by ``module_fqn/op_N_opname``
+    with phase tags and skipped-ops set so ``dump_captures_to_file``
+    and :mod:`torchtitan.tools.compare_numerics` work unchanged.
+    """
+
+    def test_captures_forward_ops(self):
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        with DebugModeTracer(model) as caps:
+            model(x)
+        self.assertGreater(len(caps), 0)
+        mm_keys = [k for k in caps if "mm" in k]
+        self.assertGreaterEqual(len(mm_keys), 2)
+
+    def test_captures_with_backward(self):
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        with DebugModeTracer(model) as caps:
+            out = model(x)
+            out.sum().backward()
+        phases = {cap.phase for cap in caps.values()}
+        self.assertIn("forward", phases)
+        self.assertIn("backward", phases)
+
+    def test_module_fqn_in_keys(self):
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        with DebugModeTracer(model) as caps:
+            model(x)
+        self.assertTrue(any("0/" in k for k in caps), f"keys={list(caps)}")
+
+    def test_excluded_ops_recorded(self):
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        tracer = DebugModeTracer(model)
+        with tracer as _caps:
+            model(x)
+        # ReLU produces a view/detach-class op chain; at minimum, the
+        # backward will dispatch t/transpose ops.  Just check the
+        # mechanism is wired (set exists and is populated, or stays
+        # empty when no excluded op fires).
+        self.assertIsInstance(tracer.skipped_excluded_ops, set)
+
+    def test_op_filter(self):
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        with DebugModeTracer(model, op_filter={"mm"}) as caps:
+            model(x)
+        for key in caps:
+            self.assertIn("mm", key.split("/")[-1])
+
+    def test_min_numel_filter(self):
+        model = nn.Linear(4, 4, bias=False)  # tiny; numel=16 per op
+        x = torch.randn(2, 4)
+        with DebugModeTracer(model, min_numel=1000) as caps:
+            model(x)
+        self.assertEqual(len(caps), 0)
+
+    def test_fqn_does_not_include_root_class_prefix(self):
+        """ModTracker prefixes FQNs with the model class name; we strip
+        that prefix at capture time so DebugModeTracer's FQNs use the
+        same naming as ``named_modules()`` (matching FQNInterpreter)."""
+        model = _make_model()  # nn.Sequential — root class is "Sequential"
+        x = torch.randn(BATCH, 64)
+        with DebugModeTracer(model) as caps:
+            out = model(x)
+            out.sum().backward()
+
+        cls_name = type(model).__name__
+        prefixed = [k for k in caps if k.startswith(f"{cls_name}.")]
+        self.assertEqual(
+            prefixed,
+            [],
+            f"FQNs should not be rooted at the model class: {prefixed[:3]}",
+        )
+
+    def test_backward_ops_have_module_fqn(self):
+        """Backward FQNs are recovered via _grad_fn_to_module.
+
+        ModTracker is silent during backward (C++ autograd doesn't
+        invoke Python module forwards), so DebugModeTracer's forward
+        hook must seed _grad_fn_to_module so backward ops can look up
+        their owning module.
+        """
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        with DebugModeTracer(model) as caps:
+            out = model(x)
+            out.sum().backward()
+        bwd_keys = [k for k, v in caps.items() if v.phase == "backward"]
+        self.assertGreater(len(bwd_keys), 0)
+        fqn_bwd = [k for k in bwd_keys if not k.startswith("<none>/")]
+        self.assertGreater(
+            len(fqn_bwd),
+            0,
+            f"all backward ops lost their FQN: {bwd_keys}",
+        )
+
+    def test_dump_and_reparse_round_trip(self):
+        """DebugModeTracer output must be parseable by compare_numerics."""
+        from torchtitan.tools.compare_numerics import parse_log
+
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        tracer = DebugModeTracer(model)
+        with tracer as caps:
+            out = model(x)
+            out.sum().backward()
+
+        with tempfile.NamedTemporaryFile(suffix=".log", delete=False) as f:
+            path = f.name
+        try:
+            dump_captures_to_file(
+                caps, path, skipped_excluded_ops=tracer.skipped_excluded_ops
+            )
+            entries, skipped = parse_log(path)
+            self.assertEqual(len(entries), len(caps))
+            self.assertEqual(skipped, tracer.skipped_excluded_ops)
+        finally:
+            os.unlink(path)
+
+
+class TestNumericsDebuggerProducesLog(unittest.TestCase):
+    """End-to-end: NumericsDebugger drives DebugModeTracer and writes a log."""
+
+    def test_writes_activation_log_on_step(self):
+        model = nn.Sequential(
+            nn.Linear(64, 64, bias=False),
+            nn.ReLU(),
+            nn.Linear(64, 64, bias=False),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            debugger = NumericsDebugger(
+                enabled=True,
+                model=model,
+                dump_dir=tmpdir,
+                capture_step=1,
+            )
+            debugger.__enter__()
+            try:
+                self.assertIsInstance(debugger._tracer, DebugModeTracer)
+                model(torch.randn(32, 64))
+                debugger.step()
+            finally:
+                debugger.__exit__(None, None, None)
+            log_path = os.path.join(tmpdir, "rank_0_activations.log")
+            self.assertTrue(os.path.exists(log_path))
+
+
 class TestFQNInterpreter(unittest.TestCase):
     """FQNInterpreter for traced graph replay."""
 
@@ -578,9 +539,7 @@ class TestFQNInterpreter(unittest.TestCase):
         """FQNInterpreter reads node.meta['custom']['module_fqn']."""
         from torch.fx.experimental.proxy_tensor import make_fx
 
-        from torchtitan.experiments.graph_trainer.debug_utils import (
-            FQNInterpreter,
-        )
+        from torchtitan.experiments.graph_trainer.debug_utils import FQNInterpreter
 
         def fn(x, w):
             return torch.mm(x, w)

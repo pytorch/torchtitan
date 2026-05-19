@@ -123,14 +123,12 @@ class FQNInterpreter(torch.fx.Interpreter):
 
         # Each ContextVar.set() returns a Token that remembers the
         # previous value.  We collect them so the finally block can
-        # restore all vars in reverse order (LIFO, like nested withs).
+        # restore all vars in reverse order (LIFO, like nested ``with`` blocks).
         tokens: list[Token] = []
         if fqn:
             tokens.append(_current_module_name.set(fqn))
         if stack_trace:
-            tokens.append(
-                _current_stack_frames.set(_parse_stack_trace(stack_trace))
-            )
+            tokens.append(_current_stack_frames.set(_parse_stack_trace(stack_trace)))
         tokens.append(_current_phase_override.set(phase))
         try:
             return super().run_node(n)

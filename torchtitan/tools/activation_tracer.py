@@ -5,10 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Lightweight activation tracer using monkeypatch + TorchDispatchMode.
+Numerics activation tracer built on top of ``torch.utils._debug_mode.DebugMode``.
 
-Captures intermediate tensor values during training without modifying
-model source code. Works with DTensor and torch.compile.
+Captures per-op activation snapshots during training without modifying
+model source code.  Each capture carries the originating module FQN,
+source location, phase (forward/backward), and norm-hashes of input +
+output tensors (for detecting in-place mutations and bit-exact
+divergences).  Works with DTensor, torch.compile, FSDP, and activation
+checkpointing.
 
 For each captured op, we track:
     - **Op name**: the ATen operation (e.g. mm, bmm, silu, add)
@@ -17,6 +21,8 @@ For each captured op, we track:
     - **Source location**: stack trace back to the model code that
       triggered the op (e.g. ``common/attention.py:534``)
     - **Phase**: whether the op ran during forward or backward
+    - **Output hash / Input hashes**: DebugMode's ``norm_hash_fn``
+      applied to result and pre-op inputs.
 
 What gets captured:
     By default, captures outputs of every op that isn't in ``_EXCLUDED_OPS``
@@ -31,26 +37,24 @@ What gets captured:
     phase (forward or backward).
 
 Filtering / customization:
-    Pass ``op_filter`` to ``ActivationTracer`` to restrict capture to specific
+    Pass ``op_filter`` to ``DebugModeTracer`` to restrict capture to specific
     ops (matched by substring against the op name). For example, to only
     capture matrix multiplies and softmax::
 
-        ActivationTracer(model, op_filter={"mm", "bmm", "softmax"})
+        DebugModeTracer(model, op_filter={"mm", "bmm", "softmax"})
 
     Tweak ``min_numel`` to filter small tensors, and edit ``_EXCLUDED_OPS``
     to drop additional infrastructure ops you never want to see.
 """
 
-import functools
 import os
 import re
-import traceback
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 import torch
+import torch.utils._pytree as pytree
 from torch import nn
-from torch.utils._python_dispatch import TorchDispatchMode
 
 
 @dataclass
@@ -68,19 +72,82 @@ class _StackFrame:
 
 @dataclass
 class CapturedActivation:
-    """A captured activation with its source location."""
+    """A captured activation: pre-computed stats + provenance.
 
-    tensor: torch.Tensor
+    Stats (Shape, Dtype, L1/L2 norms, Min/Max/Mean) are computed inline
+    at capture time so we never hold a tensor clone after the op
+    completes.  For in-place ops where the dispatch returns ``None``
+    the dict is empty — those entries rely on ``input_hashes`` /
+    ``output_hash`` for comparison.
+    """
+
+    # Pre-computed stat strings keyed by name (``Shape``, ``L1 norm``,
+    # etc.).  Empty for in-place op captures (no result to summarize).
+    stats: dict[str, str] = field(default_factory=dict)
     stack_frames: list[_StackFrame] = field(default_factory=list)
     phase: str = "forward"
+    # DebugMode norm-hash (basically L1) of the op result.  Comma-
+    # separated when the result is a tuple/list of tensors.  Empty
+    # string means no hash recorded.
+    output_hash: str = ""
+    # Comma-separated norm-hashes of input tensors captured *before*
+    # the op ran.  For in-place ops (e.g. ``_fused_adam_``) comparing
+    # an op's ``input_hashes`` against the previous op's
+    # ``input_hashes`` for the same arg surfaces the mutation, even
+    # though ``output_hash`` is empty.
+    input_hashes: str = ""
+    # Producing capture key for each input tensor, aligned positionally
+    # with ``input_hashes``.  Resolved from DebugMode's tensor ID
+    # tracker: if an input tensor was the output of an earlier captured
+    # op, that op's key is stored; otherwise empty.  Semicolon-
+    # separated (commas are reserved for the hash list).
+    input_producers: str = ""
+    # The op's aten name (e.g. ``_fused_adam_``).  Persisted so the
+    # comparison tool can recognize in-place ops without re-parsing
+    # the key.
+    op_name: str = ""
 
-    @property
-    def shape(self):
-        return self.tensor.shape
 
-    @property
-    def dtype(self):
-        return self.tensor.dtype
+def _compute_stats(tensor: torch.Tensor) -> dict[str, str]:
+    """Reduce ``tensor`` to the stat strings written to the log.
+
+    Done inline at capture time so we never have to clone or hold
+    onto the tensor itself.  L2 norm and mean are reduced in
+    **float64** so they're deterministic across reduction-order drift
+    (eager vs traced reorder sums differently — float32 reductions
+    diverge in the last digit; float64 has ~9 more bits of precision
+    and absorbs it).  L1 norm is intentionally omitted — it's
+    identical to ``output_hash`` (which DebugMode computes via
+    ``norm_hash_fn`` in float64), so dumping it again would be
+    redundant.  Min/Max are exact, so we keep the original dtype.
+    """
+    t64 = tensor.to(dtype=torch.float64)
+    return {
+        "Shape": f"{tensor.shape}, Dtype: {tensor.dtype}",
+        "L2 norm": f"{t64.norm(p=2).item():.6e}",
+        "Min": f"{tensor.float().min().item():.6e}",
+        "Max": f"{tensor.float().max().item():.6e}",
+        "Mean": f"{t64.mean().item():.6e}",
+    }
+
+
+def _stringify_hash_tree(hash_obj) -> str:
+    """Flatten a DebugMode hash pytree into a comma-separated string.
+
+    ``log_tensor_hashes`` stores hashes as a pytree mirroring the
+    original args / kwargs / result structure, with floats where
+    tensors were and ``None`` elsewhere.  We flatten + drop Nones so
+    the log line is human-readable.
+
+    Returns an empty string when nothing hashable was present.
+    """
+    if hash_obj is None:
+        return ""
+    leaves = pytree.tree_leaves(hash_obj)
+    vals = [v for v in leaves if v is not None]
+    if not vals:
+        return ""
+    return ", ".join(f"{v:.6e}" if isinstance(v, float) else str(v) for v in vals)
 
 
 # Ops to always exclude — infrastructure, not meaningful for numerics parity.
@@ -144,58 +211,54 @@ _EXCLUDED_OPS = frozenset(
         # Collective comm (DTensor / FSDP).
         #
         # Async collective ops dispatch and return *before* the
-        # destination buffer is filled — the buffer was just allocated
-        # (often via empty()) and a work handle is queued; the data only
-        # becomes valid after the corresponding wait_tensor.  Our
-        # __torch_dispatch__ clones the output at dispatch time, so we
-        # would capture uninitialized memory (NaN / garbage bit patterns
-        # from the CUDA allocator) rather than the actual gathered /
-        # scattered tensor.  wait_tensor is itself a no-op view that
-        # returns the same tensor; capturing it adds no information
-        # beyond the eventual consumer op and risks the same race.
-        "redistribute",
-        "all_gather",
-        "all_gather_into_tensor",
-        "all_gather_into_tensor_out",
+        # destination buffer is filled.
+        # "redistribute",
+        # "all_gather",
+        # "all_gather_into_tensor",
+        # "all_gather_into_tensor_out",
         "_pre_bucket_all_gather",
-        "all_reduce",
-        "reduce_scatter",
-        "reduce_scatter_tensor",
+        # "all_reduce",
+        # "reduce_scatter",
+        # "reduce_scatter_tensor",
         "_pre_bucket_reduce_scatter",
-        "wait_tensor",
     }
 )
 
-def _is_filtered_frame(path: str) -> bool:
-    """Filter frames from torch internals and activation_tracer.
 
-    Used by both _extract_user_frames (live traceback) and
-    _parse_stack_trace (node.meta / autograd traceback strings).
+def _is_filtered_frame(path: str) -> bool:
+    """Filter frames from torch internals and this module.
+
+    Used by ``_parse_stack_trace`` when surfacing source locations
+    from ``node.meta["stack_trace"]`` and from DebugMode's
+    ``op.fwd_stack_trace`` / ``op.stack_trace`` strings.
     """
-    if "/torch/nn/" in path or "\\torch\\nn\\" in path:
+    p = path.replace("\\", "/")
+    if "/torch/nn/" in p:
         return True
-    if "/torch/autograd/" in path or "\\torch\\autograd\\" in path:
+    if "/torch/autograd/" in p:
         return True
-    if "activation_tracer.py" in path:
+    # Dispatcher / compile / runtime plumbing — these frames show up
+    # in DebugMode's live traceback under FSDP and activation
+    # checkpoint, drowning out the user-code frame.
+    if "/torch/_ops.py" in p:
+        return True
+    if "/torch/_compile.py" in p:
+        return True
+    if "/torch/_dynamo/" in p:
+        return True
+    if "/torch/utils/_debug_mode/" in p:
+        return True
+    if "/torch/utils/checkpoint.py" in p:
+        return True
+    if "activation_tracer.py" in p:
+        return True
+    # FQNInterpreter wraps every traced node's execution, so its
+    # super().run_node line shows up in the live traceback when a
+    # node has no node.meta["stack_trace"].  It's never the
+    # location the user wants.
+    if "graph_trainer/debug_utils.py" in p:
         return True
     return False
-
-
-def _extract_user_frames(stack: list[traceback.FrameSummary]) -> list[_StackFrame]:
-    """Extract user-code frames from a live traceback, filtering out
-    torch internals and activation_tracer frames."""
-    frames = []
-    for frame in reversed(stack):
-        if not _is_filtered_frame(frame.filename) and not frame.filename.startswith("<"):
-            frames.append(
-                _StackFrame(
-                    filename=frame.filename,
-                    lineno=frame.lineno,
-                    name=frame.name,
-                    line=frame.line,
-                )
-            )
-    return frames
 
 
 def _get_op_name(func) -> str:
@@ -255,42 +318,32 @@ def _should_capture(func, result, min_numel: int, op_filter: set[str] | None) ->
 
 # The current module FQN for the op being dispatched.
 #
-# Set by _patch_model's wrapped_forward during eager execution, and by
-# FQNInterpreter.run_node during traced graph replay (from
-# node.meta["custom"]["module_fqn"]).  Read by _maybe_capture to build
-# the capture key (e.g. "layers.0.attention.wq/op_0_mm").
+# Set by ``FQNInterpreter.run_node`` during traced graph replay (from
+# ``node.meta["custom"]["module_fqn"]``).  Read by
+# ``DebugModeTracer.record_hook`` to build the capture key (e.g.
+# ``"layers.0.attention.wq/op_0_mm"``).
 #
-# During eager backward, the monkeypatched forwards don't fire (C++
-# autograd engine bypasses them), so this is None.  _maybe_capture
-# falls back to _grad_fn_to_module to recover the FQN from the
-# autograd graph.
+# During eager mode this stays ``None``; the FQN is recovered from
+# DebugMode's ``ModTracker`` (for forward ops) or from
+# ``_grad_fn_to_module`` (for backward ops).
 _current_module_name: ContextVar[str | None] = ContextVar(
     "_current_module_name", default=None
 )
 
 # Override for stack frames attached to captured activations.
 #
-# Set by _patch_model (from inspect.getfile of the module's forward
-# method) during eager forward, and by FQNInterpreter (from
-# node.meta["stack_trace"]) during traced replay.  When set,
-# _maybe_capture uses these instead of the live traceback (which is
-# uninformative under FSDP's C++ dispatch or during traced replay).
-#
-# During eager backward, this is None and _maybe_capture reads the
-# forward traceback from _current_autograd_node().metadata["traceback_"]
-# (enabled by detect_anomaly).
+# Set by ``FQNInterpreter`` (from ``node.meta["stack_trace"]``) during
+# traced replay.  When set, ``record_hook`` uses these instead of
+# DebugMode's live or autograd-forward traceback strings.
 _current_stack_frames: ContextVar[list[_StackFrame] | None] = ContextVar(
     "_current_stack_frames", default=None
 )
 
 # Phase override for the current op ("forward" or "backward").
 #
-# Set by FQNInterpreter from node.meta["autograd_backward"] during
-# traced replay.  When set, _maybe_capture uses this directly instead
-# of inferring the phase from the autograd state.
-#
-# None means no override (eager mode) — _maybe_capture falls back to
-# the _in_backward sticky flag on the dispatch mode.
+# Set by ``FQNInterpreter`` from ``node.meta["autograd_backward"]``
+# during traced replay.  When set, ``record_hook`` uses this directly
+# instead of inferring the phase from ``torch._C._current_autograd_node()``.
 _current_phase_override: ContextVar[str | None] = ContextVar(
     "_current_phase_override", default=None
 )
@@ -314,9 +367,7 @@ def set_numerics_capture_active(active: bool) -> None:
     _numerics_capture_active = active
 
 
-_STACK_TRACE_RE = re.compile(
-    r'File "([^"]+)", line (\d+), in (\S+)\n\s*(.*?)(?=\n|$)'
-)
+_STACK_TRACE_RE = re.compile(r'File "([^"]+)", line (\d+), in (\S+)\n\s*(.*?)(?=\n|$)')
 
 
 def _parse_stack_trace(trace_str: str) -> list[_StackFrame]:
@@ -341,122 +392,18 @@ def _clean_fqn(fqn: str) -> str:
     return fqn.replace("._checkpoint_wrapped_module", "")
 
 
-def _resolve_module_location(module: nn.Module) -> list[_StackFrame]:
-    """Resolve source location from the module class definition.
-
-    Under FSDP and activation checkpointing, module forwards are
-    dispatched from C++ hooks, so the Python call stack inside
-    ``__torch_dispatch__`` only shows the top-level entry point
-    (e.g. ``train.py:main``).  The model-level frames
-    (``attention.py``, ``decoder.py``) are not on the stack because
-    the C++ runtime broke the Python call chain.
-
-    We work around this by using ``inspect.getfile`` to look up
-    where the module's ``forward`` method is defined at patch time.
-    This gives a stable location (e.g. ``common/attention.py:278``)
-    regardless of how the module is invoked at runtime.
-
-    For aot_fx_trace mode, ``node.meta["stack_trace"]`` provides
-    exact per-op line numbers recorded during tracing, so this
-    fallback is only needed for eager mode.
-    """
-    import inspect
-
-    try:
-        fn = type(module).forward
-        source_file = inspect.getfile(fn)
-        if _is_filtered_frame(source_file):
-            return []
-        _, lineno = inspect.getsourcelines(fn)
-        return [_StackFrame(filename=source_file, lineno=lineno, name="forward")]
-    except (TypeError, OSError):
-        return []
-
-
-# Maps autograd Node (grad_fn) to module FQN. Built during forward by
-# _patch_model, read during backward by _maybe_capture to give backward
-# ops their originating module's FQN.
+# Maps autograd Node (grad_fn) to module FQN. Built during forward
+# by the global module forward hooks installed in
+# ``DebugModeTracer.__enter__`` (via ``_record_grad_fn``), read during
+# backward by ``record_hook`` to give backward ops their originating
+# module's FQN.
 _grad_fn_to_module: dict[object, str] = {}
-
-
-def _patch_model(model: nn.Module) -> list[tuple[nn.Module, callable]]:
-    """Monkeypatch every module's forward to track module context.
-
-    Three things happen in each wrapped forward:
-
-    1. Set _current_module_name so _maybe_capture knows which module
-       the current op belongs to (used as the key prefix).
-    2. Set _current_stack_frames to the module's source location
-       (from inspect.getfile) so captured ops get a meaningful
-       location even when the live traceback is empty (FSDP).
-    3. After forward returns, walk the autograd graph from the output
-       grad_fn to build the _grad_fn_to_module mapping.  This lets
-       _maybe_capture recover the module FQN for backward ops, where
-       _current_module_name is not set (C++ autograd engine bypasses
-       the monkeypatched forwards).
-
-    The default args (_name, _orig, _loc) capture loop variables
-    by value — without them, all closures would share the last
-    iteration's values.
-
-    Returns a list of (module, original_forward) pairs for unpatching.
-    """
-    _grad_fn_to_module.clear()
-    saved = []
-
-    for name, module in model.named_modules():
-        original_forward = module.forward
-        saved.append((module, original_forward))
-
-        # Pre-resolve source location from class definition at patch
-        # time.  This is the fallback for eager forward ops — the live
-        # traceback inside __torch_dispatch__ is empty under FSDP.
-        location = _resolve_module_location(module)
-
-        @functools.wraps(original_forward)
-        def wrapped_forward(
-            *args, _name=name, _orig=original_forward, _loc=location, **kwargs
-        ):
-            # Snapshot input grad_fns BEFORE forward runs.  These are
-            # the boundary in _record_grad_fn's traversal — the walk
-            # must not cross into them because they belong to the
-            # caller's scope (sibling or parent module), not this module.
-            input_grad_fns = _collect_grad_fns(args, kwargs)
-
-            name_token = _current_module_name.set(_name)
-            frames_token = _current_stack_frames.set(_loc) if _loc else None
-            try:
-                result = _orig(*args, **kwargs)
-            finally:
-                if frames_token is not None:
-                    _current_stack_frames.reset(frames_token)
-                _current_module_name.reset(name_token)
-
-            # Walk the autograd graph from this module's output to map
-            # grad_fn nodes to this module's FQN.  By this point, child
-            # modules have already mapped their nodes (they ran during
-            # _orig above), so the walk passes through them without
-            # overriding and reaches unmapped nodes that belong to this
-            # module (e.g. the mul in FeedForward between w1/w3 and w2).
-            _record_grad_fn(result, _name, input_grad_fns)
-            return result
-
-        module.forward = wrapped_forward
-
-    return saved
-
-
-def _unpatch_model(saved: list[tuple[nn.Module, callable]]) -> None:
-    """Restore original forward methods saved by _patch_model."""
-    for module, original_forward in saved:
-        module.forward = original_forward
-    _grad_fn_to_module.clear()
 
 
 def _collect_grad_fns(args, kwargs) -> set:
     """Collect grad_fn objects from input tensors."""
     grad_fns = set()
-    for a in torch.utils._pytree.tree_leaves((args, kwargs)):
+    for a in pytree.tree_leaves((args, kwargs)):
         if isinstance(a, torch.Tensor) and a.grad_fn is not None:
             grad_fns.add(a.grad_fn)
     return grad_fns
@@ -472,7 +419,7 @@ def _record_grad_fn(result, module_name: str, input_grad_fns: set) -> None:
     for correctness — the "claim only if unclaimed" check is
     order-independent.
     """
-    for t in torch.utils._pytree.tree_leaves(result):
+    for t in pytree.tree_leaves(result):
         if not isinstance(t, torch.Tensor) or t.grad_fn is None:
             continue
         stack = [t.grad_fn]
@@ -490,195 +437,6 @@ def _record_grad_fn(result, module_name: str, input_grad_fns: set) -> None:
             for parent, _ in fn.next_functions:
                 if parent is not None and parent not in visited:
                     stack.append(parent)
-
-
-class _CaptureDispatchMode(TorchDispatchMode):
-    """Lightweight TorchDispatchMode that clones tensor outputs without wrapping."""
-
-    def __init__(
-        self,
-        captures: dict[str, CapturedActivation],
-        op_counters: dict[str, int],
-        min_numel: int,
-        op_filter: set[str] | None,
-        skipped_excluded_ops: set[str],
-    ):
-        super().__init__()
-        self.captures = captures
-        self.op_counters = op_counters
-        self.min_numel = min_numel
-        self.op_filter = op_filter
-        # Records op names that actually dispatched but were dropped
-        # because they live in _EXCLUDED_OPS.  Surfaced in the log /
-        # HTML so users can see which always-skipped ops the model
-        # currently dispatches.
-        self.skipped_excluded_ops = skipped_excluded_ops
-        self._exited = False
-
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        kwargs = kwargs or {}
-        result = func(*args, **kwargs)
-        try:
-            op_name = _get_op_name(func)
-            if op_name in _EXCLUDED_OPS:
-                self.skipped_excluded_ops.add(op_name)
-            else:
-                self._maybe_capture(func, result)
-        except Exception:
-            pass
-        return result
-
-    def _maybe_capture(self, func, result):
-        if not _should_capture(func, result, self.min_numel, self.op_filter):
-            return
-
-        # _current_module_name is set by _patch_model (eager forward)
-        # or FQNInterpreter (traced replay).
-        module_name = _current_module_name.get()
-
-        # For eager backward: recover module FQN and source location
-        # from the autograd node.  _current_module_name is not set
-        # during backward (C++ autograd bypasses monkeypatched forwards),
-        # but the autograd node maps back to the forward module via
-        # _grad_fn_to_module, and detect_anomaly saves forward tracebacks.
-        autograd_fwd_trace = None
-        autograd_node = torch._C._current_autograd_node()
-        if autograd_node is not None:
-            if module_name is None:
-                module_name = _grad_fn_to_module.get(autograd_node)
-            tb = autograd_node.metadata.get("traceback_")
-            if tb:
-                autograd_fwd_trace = "".join(tb)
-
-        module_name = module_name or "<none>"
-
-        op_name = _get_op_name(func)
-        self.op_counters.setdefault(module_name, 0)
-        seq = self.op_counters[module_name]
-        self.op_counters[module_name] += 1
-
-        key = f"{module_name}/op_{seq}_{op_name}"
-
-        try:
-            from torch.distributed.tensor import DTensor
-
-            if isinstance(result, DTensor):
-                tensor = result._local_tensor.detach().clone()
-            else:
-                tensor = result.detach().clone()
-        except ImportError:
-            tensor = result.detach().clone()
-
-        # Stack frames priority:
-        # 1. _current_stack_frames (from _patch_model or FQNInterpreter)
-        # 2. Autograd forward traceback (from detect_anomaly, backward only)
-        # 3. Live traceback (fallback)
-        override_frames = _current_stack_frames.get()
-        if override_frames is not None:
-            stack_frames = override_frames
-        elif autograd_fwd_trace is not None:
-            stack_frames = _parse_stack_trace(autograd_fwd_trace)
-        else:
-            stack = traceback.extract_stack()
-            stack_frames = _extract_user_frames(stack)
-
-        # Phase priority:
-        # 1. _current_phase_override (from FQNInterpreter for traced)
-        # 2. Autograd node present → "backward"
-        # 3. Default → "forward"
-        phase = _current_phase_override.get()
-        if phase is None:
-            if autograd_node is not None:
-                phase = "backward"
-            else:
-                phase = "forward"
-
-        self.captures[key] = CapturedActivation(
-            tensor=tensor,
-            stack_frames=stack_frames,
-            phase=phase,
-        )
-
-
-class ActivationTracer:
-    """Zero-source-change activation tracer using monkeypatch + TorchDispatchMode.
-
-    Captures intermediate tensor values during a forward pass, keyed by
-    ``module_fqn/op_N_opname``. Works with DTensor and avoids the
-    compatibility issues that DebugMode has with DTensor dispatch.
-
-    Example::
-
-        with ActivationTracer(model) as captures:
-            output = model(input_batch)
-
-        for key, cap in captures.items():
-            print(f"{key}: shape={cap.shape}, loc={cap.stack_frames[-1].short_str()}")
-
-    Args:
-        model: The model to trace.
-        min_numel: Minimum tensor size to capture (default 1000).
-        op_filter: Op name substrings to capture. Default None, which captures
-            every op not in ``_EXCLUDED_OPS``. Pass a set of substrings (e.g.
-            ``{"mm", "softmax"}``) to restrict capture to a narrower allowlist.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        *,
-        min_numel: int = 1000,
-        op_filter: set[str] | None = None,
-    ):
-        self.model = model
-        self.min_numel = min_numel
-        self.op_filter = op_filter
-        self._captures: dict[str, CapturedActivation] = {}
-        self._op_counters: dict[str, int] = {}
-        # Op names that dispatched but were dropped because they sit
-        # in _EXCLUDED_OPS.  Surfaced in the log/HTML to make the
-        # always-skipped filtering visible.
-        self.skipped_excluded_ops: set[str] = set()
-        self._dispatch_mode: _CaptureDispatchMode | None = None
-        self._saved_forwards: list[tuple[nn.Module, callable]] = []
-
-    def __enter__(self) -> dict[str, CapturedActivation]:
-        # Skip patching for GraphModules — traced replay uses
-        # FQNInterpreter to set context vars from node metadata,
-        # and module forwards don't fire during gm(*inputs).
-        import torch.fx
-
-        if not isinstance(self.model, torch.fx.GraphModule):
-            self._saved_forwards = _patch_model(self.model)
-            # Enable detect_anomaly so autograd saves forward tracebacks
-            # on backward nodes — _maybe_capture reads them via
-            # _current_autograd_node().metadata["traceback_"].
-            self._anomaly_ctx = torch.autograd.set_detect_anomaly(
-                True, check_nan=False
-            )
-            self._anomaly_ctx.__enter__()
-        self._dispatch_mode = _CaptureDispatchMode(
-            self._captures,
-            self._op_counters,
-            self.min_numel,
-            self.op_filter,
-            self.skipped_excluded_ops,
-        )
-        self._dispatch_mode.__enter__()
-        return self._captures
-
-    def __exit__(self, *args):
-        if self._dispatch_mode and not self._dispatch_mode._exited:
-            self._dispatch_mode.__exit__(*args)
-        # Reset context vars.
-        _current_phase_override.set(None)
-        _current_module_name.set(None)
-        _current_stack_frames.set(None)
-        if hasattr(self, "_anomaly_ctx"):
-            self._anomaly_ctx.__exit__(*args)
-        if self._saved_forwards:
-            _unpatch_model(self._saved_forwards)
-            self._saved_forwards = []
 
 
 def dump_captures_to_file(
@@ -706,20 +464,334 @@ def dump_captures_to_file(
             f.write(f"Excluded ops dispatched: {ops_str}\n")
         f.write("=" * 80 + "\n\n")
         for key, cap in captures.items():
-            t = cap.tensor
-            tf = t.float()
             f.write(f"[{_clean_fqn(key)}]\n")
-            f.write(f"  Shape: {t.shape}, Dtype: {t.dtype}\n")
-            f.write(f"  L1 norm:  {tf.norm(p=1).item():.6e}\n")
-            f.write(f"  L2 norm:  {tf.norm(p=2).item():.6e}\n")
-            f.write(f"  Min:      {tf.min().item():.6e}\n")
-            f.write(f"  Max:      {tf.max().item():.6e}\n")
-            f.write(f"  Mean:     {tf.mean().item():.6e}\n")
+            if cap.stats:
+                # Stats are pre-computed at capture time; the dump is
+                # just a write-through.  Order matters for grep-ability,
+                # so use a fixed sequence rather than dict iteration.
+                for stat in ("Shape", "L1 norm", "L2 norm", "Min", "Max", "Mean"):
+                    val = cap.stats.get(stat)
+                    if val is not None:
+                        f.write(f"  {stat}: {val}\n")
+            if cap.output_hash:
+                f.write(f"  Output hash: {cap.output_hash}\n")
+            if cap.input_hashes:
+                f.write(f"  Input hashes: {cap.input_hashes}\n")
+            if cap.input_producers:
+                f.write(f"  Input producers: {cap.input_producers}\n")
             if cap.stack_frames:
                 f.write(f"  Location: {cap.stack_frames[-1].short_str()}\n")
             if cap.phase != "forward":
                 f.write(f"  Phase: {cap.phase}\n")
             f.write("\n")
+
+
+class DebugModeTracer:
+    """Captures per-op activations via :class:`torch.utils._debug_mode.DebugMode`.
+
+    Drives the capture by entering a DebugMode with
+    ``record_nn_module=True`` (for module FQNs via ``ModTracker``),
+    ``record_stack_trace=True`` (for per-op source locations + autograd
+    forward tracebacks), ``record_ids=True`` (graph-style tensor IDs
+    used for input-producer attribution), and
+    ``log_tensor_hashes(hash_inputs=True)`` (norm hashes of inputs and
+    outputs, including for in-place ops where the result is ``None``).
+
+    Per-op metadata is stamped by a custom dispatch hook into
+    ``op.record``; after ``__exit__`` the captured operator stream is
+    walked once to materialize a ``dict[str, CapturedActivation]``
+    keyed by ``module_fqn/op_N_opname`` and consumable by
+    :mod:`torchtitan.tools.compare_numerics`.
+
+    Args:
+        model: The model whose activations to capture.  Used to install
+            global ``nn.Module`` forward hooks that populate
+            :data:`_grad_fn_to_module` so backward ops can recover the
+            originating module's FQN.
+        min_numel: Minimum tensor size to capture (default 1000).
+        op_filter: Optional set of op-name substrings (allowlist).  None
+            captures every op not in ``_EXCLUDED_OPS``.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        min_numel: int = 1000,
+        op_filter: set[str] | None = None,
+    ):
+        self.model = model
+        self.min_numel = min_numel
+        self.op_filter = op_filter
+        self._captures: dict[str, CapturedActivation] = {}
+        self.skipped_excluded_ops: set[str] = set()
+        self._debug_mode = None
+        self._hook_ctx = None
+        self._hash_ctx = None
+        # Global nn.Module forward hook handles, removed on __exit__.
+        self._pre_fw_handle = None
+        self._post_fw_handle = None
+
+    def __enter__(self) -> dict[str, CapturedActivation]:
+        from torch.utils._debug_mode import DebugMode
+
+        self._debug_mode = DebugMode(
+            record_realtensor=True,
+            record_faketensor=False,
+            record_nn_module=True,
+            record_stack_trace=True,
+            # record_ids populates DebugMode's _tensor_memo with a stable
+            # ``$N`` graph ID per tensor.  We share that memo to map
+            # input tensors back to the captured op that produced them
+            # (used for the producer-link column in the diff HTML).
+            record_ids=True,
+        )
+        # log_tensor_hashes stamps op.log["hash"] (norm hash of the
+        # result, basically L1) and op.log["input_hash"] (norm hash of
+        # each input tensor *before* the op runs).  Input hashes are
+        # what catches in-place mutations — ``_fused_adam_`` returns
+        # None so its output is unhashable, but the per-param input
+        # hashes are still recorded.
+        self._hash_ctx = DebugMode.log_tensor_hashes(hash_fn="norm", hash_inputs=True)
+
+        # Install global forward hooks so backward ops can recover
+        # their owning module's FQN via the autograd graph.  DebugMode's
+        # ModTracker only fires on Python forward calls, so during
+        # backward (driven by the C++ autograd engine) its module stack
+        # is empty.  These hooks fire on every nn.Module.__call__:
+        # walk the autograd graph from each module's output during the
+        # forward post-hook and stash grad_fn -> fqn in _grad_fn_to_module.
+        # _maybe_record_module_fqn in record_hook reads it during backward.
+        _grad_fn_to_module.clear()
+        module_to_fqn = {id(m): name for name, m in self.model.named_modules()}
+        pending_input_grad_fns: dict[int, set] = {}
+
+        def pre_fw_hook(module, args):
+            mid = id(module)
+            if mid not in module_to_fqn:
+                return
+            pending_input_grad_fns[mid] = _collect_grad_fns(args, {})
+
+        def post_fw_hook(module, args, output):
+            mid = id(module)
+            fqn = module_to_fqn.get(mid)
+            if fqn is None:
+                return
+            input_grad_fns = pending_input_grad_fns.pop(mid, set())
+            _record_grad_fn(output, fqn, input_grad_fns)
+
+        self._pre_fw_handle = nn.modules.module.register_module_forward_pre_hook(
+            pre_fw_hook
+        )
+        self._post_fw_handle = nn.modules.module.register_module_forward_hook(
+            post_fw_hook
+        )
+
+        # Captures the cloned output tensor only for ops that pass the
+        # filter — cloning every dispatch output (including AC recompute)
+        # blows out CUDA memory.  We also stash module FQN, stack
+        # frames, and phase per op so the materialize step doesn't need
+        # to walk DebugMode annotate entries.
+        skipped_excluded_ops = self.skipped_excluded_ops
+        min_numel = self.min_numel
+        op_filter = self.op_filter
+        debug_mode = self._debug_mode
+
+        def record_hook(func, types, args, kwargs, result):
+            out = {}
+            op_name = _get_op_name(func)
+            if op_name in _EXCLUDED_OPS:
+                skipped_excluded_ops.add(op_name)
+                return out
+
+            # Compute input/output tensor IDs using DebugMode's shared
+            # tensor memo — lets _materialize_captures map an input
+            # back to its producing op.  Done unconditionally for all
+            # non-excluded ops (including in-place ops we won't clone)
+            # so the producer map is complete.
+            tracker = debug_mode._tensor_memo
+
+            def _id_leaves(obj):
+                tree = pytree.tree_map(
+                    lambda x: tracker._id(x) if isinstance(x, torch.Tensor) else None,
+                    obj,
+                )
+                return [v for v in pytree.tree_leaves(tree) if v is not None]
+
+            out["input_ids"] = _id_leaves((args, kwargs))
+            out["output_ids"] = _id_leaves(result)
+
+            if not _should_capture(func, result, min_numel, op_filter):
+                # Still want phase + module FQN + stack frames for the
+                # in-place op path in _materialize_captures.  Fall
+                # through to the metadata block below.
+                pass
+            else:
+                try:
+                    from torch.distributed.tensor import DTensor
+
+                    tensor = (
+                        result._local_tensor if isinstance(result, DTensor) else result
+                    )
+                except ImportError:
+                    tensor = result
+                # Compute stats inline — no clone, no held reference.
+                out["stats"] = _compute_stats(tensor)
+
+            # Module FQN priority:
+            # 1. _current_module_name ContextVar — set by FQNInterpreter
+            #    during traced graph replay (gm bypasses module forwards
+            #    so ModTracker is silent).
+            # 2. DebugMode's ModTracker stack — populated by Python
+            #    module forward hooks in eager mode.  ModTracker roots
+            #    FQNs at the model class (``FSDPLlama3Model.layers.0...``)
+            #    while named_modules() does not — strip the root segment
+            #    so all three sources agree on the same naming.
+            # 3. _grad_fn_to_module — populated by our forward hook
+            #    (above); recovers FQN for backward ops, where the C++
+            #    autograd engine bypasses module forwards so ModTracker
+            #    is silent.
+            fqn = _current_module_name.get()
+            if fqn is None and debug_mode.current_nn_module_stack:
+                fqn = debug_mode.current_nn_module_stack[-1]
+                root = debug_mode.current_nn_module_stack[0]
+                if fqn == root:
+                    fqn = None
+                elif fqn.startswith(root + "."):
+                    fqn = fqn[len(root) + 1 :]
+            if fqn is None:
+                autograd_node = torch._C._current_autograd_node()
+                if autograd_node is not None:
+                    fqn = _grad_fn_to_module.get(autograd_node)
+            if fqn:
+                out["module_fqn"] = _clean_fqn(fqn)
+
+            # Stack frames: ContextVar (from FQNInterpreter, already
+            # parsed) takes priority over the live traceback DebugMode
+            # captured at dispatch time, which is unhelpful under FSDP /
+            # graph replay.
+            frames = _current_stack_frames.get()
+            if frames is not None:
+                out["stack_frames"] = frames
+
+            phase = _current_phase_override.get()
+            if phase is None:
+                autograd_node = torch._C._current_autograd_node()
+                phase = "backward" if autograd_node is not None else "forward"
+            out["phase"] = phase
+            return out
+
+        self._hook_ctx = DebugMode.dispatch_hooks(record_hook=record_hook)
+        self._debug_mode.__enter__()
+        self._hash_ctx.__enter__()
+        self._hook_ctx.__enter__()
+        return self._captures
+
+    def __exit__(self, *args):
+        if self._hook_ctx is not None:
+            self._hook_ctx.__exit__(*args)
+        if self._hash_ctx is not None:
+            self._hash_ctx.__exit__(*args)
+        if self._debug_mode is not None:
+            self._debug_mode.__exit__(*args)
+        if self._pre_fw_handle is not None:
+            self._pre_fw_handle.remove()
+            self._pre_fw_handle = None
+        if self._post_fw_handle is not None:
+            self._post_fw_handle.remove()
+            self._post_fw_handle = None
+        _grad_fn_to_module.clear()
+        self._materialize_captures()
+
+    def _materialize_captures(self) -> None:
+        """Build ``module_fqn/op_N_opname`` keyed captures from the
+        per-op records stamped by ``record_hook``.
+
+        Most metadata (FQN, stack, phase, output clone) is stamped at
+        hook time, so this pass just assigns per-module op indices and
+        threads through the tensor-ID producer map used for input-link
+        attribution in the diff HTML.
+        """
+        from torch.utils._debug_mode._calls import _OpCall
+
+        op_counters: dict[str, int] = {}
+        # Map from tensor ID (from DebugMode's _tensor_memo) to the
+        # capture key of the op that produced it.  Populated as we
+        # walk operators in dispatch order, so by the time we look up
+        # op N's input IDs the map already contains its predecessors'
+        # output IDs.  Used to attach ``input_producers`` per capture
+        # so the HTML can show "this input came from <op>" on hover.
+        producer_map: dict[int, str] = {}
+
+        if self._debug_mode is None:
+            return
+        for op in self._debug_mode.operators:
+            if not isinstance(op, _OpCall):
+                continue
+
+            op_name = _get_op_name(op.op)
+            record = op.record or {}
+            stats = record.get("stats") or {}
+
+            # log_tensor_hashes stamps op.log with input/output norm
+            # hashes — populated for every _OpCall DebugMode sees,
+            # including in-place ops where result is None.
+            log = op.log or {}
+            output_hash = _stringify_hash_tree(log.get("hash"))
+            input_hashes = _stringify_hash_tree(log.get("input_hash"))
+
+            # Two cases that produce a capture:
+            # 1. We have pre-computed stats → normal capture.
+            # 2. No stats but we have hashes AND the op name ends with
+            #    "_" (in-place convention) and isn't excluded → record
+            #    a hash-only capture so optimizer steps / param updates
+            #    surface in the diff.
+            is_inplace_capture = (
+                not stats
+                and op_name not in _EXCLUDED_OPS
+                and op_name.endswith("_")
+                and (output_hash or input_hashes)
+            )
+            if not stats and not is_inplace_capture:
+                continue
+
+            module_name = record.get("module_fqn") or "<none>"
+            seq = op_counters.setdefault(module_name, 0)
+            op_counters[module_name] = seq + 1
+            key = f"{module_name}/op_{seq}_{op_name}"
+
+            stack_frames = record.get("stack_frames")
+            if not stack_frames:
+                # Fall back to DebugMode's own traceback strings.
+                # fwd_stack_trace is the autograd-saved forward stack
+                # (useful on backward ops); stack_trace is the live
+                # dispatch-time stack (poor under FSDP / replay).
+                trace_str = getattr(op, "fwd_stack_trace", None) or getattr(
+                    op, "stack_trace", None
+                )
+                stack_frames = _parse_stack_trace(trace_str) if trace_str else []
+
+            # Resolve each input tensor ID to the capture key that
+            # produced it (if any).  Positional: empty string means
+            # "produced by an uncaptured op or external input
+            # (parameter, dataloader)".
+            input_ids = record.get("input_ids") or []
+            input_producers = ";".join(producer_map.get(tid, "") for tid in input_ids)
+
+            self._captures[key] = CapturedActivation(
+                stats=stats,
+                stack_frames=stack_frames,
+                phase=record.get("phase", "forward"),
+                output_hash=output_hash,
+                input_hashes=input_hashes,
+                input_producers=input_producers,
+                op_name=op_name,
+            )
+
+            # Register this op as the producer of its output tensors so
+            # downstream consumers can find it.
+            for tid in record.get("output_ids") or []:
+                producer_map[tid] = key
 
 
 class NumericsDebugger:
@@ -751,6 +823,7 @@ class NumericsDebugger:
         self._capture_step = capture_step
         self._step = 0
         self._captured = False
+        self._tracer: DebugModeTracer | None = None
         self._captures: dict[str, CapturedActivation] | None = None
 
     def __enter__(self) -> "NumericsDebugger":
@@ -772,47 +845,38 @@ class NumericsDebugger:
             self._dump()
 
     def _setup(self) -> None:
-        """Enter ActivationTracer so the next training step is captured."""
+        """Enter DebugModeTracer so the next training step is captured."""
         from torchtitan.tools.logging import logger
 
-        logger.info(
-            f"Numerics capture: arming for step {self._capture_step}"
-        )
-        self._captures = {}
-
+        logger.info(f"Numerics capture: arming for step {self._capture_step}")
         set_numerics_capture_active(True)
-        self._tracer = ActivationTracer(self._model)
+        self._tracer = DebugModeTracer(self._model)
         self._captures = self._tracer.__enter__()
 
     def _dump(self) -> None:
         """Dump captures after the capture step completes."""
         from torchtitan.tools.logging import logger
 
-        # Snapshot the tracer's skipped-ops set before _teardown drops
-        # the reference.
-        tracer = getattr(self, "_tracer", None)
-        skipped = set(tracer.skipped_excluded_ops) if tracer is not None else set()
+        # _teardown() exits the tracer.  DebugModeTracer populates
+        # skipped_excluded_ops inside __exit__ (when operators are
+        # walked), so we snapshot it *after* teardown.
+        tracer = self._tracer
         self._teardown()
+        skipped = set(tracer.skipped_excluded_ops) if tracer is not None else set()
         if not self._captures:
             return
 
-        rank = (
-            torch.distributed.get_rank()
-            if torch.distributed.is_initialized()
-            else 0
-        )
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         filepath = os.path.join(self._dump_dir, f"rank_{rank}_activations.log")
-        dump_captures_to_file(
-            self._captures, filepath, skipped_excluded_ops=skipped
-        )
+        dump_captures_to_file(self._captures, filepath, skipped_excluded_ops=skipped)
         logger.info(f"Dumped {len(self._captures)} activations to {filepath}")
         self._captured = True
         self._captures = None
 
     def _teardown(self) -> None:
         set_numerics_capture_active(False)
-        tracer = getattr(self, "_tracer", None)
-        if tracer is not None:
-            if tracer._dispatch_mode and not tracer._dispatch_mode._exited:
-                tracer.__exit__(None, None, None)
-            self._tracer = None
+        if self._tracer is None:
+            return
+        if self._tracer._debug_mode is not None:
+            self._tracer.__exit__(None, None, None)
+        self._tracer = None

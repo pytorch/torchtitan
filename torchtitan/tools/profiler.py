@@ -18,9 +18,9 @@ import tyro
 from torchtitan.config import Configurable
 from torchtitan.config.function import Function
 from torchtitan.observability import structured_logger as sl
+from torchtitan.tools.activation_tracer import NumericsDebugger
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
-from torchtitan.tools.activation_tracer import NumericsDebugger
 
 # Paths expects by meta internal tooling
 PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
@@ -165,7 +165,8 @@ class Profiler(Configurable):
 
         dump_numerics: bool = False
         """Dump per-op activation logs for numerics debugging.
-        Writes to {dump_folder}/numerics/rank_{rank}_activations.log."""
+        Writes ``{dump_folder}/numerics/rank_{rank}_activations.log``
+        (per-op stats + norm hashes of inputs / outputs)."""
 
         enable_memory_snapshot: bool = False
         """Whether to dump memory snapshot."""
@@ -198,8 +199,8 @@ class Profiler(Configurable):
         self.torch_profiler = None
         self.memory_profiler = None
         self.numerics_debugger = None
-        # Numerics debugger needs the model to monkeypatch module forwards
-        # for ActivationTracer dispatch interception.
+        # Numerics debugger registers global module forward hooks on
+        # the model so backward ops can recover their owning FQN.
         self._model = model
 
     def active(
