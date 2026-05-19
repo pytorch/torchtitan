@@ -104,9 +104,9 @@ class Module(nn.Module, Configurable):
     def _init_self_parameters(self) -> None:
         """Initialize this module's own parameters via ``_init_param``.
 
-        Overridden internally by ``from_nn_module`` to delegate to
-        ``reset_parameters``. Not intended for subclass override — configure
-        parameter initialization via ``param_init`` on the Config instead.
+        Subclasses wrapping ``nn.Module`` classes with ``reset_parameters``
+        (e.g. Conv2d, LayerNorm) override this to call ``reset_parameters``
+        when no custom ``param_init`` is provided.
         """
         for name, param in self.named_parameters(recurse=False):
             self._init_param(name, param)
