@@ -210,3 +210,4 @@
   Planned source/config changes: None beyond the existing AC hook source.
   Planned command or config overrides: Selective AC compile+BF16 command with `--training.local_batch_size=10`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and memory below the OOM cliff. Risk is that recompute cost still dominates or batch 10 exceeds memory.
+  Result: invalid at source state `9b87a63`; OOM was contaminated by external VLLM processes occupying GPUs 0-3. Retry after the node is free.

@@ -618,3 +618,26 @@ Interpretation:
 - Selective AC fixes the local-batch-6 OOM and gives large memory headroom.
 - At batch size 6, the recompute overhead dominates the extra tokens.
 - The remaining question is whether a much larger local batch can amortize the selective AC overhead before hitting the memory limit.
+
+## Experiment 19: Selective AC Local Batch 10, Invalid Due External GPU Use
+
+Source state: `9b87a63`, using the `a593f3a` AC-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=10 --activation_checkpoint.mode=selective --dump_folder=outputs/autoresearch/may19-qwen3-14b/run19-selective-ac-compile-bf16-lbs10 > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid, not a candidate result.
+- The run initialized with local batch size 10 and selective AC, then OOMed before step 1.
+- The OOM log showed external `VLLM::Worker_TP*` processes from another user holding about 107 GiB on GPUs 0-3.
+- Rank 2 failed trying to allocate 1.33 GiB while only 579 MiB was free on its GPU.
+
+Interpretation:
+
+- This run does not measure the candidate because the 8-GPU target was not available.
+- Do not use it to conclude that selective AC local batch 10 is infeasible.
+- Retry the same candidate after the node is free.
