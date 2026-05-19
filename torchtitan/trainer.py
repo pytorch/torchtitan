@@ -48,6 +48,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.registry import OverrideConfig
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -100,6 +101,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
         def __post_init__(self):
@@ -249,6 +251,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             trainer_config=config,
         )
         self.model_config = model_config
+
+        if config.override.modules:
+            from torchtitan.registry import apply_overrides
+
+            apply_overrides(model_config, config.override)
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
