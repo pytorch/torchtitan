@@ -24,17 +24,43 @@ import torch
 DEFAULT_GENERATED_DIR = Path(__file__).parent / "generated"
 GENERATED_DIR = DEFAULT_GENERATED_DIR  # overridden by --dir
 
-# Tolerances per problem type (some involve f32 reductions / complex math)
-TOLERANCES = {
-    "default": {"rtol": 1e-2, "atol": 1e-2},
-    "cross_entropy_loss": {"rtol": 1e-2, "atol": 5e-2},
-    "cross_entropy_loss_bwd": {"rtol": 1e-2, "atol": 5e-2},
-    "multi_tensor_norm": {"rtol": 1e-3, "atol": 1e-3},
-    "rmsnorm_residual_bwd": {"rtol": 1e-2, "atol": 2e-2},
+# Tolerance tiers:
+#   bitwise: atol=0, rtol=0 — for pure elementwise/view ops (no reductions)
+#   reduction: rtol=1e-3, atol=1e-5 — for ops involving reductions (sum, mean, norm)
+#     Reductions accumulate floating point in different orders, so bitwise is impossible.
+#   complex: rtol=1e-3, atol=1e-4 — for complex arithmetic (mul, view_as_complex)
+TOLERANCE_BITWISE = {"rtol": 0, "atol": 0}
+TOLERANCE_REDUCTION = {"rtol": 1e-3, "atol": 1e-5}
+TOLERANCE_COMPLEX = {"rtol": 1e-3, "atol": 1e-4}
+
+# Ops that involve reduction (order-dependent accumulation)
+_REDUCTION_OPS = {
+    "aten.sum", "aten.mean", "aten.amax", "aten.amin", "aten.prod",
+    "aten.norm", "aten.var", "aten.std", "aten._fused_rms_norm",
+    "aten._fused_rms_norm_backward", "aten.layer_norm", "aten.softmax",
+    "aten.log_softmax", "aten.cross_entropy_loss",
 }
+
+_COMPLEX_OPS = {
+    "aten.view_as_complex", "aten.view_as_real", "aten._conj",
+}
+
+NUM_CORRECTNESS_TRIALS = 5
 
 WARMUP = 20
 BENCH_ITERS = 100
+
+
+def _detect_tolerance(problem_path: Path) -> tuple[dict, str]:
+    """Auto-detect the right tolerance from the ops in problem.py."""
+    content = problem_path.read_text()
+    has_reduction = any(op in content for op in _REDUCTION_OPS)
+    has_complex = any(op in content for op in _COMPLEX_OPS)
+    if has_reduction:
+        return TOLERANCE_REDUCTION, "reduction"
+    if has_complex:
+        return TOLERANCE_COMPLEX, "complex"
+    return TOLERANCE_BITWISE, "bitwise"
 
 
 def _load_module(path: Path, module_name: str):
@@ -139,22 +165,29 @@ def run_one(name: str) -> dict:
     if model_cls is None or get_inputs is None or kernel_fn is None:
         return {"name": name, "status": "ERROR", "reason": "missing Model/get_inputs/kernel_function"}
 
-    # --- Correctness ---
-    try:
-        inputs = get_inputs()
-        model = model_cls()
-        with torch.no_grad():
-            ref_out = model(*inputs)
-            kernel_out = kernel_fn(*inputs)
-    except Exception as e:
-        return {"name": name, "status": "FAIL", "reason": f"execution: {e}"}
+    # --- Correctness (multiple trials, auto-detected tolerance) ---
+    tols, tol_tier = _detect_tolerance(problem_path)
+    model = model_cls()
+    max_err = 0.0
+    for trial in range(NUM_CORRECTNESS_TRIALS):
+        try:
+            torch.manual_seed(trial * 137 + 42)
+            torch.cuda.manual_seed(trial * 137 + 42)
+            inputs = get_inputs()
+            with torch.no_grad():
+                ref_out = model(*inputs)
+                kernel_out = kernel_fn(*inputs)
+        except Exception as e:
+            return {"name": name, "status": "FAIL", "reason": f"execution (trial {trial}): {e}"}
 
-    tols = TOLERANCES.get(name, TOLERANCES["default"])
-    ok, detail = _compare_outputs(kernel_out, ref_out, tols)
-    if not ok:
-        return {"name": name, "status": "FAIL", "reason": str(detail)}
-
-    max_err = detail  # numeric value when ok=True
+        ok, detail = _compare_outputs(kernel_out, ref_out, tols)
+        if not ok:
+            return {
+                "name": name, "status": "FAIL",
+                "reason": f"trial {trial} ({tol_tier} tol): {detail}",
+            }
+        if isinstance(detail, (int, float)):
+            max_err = max(max_err, detail)
 
     # --- Benchmark ---
     try:
@@ -192,6 +225,7 @@ def run_one(name: str) -> dict:
         "name": name,
         "status": "PASS",
         "max_err": max_err,
+        "tol_tier": tol_tier,
         "ref_ms": ref_ms,
         "compile_ms": compile_ms,
         "kern_ms": kern_ms,
@@ -227,8 +261,9 @@ def main():
         results.append(r)
         if r["status"] == "PASS" and "kern_ms" in r:
             comp_str = f"  compile={r['compile_ms']:.3f}ms" if r.get("compile_ms") else ""
+            tier = r.get("tol_tier", "?")
             print(
-                f"PASS  ref={r['ref_ms']:.3f}ms{comp_str}  kern={r['kern_ms']:.3f}ms  "
+                f"PASS [{tier}]  ref={r['ref_ms']:.3f}ms{comp_str}  kern={r['kern_ms']:.3f}ms  "
                 f"speedup={r['speedup']:.2f}x  max_err={r['max_err']:.2e}"
             )
         elif r["status"] == "PASS":
@@ -238,7 +273,7 @@ def main():
 
     # Summary table
     print("\n" + "=" * 115)
-    print(f"{'Kernel':<28} {'Status':<6} {'Eager':>9} {'Compile':>9} {'Triton':>9} {'vs Eager':>9} {'vs Compile':>11} {'Max Err':>10}")
+    print(f"{'Kernel':<16} {'Status':<6} {'Tol':<10} {'Eager':>8} {'Compile':>8} {'Triton':>8} {'vs Eager':>9} {'vs Compile':>11} {'Max Err':>10}")
     print("-" * 115)
     for r in results:
         ref = f"{r['ref_ms']:.3f}" if "ref_ms" in r else "-"
@@ -250,8 +285,9 @@ def main():
         else:
             vs_comp = "-"
         err = f"{r['max_err']:.2e}" if "max_err" in r else "-"
+        tier = r.get("tol_tier", "-")
         reason = f"  ({r['reason'][:60]})" if r["status"] != "PASS" else ""
-        print(f"{r['name']:<28} {r['status']:<6} {ref:>9} {comp:>9} {kern:>9} {spd:>9} {vs_comp:>11} {err:>10}{reason}")
+        print(f"{r['name']:<16} {r['status']:<6} {tier:<10} {ref:>8} {comp:>8} {kern:>8} {spd:>9} {vs_comp:>11} {err:>10}{reason}")
     print("=" * 115)
 
     passed = sum(1 for r in results if r["status"] == "PASS")
