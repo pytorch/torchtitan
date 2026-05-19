@@ -20,7 +20,6 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 if TYPE_CHECKING:
     from torchtitan.models.llama4.model import Llama4Model, Llama4TransformerBlock
 
-# Routed-expert layout for the shared ``GroupedExperts`` (w1/w2/w3).
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
     "w1": Shard(1),
     "w2": Shard(2),
@@ -42,7 +41,8 @@ def set_llama4_sharding_config(
     at runtime.
 
     MoE sub-configs (router, shared experts, routed experts) are
-    populated when TP or EP is enabled.
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
     """
 
     set_decoder_sharding_config(
