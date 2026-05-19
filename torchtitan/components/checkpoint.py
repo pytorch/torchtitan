@@ -729,8 +729,8 @@ class CheckpointManager(Configurable):
             # are actively in use and cannot be reclaimed until staging finishes.
 
             assert isinstance(result, AsyncSaveResponse)
-            self.save_future = result.upload_completion
             self.staging_future = result.staging_completion
+            self.save_future = result.upload_completion
 
         elif self.async_mode == AsyncMode.ASYNC:
             result = self.dcp_save(
@@ -900,7 +900,7 @@ class CheckpointManager(Configurable):
                 isn't ASYNC_WITH_PINNED_MEM.
         """
 
-        if self.staging_future is None:
+        if not self.enable or self.staging_future is None:
             return
 
         if self.async_mode != AsyncMode.ASYNC_WITH_PINNED_MEM:
@@ -925,7 +925,7 @@ class CheckpointManager(Configurable):
             RuntimeError: If a save future is detected while asynchronous mode is DISABLED.
         """
 
-        if self.save_future is None:
+        if not self.enable or self.save_future is None:
             return
 
         if self.async_mode == AsyncMode.DISABLED:

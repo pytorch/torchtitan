@@ -733,6 +733,40 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save(curr_step=2, last_step=True)
         manager.load(step=1)
 
+    def test_maybe_wait_for_staging_when_checkpoint_disabled(self):
+        """Verify that calling maybe_wait_for_staging succeeds without errors when the manager is disabled."""
+
+        config = CheckpointManager.Config(enable=False)
+        manager = CheckpointManager(
+            config=config,
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        manager.maybe_wait_for_staging()
+
+    def test_maybe_wait_for_saving_when_checkpoint_disabled(self):
+        """Verify that calling maybe_wait_for_staging succeeds without errors when the manager is disabled."""
+
+        config = CheckpointManager.Config(enable=False)
+        manager = CheckpointManager(
+            config=config,
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        manager.maybe_wait_for_saving()
+
 
 class TestConfigPostInit(unittest.TestCase):
     def test_valid_default_config(self):
