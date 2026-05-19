@@ -486,6 +486,7 @@
   Planned source/config changes: None; use current flex-without-FP8 best source.
   Planned command or config overrides: Current best command with `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` in the environment.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are longer compile time, no kernel change, or worse selected kernels.
+  Result: discarded at source state `f2eba58`; tps dropped to 4,816 and memory rose to 171.8 GiB with allocator retries.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

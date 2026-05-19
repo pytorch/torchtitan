@@ -1,0 +1,270 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run54-flex-inductor-max-autotune-gemm-compile-bf16-lbs5-no-flight-recorder
+W0519 15:22:01.118000 300146 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 15:22:01.118000 300146 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 15:22:01.118000 300146 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 15:22:01.118000 300146 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 15:22:07.532000 306262 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 15:22:08,354 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 15:22:08,417 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run54-flex-inductor-max-autotune-gemm-compile-bf16-lbs5-no-flight-recorder/structured_logs/training.global_rank_0.20260519-152208-GBDX9P.jsonl
+[rank0]:[titan] 2026-05-19 15:22:09,652 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 15:22:09,654 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 15:22:09,662 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 15:22:09,663 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-19 15:22:13,462 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 15:22:13,467 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-19 15:22:13,495 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 15:22:13,583 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-19 15:22:13,707 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-19 15:22:13,708 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-19 15:22:13,708 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-19 15:22:13,726 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-19 15:22:13,814 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-19 15:22:14,236 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-19 15:22:14,236 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-19 15:22:14,239 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-19 15:22:14,239 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-19 15:22:14,256 - root - INFO - Trainer is initialized with local batch size 5, global batch size 40, gradient accumulation steps 1, sequence length 4096, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-19 15:22:14,256 - root - INFO - Training starts at step 1
+[rank0]:/home/avenkataraman/github/pytorch/torch/_inductor/select_algorithm.py:4667: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+[rank0]:  current_out_size = out_base.storage().size()
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 2.7701120376586914, "best_triton_pos": 1, "best_triton_time": 3.3342080116271973, "best_triton_kernel": "triton_mm_126", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x5120, 5120x17408)
+[rank0]:strides: [5120, 1], [1, 5120]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 2.7701 ms 100.0% 
+[rank0]:  triton_mm_126 3.3342 ms 83.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_123 3.7980 ms 72.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_122 4.7821 ms 57.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_124 5.8410 ms 47.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_117 6.2044 ms 44.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_113 6.6247 ms 41.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_115 6.6540 ms 41.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_120 6.6724 ms 41.5% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_116 6.7460 ms 41.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 2.4267 seconds and 0.2488 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 2.638848066329956, "best_triton_pos": 1, "best_triton_time": 3.289088010787964, "best_triton_kernel": "triton_mm_105", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x5120, 5120x17408)
+[rank0]:strides: [5120, 1], [1, 5120]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 2.6388 ms 100.0% 
+[rank0]:  triton_mm_105 3.2891 ms 80.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_102 3.9813 ms 66.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_101 4.9438 ms 53.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_103 5.2358 ms 50.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_96 5.5359 ms 47.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_94 6.7676 ms 39.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_92 6.9322 ms 38.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_98 7.1783 ms 36.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_99 7.2991 ms 36.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 2.2206 seconds and 0.0001 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 2.622688055038452, "best_triton_pos": 1, "best_triton_time": 3.4017601013183594, "best_triton_kernel": "triton_mm_147", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x17408, 17408x5120)
+[rank0]:strides: [17408, 1], [1, 17408]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 2.6227 ms 100.0% 
+[rank0]:  triton_mm_147 3.4018 ms 77.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_144 3.7510 ms 69.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_143 4.6674 ms 56.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_138 5.4036 ms 48.5% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_145 6.8710 ms 38.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_134 7.0595 ms 37.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_141 7.3359 ms 35.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_140 7.4210 ms 35.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_136 7.6149 ms 34.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 2.2430 seconds and 0.0017 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 0.7752320170402527, "best_triton_pos": 1, "best_triton_time": 0.9318720102310181, "best_triton_kernel": "triton_mm_20", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x5120, 5120x5120)
+[rank0]:strides: [5120, 1], [1, 5120]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 0.7752 ms 100.0% 
+[rank0]:  triton_mm_20 0.9319 ms 83.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_17 1.1110 ms 69.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_16 1.4120 ms 54.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_18 1.4419 ms 53.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_11 1.5770 ms 49.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_7 1.9476 ms 39.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_13 2.1588 ms 35.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_10 2.1668 ms 35.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_14 2.1709 ms 35.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 1.0766 seconds and 0.0020 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 0.1658879965543747, "best_triton_pos": 1, "best_triton_time": 0.20985600352287292, "best_triton_kernel": "triton_mm_41", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x5120, 5120x1024)
+[rank0]:strides: [5120, 1], [1, 5120]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 0.1659 ms 100.0% 
+[rank0]:  triton_mm_41 0.2099 ms 79.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_38 0.2417 ms 68.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_37 0.2847 ms 58.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_39 0.2857 ms 58.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_32 0.3062 ms 54.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_28 0.3777 ms 43.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_30 0.4117 ms 40.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_31 0.4342 ms 38.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_35 0.4370 ms 38.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 0.7572 seconds and 0.0018 seconds precompiling for 22 choices
+[rank0]:/home/avenkataraman/github/pytorch/torch/_inductor/fx_utils.py:157: UserWarning: Please add support for subgraph args to function flex_attention_backward!
+[rank0]:  warnings.warn(
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 2.6962239742279053, "best_triton_pos": 1, "best_triton_time": 3.4191999435424805, "best_triton_kernel": "triton_mm_189", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x5120, 5120x17408)
+[rank0]:strides: [5120, 1], [17408, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 2.6962 ms 100.0% 
+[rank0]:  triton_mm_189 3.4192 ms 78.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_186 3.8142 ms 70.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_185 4.2588 ms 63.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_187 4.8323 ms 55.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_178 5.9915 ms 45.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_180 6.1522 ms 43.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_182 6.4248 ms 42.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_176 6.8065 ms 39.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_183 7.0503 ms 38.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 2.3656 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 2.7966079711914062, "best_triton_pos": 1, "best_triton_time": 3.552288055419922, "best_triton_kernel": "triton_mm_168", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(5120x20480, 20480x17408)
+[rank0]:strides: [1, 5120], [17408, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 2.7966 ms 100.0% 
+[rank0]:  triton_mm_168 3.5523 ms 78.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_165 3.7735 ms 74.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_164 4.0703 ms 68.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_159 5.3187 ms 52.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_161 5.3760 ms 52.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_162 5.8798 ms 47.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_166 5.8799 ms 47.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_155 6.4213 ms 43.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_157 6.8053 ms 41.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 2.3455 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 3.3157119750976562, "best_triton_pos": 1, "best_triton_time": 3.587775945663452, "best_triton_kernel": "triton_mm_210", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(17408x20480, 20480x5120)
+[rank0]:strides: [1, 17408], [5120, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 3.3157 ms 100.0% 
+[rank0]:  triton_mm_210 3.5878 ms 92.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_207 3.8308 ms 86.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_206 3.9250 ms 84.5% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_208 4.3305 ms 76.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_200 5.4946 ms 60.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_203 5.5460 ms 59.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_199 5.5970 ms 59.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_204 6.1850 ms 53.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_201 6.2689 ms 52.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 2.2823 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 2.8795199394226074, "best_triton_pos": 1, "best_triton_time": 3.2143359184265137, "best_triton_kernel": "triton_mm_231", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x17408, 17408x5120)
+[rank0]:strides: [17408, 1], [5120, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 2.8795 ms 100.0% 
+[rank0]:  triton_mm_231 3.2143 ms 89.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_228 3.7346 ms 77.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_227 4.2311 ms 68.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_229 4.8282 ms 59.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_220 5.7354 ms 50.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_221 5.7488 ms 50.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_224 6.2220 ms 46.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_225 6.2792 ms 45.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_218 6.4098 ms 44.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 2.3671 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 0.7996799945831299, "best_triton_pos": 1, "best_triton_time": 0.9533439874649048, "best_triton_kernel": "triton_mm_315", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x5120, 5120x5120)
+[rank0]:strides: [5120, 1], [5120, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 0.7997 ms 100.0% 
+[rank0]:  triton_mm_315 0.9533 ms 83.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_312 1.1244 ms 71.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_311 1.2964 ms 61.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_306 1.4653 ms 54.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_305 1.6456 ms 48.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_304 1.7388 ms 46.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_309 1.8483 ms 43.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_302 1.8561 ms 43.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=8
+[rank0]:  triton_mm_308 1.8593 ms 43.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 1.3430 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 0.16899199783802032, "best_triton_pos": 1, "best_triton_time": 0.23446400463581085, "best_triton_kernel": "triton_mm_358", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(20480x1024, 1024x5120)
+[rank0]:strides: [1024, 1], [5120, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 0.1690 ms 100.0% 
+[rank0]:  triton_mm_358 0.2345 ms 72.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_355 0.2630 ms 64.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_354 0.2773 ms 60.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_347 0.3458 ms 48.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_356 0.3461 ms 48.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_349 0.3533 ms 47.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_348 0.3657 ms 46.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_351 0.3860 ms 43.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_352 0.3973 ms 42.5% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 1.0192 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 0.7955520153045654, "best_triton_pos": 1, "best_triton_time": 1.0045440196990967, "best_triton_kernel": "triton_mm_294", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(5120x20480, 20480x5120)
+[rank0]:strides: [1, 5120], [5120, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 0.7956 ms 100.0% 
+[rank0]:  triton_mm_294 1.0045 ms 79.2% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_291 1.1552 ms 68.9% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_290 1.1635 ms 68.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_292 1.3108 ms 60.7% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_285 1.5359 ms 51.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_284 1.6138 ms 49.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_288 1.6466 ms 48.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_287 1.6487 ms 48.3% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_283 1.7306 ms 46.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 1.3409 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:Autotune Choices Stats:
+[rank0]:{"num_choices": 22, "num_triton_choices": 21, "best_kernel": "mm", "best_time": 0.15760000050067902, "best_triton_pos": 1, "best_triton_time": 0.2516160011291504, "best_triton_kernel": "triton_mm_337", "best_triton_kernel_desc": "ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8"}
+[rank0]:AUTOTUNE mm(1024x20480, 20480x5120)
+[rank0]:strides: [1, 1024], [5120, 1]
+[rank0]:dtypes: torch.bfloat16, torch.bfloat16
+[rank0]:  mm 0.1576 ms 100.0% 
+[rank0]:  triton_mm_337 0.2516 ms 62.6% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_335 0.2815 ms 56.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=5, num_warps=8
+[rank0]:  triton_mm_333 0.2816 ms 56.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_330 0.3000 ms 52.5% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_334 0.3153 ms 50.0% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_328 0.3277 ms 48.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=3, num_warps=4
+[rank0]:  triton_mm_329 0.3686 ms 42.8% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=128, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=4
+[rank0]:  triton_mm_327 0.4004 ms 39.4% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:  triton_mm_331 0.4035 ms 39.1% ACC_TYPE='tl.float32', ALLOW_TF32=False, BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, EVEN_K=True, GROUP_M=8, USE_FAST_ACCUM=False, num_stages=4, num_warps=8
+[rank0]:SingleProcess AUTOTUNE benchmarking takes 1.0354 seconds and 0.0002 seconds precompiling for 22 choices
+[rank0]:[titan] 2026-05-19 15:23:07,732 - root - INFO - [31mstep:  1  [32mloss: 12.34380  [38;2;180;60;0mgrad_norm: 30.6250  [38;2;54;234;195mmemory: 160.99GiB(90.27%)  [34mtps: 379  [36mtflops: 35.64  [35mmfu: 1.58%[39m
+[rank0]:[titan] 2026-05-19 15:23:07,732 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[rank0]:[W519 15:23:08.171996145 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:12.172069709 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:19.594532756 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:24.839864248 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:28.915499712 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:31.924488566 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:34.230366527 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:37.693717305 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 15:23:42.925138699 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[titan] 2026-05-19 15:23:46,006 - root - WARNING - 9 CUDA memory allocation retries.
+[rank0]:[titan] 2026-05-19 15:23:46,006 - root - INFO - [31mstep: 10  [32mloss:  9.00300  [38;2;180;60;0mgrad_norm: 33.0000  [38;2;54;234;195mmemory: 171.79GiB(96.32%)  [34mtps: 4,816  [36mtflops: 452.73  [35mmfu: 20.12%[39m
+[rank0]:[titan] 2026-05-19 15:23:46,006 - root - INFO - Sleeping 2 seconds for other ranks to complete
+[rank0]:[titan] 2026-05-19 15:23:48,006 - root - INFO - Training completed
+[rank0]:[titan] 2026-05-19 15:23:48,491 - root - INFO - Process group destroyed

@@ -1553,6 +1553,35 @@ Interpretation:
 - The local batch 7 result was already far below the best, so do not keep the AC hook or continue this AC batch-scaling branch for now.
 - Restore the no-AC flex-without-FP8 source as the current best.
 
+## Experiment 54: Flex Attention Best With Inductor GEMM Max Autotune
+
+Source state: `f2eba58`.
+
+Source/config change:
+
+- None. Source was the current flex-without-FP8 best.
+
+Command:
+
+```bash
+TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run54-flex-inductor-max-autotune-gemm-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 4,816, far below the 8,489 current best.
+- Step 10 MFU: 20.12%.
+- Step 10 peak memory: 171.79 GiB, 96.32%.
+- Loss moved from 12.34380 at step 1 to 9.00300 at step 10; finite and decreasing.
+- Runtime emitted nine CUDA allocator retry warnings.
+- Autotune logs show many GEMM choices were benchmarked, often selecting `mm` over Triton choices.
+
+Interpretation:
+
+- Inductor GEMM max autotuning is counterproductive for this workload and increases memory risk.
+- Do not continue nearby Inductor GEMM autotune sweeps unless a later profile or source change materially changes the compiled matmul shapes.
+
 ## Manager Review After Experiment 29
 
 Current best:
