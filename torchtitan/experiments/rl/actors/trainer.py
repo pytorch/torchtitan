@@ -57,27 +57,42 @@ from torchtitan.tools.logging import init_logger
 logger = logging.getLogger(__name__)
 
 
+_TIED_WEIGHT_ALIASES = (
+    # (preferred_key, alias_to_drop) — when both are in the state_dict
+    # and share the same backing storage, drop ``alias_to_drop``. The
+    # receiver re-ties via ``init_weights`` so dropping is semantics-safe.
+    ("tok_embeddings.weight", "lm_head.weight"),
+)
+
+
 def _dedup_tied_tensors(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Keep one entry per unique ``data_ptr``; drops aliases.
+    """Drop known tied-weight aliases when they actually share storage.
 
     Qwen3 ties ``tok_embeddings.weight`` and ``lm_head.weight`` when
     ``enable_weight_tying=True`` — both are the same buffer. Emitting
     both into the RDMA transfer plan registers the same memory twice
-    and ~doubles the per-rank read budget. The receiver re-ties on
-    its end via ``init_weights``, so dropping one alias is safe.
+    and ~doubles the per-rank read budget.
 
-    Stable: keeps the FIRST seen alias (Python 3.7+ dict insertion
-    order is preserved), so the surviving key is deterministic.
+    Tested by checking ``data_ptr`` equality on the specific pair —
+    we DON'T iterate and drop every shared-data_ptr entry, because
+    DTensor/FSDP-managed tensors can legitimately share a flat
+    backing buffer across distinct params and we'd silently strip the
+    state_dict.
     """
-    seen: set[int] = set()
-    out: dict[str, torch.Tensor] = {}
-    for name, tensor in state_dict.items():
-        ptr = tensor.data_ptr()
-        if ptr in seen:
-            logger.debug("Dropping tied-weight alias %s (shares storage)", name)
-            continue
-        seen.add(ptr)
-        out[name] = tensor
+    out = dict(state_dict)
+    for preferred, alias in _TIED_WEIGHT_ALIASES:
+        if preferred in out and alias in out:
+            try:
+                same_storage = out[preferred].data_ptr() == out[alias].data_ptr()
+            except Exception:
+                same_storage = False
+            if same_storage:
+                logger.debug(
+                    "Dropping tied-weight alias %s (shares storage with %s)",
+                    alias,
+                    preferred,
+                )
+                del out[alias]
     return out
 
 
