@@ -192,7 +192,6 @@ def qwen3_14b() -> Trainer.Config:
             "14B",
             converters=[
                 MXFP8LinearConverter.Config(
-                    recipe_name="mxfp8_cublas",
                     model_compile_enabled=True,
                 ),
             ],
