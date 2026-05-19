@@ -442,9 +442,8 @@ def _select_best_backend(
         best_name = min(candidates, key=lambda k: candidates[k][0])
         return candidates[best_name][1], best_name
 
-    # No benchmark data — use triton if available, otherwise eager
-    if triton_fn is not None:
-        return triton_fn, "triton"
+    # No benchmark data — always use eager. A kernel that hasn't been
+    # benchmarked shouldn't be trusted (it could be orders of magnitude slower).
     return eager_fn, "eager"
 
 
