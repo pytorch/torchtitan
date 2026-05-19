@@ -1207,6 +1207,33 @@ Interpretation:
 - Do not keep it despite the higher throughput. The loss regression may reflect mask/backend numerical or semantic differences.
 - Restore source to the FP8 auto-filter `sdpa` best before continuing.
 
+## Experiment 42: FP8 Rowwise With High-Precision Grad Recipe
+
+Source state: `17c8bd9`.
+
+Source/config change:
+
+- `qwen3_14b()` changed the Float8 converter recipe from `rowwise` to `rowwise_with_gw_hp`, keeping `filter_fqns=["auto_filter_small_kn"]`.
+- The source was also restored from the prior flex-attention candidate back to the default Qwen3 attention backend.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run42-fp8-rowwise-gw-hp-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run failed during config/model-spec construction before training.
+- Error: `_auto_filter_for_recipe` raised `NotImplementedError: Unsupported recipe: Float8LinearRecipeName.ROWWISE_WITH_GW_HP`.
+
+Interpretation:
+
+- The installed torchao auto-filter path only supports the default rowwise recipe here.
+- Since `rowwise_with_gw_hp` cannot be combined with the profitable `auto_filter_small_kn` coverage, do not keep this source line. Restore the current best FP8 rowwise auto-filter recipe before continuing.
+- With quantization coverage, MXFP8, and attention-backend variants now exhausted or blocked, the next narrow search area is overhead reduction in the current best command. Structured trace logging is enabled by default and is a command-only knob worth testing separately from NCCL flight-recorder logging.
+
 ## Manager Review After Experiment 29
 
 Current best:

@@ -1,0 +1,136 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run42-fp8-rowwise-gw-hp-compile-bf16-lbs5-no-flight-recorder
+W0519 14:50:07.989000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 14:50:07.989000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 14:50:07.989000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 14:50:07.989000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 14:50:12.969000 3839137 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 14:50:13,744 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:Traceback (most recent call last):
+[rank0]:[titan] 2026-05-19 14:50:13,750 - root - INFO - Float8 training active with recipe rowwise_with_gw_hp
+[rank0]:  File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:  File "<frozen runpy>", line 88, in _run_code
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:    main()
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 29, in main
+[rank0]:    config = config_manager.parse_args()
+[rank0]:             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/config/manager.py", line 35, in parse_args
+[rank0]:    loaded_config, args = self._load_config(args)
+[rank0]:                          ^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/config/manager.py", line 150, in _load_config
+[rank0]:    loaded_config = config_fn()
+[rank0]:                    ^^^^^^^^^^^
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/config_registry.py", line 191, in qwen3_14b
+[rank0]:    model_spec=model_registry(
+[rank0]:[titan] 2026-05-19 14:50:13,750 - root - INFO - Using _auto_filter_for_recipe to avoid converting linear layers with dims too small to benefit from float8 training. See torchtitan/components/quantization/float8.md for more info.
+[rank0]:               ^^^^^^^^^^^^^^^
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/__init__.py", line 632, in model_registry
+[rank0]:    c.build().convert(config)
+[rank0]:    ^^^^^^^^^
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:    return self._owner(config=replace(self))
+[rank0]:           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/components/quantization/float8.py", line 132, in __init__
+[rank0]:    self.filter_fn = _auto_filter_for_recipe(
+[rank0]:                     ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear_utils.py", line 149, in _auto_filter_for_recipe
+[rank0]:    raise NotImplementedError(f"Unsupported recipe: {recipe}")
+[rank0]:NotImplementedError: Unsupported recipe: Float8LinearRecipeName.ROWWISE_WITH_GW_HP
+W0519 14:50:14.958000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3839140 closing signal SIGTERM
+W0519 14:50:14.959000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3839142 closing signal SIGTERM
+W0519 14:50:14.961000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3839144 closing signal SIGTERM
+W0519 14:50:14.961000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3839149 closing signal SIGTERM
+W0519 14:50:14.964000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3839154 closing signal SIGTERM
+W0519 14:50:14.966000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3839156 closing signal SIGTERM
+W0519 14:50:14.967000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3839161 closing signal SIGTERM
+E0519 14:50:15.352000 3833842 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 0 (pid: 3839137) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-19_14:50:15
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : -15 (pid: 3839140)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 3839140
+[2]:
+  time      : 2026-05-19_14:50:15
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : -15 (pid: 3839142)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 3839142
+[3]:
+  time      : 2026-05-19_14:50:15
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : -15 (pid: 3839144)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 3839144
+[4]:
+  time      : 2026-05-19_14:50:15
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : -15 (pid: 3839149)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 3839149
+[5]:
+  time      : 2026-05-19_14:50:15
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : -15 (pid: 3839154)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 3839154
+[6]:
+  time      : 2026-05-19_14:50:15
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : -15 (pid: 3839156)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 3839156
+[7]:
+  time      : 2026-05-19_14:50:15
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : -15 (pid: 3839161)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 3839161
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-19_14:50:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 3839137) 
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================

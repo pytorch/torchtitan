@@ -366,6 +366,16 @@
   Planned source/config changes: Restore FP8 auto-filter source, then change only `recipe_name` from `"rowwise"` to `"rowwise_with_gw_hp"`.
   Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is slower throughput from extra high-precision work.
+  Result: crashed at source state `17c8bd9`; torchao's `_auto_filter_for_recipe` does not support `ROWWISE_WITH_GW_HP`, so this recipe cannot be tested with the kept `auto_filter_small_kn` coverage.
+
+- Idea: disable structured trace logging on FP8 best
+  Current best source commit: 477f662
+  Source: overhead-reduction follow-up after source/backend variants
+  Expected mechanism: `debug.enable_structured_logging` defaults to true and TorchTitan records many per-rank spans during training. Disabling structured logging may reduce Python/context-manager overhead without changing model math, parallelism, data, checkpoint, or communication settings.
+  Supporting evidence: Disabling NCCL flight-recorder logging improved the FP8 best from 8,429 to 8,469 tps. The remaining source-level quantization and attention variants either crashed, lost throughput, or failed loss sanity, so the next single idea should target measurement/runtime overhead on the kept source line.
+  Planned source/config changes: Restore the FP8 rowwise auto-filter source; no source changes for the candidate.
+  Planned command or config overrides: Current best command plus `--debug.enable_structured_logging=False`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is that structured logging overhead is negligible or the CLI spelling for disabling the boolean needs adjustment.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
