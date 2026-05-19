@@ -9,6 +9,7 @@ from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.quantization import Float8LinearConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
@@ -190,6 +191,13 @@ def qwen3_14b() -> Trainer.Config:
         model_spec=model_registry(
             "14B",
             attn_backend="flex",
+            converters=[
+                Float8LinearConverter.Config(
+                    recipe_name="rowwise",
+                    filter_fqns=["auto_filter_small_kn"],
+                    model_compile_enabled=True,
+                ),
+            ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
