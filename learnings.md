@@ -85,3 +85,44 @@ Likely early risks:
 - Replicated full-model training is expected to exceed memory for a 14B model with optimizer states, so FSDP is the highest-priority bootstrap.
 - Full activation checkpointing is configured but not yet applied by the Qwen3 scaffold. That may inflate activation memory and should be measured separately after FSDP.
 - With only FSDP over 8 NVLinked B200s, collectives may become a significant cost. A later TP or FSDP resharding idea should be driven by measured throughput, memory, and profiler evidence rather than guessed.
+
+## Experiment 1: Bootstrap Minimal Baseline FSDP
+
+Commit: `01d1f8e`
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run01-fsdp-bootstrap-retry1 > run.log 2>&1
+```
+
+What changed:
+
+- `parallelize_qwen3()` now rejects unsupported HSDP and CPU offload for this baseline.
+- It applies composable FSDP on the `fsdp` mesh to each transformer block, `lm_head`, and the root model.
+- It uses `MixedPrecisionPolicy` from the recorded training config: param dtype `bfloat16`, reduce dtype `float32`.
+- It resolves `fsdp_reshard_after_forward="default"` to `True` for the non-PP baseline.
+- It disables FSDP gradient division so TorchTitan's token-count loss scaling remains responsible for gradient scaling.
+
+Diagnostic retry:
+
+- The first attempt at the same idea crashed in `ChunkedCELoss` because `lm_head` is called directly outside `Qwen3Model.forward()` and its weight was a sharded DTensor while the hidden chunk was a local tensor.
+- Fix: FSDP-wrap `model.lm_head` as its own unit before wrapping the root, so the direct loss call all-gathers `lm_head` parameters correctly.
+
+Result:
+
+- Status: keep, first runnable best.
+- Step 10 `tps`: 7,254.
+- Step 10 MFU: 30.31%.
+- Step 10 peak memory: 173.91 GiB, 97.51% of the reported 178.35 GiB capacity.
+- Loss moved from 12.53191 at step 1 to 12.04510 at step 10. It stayed finite and decreased across the short run.
+- Step 10 `tflops`: 681.97.
+- TorchTitan peak FLOPS for MFU on this B200 host: `2.250e+15`.
+- Structured timing around later steps shows fwd/bwd around 1.60-1.63 s, optimizer around 21-22 ms, fetch around 9-13 ms, and step time around 2.20-2.79 s on logged rank 0.
+
+Interpretation:
+
+- The FSDP bootstrap is correct enough to train for the target 10-step run and becomes the current best.
+- Memory is already above the program's rough 95% risk threshold. The run completed, but this leaves little room for allocator variation or later optimizations that raise activation/parameter residency.
+- The current source still does not apply the configured `activation_checkpoint.mode="full"`. Given the 97.51% peak memory, the next narrow idea should apply the baseline full activation checkpointing before any speed-focused memory-increasing idea.
+- Roofline status is still unclear without a profiler trace. The low model memory at initialization (8.62 GiB) but high step peak implies activations/FSDP all-gather residency dominate peak memory. Later per-step timings suggest fwd/bwd dominates wall time, but we need a trace to separate compute from FSDP collectives and recompute.

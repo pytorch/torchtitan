@@ -1,1 +1,2 @@
 commit	tokens_per_sec	mfu_percent	peak_memory_gb	status	description	command
+01d1f8e	7254	30.31	173.9	keep	bootstrap minimal baseline FSDP	NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run01-fsdp-bootstrap-retry1 > run.log 2>&1
