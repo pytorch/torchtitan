@@ -337,3 +337,33 @@ Interpretation:
 
 - Compile directly attacks the largest profile bucket and improves both throughput and memory. This is the new best source state.
 - Lower memory headroom reopens command-only follow-ups that were too risky from the uncompiled best, especially BF16 dtype or a small local batch increase.
+
+## Experiment 9: Compile With BF16 Training Dtype
+
+Source state: `48c69e1`, using the `51369ea` compile-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run09-compile-bf16 > run.log 2>&1
+```
+
+What changed:
+
+- Command-only override `--training.dtype=bfloat16` on top of the compiled best.
+- No source, FSDP, AC, batch-size, sequence-length, optimizer, or parallelism changes.
+
+Result:
+
+- Status: keep, new current best.
+- Step 10 `tps`: 8,168, up from 7,545.
+- Step 10 MFU: 34.13%, up from 31.53%.
+- Step 10 peak memory: 140.34 GiB, down from 153.72 GiB.
+- Model memory after init: 4.18 GiB.
+- Loss moved from 12.49057 at step 1 to 8.50811 at step 10; finite and decreasing.
+- Later-step fwd/bwd remains around 1.13-1.16 s, similar to compiled float32 training, while memory is lower.
+
+Interpretation:
+
+- BF16 becomes throughput-positive once the model blocks are compiled. This is the best result so far and has much safer memory than the original FSDP-only path.
+- The new memory headroom makes a local batch-size increase worth testing again, now under compile+BF16 where local batch 5 may fit.

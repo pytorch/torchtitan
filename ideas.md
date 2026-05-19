@@ -110,3 +110,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current-best command plus `--training.dtype=bfloat16`.
   Success criteria and expected risk: Success is tps above 7,545 with finite decreasing loss and memory below current best. Risk is that BF16 remains slightly slower or changes compile behavior unfavorably.
+  Result: kept at source state `48c69e1` with 8,168 tps, 34.13% MFU, and 140.3 GiB.
+
+- Idea: compile and BF16 with local batch 5
+  Current best source commit: 48c69e1
+  Source: result-driven follow-up
+  Expected mechanism: The current best uses only 140.3 GiB at local batch 4. Raising local batch size to 5 may improve GPU utilization and reported tokens/sec if the added activation memory fits.
+  Supporting evidence: Local batch 5 OOMed before compile, but compile+BF16 reduced peak memory by about 20.4 GiB versus BF16-only and by about 33.6 GiB versus FSDP-only.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current-best command plus `--training.local_batch_size=5`.
+  Success criteria and expected risk: Success is tps above 8,168 with finite decreasing loss and no OOM. Risk is memory still exceeding capacity during backward.
