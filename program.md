@@ -60,6 +60,13 @@ To set up a new experiment, work with the user to:
 8. **Summarize setup**: record the train command, hardware, editable files,
    current source commit, current best if known, and objective in `learnings.md`
    before starting the autonomous loops.
+9. **Lock the first experiment's baseline**: before any source/config edit,
+   write down which parts of the recorded train command are fixed baseline
+   requirements and which single part will be changed or implemented first.
+   The first experiment must not bundle multiple optimization knobs under a
+   vague "make it runnable" or "bootstrap" label. If the target command needs
+   several missing capabilities, split them into separate ordered bootstrap
+   ideas and run them one at a time.
 
 Begin experimentation after setup is recorded.
 
@@ -68,6 +75,12 @@ environment, creating the experiment branch, and initializing committed run
 logs are setup work. Editing `parallelize.py`, `sharding.py`,
 `config_registry.py`, or launch knobs is experiment work and must follow the
 one-idea rule below.
+
+The recorded baseline command is a contract. Do not silently add or remove
+compile, FSDP, activation checkpointing, precision, quantization, batch size,
+resharding, TP, CP, PP, EP, optimizer, metrics, or communication knobs during
+the first runnable attempt. Each such change is an experiment idea unless it is
+already present in the recorded baseline command.
 
 ## Editable Scope
 
@@ -127,29 +140,36 @@ human expands the scope.
 
 ## Agent Roles
 
-The experiment is split across two agents with strict ownership:
+The experiment is split between the main Codex agent and a Manager sub-agent
+with strict ownership:
 
-- The main agent is the **Manager**. During setup, it must spawn a **Worker**
-  subagent and give the worker ownership of the execution loop.
-- **Worker** owns source/config changes, experiment execution, commits for
-  candidate implementations, `results.tsv`, and all git commits on the branch.
+- The main Codex agent is the **Worker/Executor**, not the Manager. During
+  setup, the main Codex agent must spawn a **Manager** sub-agent and give the
+  Manager ownership of research, idea generation, and experiment review.
+- **Worker/Executor** owns setup, branch creation, source/config changes,
+  experiment execution, commits for candidate implementations, `results.tsv`,
+  and all git commits on the branch.
 - **Manager** owns research, idea generation, and experiment review. The
-  manager may update only `ideas.md` and `learnings.md`, but must not commit.
-- The manager reads the worker's transcript, `results.tsv`, logs, profiler
-  summaries, structured metrics, hardware properties, and relevant
-  documentation. After each experiment, the manager reviews what happened,
-  updates `learnings.md` with detailed conclusions, and updates `ideas.md` with
-  newly researched ideas, reprioritized ideas, and crossed-out discarded ideas.
-- The worker reads `ideas.md` and `learnings.md` before each iteration, chooses
-  exactly one idea to execute, updates source/config as needed, runs the
-  experiment, appends the result to `results.tsv`, and commits all changes that
-  should land on the branch.
-- The manager must not edit source/config files, `results.tsv`, logs, dumps, or
-  generated artifacts. The manager must not run `git commit`.
-- The worker is the only agent that may run `git add`, `git commit`, rebase, or
-  any other command that changes branch history.
-- The worker and manager should communicate through the three committed
-  experiment files: `ideas.md`, `learnings.md`, and `results.tsv`.
+  Manager may update only `ideas.md` and `learnings.md`, or may return proposed
+  updates for the Worker/Executor to apply. The Manager must not commit.
+- The Manager reads the Worker/Executor's transcript, `results.tsv`, logs,
+  profiler summaries, structured metrics, hardware properties, and relevant
+  documentation. After each experiment, the Manager reviews what happened and
+  updates or proposes updates to `learnings.md` with detailed conclusions and
+  `ideas.md` with newly researched ideas, reprioritized ideas, and crossed-out
+  discarded ideas.
+- The Worker/Executor reads `ideas.md` and `learnings.md` before each
+  iteration, chooses exactly one idea to execute, updates source/config as
+  needed, runs the experiment, appends the result to `results.tsv`, and commits
+  all changes that should land on the branch.
+- The Manager must not edit source/config files, `results.tsv`, logs, dumps, or
+  generated artifacts. The Manager must not run `git commit`.
+- The Worker/Executor is the only agent that may run `git add`, `git commit`,
+  rebase, or any other command that changes branch history.
+- The Worker/Executor and Manager should communicate through the three
+  committed experiment files: `ideas.md`, `learnings.md`, and `results.tsv`,
+  plus concise handoff messages when a Manager sub-agent cannot directly edit
+  the shared workspace.
 
 ## Objective
 
@@ -502,16 +522,18 @@ def5678	1730000	39.80	70.1	discard	disable sequence parallel	torchrun ...
 012abcd	0	0.00	0.0	crash	TP=8 with bad qk_norm placement	torchrun ...
 ```
 
-The manager may edit `ideas.md` and `learnings.md`, but the worker commits
-those edits. The worker also commits `results.tsv` updates. Do not commit large
-logs, profiling traces, dumps, or temporary generated command files unless the
-human explicitly asks.
+The Manager may edit `ideas.md` and `learnings.md` or propose edits for the
+Worker/Executor to apply, but the Worker/Executor commits those edits. The
+Worker/Executor also commits `results.tsv` updates. Do not commit large logs,
+profiling traces, dumps, or temporary generated command files unless the human
+explicitly asks.
 
 ## Experiment Loop
 
-The worker loop and manager loop run continuously after setup is confirmed.
+The Worker/Executor loop and Manager sub-agent loop run continuously after
+setup is confirmed.
 
-Worker loop:
+Worker/Executor loop:
 
 1. Inspect git state and record the current best commit.
 2. Read `ideas.md` and `learnings.md`, especially `## Human Generated Ideas`,
@@ -523,6 +545,9 @@ Worker loop:
    choose a hypothesis backed by a recent profiler observation, roofline
    conclusion, or documented hardware/software behavior. State the expected
    mechanism before editing.
+   For the first experiment on a new branch, also state why this is exactly one
+   change from the locked baseline and list any important knobs intentionally
+   left unchanged.
 4. Edit the smallest source/config surface needed for that one hypothesis. Edit
    only `torchtitan/models/qwen3/parallelize.py` and
    `torchtitan/models/qwen3/sharding.py` unless changing launch config knobs in
@@ -538,8 +563,9 @@ Worker loop:
    the idea is fundamentally broken, log `crash` or `discard`.
 9. Extract tokens/sec, MFU, peak memory, convergence, and failure signals.
 10. Append a row to `results.tsv`.
-11. Commit `results.tsv` plus any manager-made `ideas.md` and `learnings.md`
-    updates that should be recorded with this experiment result.
+11. Commit `results.tsv` plus any Manager-made or Manager-proposed `ideas.md`
+    and `learnings.md` updates that should be recorded with this experiment
+    result.
 12. If the candidate improves the objective and passes correctness, keep the
     commit and make it the new best.
 13. If it is worse, restore source/config files back to the previous best
@@ -573,6 +599,13 @@ Profiling And Roofline:
 One-idea rule:
 
 - Each loop iteration tests one idea only.
+- The first experiment is not exempt. "Initial runnable baseline", "bootstrap",
+  "port the scaffold", or "match historical setup" may not combine independent
+  changes such as enabling FSDP, enabling compile, changing activation
+  checkpointing, changing dtype/precision, changing batch size, changing FSDP
+  resharding, adding quantization, or changing NCCL/runtime knobs. Pick one
+  such change, record it as the first idea, run it, and only then proceed to
+  the next.
 - Broad baseline ports are not a valid idea. Do not copy an entire reference
   `parallelize.py`, FSDP helper, sharding module, or generic runnable baseline
   and treat it as one experiment.
@@ -580,9 +613,19 @@ One-idea rule:
   current best cannot run, the first worker iteration may be a narrow bootstrap
   idea that makes the target command runnable. Record that idea in `ideas.md`
   and `learnings.md`; keep the diff tiny and auditable.
+- A bootstrap idea may implement only the single missing capability named in
+  the idea. Examples of valid first bootstrap ideas are "add the minimal Qwen3
+  FSDP wrapper required by the already-recorded baseline command" or "add the
+  missing Qwen3 TP placement for the already-recorded TP=2 command". Invalid
+  bootstrap ideas include "add FSDP, turn on compile, raise batch size, and
+  switch activation checkpointing", or "copy the Llama parallelization stack
+  and test the whole bundle".
 - An idea may include the minimum coupled source and command/config changes
   required to make that hypothesis valid. For example, trying TP=2 with the
   necessary Qwen3 tensor placement changes is one idea.
+- Coupled changes must be inseparable for correctness, not merely convenient
+  or historically associated. If two choices could each be toggled
+  independently in a command line or a small source diff, they are two ideas.
 - Do not add unused or inactive code in an experiment step. This includes
   unused imports, helper functions that are not called, dormant branches for
   parallelisms or config modes that the candidate command does not enable,
