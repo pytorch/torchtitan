@@ -253,6 +253,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current-best command plus `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and similar memory. Risk is little or no effect; the tradeoff is losing timeout flight-recorder diagnostics for that run.
+  Result: discarded at source state `cb767bf`; 8,378 tps, 35.00% MFU, 168.7 GiB. Close but still below the 8,391 tps best.
 
 - Idea: FP8 rowwise linear converter on current best
   Current best source commit: f6ae44e

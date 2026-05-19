@@ -849,3 +849,27 @@ Interpretation:
 - BF16 optimizer states did not reduce reported peak memory on the steady-state step and slowed the run.
 - Structured rank 0 timings regressed versus run10: average `fwd_bwd_end` rose from 1,419.67 ms to 1,533.56 ms, and average `optim_end` rose from 44.95 ms to 47.62 ms.
 - The optimizer-state knob should be discarded. The next narrow no-source test is disabling the NCCL flight recorder with `--comm.trace_buf_size=0`.
+
+## Experiment 28: Disable NCCL Flight Recorder
+
+Source state: `cb767bf`, with Qwen3 source restored to the no-AC compile+FSDP best path.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run28-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,378, just below the 8,391 current best.
+- Step 10 MFU: 35.00%.
+- Step 10 peak memory: 168.74 GiB, 94.61%.
+- Loss moved from 12.26960 at step 1 to 10.22765 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Disabling the flight recorder is close but does not beat the best.
+- The result suggests flight-recorder overhead is not the main limiter for this DP/FSDP run.
+- Move to a distinct compute-efficiency idea: FP8 rowwise linear conversion on the current best command.
