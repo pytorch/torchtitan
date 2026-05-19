@@ -1790,3 +1790,22 @@ Result:
 Interpretation:
 
 - This is a contaminated OOM, not evidence against selective FP8. Retry the same source when GPUs are clear.
+
+Retry command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run61-prefetch-flex-fp8-bf16-lm-head-compile-bf16-lbs5-no-flight-recorder-retry > run.log 2>&1
+```
+
+Retry result:
+
+- Status: discard.
+- Step 10 `tps`: 8,762, below the 8,835 current best.
+- Step 10 MFU: 36.61%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.58068 at step 1 to 7.49573 at step 10; finite and decreasing.
+
+Retry interpretation:
+
+- Keeping `lm_head` in BF16 fixes the short-run loss issue seen in the faster FP8+flex run41, but selective FP8 still does not beat the prefetch-only source.
+- Restore the no-FP8 prefetch source and avoid further nearby FP8 coverage tweaks unless a profile shows a specific dense-GEMM bottleneck.
