@@ -458,6 +458,15 @@
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Main risk is OOM or allocator instability above the 95% memory-risk line.
   Result: crashed at source state `4e5b73f`; local batch size 6 reached about 177 GiB in the training process and OOMed during first-step loss/backward.
 
+- Idea: flex attention with memory-budget AC and local batch size 7
+  Current best source commit: 5801b0f
+  Source: memory-relief follow-up after local batch 6 OOM
+  Expected mechanism: Memory-budget activation checkpointing can trade recompute for activation memory, allowing a larger local batch. Local batch 7 may recover enough useful tokens per step to offset AC overhead while preserving the flex-attention speedup.
+  Supporting evidence: Run51 proved direct local batch 6 OOMs. Earlier memory-budget AC on older source lines lowered memory to about 146 GiB at local batch 6 and got close to the then-best, but did not include the current flex-attention source.
+  Planned source/config changes: Re-add the standard `apply_ac` hook in Qwen3 parallelize, before compile, using the existing TorchTitan helper.
+  Planned command or config overrides: Current best command shape with `--activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --training.local_batch_size=7`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are recompute overhead, OOM at local batch 7, or compile/memory-budget incompatibility.
+
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
   Source: profile follow-up after new best
