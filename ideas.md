@@ -130,3 +130,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current-best command plus profiler overrides.
   Success criteria and expected risk: Success is trace generation and a new roofline note. Profiled throughput is diagnostic only, not ranked against unprofiled candidates.
+  Result: completed at source state `da805d8`; profile shows mixed compute/communication with memory as the immediate limiter.
+
+- Idea: compile and BF16 with local batch 6
+  Current best source commit: da805d8
+  Source: result-driven boundary test
+  Expected mechanism: Local batch 5 improved reported tps by increasing useful work per step. Local batch 6 may further improve tps if it fits under the B200 memory limit.
+  Supporting evidence: Local batch 5 peaked at 168.74 GiB, 94.61%. This is close to the risk threshold but not over it, so batch 6 is the next integer boundary.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current-best command with `--training.local_batch_size=6`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Main risk is OOM during first backward.

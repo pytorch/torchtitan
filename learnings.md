@@ -398,3 +398,36 @@ Interpretation:
 - Compile+BF16 created enough memory headroom to make local batch 5 viable and throughput-positive.
 - Peak memory is close to the program's rough 95% risk threshold but still below it for this 10-step run.
 - Local batch 6 is likely risky without another memory reduction. Before pushing memory further, profile the new best to see whether the bottleneck shifted after compile+BF16+larger batch.
+
+## Experiment 11: Profile Compile+BF16 Local Batch 5 Best
+
+Source state: `da805d8`, using the `51369ea` compile-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run11-profile-compile-bf16-lbs5 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status in `results.tsv`: discard, because profiled throughput is diagnostic only.
+- Step 10 profiled `tps`: 8,067.
+- Step 10 profiled MFU: 33.70%.
+- Step 10 peak memory: 168.74 GiB, 94.61%.
+- Trace files were written under `outputs/autoresearch/may19-qwen3-14b/run11-profile-compile-bf16-lbs5/profiling/traces/iteration_10/`.
+
+Profile notes from rank 0 trace:
+
+- GPU traced duration excluding the `ProfilerStep` wrapper was about 6.09 s.
+- Matmul/compiled kernels bucket: about 1.95 s.
+- NCCL collectives: about 1.10 s.
+- Flash attention: about 0.78 s.
+- Copy/cat/split: about 0.16 s.
+- Top events include compiled graph calls, flash attention backward, GEMM kernels, and FSDP reduce-scatter/all-gather.
+- Later structured timings show fwd/bwd around 1.38-1.39 s and optimizer around 42-48 ms.
+
+Roofline conclusion:
+
+- The current best is still mixed compute/communication bound, but memory is now the immediate constraint: 94.61% leaves little room for larger batches or no-reshard.
+- Local batch 6 is a reasonable boundary test because batch 5 improved throughput and remains barely below the memory warning threshold. It is expected to OOM unless compile memory behavior scales sublinearly.
