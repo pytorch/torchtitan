@@ -180,3 +180,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: TP=2/FSDP=4 compile+BF16 command with `--training.local_batch_size=8`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and memory below the batch 10 cliff. Risk is still slower throughput from TP communication.
+  Result: discarded at source state `30886e6`; stable at 7,850 tps and 148.4 GiB, but still below no-TP best.
+
+- Idea: async TP on TP=2 local batch 8
+  Current best source commit: 30886e6
+  Source: TP communication follow-up
+  Expected mechanism: Async TP can overlap TP communication with compiled compute. The stable TP=2 local batch 8 run is below the no-TP best but has enough memory headroom; improving TP overlap is more promising than pushing batch size closer to the batch 10 cliff.
+  Supporting evidence: TP=2 runs log a DTensor redistribution warning and remain slower than no-TP despite lower memory. TorchTitan already exposes `parallelism.enable_async_tensor_parallel`, but the Qwen3 autoresearch TP path needs to call the existing helper.
+  Planned source/config changes: Call `maybe_enable_async_tp(parallelism, compile_config, tp_mesh)` in the Qwen3 TP path before model compile.
+  Planned command or config overrides: TP=2/FSDP=4 compile+BF16 local batch 8 command plus `--parallelism.enable_async_tensor_parallel`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is compile failure or no throughput gain.

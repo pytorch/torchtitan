@@ -533,3 +533,28 @@ Interpretation:
 - TP=2 local batch 10 is above the practical memory boundary despite sharding the output/loss path.
 - The crash happens after a completed first step, so it is likely allocator/headroom instability from running at 97%+ memory rather than a placement error.
 - Local batch 8 is the next reasonable midpoint: it should use materially more TP headroom than batch 5 while staying below the batch 10 edge.
+
+## Experiment 16: TP=2, FSDP=4, Compile+BF16 Local Batch 8
+
+Source state: `30886e6`, using the `4512daa` TP source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=8 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run16-tp2-fsdp4-compile-bf16-lbs8 > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,850, below the 8,391 current best.
+- Step 10 MFU: 32.80%.
+- Step 10 peak memory: 148.39 GiB, 83.20%.
+- Loss moved from 3.07666 at step 1 to 1.74183 at step 10; finite and decreasing.
+- Global batch size was 32.
+
+Interpretation:
+
+- Increasing TP=2 from local batch 5 to 8 improved throughput from 7,418 to 7,850 and remained stable.
+- The trend is not steep enough for local batch 9 to likely beat 8,391 before hitting the batch 10 memory cliff.
+- TP communication/redistribution overhead remains too high without another TP-specific optimization.
