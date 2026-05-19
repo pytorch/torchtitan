@@ -85,7 +85,7 @@ class GraphTrainer(Trainer):
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
-    def _get_interpreter_cls(self) -> type | None:
+    def _maybe_get_fqn_interpreter(self) -> type | None:
         from torchtitan.tools.activation_tracer import is_numerics_capture_active
 
         if is_numerics_capture_active():
@@ -205,7 +205,7 @@ class GraphTrainer(Trainer):
                 global_valid_tokens,
                 extra_inputs,
                 extra_kwargs,
-                interpreter_cls=self._get_interpreter_cls(),
+                interpreter_cls=self._maybe_get_fqn_interpreter(),
             )
         loss = outputs[0]
         grads = outputs[1:]

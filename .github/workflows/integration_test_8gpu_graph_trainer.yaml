@@ -5,11 +5,17 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
+      - 'torchtitan/tools/activation_tracer.py'
+      - 'torchtitan/tools/compare_numerics.py'
+      - 'torchtitan/tools/profiler.py'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
+      - 'torchtitan/tools/activation_tracer.py'
+      - 'torchtitan/tools/compare_numerics.py'
+      - 'torchtitan/tools/profiler.py'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
   schedule:
     # Runs every 12 hours
@@ -75,6 +81,9 @@ jobs:
 
         # Run kernel annotation profiler tests (skips if cuda-compat < 13.1)
         pytest torchtitan/experiments/graph_trainer/tests/test_profiler.py -v
+
+        # Run numerics-debugger E2E smoke test (eager vs aot_fx_trace capture + HTML diff)
+        pytest torchtitan/experiments/graph_trainer/tests/test_numerics_debugger_e2e.py -v
 
         # Run the make_fx tracer unit tests
         pytest torchtitan/experiments/graph_trainer/tests/test_trace_module.py -v

@@ -441,6 +441,48 @@ class TestDebugModeTracer(unittest.TestCase):
             model(x)
         self.assertEqual(len(caps), 0)
 
+    def test_captures_tuple_output_op(self):
+        class TupleOutputModel(nn.Module):
+            def forward(self, x):
+                y, _, _ = torch.ops.aten.native_layer_norm.default(
+                    x,
+                    [64],
+                    None,
+                    None,
+                    1e-5,
+                )
+                return y
+
+        model = TupleOutputModel()
+        x = torch.randn(BATCH, 64)
+        with DebugModeTracer(model) as caps:
+            model(x)
+
+        tuple_op_caps = {k: v for k, v in caps.items() if "native_layer_norm" in k}
+        self.assertGreater(len(tuple_op_caps), 0, f"keys={list(caps)}")
+        cap = next(iter(tuple_op_caps.values()))
+        self.assertIn("Shape", cap.stats)
+        self.assertTrue(cap.output_hash)
+        self.assertGreaterEqual(len(cap.output_hash.split(",")), 3)
+
+    def test_exit_is_idempotent_after_materialize_error(self):
+        class FailingTracer(DebugModeTracer):
+            def _materialize_captures(self):
+                raise RuntimeError("forced materialize failure")
+
+        model = _make_model()
+        x = torch.randn(BATCH, 64)
+        tracer = FailingTracer(model)
+        tracer.__enter__()
+        model(x)
+
+        with self.assertRaisesRegex(RuntimeError, "forced materialize failure"):
+            tracer.__exit__(None, None, None)
+
+        # A second teardown path should be a no-op, not a double-exit of
+        # DebugMode's dispatch context.
+        tracer.__exit__(None, None, None)
+
     def test_fqn_does_not_include_root_class_prefix(self):
         """ModTracker prefixes FQNs with the model class name; we strip
         that prefix at capture time so DebugModeTracer's FQNs use the

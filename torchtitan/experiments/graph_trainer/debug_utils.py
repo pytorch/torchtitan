@@ -97,12 +97,13 @@ class FQNInterpreter(torch.fx.Interpreter):
     For each node, reads:
     - ``node.meta["custom"]["module_fqn"]`` → sets _current_module_name
     - ``node.meta["stack_trace"]`` → parsed and set as _current_stack_frames
-    - ``node.meta["autograd_backward"]`` → sets _current_is_backward
+    - ``node.meta["autograd_backward"]`` → sets _current_phase_override
 
     This is needed because traced graph replay via ``gm(*inputs)`` bypasses
-    module forwards entirely, so the monkeypatched forwards from _patch_model
-    never fire.  FQNInterpreter walks the graph node-by-node, restoring the
-    context that _patch_model would have set during eager execution.
+    module forwards entirely, so DebugMode's ModTracker cannot infer the
+    module FQN.  FQNInterpreter walks the graph node-by-node, restoring the
+    context that eager capture would otherwise get from DebugMode and
+    autograd metadata.
     """
 
     def run_node(self, n: torch.fx.Node):

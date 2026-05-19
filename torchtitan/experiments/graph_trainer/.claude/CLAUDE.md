@@ -300,6 +300,20 @@ and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
 
+### Numerics Debugging (DebugMode-based per-op capture)
+
+When the bitwise deterministic guardrail fails (or you want to investigate
+any numerics divergence), use the per-op capture +
+comparison toolkit driven by `--profiler.dump_numerics`.  It records each
+op's Shape / L1·L2·Min·Max·Mean stats and norm-hashes of inputs+outputs,
+then `compare_numerics.py` renders an interactive HTML diff with manual-
+override support for AC-recompute / collective-renaming pairings.
+
+See [`numerics_debugging.md`](numerics_debugging.md) next to this file for
+the full guide: capture/compare commands, customization (`_EXCLUDED_OPS`,
+hash function, manual overrides), and recommended agent prompts for
+triaging mismatches and auto-discovering override candidates.
+
 ### Async Tensor Parallel (micro-pipeline TP)
 
 Enable with `--parallelism.enable_async_tensor_parallel`. This fuses

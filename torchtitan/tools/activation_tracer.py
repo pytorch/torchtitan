@@ -74,14 +74,14 @@ class _StackFrame:
 class CapturedActivation:
     """A captured activation: pre-computed stats + provenance.
 
-    Stats (Shape, Dtype, L1/L2 norms, Min/Max/Mean) are computed inline
-    at capture time so we never hold a tensor clone after the op
-    completes.  For in-place ops where the dispatch returns ``None``
-    the dict is empty — those entries rely on ``input_hashes`` /
-    ``output_hash`` for comparison.
+    Stats (Shape, Dtype, L2 norm, Min/Max/Mean) are computed inline at
+    capture time so we never hold a tensor clone after the op completes.
+    L1 is represented by DebugMode's output hash.  For in-place ops where
+    the dispatch returns ``None`` the dict is empty — those entries rely
+    on ``input_hashes`` / ``output_hash`` for comparison.
     """
 
-    # Pre-computed stat strings keyed by name (``Shape``, ``L1 norm``,
+    # Pre-computed stat strings keyed by name (``Shape``, ``L2 norm``,
     # etc.).  Empty for in-place op captures (no result to summarize).
     stats: dict[str, str] = field(default_factory=dict)
     stack_frames: list[_StackFrame] = field(default_factory=list)
@@ -267,8 +267,37 @@ def _get_op_name(func) -> str:
     return str(func).split(".")[-1].replace(">", "")
 
 
+def _local_tensor_if_dtensor(tensor: torch.Tensor) -> torch.Tensor:
+    try:
+        from torch.distributed.tensor import DTensor
+
+        return tensor._local_tensor if isinstance(tensor, DTensor) else tensor
+    except ImportError:
+        return tensor
+
+
+def _is_captureable_tensor(tensor: torch.Tensor, min_numel: int) -> bool:
+    # Skip FakeTensors produced during make_fx tracing.
+    if isinstance(tensor, torch._subclasses.FakeTensor):
+        return False
+
+    tensor = _local_tensor_if_dtensor(tensor)
+    if tensor.numel() < min_numel:
+        return False
+    return tensor.dtype in {torch.float32, torch.float16, torch.bfloat16}
+
+
+def _captureable_tensor_leaves(result, min_numel: int) -> list[torch.Tensor]:
+    """Return result tensor leaves that are meaningful for numerics capture."""
+    tensors: list[torch.Tensor] = []
+    for leaf in pytree.tree_leaves(result):
+        if isinstance(leaf, torch.Tensor) and _is_captureable_tensor(leaf, min_numel):
+            tensors.append(_local_tensor_if_dtensor(leaf))
+    return tensors
+
+
 def _should_capture(func, result, min_numel: int, op_filter: set[str] | None) -> bool:
-    """Filter to only capture "interesting" tensors.
+    """Filter to only capture "interesting" tensor outputs.
 
     Filters by:
     - Tensor type (must be a real tensor, not FakeTensor)
@@ -289,31 +318,14 @@ def _should_capture(func, result, min_numel: int, op_filter: set[str] | None) ->
     Returns:
         True if the result should be captured.
     """
-    if not isinstance(result, torch.Tensor):
-        return False
-
-    # Skip FakeTensors produced during make_fx tracing.
-    if isinstance(result, torch._subclasses.FakeTensor):
-        return False
-
-    try:
-        from torch.distributed.tensor import DTensor
-
-        tensor = result._local_tensor if isinstance(result, DTensor) else result
-    except ImportError:
-        tensor = result
-
-    if tensor.numel() < min_numel:
-        return False
-    if tensor.dtype not in {torch.float32, torch.float16, torch.bfloat16}:
-        return False
-
     op_name = _get_op_name(func)
     if op_name in _EXCLUDED_OPS:
         return False
     if op_filter is None:
-        return True
-    return any(f in op_name for f in op_filter)
+        return bool(_captureable_tensor_leaves(result, min_numel))
+    return any(f in op_name for f in op_filter) and bool(
+        _captureable_tensor_leaves(result, min_numel)
+    )
 
 
 # The current module FQN for the op being dispatched.
@@ -350,7 +362,7 @@ _current_phase_override: ContextVar[str | None] = ContextVar(
 
 # Global flag indicating that NumericsDebugger has armed capture.
 #
-# Checked by GraphTrainer._get_interpreter_cls() to decide whether to
+# Checked by GraphTrainer._maybe_get_fqn_interpreter() to decide whether to
 # route traced graph replay through FQNInterpreter (which populates
 # _current_module_name from node metadata) instead of direct gm(*inputs).
 # Module-level bool rather than a callback — each rank is a separate
@@ -413,11 +425,12 @@ def _record_grad_fn(result, module_name: str, input_grad_fns: set) -> None:
     """Map output grad_fn to module FQN for backward op attribution.
 
     Walks the autograd graph from the output grad_fn (DFS via an
-    explicit stack), mapping internal nodes to the module.  Stops at
-    nodes already mapped (child modules) and at input grad_fns
-    (sibling/parent module boundary).  Traversal order doesn't matter
-    for correctness — the "claim only if unclaimed" check is
-    order-independent.
+    explicit stack), mapping internal nodes to the module.  The walk
+    stops at input grad_fns (sibling/parent module boundary).  It does
+    not overwrite nodes already mapped to child modules, but it still
+    walks through them so parent modules can claim unmapped glue ops
+    between children.  Traversal order doesn't matter for correctness
+    because the "claim only if unclaimed" check is order-independent.
     """
     for t in pytree.tree_leaves(result):
         if not isinstance(t, torch.Tensor) or t.grad_fn is None:
@@ -528,6 +541,7 @@ class DebugModeTracer:
         self._debug_mode = None
         self._hook_ctx = None
         self._hash_ctx = None
+        self._materialized = False
         # Global nn.Module forward hook handles, removed on __exit__.
         self._pre_fw_handle = None
         self._post_fw_handle = None
@@ -587,11 +601,11 @@ class DebugModeTracer:
             post_fw_hook
         )
 
-        # Captures the cloned output tensor only for ops that pass the
-        # filter — cloning every dispatch output (including AC recompute)
-        # blows out CUDA memory.  We also stash module FQN, stack
-        # frames, and phase per op so the materialize step doesn't need
-        # to walk DebugMode annotate entries.
+        # Computes output stats only for ops that pass the filter —
+        # cloning every dispatch output (including AC recompute) blows
+        # out CUDA memory.  We also stash module FQN, stack frames, and
+        # phase per op so the materialize step doesn't need to walk
+        # DebugMode annotate entries.
         skipped_excluded_ops = self.skipped_excluded_ops
         min_numel = self.min_numel
         op_filter = self.op_filter
@@ -627,16 +641,14 @@ class DebugModeTracer:
                 # through to the metadata block below.
                 pass
             else:
-                try:
-                    from torch.distributed.tensor import DTensor
-
-                    tensor = (
-                        result._local_tensor if isinstance(result, DTensor) else result
-                    )
-                except ImportError:
-                    tensor = result
+                # Compute stats for the first captureable result tensor.
+                # Multi-output ops still get complete DebugMode hash
+                # strings for all tensor leaves; the scalar stat columns
+                # summarize the primary tensor leaf so the existing log
+                # format stays stable.
+                primary_tensor = _captureable_tensor_leaves(result, min_numel)[0]
                 # Compute stats inline — no clone, no held reference.
-                out["stats"] = _compute_stats(tensor)
+                out["stats"] = _compute_stats(primary_tensor)
 
             # Module FQN priority:
             # 1. _current_module_name ContextVar — set by FQNInterpreter
@@ -688,20 +700,31 @@ class DebugModeTracer:
         return self._captures
 
     def __exit__(self, *args):
-        if self._hook_ctx is not None:
-            self._hook_ctx.__exit__(*args)
-        if self._hash_ctx is not None:
-            self._hash_ctx.__exit__(*args)
-        if self._debug_mode is not None:
-            self._debug_mode.__exit__(*args)
-        if self._pre_fw_handle is not None:
-            self._pre_fw_handle.remove()
-            self._pre_fw_handle = None
-        if self._post_fw_handle is not None:
-            self._post_fw_handle.remove()
-            self._post_fw_handle = None
-        _grad_fn_to_module.clear()
-        self._materialize_captures()
+        try:
+            if self._hook_ctx is not None:
+                hook_ctx = self._hook_ctx
+                self._hook_ctx = None
+                hook_ctx.__exit__(*args)
+            if self._hash_ctx is not None:
+                hash_ctx = self._hash_ctx
+                self._hash_ctx = None
+                hash_ctx.__exit__(*args)
+            if self._debug_mode is not None:
+                self._debug_mode.__exit__(*args)
+            if self._debug_mode is not None and not self._materialized:
+                self._materialize_captures()
+                self._materialized = True
+        finally:
+            if self._pre_fw_handle is not None:
+                self._pre_fw_handle.remove()
+                self._pre_fw_handle = None
+            if self._post_fw_handle is not None:
+                self._post_fw_handle.remove()
+                self._post_fw_handle = None
+            _grad_fn_to_module.clear()
+            # Mark the DebugMode context as closed even if materializing
+            # captures raises, so repeated teardown cannot double-exit it.
+            self._debug_mode = None
 
     def _materialize_captures(self) -> None:
         """Build ``module_fqn/op_N_opname`` keyed captures from the
@@ -712,7 +735,10 @@ class DebugModeTracer:
         threads through the tensor-ID producer map used for input-link
         attribution in the diff HTML.
         """
-        from torch.utils._debug_mode._calls import _OpCall
+        try:
+            from torch.utils._debug_mode import _OpCall
+        except ImportError:
+            from torch.utils._debug_mode._calls import _OpCall
 
         op_counters: dict[str, int] = {}
         # Map from tensor ID (from DebugMode's _tensor_memo) to the
@@ -875,8 +901,9 @@ class NumericsDebugger:
 
     def _teardown(self) -> None:
         set_numerics_capture_active(False)
-        if self._tracer is None:
-            return
-        if self._tracer._debug_mode is not None:
-            self._tracer.__exit__(None, None, None)
+        tracer = self._tracer
         self._tracer = None
+        if tracer is None:
+            return
+        if tracer._debug_mode is not None:
+            tracer.__exit__(None, None, None)

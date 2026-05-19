@@ -11,16 +11,17 @@ Inputs are the per-rank text logs produced by
 ``torchtitan.tools.activation_tracer.dump_captures_to_file`` (typically
 written to ``{dump_folder}/numerics/rank_{rank}_activations.log`` when
 ``--profiler.dump_numerics`` is set). Each log is a sequence of
-``[module_fqn/op_N_opname]`` blocks with per-op stats (Shape, L1/L2 norm,
-Min/Max/Mean), source ``Location``, and optional ``Phase``.
+``[module_fqn/op_N_opname]`` blocks with per-op stats (Shape, output hash,
+input hashes, L2 norm, Min/Max/Mean), source ``Location``, and optional
+``Phase``.
 
 Pipeline:
     1. ``parse_log`` reads each file into a list of :class:`OpEntry`.
-    2. ``match_entries`` aligns the two lists with three passes (exact key
-       → fuzzy key → numeric stats) so that ops with different counters
-       or FQNs across modes can still be compared.
-    3. ``_compute_diffs`` flags per-stat differences, scaled by the
-       tensor's L1 norm to suppress near-zero noise.
+    2. ``match_entries`` aligns the two lists with four passes (manual
+       overrides → exact key → fuzzy key → numeric stats) so that ops with
+       different counters or FQNs across modes can still be compared.
+    3. ``_compute_diffs`` flags per-stat differences on each stat's own
+       scale via symmetric relative difference.
     4. ``generate_html`` renders an interactive page with collapsible
        Forward/Backward sections, per-cell diff coloring, filter toggles,
        and row hover-highlighting.
@@ -47,9 +48,9 @@ class OpEntry:
     Attributes:
         key: ``module_fqn/op_N_opname`` identifier from the ``[...]``
             header line. Used as the primary matching key.
-        stats: Per-stat string values (Shape, L1 norm, L2 norm, Min, Max,
-            Mean). Stored as strings so we can preserve formatting and
-            detect non-numeric mismatches (e.g. shape).
+        stats: Per-stat string values (Shape, L2 norm, Min, Max, Mean, and
+            optionally legacy L1 norm). Stored as strings so we can preserve
+            formatting and detect non-numeric mismatches (e.g. shape).
         phase: ``"forward"`` or ``"backward"`` from the ``Phase:`` line.
             Forward is the default when the log omits the line.
         location: Source location like ``common/attention.py:534`` from
@@ -221,6 +222,12 @@ def _rel_diff(a_str: str, b_str: str) -> float | None:
         a, b = float(a_str), float(b_str)
     except (ValueError, TypeError):
         return None
+    # Treat NaN inputs as "non-numeric" so the caller falls back to
+    # exact-string equality.  Async-collective outputs hash to NaN
+    # before sync; comparing NaN propagates through the relative diff
+    # and breaks the downstream intensity gradient.
+    if math.isnan(a) or math.isnan(b):
+        return None
     denom = max(abs(a), abs(b), 1e-30)
     return abs(a - b) / denom
 
@@ -251,6 +258,17 @@ def _hash_intensity(e_val: str, t_val: str) -> float | None:
         return 1.0
     max_rd = 0.0
     for a_s, b_s in zip(ev, tv):
+        # ``nan`` shows up for async-collective outputs that haven't
+        # synced yet (the destination buffer is uninitialized).  Two
+        # NaNs side-by-side = both sides observed the same unsynced
+        # bucket → treat as matching.  One side NaN + one numeric =
+        # structural mismatch.
+        a_nan = a_s == "nan"
+        b_nan = b_s == "nan"
+        if a_nan or b_nan:
+            if a_nan and b_nan:
+                continue
+            return 1.0
         rd = _rel_diff(a_s, b_s)
         if rd is None:
             if a_s != b_s:
@@ -612,8 +630,27 @@ def generate_html(
                     )
                 else:
                     style = ""
-                eager_cells.append(f"<td{style}>{html.escape(ev)}</td>")
-                traced_cells.append(f"<td{style}>{html.escape(tv)}</td>")
+                # Shape is rendered as ``torch.Size([...]), Dtype: ...``
+                # which can be long for high-rank tensors; wrap in the
+                # same collapsible cell used by the L1-norm columns.
+                if stat == "Shape":
+                    ev_inner = (
+                        f'<div class="ih-cell collapsed" onclick="toggleIH(this)">'
+                        f"{html.escape(ev)}</div>"
+                        if ev
+                        else ""
+                    )
+                    tv_inner = (
+                        f'<div class="ih-cell collapsed" onclick="toggleIH(this)">'
+                        f"{html.escape(tv)}</div>"
+                        if tv
+                        else ""
+                    )
+                else:
+                    ev_inner = html.escape(ev)
+                    tv_inner = html.escape(tv)
+                eager_cells.append(f"<td{style}>{ev_inner}</td>")
+                traced_cells.append(f"<td{style}>{tv_inner}</td>")
 
             e_loc = html.escape(e.location) if e else ""
             t_loc = html.escape(t.location) if t else ""
@@ -705,7 +742,7 @@ def generate_html(
 
             e_oh = e.output_hash if e else ""
             t_oh = t.output_hash if t else ""
-            e_oh_cell, t_oh_cell = _hash_cell(e_oh, t_oh)
+            e_oh_cell, t_oh_cell = _hash_cell(e_oh, t_oh, collapsible=True)
             e_ih = e.input_hashes if e else ""
             t_ih = t.input_hashes if t else ""
             e_ip = e.input_producers if e else ""
@@ -732,10 +769,10 @@ def generate_html(
               <td class="key-cell" rowspan="2">{key_html}</td>
               <td class="match-cell" rowspan="2">{strategy_html}</td>
               <td class="side-label">{name1_safe}</td>
-              {eager_cells[0]}
               {e_oh_cell}
               {e_ih_cell}
               <td>{e_loc}</td>
+              {eager_cells[0]}
               <td>{e_phase}</td>
               {''.join(eager_cells[1:])}
             </tr>
@@ -743,10 +780,10 @@ def generate_html(
                 onmouseenter="highlight('{row_id}')"
                 onmouseleave="unhighlight('{row_id}')">
               <td class="side-label">{name2_safe}</td>
-              {traced_cells[0]}
               {t_oh_cell}
               {t_ih_cell}
               <td>{t_loc}</td>
+              {traced_cells[0]}
               <td>{t_phase}</td>
               {''.join(traced_cells[1:])}
             </tr>"""
@@ -874,6 +911,17 @@ def generate_html(
   .filter-bar {{ margin-bottom: 15px; }}
   .filter-bar label {{ margin-right: 15px; color: #aaa; cursor: pointer; }}
   .filter-bar input {{ margin-right: 4px; }}
+  .op-filter-input {{
+    margin-left: 18px;
+    padding: 4px 8px;
+    width: 340px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    color: #d4d6dc;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+  }}
 </style>
 </head>
 <body>
@@ -892,6 +940,14 @@ def generate_html(
   <label><input type="checkbox" checked onchange="toggleClass('has-diff', this.checked)"> Show diffs</label>
   <label><input type="checkbox" checked onchange="toggleClass('eager-only', this.checked)"> Show {name1_safe}-only</label>
   <label><input type="checkbox" checked onchange="toggleClass('traced-only', this.checked)"> Show {name2_safe}-only</label>
+  <input
+    type="text"
+    id="op-filter"
+    class="op-filter-input"
+    placeholder="filter ops by regex (e.g. layers\\.0.*mul) — empty = show all"
+    oninput="applyOpFilter(this.value)"
+  >
+  <span id="op-filter-status" style="color:#888; font-size:11px; margin-left:8px;"></span>
 </div>
 
 <div class="section">
@@ -899,9 +955,9 @@ def generate_html(
   <div class="section-content" id="fwd">
     <table>
       <tr>
-        <th>Op</th><th>Match method</th><th>Side</th><th>Shape</th>
+        <th>Op</th><th>Match method</th><th>Side</th>
         <th>Output L1 norm</th><th>Input L1 norm</th>
-        <th>Location</th><th>Phase</th>
+        <th>Location</th><th>Shape</th><th>Phase</th>
         <th>Output L2 norm</th><th>Output Min</th>
         <th>Output Max</th><th>Output Mean</th>
       </tr>
@@ -915,9 +971,9 @@ def generate_html(
   <div class="section-content" id="bwd">
     <table>
       <tr>
-        <th>Op</th><th>Match method</th><th>Side</th><th>Shape</th>
+        <th>Op</th><th>Match method</th><th>Side</th>
         <th>Output L1 norm</th><th>Input L1 norm</th>
-        <th>Location</th><th>Phase</th>
+        <th>Location</th><th>Shape</th><th>Phase</th>
         <th>Output L2 norm</th><th>Output Min</th>
         <th>Output Max</th><th>Output Mean</th>
       </tr>
@@ -947,10 +1003,74 @@ function toggleSection(id) {{
     toggle.textContent = '▶';
   }}
 }}
+// Two independent filters can hide a row: the category checkboxes
+// (toggleClass) and the regex op-filter (applyOpFilter).  Each
+// maintains its own ``data-hidden-by-*`` attribute; a row is shown
+// only when neither flag is set.
+function _setHide(el, key, hide) {{
+  if (hide) {{
+    el.dataset['hideBy' + key] = '1';
+  }} else {{
+    delete el.dataset['hideBy' + key];
+  }}
+  const hidden = el.dataset.hideByCategory || el.dataset.hideByOpFilter;
+  el.style.display = hidden ? 'none' : '';
+}}
 function toggleClass(cls, show) {{
   document.querySelectorAll('.op-row.' + cls).forEach(el => {{
-    el.style.display = show ? '' : 'none';
+    _setHide(el, 'Category', !show);
   }});
+}}
+// Compile ``pattern`` as a regex and hide any row whose ``op`` key
+// (eager or traced, since paired-rows share both) doesn't match.
+// Paired rows are two ``<tr>``s sharing the same ``data-row-id``;
+// we hide both members together by row id.
+let _opFilterTimer = null;
+function applyOpFilter(pattern) {{
+  // Debounce so typing isn't laggy on large tables.
+  if (_opFilterTimer) clearTimeout(_opFilterTimer);
+  _opFilterTimer = setTimeout(() => _applyOpFilterNow(pattern), 60);
+}}
+function _applyOpFilterNow(pattern) {{
+  const status = document.getElementById('op-filter-status');
+  const pat = (pattern || '').trim();
+  let re = null;
+  if (pat) {{
+    try {{
+      re = new RegExp(pat, 'i');
+      status.textContent = '';
+      status.style.color = '#888';
+    }} catch (err) {{
+      status.textContent = 'invalid regex: ' + err.message;
+      status.style.color = '#f87171';
+      return;
+    }}
+  }} else {{
+    status.textContent = '';
+  }}
+  // Group rows by data-row-id so paired ``<tr>``s hide together.
+  const groups = new Map();
+  document.querySelectorAll('.op-row').forEach(el => {{
+    const id = el.dataset.rowId;
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(el);
+  }});
+  let kept = 0, total = 0;
+  for (const [id, els] of groups) {{
+    total += 1;
+    // Pull the key text from whichever row has the key-cell (rowspan=2).
+    let keyText = '';
+    for (const el of els) {{
+      const kc = el.querySelector('.key-cell');
+      if (kc) {{ keyText = kc.textContent || ''; break; }}
+    }}
+    const hide = re ? !re.test(keyText) : false;
+    if (!hide) kept += 1;
+    for (const el of els) _setHide(el, 'OpFilter', hide);
+  }}
+  if (re) {{
+    status.textContent = kept + ' / ' + total + ' rows match';
+  }}
 }}
 function toggleIH(el) {{
   el.classList.toggle('collapsed');
