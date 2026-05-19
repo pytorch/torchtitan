@@ -12,6 +12,12 @@ hardware being tested.
 
 ## Setup
 
+When autoresearch is started from `aditvenk/autoresearch-parallelize`, it must
+always start FRESH by creating a brand-new experiment branch. It must never
+resume an existing experiment, and must never CHEAT by inspecting, checking out,
+diffing against, reading logs from, or otherwise using any existing
+`autoresearch-parallelize/*` experiment branch.
+
 To set up a new experiment, work with the user to:
 
 1. **Record the baseline train command**: get the command that defines the
