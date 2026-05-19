@@ -1772,3 +1772,21 @@ Interpretation:
 - Explicit one-module-ahead FSDP prefetch is the first communication-overlap change to beat the flex best.
 - Current best source is now `7c1c351`, with flex attention, no FP8 converter, compile enabled, BF16 training dtype, local batch size 5, `--comm.trace_buf_size=0`, and Qwen3 FSDP prefetch.
 - Next tests should keep this prefetch source line and isolate either variance, selective FP8 coverage, or a narrower prefetch refinement.
+
+## Experiment 60: Selective FP8 With BF16 `lm_head` On Prefetch Source
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run60-prefetch-flex-fp8-bf16-lm-head-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid.
+- The run OOMed before step metrics.
+- External `VLLM::Worker_TP*` processes appeared on GPUs 4-7 during the run and held about 127 GiB each at failure time.
+
+Interpretation:
+
+- This is a contaminated OOM, not evidence against selective FP8. Retry the same source when GPUs are clear.

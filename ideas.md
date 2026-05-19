@@ -536,6 +536,7 @@
   Planned source/config changes: In `qwen3_14b()`, use `model_registry("14B", attn_backend="flex", converters=[Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn", "lm_head"], model_compile_enabled=True)])`.
   Planned command or config overrides: Current flex best command shape with `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are still-invalid loss if attention/MLP FP8 is the issue, or slower throughput if `lm_head` FP8 supplied most of the speedup.
+  Attempt: run60 at source state `e213be2` was invalid; external VLLM workers appeared on GPUs 4-7 and caused a contaminated OOM before any step metrics.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
