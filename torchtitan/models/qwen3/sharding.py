@@ -26,11 +26,6 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
 
 
-# Routed-expert weight layout for the shared ``GroupedExperts`` (w1/w2/w3).
-# Maps each parameter name to its in/out-dim placement: ``Shard(1)`` for
-# colwise (w1, w3), ``Shard(2)`` for rowwise (w2). Reused across qwen3,
-# llama4, deepseek_v3 -- all three share ``GroupedExperts`` from
-# ``models/common/moe.py``.
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
     "w1": Shard(1),
     "w2": Shard(2),
@@ -52,7 +47,8 @@ def set_qwen3_sharding_config(
     at runtime.
 
     MoE sub-configs (router, shared experts, routed experts) are
-    populated when TP or EP is enabled.
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
     """
 
     set_decoder_sharding_config(
@@ -80,7 +76,6 @@ def _set_qwen3_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(attention.inner_attention)
@@ -96,6 +91,7 @@ def _set_qwen3_layer_sharding(
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
+        attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
             attn_x_placement=attn_x_placement,
