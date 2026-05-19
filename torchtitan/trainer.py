@@ -324,13 +324,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         assert self.gradient_accumulation_steps > 0
 
-        # Validate sequence length is compatible with parallelism dimensions
-        assert config.training.seq_len % parallel_dims.seq_len_divisor == 0, (
-            f"Sequence length {config.training.seq_len} must be divisible by "
-            f"the product of TP degree ({parallel_dims.tp}) and "
-            f"2 * CP degree ({parallel_dims.cp})."
-        )
-
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
@@ -357,6 +350,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     model_config=model_config,
                     parallelize_fn=model_spec.parallelize_fn,
                     loss_fn=self.loss_fn,
+                    local_batch_size=config.training.local_batch_size,
                 )
                 # when PP is enabled, `model` obj is no longer used after this point,
                 # model_parts is used instead
@@ -383,7 +377,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     model = model_spec.parallelize_fn(
                         model,
                         parallel_dims=parallel_dims,
-                        training=config.training,
                         parallelism=config.parallelism,
                         compile_config=config.compile,
                         ac_config=config.activation_checkpoint,

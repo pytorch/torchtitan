@@ -214,7 +214,6 @@ class VLLMModelWrapper(Module):
         self.model = self.parallelize_fn(
             model=self.model,
             parallel_dims=self.parallel_dims,
-            training=TrainingConfig(),
             parallelism=parallelism,
             compile_config=compile_config,
             ac_config=ActivationCheckpointConfig(mode="none"),

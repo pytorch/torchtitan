@@ -61,7 +61,7 @@ def parallelize_deepseekv3(
         and "model" in compile_config.components
     )
 
-    if ac_config is not None:
+    if ac_config is not None and ac_config.mode != "none":
         apply_ac(
             model,
             ac_config,

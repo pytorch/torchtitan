@@ -28,7 +28,6 @@ from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model import BaseModel
@@ -69,7 +68,6 @@ def pipeline_llm(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig | None = None,
     ac_config: ActivationCheckpointConfig | None = None,
@@ -78,6 +76,7 @@ def pipeline_llm(
     model_config: BaseModel.Config,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
+    local_batch_size: int,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
@@ -126,7 +125,7 @@ def pipeline_llm(
 
     pp_schedule = build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        local_batch_size=local_batch_size,
         stages=stages,
         loss_fn=loss_fn,
     )

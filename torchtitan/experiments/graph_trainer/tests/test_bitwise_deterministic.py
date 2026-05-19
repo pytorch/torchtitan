@@ -134,11 +134,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         inner_attention = getattr(layer.attention, "inner_attention", None)
         if not isinstance(inner_attention, FlexAttnModule.Config):
             return {}
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-        attention_masks = model.get_attention_masks(
-            input_batch=self.inputs,
-            tokenizer=tokenizer,
-        )
+        attention_masks = model.get_attention_masks(self.positions)
         return {"attention_masks": attention_masks}
 
     def _run_steps(
@@ -238,6 +234,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                     cpu_offload_prefetch_n_layers=1,
                     cpu_offload_defer_n_layers=1,
                     cpu_offload_budget_gb=100.0,
+                    enable_fsdp_ag_rs_overlap=False,
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
