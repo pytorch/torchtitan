@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -79,6 +80,32 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+
+        def update_from_config(
+            self,
+            *,
+            trainer_config,
+            **kwargs,
+        ) -> None:
+            """Apply trainer config to model config.
+
+            ``training`` is optional: callers that only need parallelism
+            setup (e.g. the vLLM inference wrapper) may omit it.  When
+            present, ``training.seq_len`` is validated against the model's
+            intrinsic ``rope.max_seq_len`` and the RoPE cache is resized.
+            """
+            training = getattr(trainer_config, "training", None)
+            if training is not None:
+                seq_len = training.seq_len
+                if seq_len > self.rope.max_seq_len:
+                    raise ValueError(
+                        f"Training sequence length {seq_len} exceeds "
+                        f"model's maximum supported sequence length "
+                        f"{self.rope.max_seq_len}."
+                    )
+                self.rope = dataclasses.replace(
+                    self.rope, max_seq_len=seq_len
+                )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
