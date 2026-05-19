@@ -418,6 +418,15 @@
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is that LR does not fix a semantic/masking issue, or that lower LR only masks an invalid attention behavior.
   Result: discarded at source state `be0f401`; lower LR recovered finite decreasing loss, but throughput was 8,432 tps, below the 8,489 flex-without-FP8 best.
 
+- Idea: FP8 flex attention with intermediate learning rate
+  Current best source commit: 5801b0f
+  Source: follow-up after FP8 flex lower-LR recovery
+  Expected mechanism: Run41 at LR 8e-4 was faster than the best but failed loss sanity, while run47 at LR 4e-4 recovered decreasing loss but was slower. Testing LR 6e-4 checks whether an intermediate update size keeps the FP8+flex loss trend healthy while preserving more of the faster kernel path.
+  Supporting evidence: Run47 showed the FP8+flex loss issue is not an immediate semantic failure; it can pass the 10-step sanity check with a lower LR. The throughput gap may include run-to-run variance, so one intermediate LR is justified before abandoning FP8+flex.
+  Planned source/config changes: Use FP8 rowwise auto-filter converter with `attn_backend="flex"`.
+  Planned command or config overrides: Current best command shape plus `--optimizer.lr=6e-4`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is that loss still increases or throughput remains below the flex-without-FP8 best.
+
 - Idea: FP8 rowwise_with_gw_hp without auto-filter
   Current best source commit: 477f662
   Source: quantization recipe fallback after auto-filter crash
