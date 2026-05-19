@@ -216,3 +216,38 @@ Interpretation:
 - BF16's recovered memory is not enough to raise local batch from 4 to 5 without activation checkpointing or another memory reduction.
 - The batch-size path is blocked unless paired with a stronger memory-saving source state such as AC or TP. Since full AC at batch 4 was much slower, blind batch-size search is not currently attractive.
 - The search should pivot to profiling the current best to see whether compute kernels, FSDP collectives, or launch/data overhead dominate before making another source change.
+
+## Experiment 5: Profile Current Best
+
+Source state: `38ac2c8` with source still matching the FSDP-best implementation.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run05-profile-best --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status in `results.tsv`: discard, because profiled throughput is not comparable to unprofiled candidates.
+- Step 10 profiled `tps`: 6,854.
+- Step 10 profiled MFU: 28.64%.
+- Step 10 peak memory: 173.91 GiB, 97.51%.
+- Trace files were written under `outputs/autoresearch/may19-qwen3-14b/run05-profile-best/profiling/traces/iteration_10/`.
+
+Profile notes from rank 0 trace:
+
+- GPU traced duration excluding the `ProfilerStep` wrapper was about 3.51 s.
+- Matmul/GEMM kernels: about 1.24 s across 1,073 events.
+- NCCL collectives: about 0.94 s across 293 events.
+- Flash attention kernels: about 0.52 s across 205 events.
+- Elementwise/activation/optimizer kernels: about 0.32 s.
+- Copy/cat/split kernels: about 0.25 s.
+- Top communication kernels included reduce-scatter and all-gather. The trace had 58 reduce-scatter device kernels totaling about 307 ms plus 42 `nccl:_reduce_scatter_base` events totaling about 223 ms, and 98 all-gather device kernels totaling about 215 ms plus 84 `nccl:_all_gather_base` events totaling about 196 ms.
+- Later structured timings still show fwd/bwd around 1.62-1.65 s and optimizer around 22-24 ms; data fetch remains around 9-13 ms and is not the bottleneck.
+
+Roofline conclusion:
+
+- The run is not purely compute-bound. GEMMs are the largest bucket, but NCCL collectives are close behind and large enough to motivate a communication/memory tradeoff experiment.
+- Memory pressure prevents simple larger-batch exploitation. Communication reduction should be attempted only with a memory-saving ingredient such as BF16 dtype or AC.
+- Next narrow hypothesis: combine BF16 training dtype with `fsdp_reshard_after_forward=never` to spend the BF16 memory savings on fewer FSDP all-gathers. This may OOM; if it fits, success requires tps above 7,254.
