@@ -569,6 +569,15 @@
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is valid OOM or lower tps from too much early parameter residency/communication contention.
   Result: discarded at source state `388fdfd`; 8,627 tps with finite decreasing loss, and peak memory rose to 169.33 GiB.
 
+- Idea: forward-only FSDP prefetch on prefetch flex best
+  Current best source commit: 7c1c351
+  Source: asymmetric prefetch follow-up after run63 and run64
+  Expected mechanism: Keep the forward one-module-ahead prefetch that can hide all-gathers before compute, but remove backward prefetch to reduce contention with FSDP reduce-scatter, now the largest visible NCCL bucket in the profile.
+  Supporting evidence: Run64 showed wider prefetch is worse and raises memory. Run63 showed 1.76 s rank0 reduce-scatter kernel time versus 0.63 s all-gather kernel time, suggesting backward communication contention is a plausible remaining limiter.
+  Planned source/config changes: In Qwen3 FSDP wrapping, keep the current one-module forward prefetch chain through `lm_head`, but remove `set_modules_to_backward_prefetch` calls. Do not change batch size, reshard policy, converters, AC, or command flags.
+  Planned command or config overrides: Exact current best command with a new dump folder.
+  Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is lower tps if backward prefetch was hiding necessary parameter all-gathers.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
