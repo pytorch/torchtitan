@@ -251,3 +251,26 @@ Roofline conclusion:
 - The run is not purely compute-bound. GEMMs are the largest bucket, but NCCL collectives are close behind and large enough to motivate a communication/memory tradeoff experiment.
 - Memory pressure prevents simple larger-batch exploitation. Communication reduction should be attempted only with a memory-saving ingredient such as BF16 dtype or AC.
 - Next narrow hypothesis: combine BF16 training dtype with `fsdp_reshard_after_forward=never` to spend the BF16 memory savings on fewer FSDP all-gathers. This may OOM; if it fits, success requires tps above 7,254.
+
+## Experiment 6: BF16 Training Dtype With FSDP Reshard Disabled
+
+Source state: `a156590` with source still matching the FSDP-best implementation.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --training.dtype=bfloat16 --parallelism.fsdp_reshard_after_forward=never --dump_folder=outputs/autoresearch/may19-qwen3-14b/run06-bf16-reshard-never > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run initialized with `reshard_after_forward=False` and reached step 1.
+- Step 1 reported 881 tps, 3.68% MFU, and 176.49 GiB peak memory before crashing later in first backward.
+- The OOM happened in FSDP post-backward when converting an unsharded accumulated gradient to the reduce dtype. The failed allocation was 2.90 GiB with about 175.75 GiB already in use.
+
+Interpretation:
+
+- BF16 alone does not create enough room for `fsdp_reshard_after_forward=never`.
+- The profile's communication bottleneck remains relevant, but any no-reshard attempt needs stronger activation memory reduction than BF16 provides.
+- A coupled AC plus no-reshard experiment is justified: AC alone was slower because recompute cost dominated, but no-reshard may recover some all-gather time while AC supplies the memory headroom required for retained parameters.
