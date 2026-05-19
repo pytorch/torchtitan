@@ -709,17 +709,26 @@ class RLTrainer(Configurable):
         logger.info("Pre:  %s", _format_validation(pre_validation))
         sl.log_trace_instant("training_start")
 
-        async def continuous_rollouts() -> None:
+        async def continuous_rollouts(task_idx: int) -> None:
+            """Run one rollout-producer coroutine.
+
+            Each task picks a unique slot ``task_idx`` from each batch of
+            ``num_rollout_tasks`` examples the dataset hands back, so the
+            ``N`` concurrent producers always sample distinct prompts
+            within one dataset step. Without this, all tasks would call
+            ``sample_groups(step=..., num_groups=1)`` and burn compute on
+            duplicate rollouts of the same prompt.
+            """
             train_dataset: EnvDataset = cfg.train_dataset.build()
-            local_step = 0
+            dataset_step = 0
             while not shutdown.is_set():
                 examples = train_dataset.sample_groups(
-                    step=self._train_step,
-                    num_groups=1,
+                    step=dataset_step,
+                    num_groups=cfg.num_rollout_tasks,
                 )
-                if not examples:
+                if not examples or task_idx >= len(examples):
                     return
-                example = examples[0]
+                example = examples[task_idx]
                 with sl.log_trace_span("rollout_group"):
                     rollouts = await self._rollout_one_group(example)
                 samples = self._build_replay_samples(rollouts)
@@ -727,16 +736,19 @@ class RLTrainer(Configurable):
                     await self.replay_buffer.add(samples)
 
                 if cfg.log_samples:
-                    if local_step % 4 == 0:
+                    if dataset_step % 4 == 0 and task_idx == 0:
                         _log_first_sample(rollouts)
                     _dump_rollouts_jsonl(
                         rollouts,
                         dump_folder=cfg.dump_folder,
                         train_step=self._train_step,
                     )
-                local_step += 1
+                dataset_step += 1
+
+        skipped_zero_advantage_steps = 0
 
         async def continuous_training() -> None:
+            nonlocal skipped_zero_advantage_steps
             while self._train_step < num_steps and not shutdown.is_set():
                 try:
                     batches_per_rank = await self.replay_buffer.sample(
@@ -745,6 +757,26 @@ class RLTrainer(Configurable):
                 except BufferClosedError:
                     return
                 step_start = time.perf_counter()
+
+                # Skip when no group in the batch has any advantage signal:
+                # forward/backward would just multiply gradients by zero and
+                # waste compute. Counts toward ``num_steps`` so a fully
+                # degenerate task still terminates.
+                if not _any_advantage_signal(batches_per_rank):
+                    skipped_zero_advantage_steps += 1
+                    self._train_step += 1
+                    sl.set_step(self._train_step)
+                    logger.info(
+                        "Step %2d | SKIPPED (no advantage signal; cumulative=%d)",
+                        self._train_step,
+                        skipped_zero_advantage_steps,
+                    )
+                    sl.log_trace_scalar(
+                        {
+                            "train/skipped_zero_advantage_steps": skipped_zero_advantage_steps
+                        }
+                    )
+                    continue
 
                 # Collate one TrainBatch per DP rank.
                 train_batches = [self._collate(b) for b in batches_per_rank]
@@ -787,7 +819,7 @@ class RLTrainer(Configurable):
 
         # Fail-fast: any task error triggers shutdown.
         rollout_tasks = [
-            asyncio.create_task(continuous_rollouts(), name=f"rollout_{i}")
+            asyncio.create_task(continuous_rollouts(i), name=f"rollout_{i}")
             for i in range(cfg.num_rollout_tasks)
         ]
         training_task = asyncio.create_task(continuous_training(), name="training")
@@ -828,6 +860,30 @@ class RLTrainer(Configurable):
             _format_validation(pre_validation),
             _format_validation(post_validation),
         )
+
+
+# ---------------------------------------------------------------------------
+# Training helpers
+# ---------------------------------------------------------------------------
+
+
+def _any_advantage_signal(
+    batches_per_rank: Sequence[Sequence[ReplaySample]], *, eps: float = 1e-12
+) -> bool:
+    """True iff any sample in any rank's batch has a non-zero advantage.
+
+    The group-mean GRPO baseline produces zero advantages when every
+    rollout in a group lands the same reward (the model already solved
+    the task or completely failed it). Forwarding such batches just
+    multiplies gradients by zero and burns compute, so the training
+    loop skips them and tracks the count via
+    ``train/skipped_zero_advantage_steps``.
+    """
+    for batch in batches_per_rank:
+        for sample in batch:
+            if abs(sample.advantage) > eps:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------

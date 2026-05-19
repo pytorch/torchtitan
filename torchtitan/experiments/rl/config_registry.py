@@ -7,7 +7,10 @@
 """Config entrypoints for the RL experiment.
 
 Each function returns a complete :class:`RLTrainer.Config` and is
-discoverable via ``--module rl --config <function_name>``.
+discoverable via ``--module rl --config <function_name>``. The
+``_trainer``, ``_generator``, and ``_replay`` helpers factor the
+shared boilerplate so each entry point only shows its actual
+choices (model size, dataset, parallelism, learning rate).
 """
 
 from torchtitan.components.checkpoint import CheckpointManager
@@ -33,6 +36,105 @@ from torchtitan.experiments.rl.sum_digits import SumDigitsBuilder, SumDigitsData
 from torchtitan.models.qwen3 import model_registry
 
 
+# ---------------------------------------------------------------------------
+# Shared builders
+# ---------------------------------------------------------------------------
+
+
+def _trainer(
+    *,
+    train_tp: int,
+    lr: float,
+    warmup_steps: int,
+    clip_eps: float = 0.2,
+    training_dtype: str | None = None,
+    checkpoint_interval: int = 10,
+    debug: DebugConfig | None = None,
+) -> PolicyTrainer.Config:
+    training_kwargs: dict = {}
+    if training_dtype is not None:
+        training_kwargs["dtype"] = training_dtype
+    trainer_kwargs: dict = {}
+    if debug is not None:
+        trainer_kwargs["debug"] = debug
+    return PolicyTrainer.Config(
+        optimizer=OptimizersContainer.Config(lr=lr),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=warmup_steps,
+            decay_type="linear",
+        ),
+        training=TrainingConfig(**training_kwargs),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=1,
+            tensor_parallel_degree=train_tp,
+            # SP off: batch_invariant mode requires it off (NCCL reduce-
+            # scatter Ring is the only deterministic mode), and non-
+            # batch-invariant runs at TP=2 don't gain enough from SP to
+            # justify the inconsistent default.
+            enable_sequence_parallel=False,
+            disable_loss_parallel=True,
+        ),
+        checkpoint=CheckpointManager.Config(
+            enable=True,
+            initial_load_in_hf=True,
+            interval=checkpoint_interval,
+            last_save_model_only=False,
+        ),
+        loss=GRPOLoss.Config(clip_eps=clip_eps),
+        **trainer_kwargs,
+    )
+
+
+def _generator(
+    *,
+    gen_tp: int,
+    max_tokens: int,
+    gpu_memory_limit: float = 0.9,
+    debug: DebugConfig | None = None,
+) -> VLLMGenerator.Config:
+    kwargs: dict = {}
+    if debug is not None:
+        kwargs["debug"] = debug
+    return VLLMGenerator.Config(
+        model_dtype="bfloat16",
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=1,
+            tensor_parallel_degree=gen_tp,
+            data_parallel_replicate_degree=1,
+            enable_sequence_parallel=False,
+            disable_loss_parallel=True,
+        ),
+        checkpoint=CheckpointManager.Config(enable=False),
+        gpu_memory_limit=gpu_memory_limit,
+        sampling=SamplingConfig(
+            n=1,  # GRPO siblings come from rollout_group_size, not n.
+            temperature=0.8,
+            top_p=0.95,
+            max_tokens=max_tokens,
+        ),
+        **kwargs,
+    )
+
+
+def _replay(
+    *,
+    batch_size: int = 5,
+    max_policy_age: int | None = 1,
+    max_buffer_size: int = 256,
+) -> ReplayBuffer.Config:
+    return ReplayBuffer.Config(
+        batch_size=batch_size,
+        dp_size=1,
+        max_policy_age=max_policy_age,
+        max_buffer_size=max_buffer_size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
+
+
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train) — SumDigits smoke.
 
@@ -53,48 +155,9 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         validation_dataset=SumDigitsDataset.Config(seed=99),
         validation_builder=SumDigitsBuilder.Config(),
         renderer=RendererConfig(name="auto"),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
-                initial_load_in_hf=True,
-                interval=10,
-                last_save_model_only=False,
-            ),
-            loss=GRPOLoss.Config(),
-        ),
-        generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=4,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(enable=False),
-            sampling=SamplingConfig(
-                n=1,  # GRPO siblings come from rollout_group_size
-                temperature=0.8,
-                top_p=0.95,
-                max_tokens=512,
-            ),
-        ),
-        replay_buffer=ReplayBuffer.Config(
-            batch_size=5,
-            dp_size=1,
-            max_policy_age=1,
-            max_buffer_size=256,
-        ),
+        trainer=_trainer(train_tp=2, lr=2e-6, warmup_steps=2),
+        generator=_generator(gen_tp=4, max_tokens=512),
+        replay_buffer=_replay(),
     )
 
 
@@ -104,6 +167,11 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
     Encourages brief thinking (Qwen3 chat template emits ``<think>``) so
     the model has scratch space before ``<answer>``, then a larger
     ``max_tokens`` budget so it actually finishes inside the cap.
+
+    Compile disabled: torch.compile aot_eager backend hits the empty
+    sources assertion (``s59``) on the 1.7B layer shapes, which yields
+    inconsistent graphs across DP ranks and a downstream NCCL timeout.
+    The 0.6B config compiles fine; this is model-specific to 1.7B.
     """
     short_thinking_prompt = (
         "You are a careful arithmetic assistant. Given a list of integers, "
@@ -121,55 +189,15 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         max_rollout_turns=1,
         num_validation_samples=20,
         log_samples=True,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(enable=False),
         train_dataset=SumDigitsDataset.Config(seed=42),
         train_builder=SumDigitsBuilder.Config(system_prompt=short_thinking_prompt),
         validation_dataset=SumDigitsDataset.Config(seed=99),
         validation_builder=SumDigitsBuilder.Config(system_prompt=short_thinking_prompt),
         renderer=RendererConfig(name="auto"),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
-                initial_load_in_hf=True,
-                interval=10,
-                last_save_model_only=False,
-            ),
-            loss=GRPOLoss.Config(),
-        ),
-        generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(enable=False),
-            sampling=SamplingConfig(
-                n=1,
-                temperature=0.8,
-                top_p=0.95,
-                max_tokens=1024,
-            ),
-        ),
-        replay_buffer=ReplayBuffer.Config(
-            batch_size=5,
-            dp_size=1,
-            max_policy_age=1,
-            max_buffer_size=256,
-        ),
+        trainer=_trainer(train_tp=2, lr=2e-6, warmup_steps=2),
+        generator=_generator(gen_tp=2, max_tokens=1024, gpu_memory_limit=0.7),
+        replay_buffer=_replay(),
     )
 
 
@@ -179,7 +207,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
     Enables deterministic + batch-invariant mode for true on-policy RL.
     Trainer and generator use the same TP degree.
     """
-    batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
+    debug = DebugConfig(batch_invariant=True, deterministic=True)
     return RLTrainer.Config(
         model_spec=model_registry("0.6B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -195,51 +223,15 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         validation_dataset=SumDigitsDataset.Config(seed=99),
         validation_builder=SumDigitsBuilder.Config(),
         renderer=RendererConfig(name="auto"),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=2e-6),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(dtype="bfloat16"),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
-                initial_load_in_hf=True,
-                interval=10,
-                last_save_model_only=False,
-            ),
-            debug=batch_invariant_config,
-            loss=GRPOLoss.Config(),
+        trainer=_trainer(
+            train_tp=2,
+            lr=2e-6,
+            warmup_steps=2,
+            training_dtype="bfloat16",
+            debug=debug,
         ),
-        generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(enable=False),
-            sampling=SamplingConfig(
-                n=1,
-                temperature=0.8,
-                top_p=0.95,
-                max_tokens=512,
-            ),
-            debug=batch_invariant_config,
-        ),
-        replay_buffer=ReplayBuffer.Config(
-            batch_size=5,
-            dp_size=1,
-            max_policy_age=0,
-            max_buffer_size=128,
-        ),
+        generator=_generator(gen_tp=2, max_tokens=512, debug=debug),
+        replay_buffer=_replay(max_policy_age=0, max_buffer_size=128),
     )
 
 
@@ -290,47 +282,12 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
             max_trajectory_tokens=2048,
             max_generation_tokens=768,
         ),
-        trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=1e-5),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=4,
-                decay_type="linear",
-            ),
-            training=TrainingConfig(),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
-                initial_load_in_hf=True,
-                interval=50,
-                last_save_model_only=False,
-            ),
-            loss=GRPOLoss.Config(clip_eps=0.2),
+        trainer=_trainer(
+            train_tp=2,
+            lr=1e-5,
+            warmup_steps=4,
+            checkpoint_interval=50,
         ),
-        generator=VLLMGenerator.Config(
-            model_dtype="bfloat16",
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                enable_sequence_parallel=False,
-                disable_loss_parallel=True,
-            ),
-            checkpoint=CheckpointManager.Config(enable=False),
-            sampling=SamplingConfig(
-                n=1,
-                temperature=0.8,
-                top_p=0.95,
-                max_tokens=768,
-            ),
-        ),
-        replay_buffer=ReplayBuffer.Config(
-            batch_size=8,
-            dp_size=1,
-            max_policy_age=1,
-            max_buffer_size=512,
-        ),
+        generator=_generator(gen_tp=2, max_tokens=768),
+        replay_buffer=_replay(batch_size=8, max_buffer_size=512),
     )
