@@ -230,21 +230,17 @@ def construct_default_graph_passes(
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.
     """
-    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
-
-    cudagraph_disabled = "cudagraph_pass" in config.compile.disable_passes
-    use_cudagraph = not cudagraph_disabled and is_cudagraph_compatible(traced_result.gm)
+    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
     passes: list[Callable] = []
     if not has_precompile_artifact:
         passes.extend(
-            compile_time_passes(traced_result, config, use_cudagraph=use_cudagraph)
+            compile_time_passes(traced_result, config, use_cudagraph=want_cudagraph)
         )
 
-    # cudagraph should be the last pass.
-    if use_cudagraph:
+    if want_cudagraph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(

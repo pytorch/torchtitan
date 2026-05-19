@@ -6,6 +6,7 @@
 
 import unittest
 from collections import Counter
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -724,6 +725,43 @@ class TestReparametrizeOptimizer(unittest.TestCase):
         self.assertEqual(list(inner.state.keys()), original_state_keys)
         for orig_ids, group in zip(original_param_ids, inner.param_groups, strict=True):
             self.assertEqual([id(p) for p in group["params"]], orig_ids)
+
+    def test_minimal_fx_tracer_with_bucketed_optimizer(self):
+        torch.manual_seed(0)
+        module = nn.Sequential(nn.Linear(3, 5), nn.ReLU(), nn.Linear(5, 7))
+        weights = [p for n, p in module.named_parameters() if n.endswith("weight")]
+        biases = [p for n, p in module.named_parameters() if n.endswith("bias")]
+        optimizer = torch.optim.AdamW(
+            [{"params": weights, "lr": 0.1}, {"params": biases, "lr": 0.01}]
+        )
+
+        x = torch.randn(2, 3)
+        module(x).sum().backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        def train_step(x):
+            optimizer.zero_grad(set_to_none=True)
+            module(x).sum().backward()
+            optimizer.step()
+            return torch.stack([p.detach().sum() for p in module.parameters()])
+
+        traced = minimal_fx_tracer(train_step, module=module, optimizer=optimizer)(x)
+
+        model_sd = deepcopy(module.state_dict())
+        optim_sd = deepcopy(optimizer.state_dict())
+
+        eager_out = train_step(x)
+        eager_params = [p.detach().clone() for p in module.parameters()]
+
+        module.load_state_dict(model_sd)
+        optimizer.load_state_dict(optim_sd)
+        traced_out = run_traced(traced, module=module, optimizer=optimizer)(x)
+        traced_params = [p.detach().clone() for p in module.parameters()]
+
+        self.assertTrue(torch.equal(eager_out, traced_out))
+        for ep, tp in zip(eager_params, traced_params, strict=True):
+            self.assertTrue(torch.equal(ep, tp))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
