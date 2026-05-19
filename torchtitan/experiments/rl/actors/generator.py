@@ -6,15 +6,20 @@
 
 """vLLM-backed generator actor.
 
-``generate_tokens`` is a submit-queue endpoint: each call adds one
-request to vLLM's engine, registers an :class:`asyncio.Future`, and
-parks on it. A background ``_run`` coroutine pumps ``engine.step()``
-and resolves the per-request futures as outputs finish.
+``generate_tokens`` is a batched endpoint: it accepts a list of
+pre-tokenized prompts, submits them all to vLLM's engine in the same
+order on every TP rank, drains via ``engine.step()`` until every
+request finishes, returns the per-prompt :class:`GenerateOutput`\\ s.
 
-Weight sync is drain-and-load: ``pull_model_state_dict`` closes the
-``accepting_requests`` gate, waits for in-flight to empty, swaps
-weights, opens the gate. Sync ``LLMEngine`` throughout — no
-``AsyncLLM``.
+Why batched: ``vLLM external_launcher`` TP requires every rank's
+scheduler to see the same requests in the same order; a per-request
+endpoint shape lets Monarch's per-rank message ordering diverge,
+which breaks scheduler agreement and silently hangs NCCL. The
+batched shape sends one ordered list to every rank.
+
+Weight sync (``pull_model_state_dict``) runs between
+``generate_tokens`` calls — endpoint dispatch on a single actor is
+sequential, so no in-flight requests exist when it fires.
 """
 
 from __future__ import annotations
@@ -178,14 +183,14 @@ def _emit_request_metrics(output: RequestOutput, *, prefix: str) -> None:
 
 
 class VLLMGenerator(Actor, Configurable):
-    """vLLM-backed generator actor with a submit-queue endpoint.
+    """vLLM-backed generator actor.
 
-    The controller hits :meth:`generate_tokens` once per rollout-turn;
-    the actor's event loop schedules N coroutines, each parking on an
-    :class:`asyncio.Future`. A background :meth:`_run` task pumps
-    ``engine.step()`` and resolves the futures as outputs finish, so
-    vLLM's scheduler sees all N requests in flight (bsz=N) without the
-    actor itself blocking.
+    One :meth:`generate_tokens` call takes a list of prompts, submits
+    them to vLLM's engine in order, drains until each finishes, and
+    returns the outputs. The controller batches N concurrent rollouts'
+    current-turn prompts into a single call so that every TP rank sees
+    the requests in the same order (vLLM ``external_launcher`` TP
+    relies on deterministic scheduling across ranks).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -332,14 +337,9 @@ class VLLMGenerator(Actor, Configurable):
             logger.info("vLLM engine initialized")
 
         self.policy_version: int = 0
-
-        # Submit-queue state. Populated by ``setup`` (which can't run in
-        # ``__init__`` because asyncio primitives need a running loop).
-        self._requests: dict[str, asyncio.Future[GenerateOutput]] = {}
-        self._request_lock: asyncio.Condition | None = None
-        self._accepting_requests: bool = True
-        self._run_task: asyncio.Task[None] | None = None
-        self._shutting_down: bool = False
+        # Monotonic request ID counter; vLLM uses these to track in-flight
+        # requests. We never reuse IDs because vLLM keeps a finished-set
+        # internally even after we drain.
         self._next_request_id: int = 0
 
     @staticmethod
@@ -361,17 +361,6 @@ class VLLMGenerator(Actor, Configurable):
     # ------------------------------------------------------------------ endpoints
 
     @endpoint
-    async def setup(self) -> None:
-        """Initialize asyncio primitives and start the background pump.
-
-        Can't be done in ``__init__`` because the asyncio loop isn't
-        running yet at actor-construction time. Called once by the
-        controller before any ``generate_tokens`` call.
-        """
-        self._request_lock = asyncio.Condition()
-        self._run_task = asyncio.create_task(self._run(), name="vllm_pump")
-
-    @endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
@@ -380,22 +369,25 @@ class VLLMGenerator(Actor, Configurable):
     @sl.log_trace_span("generate_tokens")
     async def generate_tokens(
         self,
-        prompt_token_ids: list[int],
+        prompts: list[list[int]],
         *,
         sampling_config: SamplingConfig | None = None,
-    ) -> GenerateOutput:
-        """Submit one request, park on its future, return the output.
+    ) -> list[GenerateOutput]:
+        """Submit a list of prompts, drive ``engine.step()`` to completion,
+        return outputs in submission order.
 
-        N concurrent calls land as N coroutines on the actor's event
-        loop; each registers an :class:`asyncio.Future` and yields on
-        ``await``. The background :meth:`_run` pump drains them in
-        the order vLLM's scheduler finishes them.
+        The controller serializes N concurrent rollouts into one batched
+        call so that every TP rank's engine sees the same ordered prompt
+        list and the schedulers stay in lockstep (vLLM ``external_launcher``
+        TP requires deterministic scheduling across ranks). The
+        per-request submit-queue shape was incorrect for this topology
+        — see round 7 §4.
 
         Args:
-            prompt_token_ids: pre-tokenized prompt, shape ``[T_p]``.
+            prompts: ``[num_prompts][prompt_tokens]`` — already tokenized.
             sampling_config: per-call override of the actor's default
                 :class:`SamplingConfig`. ``seed`` comes from
-                ``config.debug.seed`` (not a per-call field).
+                ``config.debug.seed`` (not per-call).
         """
         sc = sampling_config or self.config.sampling
         params = SamplingParams(
@@ -408,50 +400,49 @@ class VLLMGenerator(Actor, Configurable):
             logprobs=1,
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
+        if not prompts:
+            return []
 
-        assert self._request_lock is not None, "call setup() before generate_tokens"
-        request_id = str(self._next_request_id)
-        self._next_request_id += 1
-        fut: asyncio.Future[GenerateOutput] = asyncio.get_running_loop().create_future()
-
-        async with self._request_lock:
-            await self._request_lock.wait_for(lambda: self._accepting_requests)
-            # ``render_cmpl`` is vLLM's input-pipeline entry; tokenize is
-            # a no-op for already-tokenized prompts.
-            (engine_input,) = self._engine.renderer.render_cmpl(
-                [{"prompt_token_ids": prompt_token_ids}]
-            )
+        engine_inputs = self._engine.renderer.render_cmpl(
+            [{"prompt_token_ids": p} for p in prompts]
+        )
+        first_id = self._next_request_id
+        self._next_request_id += len(prompts)
+        for i, engine_input in enumerate(engine_inputs):
             self._engine.add_request(
-                request_id=request_id,
+                request_id=str(first_id + i),
                 prompt=engine_input,
                 params=params,
             )
-            self._requests[request_id] = fut
 
-        return await fut
+        # Drain the engine in-process; yield between steps so other
+        # endpoints (sync_log_step, pull_model_state_dict) can land.
+        finished: dict[str, RequestOutput] = {}
+        target = {str(first_id + i) for i in range(len(prompts))}
+        with sl.log_trace_span("engine_steps"):
+            while target - finished.keys():
+                outputs = self._engine.step()
+                await asyncio.sleep(0)
+                for o in outputs:
+                    if o.finished and o.request_id in target:
+                        finished[o.request_id] = o
+
+        return [
+            self._to_generate_output(finished[str(first_id + i)])
+            for i in range(len(prompts))
+        ]
 
     @endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
-        """Drain in-flight requests, pull new weights, resume accepting.
+        """Pull new weights from TorchStore, reset prefix cache, bump version.
 
-        Sequence:
-            1. Close the gate (``accepting_requests = False``); new
-               ``generate_tokens`` calls park.
-            2. Wait for ``self._requests`` to empty — the pump finishes
-               in-flight requests on the OLD weights.
-            3. ``ts.get_state_dict(direct_rdma=is_rdma_available())`` —
-               load new weights.
-            4. ``engine.reset_prefix_cache()`` — invalidate stale KV.
-            5. ``policy_version = version``; open the gate; notify
-               waiters.
+        ``generate_tokens`` is batched-and-drained per call, so no
+        in-flight requests exist when this endpoint runs (Monarch
+        endpoint dispatch on the same actor serializes endpoint bodies
+        with each other).
         """
         from monarch.rdma import is_rdma_available
-
-        assert self._request_lock is not None
-        async with self._request_lock:
-            self._accepting_requests = False
-            await self._request_lock.wait_for(lambda: not self._requests)
 
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
@@ -461,30 +452,16 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=is_rdma_available(),
         )
         self._engine.reset_prefix_cache()
-
-        async with self._request_lock:
-            self.policy_version = version
-            self._accepting_requests = True
-            self._request_lock.notify_all()
+        self.policy_version = version
 
     @endpoint
     async def close(self) -> None:
-        """Stop the pump, then tear down vLLM in the same order as ``AsyncLLM``.
+        """Tear down vLLM in the same order as ``AsyncLLM``.
 
-        Sequence:
-            1. Cancel ``_run_task`` and wait briefly for it to drain.
-            2. ``renderer.shutdown()`` — close thread pools / multimodal cache.
-            3. ``engine_core.shutdown()`` — stop the model worker + scheduler.
-            4. ``cleanup_dist_env_and_memory()`` — destroy NCCL groups.
+        1. ``renderer.shutdown()`` — close thread pools / multimodal cache.
+        2. ``engine_core.shutdown()`` — stop the model worker + scheduler.
+        3. ``cleanup_dist_env_and_memory()`` — destroy NCCL groups.
         """
-        self._shutting_down = True
-        if self._run_task is not None:
-            self._run_task.cancel()
-            try:
-                await asyncio.wait_for(self._run_task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
-
         if self._engine is not None:
             renderer = getattr(self._engine, "renderer", None)
             try:
@@ -495,51 +472,6 @@ class VLLMGenerator(Actor, Configurable):
         cleanup_dist_env_and_memory()
 
     # ------------------------------------------------------------------ internal
-
-    async def _run(self) -> None:
-        """Background pump: drive ``engine.step()`` and fan out outputs.
-
-        ``engine.step()`` runs on the actor's event loop (not a worker
-        thread) so it never races with ``add_request``. ``await
-        asyncio.sleep(0)`` between steps yields the loop so concurrent
-        ``generate_tokens`` calls can land their submissions before the
-        next step.
-        """
-        assert self._request_lock is not None
-        while not self._shutting_down:
-            if not self._engine.has_unfinished_requests():
-                # Wake drainers waiting on an empty request set, then idle.
-                async with self._request_lock:
-                    self._request_lock.notify_all()
-                await asyncio.sleep(0.001)
-                continue
-
-            outputs: list[RequestOutput] = self._engine.step()
-            # Yield AFTER step so the next iteration's add_request side
-            # has a chance to run before we step again.
-            await asyncio.sleep(0)
-
-            resolved_any = False
-            for output in outputs:
-                if not output.finished:
-                    continue
-                fut = self._requests.pop(output.request_id, None)
-                if fut is None:
-                    logger.warning(
-                        "engine emitted finished output for unknown request_id %s",
-                        output.request_id,
-                    )
-                    continue
-                fut.set_result(self._to_generate_output(output))
-                resolved_any = True
-
-            # If we drained any request, notify weight-pull waiters
-            # immediately rather than waiting for the next empty-engine
-            # iteration. Self-recovers within one cycle but explicit
-            # notify avoids a stutter under heavy concurrent traffic.
-            if resolved_any:
-                async with self._request_lock:
-                    self._request_lock.notify_all()
 
     def _to_generate_output(self, output: RequestOutput) -> GenerateOutput:
         """Build a :class:`GenerateOutput` from one finished ``RequestOutput``.

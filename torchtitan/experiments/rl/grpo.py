@@ -211,6 +211,66 @@ def _check_batch_invariant(
         )
 
 
+class _CompletionBatcher:
+    """Coalesces concurrent ``generate_tokens`` submissions into one call.
+
+    Every rollout's ``completion_fn(prompt, sampling)`` parks on a
+    future; the batcher flushes after a single ``await asyncio.sleep(0)``
+    so co-scheduled rollouts on the same event loop can pile their
+    prompts into one batched call. The batched ``.call(prompts, ...)``
+    sends one ordered message to every TP rank — the schedulers stay
+    in lockstep, no NCCL hang.
+
+    All entries in a single flush MUST share the same ``sampling``
+    (the actor passes one ``SamplingParams`` to vLLM); training and
+    validation use different ``SamplingConfig`` instances so they
+    naturally batch separately.
+    """
+
+    def __init__(self, generator, unmesh: Callable) -> None:
+        self._generator = generator
+        self._unmesh = unmesh
+        self._pending: list[tuple[list[int], asyncio.Future, SamplingConfig]] = []
+        self._lock = asyncio.Lock()
+        self._flush_task: asyncio.Task | None = None
+
+    async def submit(
+        self, prompt_token_ids: list[int], sampling: SamplingConfig
+    ) -> GenerateOutput:
+        fut: asyncio.Future[GenerateOutput] = asyncio.get_running_loop().create_future()
+        async with self._lock:
+            self._pending.append((prompt_token_ids, fut, sampling))
+            if self._flush_task is None or self._flush_task.done():
+                self._flush_task = asyncio.create_task(self._flush())
+        return await fut
+
+    async def _flush(self) -> None:
+        # One yield so any co-scheduled rollouts get a chance to submit
+        # into the same batch before we send.
+        await asyncio.sleep(0)
+        async with self._lock:
+            batch = list(self._pending)
+            self._pending.clear()
+            self._flush_task = None
+        if not batch:
+            return
+        sampling = batch[0][2]
+        for _, _, sc in batch[1:]:
+            assert sc is sampling, (
+                "_CompletionBatcher: concurrent submissions with different "
+                "sampling configs cannot share a batch (TP ranks need one "
+                "SamplingParams per call)"
+            )
+        prompts = [p for p, _, _ in batch]
+        mesh = await self._generator.generate_tokens.call(
+            prompts,
+            sampling_config=sampling,
+        )
+        outputs = self._unmesh(mesh)
+        for (_, fut, _), out in zip(batch, outputs, strict=True):
+            fut.set_result(out)
+
+
 # ---------------------------------------------------------------------------
 # RLTrainer
 # ---------------------------------------------------------------------------
@@ -446,9 +506,6 @@ class RLTrainer(Configurable):
         with sl.log_trace_span("torchstore_init"):
             await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
 
-        # Start the generator's background pump.
-        await self.generator.setup.call()
-
         # Build the renderer pool on the controller (shared by all rollouts).
         self._renderer_pool = config.renderer.build(config.hf_assets_path)
         self._stop_token_ids = list(self._renderer_pool.get_stop_token_ids())
@@ -516,23 +573,20 @@ class RLTrainer(Configurable):
 
     def _build_completion_fn(self):
         """Closure handed to ``do_single_rollout``; hides Monarch + the
-        rank-0 unmesh from the driver.
+        rank-0 unmesh + the controller-side batcher from the driver.
 
-        The renderer-derived stop tokens are merged into the train and
-        validation sampling configs ONCE at setup (see :attr:`_train_sampling`
-        / :attr:`_greedy_sampling`), so each call just forwards the
-        merged config to the generator.
+        Concurrent rollouts each call ``completion_fn(prompts, sampling)``;
+        the batcher coalesces submissions into one
+        ``generator.generate_tokens.call(prompts_list, ...)`` so every TP
+        rank's vLLM scheduler sees the same ordered list (required by
+        ``external_launcher`` TP — see round 7 §4).
         """
-        generator = self.generator
+        self._batcher = _CompletionBatcher(self.generator, self._get_rank_0_value)
 
         async def completion_fn(
             prompt_token_ids: list[int], sampling: SamplingConfig
         ) -> GenerateOutput:
-            mesh = await generator.generate_tokens.call(
-                prompt_token_ids,
-                sampling_config=sampling,
-            )
-            return self._get_rank_0_value(mesh)
+            return await self._batcher.submit(prompt_token_ids, sampling)
 
         return completion_fn
 
