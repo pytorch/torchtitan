@@ -226,6 +226,59 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
     )
 
 
+def rl_grpo_qwen3_0_6b_alphabet() -> RLTrainer.Config:
+    """AlphabetSort smoke on Qwen3-0.6B — debug companion to the 1.7B gate.
+
+    0.6B is more numerically stable in mixed-precision training, so this
+    config is useful for distinguishing pipeline bugs (would NaN even at
+    0.6B) from model-specific instability (1.7B-only NaN).
+    """
+    return RLTrainer.Config(
+        model_spec=model_registry("0.6B", attn_backend="varlen"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_steps=30,
+        num_prompts_per_step=8,
+        rollout_group_size=8,
+        num_rollout_tasks=4,
+        max_rollout_turns=5,
+        num_validation_samples=20,
+        log_samples=True,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        train_dataset=AlphabetSortDataset.Config(
+            seed=1337420,
+            min_turns=3,
+            max_turns=5,
+            min_names_per_turn=1,
+            max_names_per_turn=5,
+        ),
+        train_builder=AlphabetSortBuilder.Config(
+            similarity_power=4,
+            power_per_turn=False,
+        ),
+        validation_dataset=AlphabetSortDataset.Config(
+            seed=99,
+            min_turns=3,
+            max_turns=3,
+            min_names_per_turn=1,
+            max_names_per_turn=4,
+        ),
+        validation_builder=AlphabetSortBuilder.Config(
+            similarity_power=8,
+            power_per_turn=False,
+        ),
+        renderer=RendererConfig(name="auto"),
+        token_env=TokenEnvConfig(
+            error_reward=0.0,
+            truncation_reward=0.0,
+            max_trajectory_tokens=2048,
+            max_generation_tokens=768,
+        ),
+        trainer=_trainer(train_tp=2, lr=2e-6, warmup_steps=2, clip_eps=0.1),
+        generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
+        replay_buffer=_replay(batch_size=4, max_buffer_size=256),
+    )
+
+
 def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
     """AlphabetSort acceptance gate — Qwen3-1.7B, 100 steps, 4-GPU split.
 
