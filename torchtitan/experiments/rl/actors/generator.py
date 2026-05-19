@@ -519,62 +519,60 @@ class VLLMGenerator(Actor, Configurable):
         )
 
     async def _engine_driver_loop(self) -> None:
-        """Continuous-admission driver: step engine, complete futures, repeat.
+        """Continuous-admission driver: step engine, complete futures,
+        exit when idle (restart on next admit via :meth:`_ensure_engine_driver`).
 
-        Loop body (TBR ``_server_loop`` analogue, sample_method.py:537):
-        1. If nothing in flight, briefly yield and try again — this is
-           the idle path; the next caller's ``add_request`` plus the
-           lock-release wake-up below will wake us up.
-        2. Acquire the step lock, call ``engine.step()`` once, release.
-        3. For each finished output, look up its future and ``set_result``.
-        4. ``await asyncio.sleep(0)`` — single yield to give pending
-           callers a chance to acquire the lock and admit before we
-           re-lock for the next step.
+        Loop body (TBR ``_server_loop`` analogue, sample_method.py:537;
+        codex's `_drive_engine` matches):
+        1. Acquire step lock; if engine idle and no pending futures,
+           exit cleanly so next caller re-creates the task.
+        2. Call ``engine.step()`` once under the lock.
+        3. Release lock, resolve finished futures outside the lock so
+           ``set_result`` callbacks don't block admissions waiting on
+           the lock.
+        4. ``await asyncio.sleep(0)`` — single yield bounds admission
+           latency to one step (~50ms) for a caller racing for the lock.
 
         Multi-step bounding (TBR's ``max_steps_per_iteration=8`` in
         sampler_base.py:226) is unnecessary here because we already
-        release the lock between every step — admission latency is
-        bounded to one step's worth of GPU compute (~50ms).
+        release the lock between every step.
         """
         engine = self._engine
         try:
             while not self._engine_shutdown.is_set():
-                # Idle: no requests in flight. Yield to keep loop responsive;
-                # the next add_request will give us work to do on the next tick.
-                if not self._req_futures:
-                    await asyncio.sleep(0)
-                    continue
-
+                ready: list[tuple[asyncio.Future[RequestOutput], RequestOutput]] = []
                 async with self._engine_step_lock:
                     if not engine.has_unfinished_requests():
-                        # Could have drained between the check and the lock
-                        # (e.g. shutdown). Bail back to the outer loop.
-                        continue
+                        # No outstanding work — exit cleanly. ``_ensure_engine_driver``
+                        # will recreate the task on the next admit.
+                        return
                     outputs = engine.step()
+                    for o in outputs:
+                        if not o.finished:
+                            continue
+                        fut = self._req_futures.pop(o.request_id, None)
+                        self._req_admit_versions.pop(o.request_id, None)
+                        if fut is not None:
+                            ready.append((fut, o))
 
-                # Resolve finished requests OUTSIDE the lock so callers
-                # racing to admit don't get blocked by future.set_result
-                # callbacks.
-                for o in outputs:
-                    if not o.finished:
-                        continue
-                    fut = self._req_futures.pop(o.request_id, None)
-                    self._req_admit_versions.pop(o.request_id, None)
-                    if fut is not None and not fut.done():
-                        fut.set_result(o)
+                # Resolve futures OUTSIDE the lock so set_result callbacks
+                # don't block callers racing to admit on the next tick.
+                for fut, output in ready:
+                    if not fut.done():
+                        fut.set_result(output)
 
-                # One yield between steps — bounds admission latency to a
-                # single step (~50ms) for a caller waiting on the lock.
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
             return
-        except Exception:
+        except Exception as exc:
             logger.exception("engine driver loop crashed")
             # Cascade the failure to all in-flight callers so they don't
             # hang forever on futures that will never resolve.
+            crash_error = RuntimeError("engine driver crashed")
+            crash_error.__cause__ = exc
             for fut in self._req_futures.values():
                 if not fut.done():
-                    fut.set_exception(RuntimeError("engine driver crashed"))
+                    fut.set_exception(crash_error)
             self._req_futures.clear()
             self._req_admit_versions.clear()
             raise
