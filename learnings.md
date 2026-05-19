@@ -1029,6 +1029,28 @@ Interpretation:
 - Do not use this to conclude local batch 8 is infeasible.
 - Retry the same no-auto-filter FP8 local-batch-8 candidate after large external GPU allocations clear.
 
+## Experiment 35: FP8 Rowwise Without Auto-Filter, Local Batch 8 Retry
+
+Source state: `addc7f9`, using the no-auto-filter FP8 source from `582d685`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=8 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run35-fp8-rowwise-no-auto-filter-compile-bf16-lbs8-no-flight-recorder-retry > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run OOMed on a clear node before step 1 completed.
+- Failure occurred in the float8 `lm_head` loss path while converting the weight to float8, trying to allocate 2.90 GiB with about 2.86 GiB free.
+- The failing ranks reported about 175.48 GiB in use.
+
+Interpretation:
+
+- Broad FP8 local batch 8 is just over the memory cliff, so it is infeasible without another memory-saving change.
+- Local batch 7 is the next boundary to test because it may fit while using much more of the memory headroom than local batch 5.
+
 ## Manager Review After Experiment 29
 
 Current best:

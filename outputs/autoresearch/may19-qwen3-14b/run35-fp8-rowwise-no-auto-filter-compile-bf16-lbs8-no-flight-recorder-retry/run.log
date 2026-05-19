@@ -1,0 +1,593 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=8 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run35-fp8-rowwise-no-auto-filter-compile-bf16-lbs8-no-flight-recorder-retry
+W0519 14:29:24.487000 874605 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 14:29:24.487000 874605 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 14:29:24.487000 874605 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 14:29:24.487000 874605 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 14:29:31.405000 881349 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 14:29:32,232 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 14:29:32,239 - root - INFO - Float8 training active with recipe rowwise
+[rank0]:[titan] 2026-05-19 14:29:32,240 - root - INFO - Swapped to Float8Linear layers
+[rank0]:[titan] 2026-05-19 14:29:32,304 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run35-fp8-rowwise-no-auto-filter-compile-bf16-lbs8-no-flight-recorder-retry/structured_logs/training.global_rank_0.20260519-142932-QCLETD.jsonl
+[rank0]:[titan] 2026-05-19 14:29:33,385 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 14:29:33,387 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 14:29:33,395 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 14:29:33,396 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-19 14:29:36,678 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 14:29:36,683 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-19 14:29:36,711 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 14:29:36,805 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-19 14:29:36,976 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-19 14:29:36,976 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-19 14:29:36,976 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-19 14:29:36,995 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-19 14:29:37,081 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-19 14:29:37,618 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-19 14:29:37,618 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-19 14:29:37,620 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-19 14:29:37,621 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-19 14:29:37,639 - root - INFO - Trainer is initialized with local batch size 8, global batch size 64, gradient accumulation steps 1, sequence length 4096, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-19 14:29:37,640 - root - INFO - Training starts at step 1
+[rank0]:/home/avenkataraman/github/pytorch/torch/distributed/fsdp/_fully_shard/_fsdp_state.py:317: UserWarning: FSDP2-wrapped module (FSDPFloat8Linear) returned a view tensor. An in-place op on this view (e.g., `x += y`) will silently drop the pre-backward hook and skip the all-gather, which can cause backward to fail or produce wrong gradients. Use out-of-place ops (`out = out + y`, not `out += y`) or `.clone()` the output before any in-place op.
+[rank0]:  output = self._register_pre_backward_hook(output)
+[rank0]:[rank0]:[W519 14:29:52.035249794 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 9961472, total: 191503138816).
+[rank0]:/home/avenkataraman/github/pytorch/torch/distributed/fsdp/_fully_shard/_fsdp_state.py:317: UserWarning: FSDP2-wrapped module (FSDPFloat8Linear) returned a view tensor. An in-place op on this view (e.g., `x += y`) will silently drop the pre-backward hook and skip the all-gather, which can cause backward to fail or produce wrong gradients. Use out-of-place ops (`out = out + y`, not `out += y`) or `.clone()` the output before any in-place op.
+[rank0]:  output = self._register_pre_backward_hook(output)
+[rank0]:[rank0]:[W519 14:29:52.653418623 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 9961472, total: 191503138816).
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:[titan] 2026-05-19 14:30:10,770 - root - WARNING - 2 CUDA memory allocation retries.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-19 14:30:10,770 - root - INFO - [31mstep:  1  [32mloss: 12.39957  [38;2;180;60;0mgrad_norm: 33.2500  [38;2;54;234;195mmemory: 175.95GiB(98.65%)  [34mtps: 970  [36mtflops: 91.15  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-19 14:30:10,771 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:[rank0]:[W519 14:30:10.776382617 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5701632, total: 191503138816).
+[rank0]:[rank0]:[W519 14:30:23.337910421 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 14:30:24.974427685 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]:[W519 14:30:25.359885416 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 5767168, total: 191503138816).
+[rank0]:[rank0]: Traceback (most recent call last):
+[rank0]:[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:[rank0]:     main()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 65, in main
+[rank0]:[rank0]:     trainer.train()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+[rank0]:[rank0]:     return f(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+[rank0]:[rank0]:     self.train_step(data_iterator)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+[rank0]:[rank0]:     loss = self.forward_backward_step(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+[rank0]:[rank0]:     return func(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+[rank0]:[rank0]:     loss = self.loss_fn(pred, labels, global_valid_tokens)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+[rank0]:[rank0]:     logits = lm_head(h_chunk)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+[rank0]:[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+[rank0]:[rank0]:     return inner()
+[rank0]:[rank0]:            ^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+[rank0]:[rank0]:     result = forward_call(*args, **kwargs)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+[rank0]:[rank0]:     output = matmul_with_hp_or_float8_args.apply(
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+[rank0]:[rank0]:     return super().apply(*args, **kwargs)  # type: ignore[misc]
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+[rank0]:[rank0]:     weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+[rank0]:[rank0]:                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+[rank0]:[rank0]:     return hp_tensor_and_scale_to_float8(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+[rank0]:[rank0]:     return _ToFloat8ConstrFunc.apply(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+[rank0]:[rank0]:     return super().apply(*args, **kwargs)  # type: ignore[misc]
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+[rank0]:[rank0]:     tensor_scaled = tensor.to(torch.float32) * scale
+[rank0]:[rank0]:                     ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+[rank0]:[rank0]: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 0 has a total capacity of 178.35 GiB of which 1.47 GiB is free. Process 3692507 has 616.00 MiB memory in use. Including non-PyTorch memory, this process has 176.15 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 1.24 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+W0519 14:30:31.249000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 881349 closing signal SIGTERM
+W0519 14:30:31.249000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 881354 closing signal SIGTERM
+W0519 14:30:31.249000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 881357 closing signal SIGTERM
+W0519 14:30:31.249000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 881364 closing signal SIGTERM
+W0519 14:30:31.249000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 881372 closing signal SIGTERM
+W0519 14:30:31.250000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 881375 closing signal SIGTERM
+W0519 14:30:31.250000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 881379 closing signal SIGTERM
+E0519 14:30:36.935000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 4 (pid: 881371) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0519 14:30:36.939000 874605 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/4/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-19_14:30:26
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 881349) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/0/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 0 has a total capacity of 178.35 GiB of which 1.47 GiB is free. Process 3692507 has 616.00 MiB memory in use. Including non-PyTorch memory, this process has 176.15 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 1.24 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[2]:
+  time      : 2026-05-19_14:30:26
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 881354) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/1/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 1 has a total capacity of 178.35 GiB of which 2.86 GiB is free. Including non-PyTorch memory, this process has 175.48 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 587.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[3]:
+  time      : 2026-05-19_14:30:26
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 881357) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/2/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 2 has a total capacity of 178.35 GiB of which 2.86 GiB is free. Including non-PyTorch memory, this process has 175.48 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 587.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[4]:
+  time      : 2026-05-19_14:30:26
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 881364) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/3/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 3 has a total capacity of 178.35 GiB of which 2.86 GiB is free. Including non-PyTorch memory, this process has 175.48 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 587.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[5]:
+  time      : 2026-05-19_14:30:26
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : 1 (pid: 881372) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 5 has a total capacity of 178.35 GiB of which 2.85 GiB is free. Including non-PyTorch memory, this process has 175.48 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 587.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[6]:
+  time      : 2026-05-19_14:30:26
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : 1 (pid: 881375) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 6 has a total capacity of 178.35 GiB of which 2.86 GiB is free. Including non-PyTorch memory, this process has 175.48 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 587.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[7]:
+  time      : 2026-05-19_14:30:26
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 881379) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 7 has a total capacity of 178.35 GiB of which 2.86 GiB is free. Including non-PyTorch memory, this process has 175.48 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 587.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-19_14:30:25
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : 1 (pid: 881371) 
+  error_file: /tmp/torchelastic_vs0bmxw6/none_u10lhe4z/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264, in forward
+      output = matmul_with_hp_or_float8_args.apply(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73, in forward
+      weight_maybe_fp8_t = hp_tensor_to_float8_dynamic(
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65, in hp_tensor_to_float8_dynamic
+      return hp_tensor_and_scale_to_float8(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237, in hp_tensor_and_scale_to_float8
+      return _ToFloat8ConstrFunc.apply(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153, in forward
+      tensor_scaled = tensor.to(torch.float32) * scale
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB. GPU 4 has a total capacity of 178.35 GiB of which 2.86 GiB is free. Including non-PyTorch memory, this process has 175.48 GiB memory in use. Of the allocated memory 173.25 GiB is allocated by PyTorch, and 587.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+============================================================

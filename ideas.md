@@ -305,6 +305,16 @@
   Planned command or config overrides: Broad FP8 command with `--training.local_batch_size=8`, keeping `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are OOM if activation scaling is nonlinear, or worse numerics/throughput from broader FP8 conversion.
   Result: invalid at source state `a04a025`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
+  Result: crashed on valid retry at source state `addc7f9`; local batch 8 reached about 175.5 GiB and OOMed in the float8 `lm_head` loss path.
+
+- Idea: FP8 rowwise without auto-filter local batch size 7
+  Current best source commit: 5681e36
+  Source: memory-bound midpoint after broad-FP8 batch8 OOM
+  Expected mechanism: Local batch 7 should fit below the batch8 loss-path memory cliff while using more of the broad-FP8 memory headroom than local batch 5. The larger batch may amortize dynamic quantization overhead enough to beat the current best.
+  Supporting evidence: Broad FP8 local batch 5 used 129.0 GiB but was slow; broad FP8 local batch 8 reached about 175.5 GiB and OOMed needing only another 2.90 GiB. A midpoint batch should be below the allocator cliff.
+  Planned source/config changes: None beyond the no-auto-filter FP8 source from `582d685`.
+  Planned command or config overrides: Broad FP8 command with `--training.local_batch_size=7`, keeping `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is still OOM or slow throughput from broad FP8 overhead.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
