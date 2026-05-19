@@ -72,7 +72,9 @@ def score_completion_text(
 
     if len(attempts) == 1:
         return attempts[0]
-    for a, b in zip(attempts, attempts[1:], strict=True):
+    # Adjacent-pair walk: ``attempts[1:]`` is intentionally one shorter,
+    # so the pair-iterator yields ``len(attempts) - 1`` pairs.
+    for a, b in zip(attempts, attempts[1:], strict=False):
         if b <= a:
             return 0.0
     return attempts[-1]

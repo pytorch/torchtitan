@@ -268,7 +268,11 @@ class _CompletionBatcher:
         )
         outputs = self._unmesh(mesh)
         for (_, fut, _), out in zip(batch, outputs, strict=True):
-            fut.set_result(out)
+            # A rollout task may have been cancelled while awaiting fut
+            # (e.g., shutdown set during a slow generate). Setting a
+            # result on a cancelled future raises ``InvalidStateError``.
+            if not fut.done():
+                fut.set_result(out)
 
 
 # ---------------------------------------------------------------------------
