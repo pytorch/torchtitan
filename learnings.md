@@ -1097,6 +1097,38 @@ Interpretation:
 - The broad FP8 path should be abandoned: batch 5 is slow, batch 7 is still slower and memory-risky, and batch 8 OOMs.
 - Restore source to the FP8 auto-filter best before continuing. The next useful step is to profile the current best command.
 
+## Experiment 38: Profile Current FP8 Best
+
+Source state: `91f4e9d`, using the FP8 rowwise auto-filter source from `5681e36`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run38-profile-fp8-rowwise-best --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic discard; profiled throughput is not compared against unprofiled candidates.
+- Step 10 `tps`: 7,863.
+- Step 10 MFU: 32.85%.
+- Step 10 peak memory: 168.74 GiB, 94.61%.
+- Loss moved from 12.26053 at step 1 to 7.70341 at step 10; finite and decreasing.
+- Traces were written under `outputs/autoresearch/may19-qwen3-14b/run38-profile-fp8-rowwise-best/profiling/traces/iteration_10/`.
+
+Profile notes from rank 0 trace:
+
+- CUDA kernel total: about 3.57 s for the profiled step.
+- Flash attention backward is the largest single kernel family at about 599 ms; flash attention forward adds about 156 ms.
+- NCCL kernels total about 693 ms (`ReduceScatter` about 351 ms, `AllGather` about 342 ms); NCCL annotations total about 526 ms.
+- B200 nvjet GEMM kernels remain a large bucket, with several kernels totaling well over 1.6 s.
+- Optimizer is small in the trace, about 7 ms of GPU annotation.
+
+Interpretation:
+
+- The best is still mixed compute/communication-bound, with attention now large enough to justify one attention-backend experiment.
+- Since TP and AC lines failed to beat the best and memory remains near the risk line, the next narrow source/config test is `attn_backend="flex_flash"` while keeping FP8 auto-filtering and the best command.
+
 ## Manager Review After Experiment 29
 
 Current best:

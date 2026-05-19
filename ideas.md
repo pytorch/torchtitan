@@ -326,6 +326,16 @@
   Planned source/config changes: Restore FP8 auto-filter source; no source changes for the profile run.
   Planned command or config overrides: Current best command plus profiler overrides: `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is trace generation and updated roofline notes. Profiled throughput is diagnostic and not ranked against unprofiled candidates.
+  Result: completed at source state `91f4e9d`; trace shows mixed compute/communication, with flash attention backward about 599 ms, NCCL kernels about 693 ms, and B200 nvjet GEMM kernels still large.
+
+- Idea: FP8 best with flex_flash attention backend
+  Current best source commit: 5681e36
+  Source: profile follow-up
+  Expected mechanism: The current FP8-best profile shows flash attention backward as the largest individual kernel family. Qwen3 supports `attn_backend="flex_flash"` through `model_registry`, which may use a different compiled FlexAttention flash path and improve attention time.
+  Supporting evidence: Rank 0 profile for run38 shows flash attention backward around 599 ms and forward around 156 ms in the profiled step, while other lines such as TP and AC have not beaten the best. This is a single allowed `model_spec` keyword change.
+  Planned source/config changes: Edit only `qwen3_14b()` to call `model_registry("14B", attn_backend="flex_flash", converters=[...])`.
+  Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are compile overhead, FlexAttention incompatibility with this Qwen3 mask/shape, or slower attention kernels.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
