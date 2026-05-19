@@ -689,3 +689,25 @@ Interpretation:
 - Compiler memory-budget AC is much better than eager selective AC for this workload.
 - Budget 0.8 makes local batch 6 fit and nearly matches the no-AC local-batch-5 best.
 - Since memory is only 82%, budget 0.9 is the next direct test: less rematerialization may recover speed while still fitting.
+
+## Experiment 22: Memory-Budget AC 0.9, Invalid Due External GPU Use
+
+Source state: `14a0c41`, using the `a593f3a` AC-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run22-memory-budget-ac09-compile-bf16-lbs6 > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid, not a candidate result.
+- The run initialized memory-budget AC 0.9 and local batch size 6, then OOMed before step 1.
+- The OOM log showed external `VLLM::Worker_TP*` processes from another user holding about 108-111 GiB on GPUs 4-7.
+- The failing ranks reported this run using about 69 GiB, so the node was not measuring the candidate's real memory boundary.
+
+Interpretation:
+
+- Do not use this run to conclude budget 0.9 is infeasible.
+- Retry memory-budget AC 0.9 after large external GPU allocations clear.
