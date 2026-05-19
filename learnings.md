@@ -1376,6 +1376,34 @@ Interpretation:
 - The recovered FP8+flex run is slower than the flex-without-FP8 best, so do not keep this source/command.
 - Restore the flex-without-FP8 source as the current best before continuing.
 
+## Experiment 48: FP8 Flex Attention With Intermediate Learning Rate
+
+Source state: `a5a7276`.
+
+Source/config change:
+
+- `qwen3_14b()` used `attn_backend="flex"` plus the FP8 rowwise auto-filter converter.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --optimizer.lr=6e-4 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run48-fp8-flex-lr6e-4-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,325, below the 8,489 current best.
+- Step 10 MFU: 34.78%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.54173 at step 1 to 9.93097 at step 10; finite and decreasing.
+
+Interpretation:
+
+- LR 6e-4 also recovers the FP8+flex loss trend, but throughput is even lower than LR 4e-4 in this run.
+- The faster invalid run41 does not translate into a keepable FP8+flex configuration under the LR recovery tests tried so far.
+- Restore the flex-without-FP8 source as the current best.
+
 ## Manager Review After Experiment 29
 
 Current best:

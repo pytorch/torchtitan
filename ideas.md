@@ -426,6 +426,7 @@
   Planned source/config changes: Use FP8 rowwise auto-filter converter with `attn_backend="flex"`.
   Planned command or config overrides: Current best command shape plus `--optimizer.lr=6e-4`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is that loss still increases or throughput remains below the flex-without-FP8 best.
+  Result: discarded at source state `a5a7276`; loss decreased but throughput was only 8,325 tps, below the 8,489 flex-without-FP8 best.
 
 - Idea: FP8 rowwise_with_gw_hp without auto-filter
   Current best source commit: 477f662
