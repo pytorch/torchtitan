@@ -134,7 +134,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
         inner_attention = getattr(layer.attention, "inner_attention", None)
         if not isinstance(inner_attention, FlexAttnModule.Config):
             return {}
-        attention_masks = model.get_attention_masks(self.positions)
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+        attention_masks = model.get_attention_masks(
+            input_batch=self.inputs,
+            tokenizer=tokenizer,
+        )
         return {"attention_masks": attention_masks}
 
     def _run_steps(

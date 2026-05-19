@@ -28,7 +28,6 @@ import torch.distributed as dist
 
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
