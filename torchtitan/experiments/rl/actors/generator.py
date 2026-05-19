@@ -4,10 +4,38 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""vLLM-backed generator actor with a submit-queue / background-pump shape.
+
+This is the SHAPE C refactor from the v6 design: instead of one
+endpoint that batches all prompts and drains synchronously, each
+``generate_tokens`` call submits ONE request, registers an
+:class:`asyncio.Future`, and parks on it. A single background
+``_run()`` coroutine continuously pumps ``engine.step()`` and resolves
+the per-request futures as outputs finish.
+
+This lets the controller fire N concurrent ``generate_tokens`` calls
+and have vLLM see ``bsz=N`` in flight — the prerequisite for truly-async
+rollouts. Modelled on forge's v0 generator
+(``forge/src/forge/actors/vllm/v0/generator.py``, BSD-licensed).
+
+Weight sync is drain-and-load: ``pull_model_state_dict`` flips the
+``accepting_requests`` gate off, waits for the in-flight set to empty,
+swaps weights, flips the gate on. New requests queued during the load
+park in :meth:`generate_tokens` on the ``request_lock``.
+
+The actor still uses sync ``LLMEngine`` (not ``AsyncLLM``); ``engine.step``
+is called via :func:`asyncio.to_thread` so the actor's event loop stays
+responsive for new submissions and weight-pull endpoints.
+"""
+
+from __future__ import annotations
+
+import asyncio
 import logging
 import math
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torchstore as ts
@@ -24,8 +52,6 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     registry_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
 )
-from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import Completion
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
@@ -39,63 +65,37 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "GenerateOutput",
+    "GenerateOutput",
+    "SamplingConfig",
+    "VLLMCudagraphConfig",
+    "VLLMGenerator",
+]
 
-def _prepare_generation_request_metrics(
-    output: RequestOutput, *, prefix: str
-) -> list[m.Metric]:
-    """Prepare vLLM metrics from a RequestOutput.
 
-    For `[num_prompts]` submitted prompts, vLLM returns `[num_prompts]`
-    per parent `RequestOutput`s (one per `add_request` call), each carrying
-    a single `RequestStateStats` on `.metrics`.
+# ---------------------------------------------------------------------------
+# Wire types
+# ---------------------------------------------------------------------------
 
-    Caveat under `SamplingParams.n > 1`: vLLM stores one `RequestStateStats`
-    per child request; the parent output exposes the **last-finishing**
-    child's timeline. `arrival_time` is shared across siblings, but
-    [`queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`,
-    `num_generation_tokens`] describe one specific child — not an aggregate,
-    not the first sibling's. The other `n-1` siblings' stats are dropped by
-    vLLM at ``output_processor._finish_request``.
+
+@dataclass(kw_only=True, slots=True)
+class GenerateOutput:
+    """One response from ``VLLMGenerator.generate_tokens``.
+
+    Shape legend:
+        T_r: number of response tokens (= ``len(response_token_ids)``).
     """
 
-    # TODO: Per-request fields here come from RequestOutput.metrics
-    # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
-    # prefix-cache hit rate, preemptions, and batch occupancy, live in
-    # SchedulerStats / IterationStats and require registering a
-    # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]).
+    policy_version: int
+    response_token_ids: list[int]  # [T_r]
+    response_logprobs: list[float]  # [T_r]
+    finish_reason: str | None = None  # "stop" | "length" | "abort"
 
-    metric_values: dict[str, float] = {}
-    if output.num_cached_tokens is not None:
-        metric_values[f"{prefix}/num_cached_tokens"] = output.num_cached_tokens
 
-    stats = output.metrics
-    if stats is not None:
-        metric_values[f"{prefix}/queue_time_ms"] = (
-            stats.scheduled_ts - stats.queued_ts
-        ) * 1000
-
-        if stats.num_generation_tokens > 0:
-            metric_values[f"{prefix}/time_to_first_token_ms"] = (
-                stats.first_token_latency * 1000
-            )
-            metric_values[f"{prefix}/prefill_time_ms"] = (
-                stats.first_token_ts - stats.scheduled_ts
-            ) * 1000
-
-        if stats.num_generation_tokens > 1:
-            first_to_last_token_ms = (stats.last_token_ts - stats.first_token_ts) * 1000
-            metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
-            metric_values[
-                f"{prefix}/inter_token_latency_ms"
-            ] = first_to_last_token_ms / (stats.num_generation_tokens - 1)
-
-    # Emit each value with both Mean and Max aggregators.
-    return [
-        metric
-        for key, value in metric_values.items()
-        for metric in (m.Metric(key, m.Mean(value)), m.Metric(key, m.Max(value)))
-    ]
+# ---------------------------------------------------------------------------
+# Sampling + CUDA-graph configs (shared with the trainer config tree)
+# ---------------------------------------------------------------------------
 
 
 @dataclass(kw_only=True, slots=True)
@@ -103,37 +103,20 @@ class VLLMCudagraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
     torch.compile is configured separately via ``CompileConfig`` at the
-    ``RLTrainer`` level, shared by both trainer and generator.  Only CUDA
+    ``RLTrainer`` level, shared by trainer and generator. Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
     When enabled, vLLM captures the forward pass as a single CUDA graph
-    ("full" mode).  "piecewise" modes are intentionally excluded: they
-    require vLLM's whole-model torch.compile to split the graph around
-    non-capturable ops, which conflicts with per-layer compile.
+    ("full" mode). "piecewise" modes are intentionally excluded: they
+    preclude CUDA graph capture despite being torch.compile-compatible
+    post https://github.com/pytorch/torchtitan/pull/3142.
     """
 
     enable: bool = True
-    """Whether to enable CUDA graph capture (vLLM "full" mode)."""
-
-    # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
-    # MoE routing produces dynamic shapes that may conflict with full
-    # CUDA graph capture despite being torch.compile-compatible
-    # post https://github.com/pytorch/torchtitan/pull/3142
-
-    # TODO: Explore applying CUDA graph capture on the torchtitan trainer
-    # side as well (not just the vLLM generator).
-    # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
         self, *, max_num_seqs: int
     ) -> CompilationConfig | None:
-        """Build a vLLM ``CompilationConfig``, or return ``None`` when
-        CUDA graphs are disabled.
-
-        ``max_num_seqs`` determines CUDA graph capture sizes: powers of
-        2 from 1 up to ``max_num_seqs``, plus ``max_num_seqs`` itself
-        if it isn't already a power of 2.
-        """
         if not self.enable:
             return None
         if max_num_seqs <= 0:
@@ -150,50 +133,94 @@ class VLLMCudagraphConfig:
 
 @dataclass(kw_only=True, slots=True)
 class SamplingConfig:
-    """Sampling parameters passed to vLLM's SamplingParams."""
+    """Sampling parameters passed to vLLM's :class:`SamplingParams`.
 
-    n: int = 8
-    """Number of completions to generate per prompt (vLLM SamplingParams.n)."""
+    ``n`` is the number of samples per prompt at the vLLM level. With
+    GRPO + ``EnvBuilder.make_envs(group_size)`` the controller fans out
+    siblings at the env level, so ``n=1`` here is the typical setting;
+    raise only if you want vLLM-side sibling fanout for a single env.
+    """
 
+    n: int = 1
     temperature: float = 0.8
-    """Sampling temperature. 0.0 = greedy, higher = more random."""
-
     top_p: float = 0.95
-    """Nucleus sampling threshold."""
-
     max_tokens: int = 100
-    """Maximum number of tokens to generate per completion."""
+
+    stop_token_ids: list[int] = field(default_factory=list)
+    """Renderer-derived stop tokens; the controller fills this per
+    call. NOT a property of the actor; the actor never owns the
+    renderer."""
+
+
+# ---------------------------------------------------------------------------
+# Per-request metrics emitted to the structured logger for trace correlation.
+# ---------------------------------------------------------------------------
+
+
+def _emit_request_metrics(output: RequestOutput, *, prefix: str) -> None:
+    """Stream per-request vLLM timing into ``structured_logger``.
+
+    Pulls from ``RequestOutput.metrics`` (``RequestStateStats``). With
+    ``SamplingParams.n > 1`` vLLM stores one ``RequestStateStats`` per
+    child; the parent exposes the LAST-finishing child's timeline.
+    """
+    values: dict[str, float] = {}
+    if output.num_cached_tokens is not None:
+        values[f"{prefix}/num_cached_tokens"] = float(output.num_cached_tokens)
+    stats = output.metrics
+    if stats is not None:
+        values[f"{prefix}/queue_time_ms"] = (
+            stats.scheduled_ts - stats.queued_ts
+        ) * 1000
+        if stats.num_generation_tokens > 0:
+            values[f"{prefix}/time_to_first_token_ms"] = (
+                stats.first_token_latency * 1000
+            )
+            values[f"{prefix}/prefill_time_ms"] = (
+                stats.first_token_ts - stats.scheduled_ts
+            ) * 1000
+        if stats.num_generation_tokens > 1:
+            decode_ms = (stats.last_token_ts - stats.first_token_ts) * 1000
+            values[f"{prefix}/decode_time_ms"] = decode_ms
+            values[f"{prefix}/inter_token_latency_ms"] = decode_ms / (
+                stats.num_generation_tokens - 1
+            )
+    if values:
+        sl.log_trace_scalar(values)
+
+
+# ---------------------------------------------------------------------------
+# VLLMGenerator
+# ---------------------------------------------------------------------------
 
 
 class VLLMGenerator(Actor, Configurable):
-    """
-    Generates rollouts using vLLM engine.
+    """vLLM-backed generator actor with a submit-queue endpoint.
 
-    Maintains a vLLM engine synchronized with the Trainer via weight
-    sync. ``generate()`` produces a flat list of Completions; reward
-    and advantage computation live in the controller.
-
-    Args:
-        config: Generator-specific configuration.
-        model_spec: TorchTitan model specification.
-        model_path: Path to the HF model checkpoint.
-        compile_config: Per-layer torch.compile config shared with the
-            trainer so both sides compile identically.
+    The controller hits :meth:`generate_tokens` once per rollout-turn;
+    the actor's event loop schedules N coroutines, each parking on an
+    :class:`asyncio.Future`. A background :meth:`_run` task pumps
+    ``engine.step()`` and resolves the futures as outputs finish, so
+    vLLM's scheduler sees all N requests in flight (bsz=N) without the
+    actor itself blocking.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         """Generator actor configuration.
-        TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
+
+        TODO: expose an ``EngineConfig`` field to pass arbitrary
+        configuration to the vLLM Engine.
+        """
 
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         """Parallelism configuration for the vLLM engine."""
 
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
-        """Default sampling parameters for generation."""
+        """Default sampling parameters; per-call overrides allowed."""
 
         model_dtype: str = "bfloat16"
-        """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
+        """Data type for model weights — auto / float16 / bfloat16 / float32."""
 
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
@@ -205,16 +232,17 @@ class VLLMGenerator(Actor, Configurable):
             default_factory=CheckpointManager.Config
         )
         """Controls whether the vLLM wrapper loads initial HF weights.
-        In the RL loop this should stay disabled (default ``enable=False``)
-        because weights arrive from TorchStore. For standalone inference,
-        set ``enable=True`` and ``initial_load_in_hf=True``."""
+        In the RL loop this should stay disabled; weights arrive from
+        TorchStore. For standalone inference, set ``enable=True`` +
+        ``initial_load_in_hf=True``."""
 
         debug: DebugConfig = field(default_factory=DebugConfig)
         """Debug and determinism settings."""
 
         def __post_init__(self):
-            # VLLMGenerator only supports TP. vLLM handles its own parallelism;
-            # we only apply TP via the core parallelize function.
+            # vLLM handles its own parallelism; we only apply TP via the
+            # core parallelize function. Reject every other dim explicitly
+            # so misconfiguration fails loudly at config time.
             p = self.parallelism
             if p.data_parallel_replicate_degree != 1:
                 raise ValueError(
@@ -240,8 +268,7 @@ class VLLMGenerator(Actor, Configurable):
                 raise ValueError(
                     "Generator does not support sequence parallelism: "
                     "spmd_types erasure mode requires sequence length to be "
-                    "evenly divisible by TP, which doesn't hold for inference "
-                    "(uneven batches). Set enable_sequence_parallel=False."
+                    "evenly divisible by TP, which doesn't hold for inference."
                 )
             if not p.disable_loss_parallel:
                 raise ValueError(
@@ -258,7 +285,7 @@ class VLLMGenerator(Actor, Configurable):
         compile_config: CompileConfig,
         max_num_seqs: int,
         output_dir: str,
-    ):
+    ) -> None:
         init_logger()
         sl.init_structured_logger(
             source="rl_generator",
@@ -270,15 +297,10 @@ class VLLMGenerator(Actor, Configurable):
 
         self.config = config
         self.model_spec = model_spec
-
-        # max_num_seqs controls vLLM's maximum batch dimension: it sets
-        # the upper bound for concurrent sequences, determines KV-cache
-        # block allocation (and therefore GPU memory usage), and bounds
-        # the CUDA graph capture sizes.  Always computed by the caller
-        # (RLTrainer) as num_prompts_per_step * sampling.n.
+        # ``max_num_seqs`` controls vLLM's maximum batch dimension; also
+        # bounds CUDA graph capture sizes.
         self._max_num_seqs = max_num_seqs
 
-        # Register TorchTitan model + parser with vLLM
         registry_to_vllm(
             model_spec,
             parallelism=config.parallelism,
@@ -286,71 +308,59 @@ class VLLMGenerator(Actor, Configurable):
             checkpoint_config=config.checkpoint,
         )
 
-        # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
 
         set_batch_invariance(config.debug.batch_invariant)
-
         self._set_determinism(config.debug)
 
         self.model_path = model_path
 
-        # Build vLLM engine
-        engine_kwargs = dict(
-            # ``model`` is the path to the HF checkpoint directory. The
-            # config is sourced from torchtitan's ModelSpec via
-            # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
-            # read), but vLLM still uses this path to locate the
-            # tokenizer assets and the safetensors weight shards.
+        engine_kwargs: dict[str, Any] = dict(
             model=model_path,
             trust_remote_code=True,
-            # Use the torchtitan custom config parser (registered by
-            # registry_to_vllm above). It builds PretrainedConfig from
-            # ModelSpec instead of reading config.json from disk.
+            # torchtitan custom config parser; builds PretrainedConfig
+            # from ModelSpec rather than reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
-            # Monarch already spawned TP workers via proc mesh. "external_launcher"
-            # tells vLLM to run one worker per process (no subprocess spawning)
+            # Monarch already spawned TP workers via proc mesh.
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            attention_config=AttentionConfig(
-                backend=AttentionBackendEnum.CUSTOM,
-            ),
-            # Enables RequestOutput.metrics, so generator metrics can be returned
+            attention_config=AttentionConfig(backend=AttentionBackendEnum.CUSTOM),
+            # RequestOutput.metrics enabled for per-request timing data.
             disable_log_stats=False,
-        )
-        engine_kwargs["max_num_seqs"] = self._max_num_seqs
-        # FA2 requires block_size to be a multiple of 256
-        if not has_cuda_capability(9, 0):
-            engine_kwargs["block_size"] = 256
-        vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
         )
-        if vllm_compilation_config is not None:
-            engine_kwargs["compilation_config"] = vllm_compilation_config
+        # FA2 requires block_size to be a multiple of 256 (pre-Hopper).
+        if not has_cuda_capability(9, 0):
+            engine_kwargs["block_size"] = 256
+        comp = config.cudagraph.get_vllm_compilation_config(
+            max_num_seqs=self._max_num_seqs
+        )
+        if comp is not None:
+            engine_kwargs["compilation_config"] = comp
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
-        engine_args = EngineArgs(**engine_kwargs)
 
         with sl.log_trace_span("vllm_init"):
-            logger.info("Initializing LLMEngine from EngineArgs...")
-            self._engine = LLMEngine.from_engine_args(engine_args)
-            logger.info("vLLM rollout engine initialized")
+            self._engine = LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
+            logger.info("vLLM engine initialized")
 
-        self.policy_version = 0
+        self.policy_version: int = 0
 
-        logger.info("Generator initialized with vLLM engine")
+        # Submit-queue state. Populated by ``setup`` (which can't run in
+        # ``__init__`` because asyncio primitives need a running loop).
+        self._requests: dict[str, asyncio.Future[GenerateOutput]] = {}
+        self._request_lock: asyncio.Condition | None = None
+        self._accepting_requests: bool = True
+        self._run_task: asyncio.Task[None] | None = None
+        self._shutting_down: bool = False
+        self._next_request_id: int = 0
 
     @staticmethod
     def _set_determinism(debug: DebugConfig) -> None:
-        """Apply deterministic flags for the generator.
-
-        The generator doesn't use torchtitan's ParallelDims, so we apply
-        the deterministic flags directly instead of using set_determinism().
-        """
         if debug.deterministic:
             torch.use_deterministic_algorithms(
                 True, warn_only=debug.deterministic_warn_only
@@ -358,15 +368,25 @@ class VLLMGenerator(Actor, Configurable):
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
         if debug.seed is not None:
             torch.manual_seed(debug.seed)
 
     def _get_model(self):
-        """Access the model from the vLLM engine.
-        Returns a VLLMModelWrapper instance.
-        """
+        """Access the model from the vLLM engine (returns a ``VLLMModelWrapper``)."""
         return self._engine.model_executor.driver_worker.get_model()
+
+    # ------------------------------------------------------------------ endpoints
+
+    @endpoint
+    async def setup(self) -> None:
+        """Initialize asyncio primitives and start the background pump.
+
+        Can't be done in ``__init__`` because the asyncio loop isn't
+        running yet at actor-construction time. Called once by the
+        controller before any ``generate_tokens`` call.
+        """
+        self._request_lock = asyncio.Condition()
+        self._run_task = asyncio.create_task(self._run(), name="vllm_pump")
 
     @endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
@@ -374,128 +394,81 @@ class VLLMGenerator(Actor, Configurable):
         sl.set_step(step, relative_step=relative_step)
 
     @endpoint
-    @sl.log_trace_span("generate")
-    async def generate(
+    @sl.log_trace_span("generate_tokens")
+    async def generate_tokens(
         self,
-        tokenized_prompts: list[list[int]],
+        prompt_token_ids: list[int],
         *,
         sampling_config: SamplingConfig | None = None,
-        metrics_prefix: str = "generator",
-    ) -> tuple[list[Completion], list[m.Metric]]:
-        """Generate completions and generator metrics for tokenized prompts.
+    ) -> GenerateOutput:
+        """Submit one request, park on its future, return the output.
 
-        Takes ``tokenized_prompts`` as ``[num_prompts][prompt_tokens]``.
-        Returns completions as ``[num_prompts * n]`` plus generator metrics,
-        where ``n`` is the resolved ``SamplingConfig.n`` completions per prompt.
+        N concurrent calls land as N coroutines on the actor's event
+        loop; each registers an :class:`asyncio.Future` and yields on
+        ``await``. The background :meth:`_run` pump drains them in
+        the order vLLM's scheduler finishes them.
 
         Args:
-            tokenized_prompts: Tokenized prompts shaped ``[num_prompts][prompt_tokens]``.
-            sampling_config: Optional per-call override for the generator's
-                default SamplingConfig. ``seed`` always comes from
-                ``config.debug.seed`` (not part of SamplingConfig).
-            metrics_prefix: Namespace prepended to every returned metric key
-                (default ``"generator"``). Callers that need to keep streams
-                separate, e.g. ``"validation/generator"``, can override it.
+            prompt_token_ids: pre-tokenized prompt, shape ``[T_p]``.
+            sampling_config: per-call override of the actor's default
+                :class:`SamplingConfig`. ``seed`` comes from
+                ``config.debug.seed`` (not a per-call field).
         """
-        _sampling_config = (
-            sampling_config if sampling_config is not None else self.config.sampling
+        sc = sampling_config or self.config.sampling
+        params = SamplingParams(
+            n=sc.n,
+            temperature=sc.temperature,
+            top_p=sc.top_p,
+            max_tokens=sc.max_tokens,
+            stop_token_ids=list(sc.stop_token_ids) if sc.stop_token_ids else None,
+            seed=self.config.debug.seed,
+            logprobs=1,
+            output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-        logger.debug(
-            f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
-        )
+        assert self._request_lock is not None, "call setup() before generate_tokens"
+        request_id = str(self._next_request_id)
+        self._next_request_id += 1
+        fut: asyncio.Future[GenerateOutput] = asyncio.get_event_loop().create_future()
 
-        with torch.no_grad():
-            sampling_params = SamplingParams(
-                temperature=_sampling_config.temperature,
-                top_p=_sampling_config.top_p,
-                max_tokens=_sampling_config.max_tokens,
-                n=_sampling_config.n,
-                seed=self.config.debug.seed,
-                logprobs=1,
-                output_kind=RequestOutputKind.FINAL_ONLY,
+        async with self._request_lock:
+            await self._request_lock.wait_for(lambda: self._accepting_requests)
+            # ``render_cmpl`` is vLLM's input-pipeline entry; tokenize is
+            # a no-op for already-tokenized prompts.
+            (engine_input,) = self._engine.renderer.render_cmpl(
+                [{"prompt_token_ids": prompt_token_ids}]
             )
-
-            # render_cmpl is vLLM's input-pipeline entry.
-            # The tokenize step is a no-op for already-tokenized prompts. The
-            # lower-level alternative is vllm.inputs.tokens_input; we use the
-            # high-level API to stay resilient to vLLM internal changes.
-            engine_inputs = self._engine.renderer.render_cmpl(
-                [{"prompt_token_ids": ids} for ids in tokenized_prompts]
+            self._engine.add_request(
+                request_id=request_id,
+                prompt=engine_input,
+                params=params,
             )
-            for i, engine_input in enumerate(engine_inputs):
-                self._engine.add_request(
-                    request_id=str(i),
-                    prompt=engine_input,
-                    params=sampling_params,
-                )
+            self._requests[request_id] = fut
 
-            all_outputs = []
-            with sl.log_trace_span("engine_steps"):
-                while self._engine.has_unfinished_requests():
-                    all_outputs.extend(self._engine.step())
-
-            # vLLM may return requests out of order; sort by the integer
-            # request_id we assigned so prompt_idx lines up with the input.
-            all_outputs.sort(key=lambda o: int(o.request_id))
-
-            completions: list[Completion] = []
-            generation_metrics: list[m.Metric] = []
-            output_token_counts: list[int] = []
-            for output in all_outputs:
-                prompt_idx = int(output.request_id)
-                generation_metrics.extend(
-                    _prepare_generation_request_metrics(output, prefix=metrics_prefix)
-                )
-                for sample in output.outputs:
-                    per_token_logprobs = [
-                        list(logprob_dict.values())[0].logprob
-                        for logprob_dict in sample.logprobs
-                    ]
-                    output_token_counts.append(len(sample.token_ids))
-                    completions.append(
-                        Completion(
-                            policy_version=self.policy_version,
-                            prompt_idx=prompt_idx,
-                            text=sample.text,
-                            token_ids=sample.token_ids,
-                            token_logprobs=per_token_logprobs,
-                            finish_reason=sample.finish_reason,
-                        )
-                    )
-            generation_metrics.append(
-                m.Metric(
-                    f"{metrics_prefix}/output_tokens",
-                    m.Sum.from_list(output_token_counts),
-                )
-            )
-
-        logger.debug(
-            f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
-        )
-
-        # TODO: consider passing metrics as an arg to Completion and Trajectory,
-        # e.g. Completion(metrics=generation_metrics), so when we log the rollouts
-        # to a json or database,  we can associate each rollout with its metrics
-        # I am keeping like this for now for simplicity.
-        return completions, generation_metrics
+        return await fut
 
     @endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
-        """Pull latest weights from TorchStore.
+        """Drain in-flight requests, pull new weights, resume accepting.
 
-        When ``direct_rdma=True``, weights are read directly from the
-        trainer's GPU memory via one-sided RDMA, bypassing StorageVolumes.
-        When ``False``, data is fetched through StorageVolumes (which may
-        themselves use RDMA as their transport internally).
-
-        See ``push_model_state_dict`` for more details on the distinction.
-
-        Args:
-            version: New policy version number.
+        Sequence:
+            1. Close the gate (``accepting_requests = False``); new
+               ``generate_tokens`` calls park.
+            2. Wait for ``self._requests`` to empty — the pump finishes
+               in-flight requests on the OLD weights.
+            3. ``ts.get_state_dict(direct_rdma=is_rdma_available())`` —
+               load new weights.
+            4. ``engine.reset_prefix_cache()`` — invalidate stale KV.
+            5. ``policy_version = version``; open the gate; notify
+               waiters.
         """
         from monarch.rdma import is_rdma_available
+
+        assert self._request_lock is not None
+        async with self._request_lock:
+            self._accepting_requests = False
+            await self._request_lock.wait_for(lambda: not self._requests)
 
         model_sd = self._get_model().model.state_dict()
         await ts.get_state_dict(
@@ -504,34 +477,31 @@ class VLLMGenerator(Actor, Configurable):
             strict=False,
             direct_rdma=is_rdma_available(),
         )
-        self.policy_version = version
-        # Invalidate the KV prefix cache so stale values computed with the
-        # old weights are never reused for new generations.
         self._engine.reset_prefix_cache()
-        logger.debug(
-            f"{os.getpid()=} Generator pulled model state dict for policy v{version}"
-        )
+
+        async with self._request_lock:
+            self.policy_version = version
+            self._accepting_requests = True
+            self._request_lock.notify_all()
 
     @endpoint
     async def close(self) -> None:
-        """Release the vLLM engine and distributed state.
+        """Stop the pump, then tear down vLLM in the same order as ``AsyncLLM``.
 
-        vLLM's sync ``LLMEngine`` (what we use) has no public ``shutdown``
-        method; only the async ``AsyncLLM`` does. We tear it down by
-        plumbing through its components in the same order ``AsyncLLM``
-        uses internally:
-
-        1. ``renderer.shutdown()`` — closes thread pools and the
-           multimodal-processor cache.
-        2. ``engine_core.shutdown()`` — stops the model worker and the
-           scheduler.
-        3. ``cleanup_dist_env_and_memory()`` — destroys NCCL / model-
-           parallel process groups, runs ``gc.collect``, empties the
-           accelerator cache.
-
-        Each step runs in a ``try/finally`` so a failure in one step
-        does not skip the next.
+        Sequence:
+            1. Cancel ``_run_task`` and wait briefly for it to drain.
+            2. ``renderer.shutdown()`` — close thread pools / multimodal cache.
+            3. ``engine_core.shutdown()`` — stop the model worker + scheduler.
+            4. ``cleanup_dist_env_and_memory()`` — destroy NCCL groups.
         """
+        self._shutting_down = True
+        if self._run_task is not None:
+            self._run_task.cancel()
+            try:
+                await asyncio.wait_for(self._run_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
         if self._engine is not None:
             renderer = getattr(self._engine, "renderer", None)
             try:
@@ -540,3 +510,56 @@ class VLLMGenerator(Actor, Configurable):
             finally:
                 self._engine.engine_core.shutdown()
         cleanup_dist_env_and_memory()
+
+    # ------------------------------------------------------------------ internal
+
+    async def _run(self) -> None:
+        """Background pump: drive ``engine.step()`` and fan out outputs.
+
+        ``engine.step()`` is sync CPU+CUDA work; we wrap it in
+        :func:`asyncio.to_thread` so the actor's event loop keeps
+        servicing new ``generate_tokens`` submissions and weight pulls.
+
+        Idle behaviour: when the engine has no requests, ``await
+        asyncio.sleep(0.001)`` keeps the loop responsive without
+        burning CPU.
+        """
+        while not self._shutting_down:
+            if not self._engine.has_unfinished_requests():
+                # Drain notifier so weight-pull waiters wake up.
+                assert self._request_lock is not None
+                async with self._request_lock:
+                    self._request_lock.notify_all()
+                await asyncio.sleep(0.001)
+                continue
+
+            outputs: list[RequestOutput] = await asyncio.to_thread(self._engine.step)
+            for output in outputs:
+                if not output.finished:
+                    continue
+                fut = self._requests.pop(output.request_id, None)
+                if fut is None:
+                    logger.warning(
+                        "engine emitted finished output for unknown request_id %s",
+                        output.request_id,
+                    )
+                    continue
+                fut.set_result(self._to_generate_output(output))
+
+    def _to_generate_output(self, output: RequestOutput) -> GenerateOutput:
+        """Build a :class:`GenerateOutput` from one finished ``RequestOutput``.
+
+        Assumes ``SamplingParams.n == 1`` (the controller fans GRPO siblings
+        out at the env-builder layer). With ``n > 1`` we return the first
+        sample only.
+        """
+        # ``logprobs=1`` was passed; each entry is ``{chosen_id: Logprob(...)}``.
+        sample = output.outputs[0]
+        per_token_lp = [list(d.values())[0].logprob for d in sample.logprobs]
+        _emit_request_metrics(output, prefix="generator")
+        return GenerateOutput(
+            policy_version=self.policy_version,
+            response_token_ids=list(sample.token_ids),
+            response_logprobs=per_token_lp,
+            finish_reason=sample.finish_reason,
+        )
