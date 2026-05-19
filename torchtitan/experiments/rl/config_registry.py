@@ -417,7 +417,11 @@ def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
         trainer=_trainer(
             train_tp=1,
             lr=5e-6,
-            warmup_steps=4,
+            # Prime-RL uses ConstantSchedulerConfig — no warmup, no
+            # decay. Set warmup=0 to match. ``_trainer`` only exposes a
+            # linear decay, but at 25-100 steps with lr=5e-6 the
+            # decay slope is small enough vs constant.
+            warmup_steps=0,
             checkpoint_interval=25,
         ),
         generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.7),
