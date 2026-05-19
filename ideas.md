@@ -526,6 +526,7 @@
   Planned source/config changes: Add a Qwen3-specific prefetch chain after FSDP wrapping: each block prefetches the next block in forward, `lm_head` or the final wrapped module at the tail, and each block prefetches the previous block in backward. Do not change reshard policy, batch size, AC, TP, CP, or converters in the same run.
   Planned command or config overrides: Current flex best command unchanged.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is higher peak memory or allocator retries from earlier all-gathers; if that happens, discard rather than pairing with AC immediately.
+  Result: kept at source state `7c1c351`; 8,835 tps, 36.91% MFU, 168.10 GiB, and loss decreased from 12.19318 to 6.47119.
 
 - Idea: flex attention with FP8 rowwise auto-filter but BF16 lm_head
   Current best source commit: 5801b0f

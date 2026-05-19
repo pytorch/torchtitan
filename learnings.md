@@ -1750,3 +1750,25 @@ Interpretation:
 
 - Keeping only `lm_head` unresharded after forward is materially slower than the flex best, despite preserving loss sanity.
 - Do not pursue `lm_head` no-reshard variants on this source line. The next communication idea should use overlap/prefetch rather than extra parameter residency.
+
+## Experiment 59: Flex Attention With Explicit FSDP Prefetch
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run59-flex-fsdp-prefetch-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep; new best.
+- Step 10 `tps`: 8,835, above the prior 8,489 best.
+- Step 10 MFU: 36.91%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.19318 at step 1 to 6.47119 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Explicit one-module-ahead FSDP prefetch is the first communication-overlap change to beat the flex best.
+- Current best source is now `7c1c351`, with flex attention, no FP8 converter, compile enabled, BF16 training dtype, local batch size 5, `--comm.trace_buf_size=0`, and Qwen3 FSDP prefetch.
+- Next tests should keep this prefetch source line and isolate either variance, selective FP8 coverage, or a narrower prefetch refinement.
