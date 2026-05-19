@@ -498,6 +498,15 @@
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are CP wrapper incompatibility, load-balancer/mask issues, extra K/V all-gather overhead, or higher parameter memory because FSDP degree falls from 8 to 4.
   Result: discarded at source state `c36ca11`; it ran but reached only 4,531 tps, used 170.2 GiB with allocator retries, and loss increased from 12.30233 to 17.01370.
 
+- Idea: flex attention best with structured logging disabled
+  Current best source commit: 5801b0f
+  Source: overhead check on new best source
+  Expected mechanism: Disabling structured logging may reduce per-step Python trace overhead for the current flex source, even though it did not help the older FP8 SDPA source.
+  Supporting evidence: Run46 became the new best after run43's structured-logging test on a different source line. The command-only knob is cheap to isolate.
+  Planned source/config changes: None; use current flex-without-FP8 best source.
+  Planned command or config overrides: Current best command plus `--debug.no-enable-structured-logging`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is no effect or a small regression, as seen on the older FP8 source.
+
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
   Source: profile follow-up after new best
