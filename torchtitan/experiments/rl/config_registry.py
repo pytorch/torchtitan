@@ -347,7 +347,12 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
             warmup_steps=0,
             checkpoint_interval=50,
         ),
-        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.2),
+        # gpu_memory_limit bumped from 0.2 to 0.7 — Opus has GPUs 4,5
+        # exclusively (no shared tenants on this branch), so vLLM can
+        # claim ~70GB of the 97GB card for KV cache. More KV cache →
+        # more concurrent in-flight requests in vLLM's scheduler →
+        # bigger continuous batches when combined with CP38 + CP39.
+        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.7),
         replay_buffer=_replay(batch_size=4, max_buffer_size=512),
     )
 
@@ -435,9 +440,9 @@ def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
             warmup_steps=0,
             checkpoint_interval=25,
         ),
-        # gpu_memory_limit=0.2 lets vLLM coexist with heavy external
-        # tenants on the same physical GPU; once we're on a quiet host
-        # bump back up to 0.7+ to give the KV cache more room.
-        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.2),
+        # gpu_memory_limit=0.7 — see 1.7B alphabet for rationale; this
+        # branch has exclusive use of GPUs 4,5, so vLLM can claim ~70GB
+        # for KV cache (vs the 0.2 used during early shared-tenant runs).
+        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.7),
         replay_buffer=_replay(batch_size=4, max_buffer_size=512),
     )
