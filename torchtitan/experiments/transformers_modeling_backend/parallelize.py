@@ -102,7 +102,6 @@ class HFExpertParallel(ParallelStyle):
         )
 
 
-
 # ---------------------------------------------------------------------------
 # Gate and expert hooks for DTensor → local conversion
 # ---------------------------------------------------------------------------
@@ -129,7 +128,6 @@ def _make_moe_to_local_pre_hook(grad_placements):
         return None
 
     return hook
-
 
 
 def _experts_to_local_pre_hook(module, args):
@@ -165,7 +163,6 @@ def _experts_restore_post_hook(module, args, output):
     return output
 
 
-
 # ---------------------------------------------------------------------------
 # Main parallelization entry point
 # ---------------------------------------------------------------------------
@@ -191,9 +188,7 @@ def parallelize_hf_transformers(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
@@ -710,9 +705,7 @@ def apply_fsdp(
                     return HSDPMeshInfo(
                         mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
                     )
-                raise ValueError(
-                    f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
-                )
+                raise ValueError(f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh.")
 
             edp_mesh_info = _get_fsdp_mesh_info(dp_mod_ep_mesh)
             dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
@@ -728,9 +721,7 @@ def apply_fsdp(
                     return ShardPlacementResult(
                         placement=_expert_placement, mesh_info=_edp_mesh_info
                     )
-                return ShardPlacementResult(
-                    placement=Shard(0), mesh_info=_dp_mesh_info
-                )
+                return ShardPlacementResult(placement=Shard(0), mesh_info=_dp_mesh_info)
 
             fully_shard(
                 transformer_block,
@@ -778,9 +769,7 @@ def apply_fsdp(
         transformer_blocks, next_transformer_blocks
     ):
         if next_transformer_block is not None:
-            transformer_block.set_modules_to_forward_prefetch(
-                [next_transformer_block]
-            )
+            transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
         elif model.norm is not None and model.lm_head is not None:
             transformer_block.set_modules_to_forward_prefetch(
                 [model.norm, model.lm_head]
@@ -801,8 +790,6 @@ def apply_fsdp(
         reversed_transformer_blocks, prev_transformer_blocks
     ):
         if prev_transformer_block is not None:
-            transformer_block.set_modules_to_backward_prefetch(
-                [prev_transformer_block]
-            )
+            transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
         elif model.tok_embeddings is not None:
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])

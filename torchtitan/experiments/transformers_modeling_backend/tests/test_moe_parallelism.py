@@ -131,9 +131,7 @@ def _prepare_hf_moe_layers(model, load_balance_coeff=1e-3):
         {str(i): layer for i, layer in enumerate(model.model.layers)}
     )
     for layer in model.model.layers.values():
-        layer.moe_enabled = hasattr(layer.mlp, "gate") and hasattr(
-            layer.mlp, "experts"
-        )
+        layer.moe_enabled = hasattr(layer.mlp, "gate") and hasattr(layer.mlp, "experts")
         if layer.moe_enabled:
             attach_hf_moe_load_balancing(
                 layer,
