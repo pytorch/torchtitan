@@ -274,6 +274,7 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
             "batch_size": local_batch_size,
+            **kwargs,
         }
 
         super().__init__(
@@ -347,6 +348,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
             "batch_size": local_batch_size,
+            **kwargs,
         }
 
         super().__init__(
@@ -673,6 +675,7 @@ class ChatDataLoader(ParallelAwareDataloader):
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
             "batch_size": local_batch_size,
+            **kwargs,
         }
 
         super().__init__(
@@ -748,6 +751,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
             "batch_size": local_batch_size,
+            **kwargs,
         }
 
         super().__init__(
