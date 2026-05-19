@@ -170,3 +170,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: TP=2/FSDP=4 compile+BF16 command with `--training.local_batch_size=10`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no OOM. Risk is activation memory scaling beyond the available headroom or TP communication still dominating.
+  Result: crashed at source state `a544471`; step 1 completed at 173.69 GiB, then rank 7 aborted after repeated allocator OOM mapping warnings.
+
+- Idea: TP=2 with local batch 8
+  Current best source commit: a544471
+  Source: midpoint after TP batch 10 memory abort
+  Expected mechanism: Local batch 8 should use substantially more of the TP memory headroom than batch 5 while avoiding the 97%+ memory cliff observed at batch 10. The larger per-step token count may amortize TP communication enough to approach or beat the no-TP best.
+  Supporting evidence: TP batch 5 used 99.7 GiB and ran at 7,418 tps; TP batch 10 reached 173.69 GiB and aborted after step 1. Linear interpolation suggests batch 8 has a better chance to stay below the allocator cliff.
+  Planned source/config changes: None.
+  Planned command or config overrides: TP=2/FSDP=4 compile+BF16 command with `--training.local_batch_size=8`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and memory below the batch 10 cliff. Risk is still slower throughput from TP communication.

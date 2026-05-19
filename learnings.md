@@ -509,3 +509,27 @@ Interpretation:
 - TP=2 is functionally viable and substantially reduces memory.
 - At the same local batch size, the extra TP communication and lower global batch lose throughput.
 - The memory headroom is large enough to test local batch size 10 under TP=2, matching the no-TP best's global batch size of 40 while retaining output/loss sharding.
+
+## Experiment 15: TP=2, FSDP=4, Compile+BF16 Local Batch 10
+
+Source state: `a544471`, using the `4512daa` TP source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=10 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run15-tp2-fsdp4-compile-bf16-lbs10 > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- Step 1 completed with loss 3.09632 and peak memory 173.69 GiB, 97.38%.
+- After step 1, the allocator repeatedly logged `expandable_segments: memory mapping failed with OOM` while trying to map 20 MiB segments.
+- The run exited with rank 7 `SIGABRT`; other ranks were terminated by elastic.
+- No step 10 metric was emitted.
+
+Interpretation:
+
+- TP=2 local batch 10 is above the practical memory boundary despite sharding the output/loss path.
+- The crash happens after a completed first step, so it is likely allocator/headroom instability from running at 97%+ memory rather than a placement error.
+- Local batch 8 is the next reasonable midpoint: it should use materially more TP headroom than batch 5 while staying below the batch 10 edge.
