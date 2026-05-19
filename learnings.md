@@ -641,3 +641,27 @@ Interpretation:
 - This run does not measure the candidate because the 8-GPU target was not available.
 - Do not use it to conclude that selective AC local batch 10 is infeasible.
 - Retry the same candidate after the node is free.
+
+## Experiment 20: Selective AC Local Batch 10 Retry
+
+Source state: `ad6265f`, using the `a593f3a` AC-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=10 --activation_checkpoint.mode=selective --dump_folder=outputs/autoresearch/may19-qwen3-14b/run20-selective-ac-compile-bf16-lbs10-retry > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,434, below the 8,391 current best.
+- Step 10 MFU: 31.06%.
+- Step 10 peak memory: 135.75 GiB, 76.11%.
+- Loss moved from 12.37296 at step 1 to 14.42308 at step 10; this fails the short-run convergence sanity check.
+
+Interpretation:
+
+- Increasing local batch under eager selective AC did not amortize recompute overhead.
+- The larger batch also produced an unhealthy short-run loss trend.
+- Eager AC should not be kept as the best path. A compiler memory-budget AC mode may still be worth one test because it can choose a different rematerialization tradeoff under compile.

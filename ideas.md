@@ -211,3 +211,13 @@
   Planned command or config overrides: Selective AC compile+BF16 command with `--training.local_batch_size=10`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and memory below the OOM cliff. Risk is that recompute cost still dominates or batch 10 exceeds memory.
   Result: invalid at source state `9b87a63`; OOM was contaminated by external VLLM processes occupying GPUs 0-3. Retry after the node is free.
+  Result: discarded on retry at source state `ad6265f`; 7,434 tps and loss increased from step 1 to step 10.
+
+- Idea: memory-budget activation checkpointing with compile, BF16, and local batch 6
+  Current best source commit: ad6265f
+  Source: follow-up from eager selective AC overhead
+  Expected mechanism: Compiler memory-budget AC may choose a less expensive rematerialization plan than eager selective AC while still reducing enough activation memory for local batch 6 to fit.
+  Supporting evidence: No-AC local batch 6 OOMed, selective AC local batch 6 fit but was slower at 7,701 tps, and selective AC local batch 10 was worse. The source hook already passes `model_compile_enabled=True`, which memory-budget mode requires.
+  Planned source/config changes: None beyond the existing AC hook source.
+  Planned command or config overrides: Current-best compile+BF16 local batch 6 command with `--activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.8`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no OOM. Risk is that memory-budget mode does not reduce enough memory or adds compile overhead.
