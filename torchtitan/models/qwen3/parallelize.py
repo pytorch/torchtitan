@@ -56,9 +56,6 @@ def parallelize_qwen3(
     if parallel_dims.ep_enabled:
         raise NotImplementedError("Qwen3 DP-only parallelize does not support EP.")
 
-    if compile_config.enable and "model" in compile_config.components:
-        apply_compile(model, compile_config)
-
     if skip_dp or not parallel_dims.dp_enabled:
         return model
 
@@ -68,6 +65,9 @@ def parallelize_qwen3(
         raise NotImplementedError(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
+
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile(model, compile_config)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
