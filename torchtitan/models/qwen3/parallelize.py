@@ -21,6 +21,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -64,6 +65,9 @@ def parallelize_qwen3(
         raise NotImplementedError(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
+
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile(model, compile_config)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
