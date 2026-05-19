@@ -587,12 +587,25 @@ class RLTrainer(Configurable):
     @staticmethod
     def _build_replay_samples(
         rollouts: Sequence[RolloutOutput],
+        *,
+        drop_zero_advantage: bool = True,
+        eps: float = 1e-12,
     ) -> list[ReplaySample]:
-        """Convert rollouts to replay samples + stamp group-mean advantages."""
+        """Convert rollouts to replay samples + stamp group-mean advantages.
+
+        With ``drop_zero_advantage=True`` (default, prime-rl's
+        ``ZeroAdvantageFilter`` behavior), rollouts whose group all
+        landed at the same reward (advantage = 0) are excluded from
+        the buffer — they add no gradient signal and only dilute
+        non-degenerate batches. The reward itself was already used to
+        compute the group baseline, so the signal isn't lost.
+        """
         advs = compute_advantages(rollouts)
         out: list[ReplaySample] = []
         for r in rollouts:
             adv = advs[(r.group_id, r.sample_idx)]
+            if drop_zero_advantage and abs(adv) < eps:
+                continue
             for s in rollout_to_replay_samples(r):
                 s.advantage = adv
                 out.append(s)
