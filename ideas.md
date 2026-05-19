@@ -243,3 +243,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: Same memory-budget AC local-batch-6 command with `--activation_checkpoint.memory_budget=0.95`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is OOM if the compiler stores too many activations or no speed change if the selected rematerialization plan is unchanged.
+  Result: discarded at source state `4cff4ed`; 8,329 tps, 34.80% MFU, 146.2 GiB. Budget 0.95 did not improve on 0.9 and stayed below the best.
+
+- Idea: BF16 optimizer states on compile+BF16 local batch 5
+  Current best source commit: f6ae44e
+  Source: structured metrics follow-up after memory-budget AC plateau
+  Expected mechanism: The current best spends about 42-45 ms in the optimizer on later steps. `fused_opt_states_bf16` keeps the fused AdamW implementation but uses BF16 optimizer state tensors, which may reduce optimizer memory traffic and slightly improve the measured step time while preserving the no-AC local-batch-5 path.
+  Supporting evidence: Memory-budget AC could not beat the best, so the next idea should target a different part of the step. Structured logs for run10 show optimizer time is small but nonzero; the remaining gap to beat is only about 60 tps. This knob is isolated to optimizer implementation and does not change model, loss, data, or parallel layout.
+  Planned source/config changes: Restore Qwen3 source to the no-AC best path, then no source change for the optimizer candidate.
+  Planned command or config overrides: Best compile+BF16 local-batch-5 command plus `--optimizer.implementation=fused_opt_states_bf16`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is no speedup or a small slowdown if optimizer state dtype conversion overhead outweighs memory savings.

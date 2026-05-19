@@ -757,3 +757,27 @@ Interpretation:
 - Memory-budget AC remains close but does not beat the no-AC local-batch-5 best.
 - Budget 0.9 is only 19 tps faster than budget 0.8, and both report the same peak memory.
 - The next direct test is budget 0.95: if the compiler saves fewer activations, it may recover the remaining overhead while still fitting.
+
+## Experiment 25: Memory-Budget AC 0.95, Compile+BF16 Local Batch 6
+
+Source state: `4cff4ed`, using the `a593f3a` AC-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.95 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run25-memory-budget-ac095-compile-bf16-lbs6 > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,329, below the 8,391 current best.
+- Step 10 MFU: 34.80%.
+- Step 10 peak memory: 146.23 GiB, 81.99%.
+- Loss moved from 12.26335 at step 1 to 11.98264 at step 10; finite and slightly decreasing.
+
+Interpretation:
+
+- Budgets 0.8, 0.9, and 0.95 all land around 146.2 GiB and 8.31-8.33k tps, so this knob is likely selecting the same or effectively equivalent rematerialization plan.
+- The memory-budget AC line should be abandoned for now; its extra local batch does not overcome recompute/compile overhead.
+- Restore source to the no-AC best path before testing non-AC ideas, because the AC hook is not part of the current best implementation.
