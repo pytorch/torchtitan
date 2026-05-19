@@ -331,6 +331,10 @@ class RLTrainer(Configurable):
 
         metrics: m.MetricsProcessor.Config = field(
             default_factory=lambda: m.MetricsProcessor.Config(
+                # Default wandb-on for the RL trainer (matches codex's
+                # convention; observability/metrics/processor.py keeps
+                # it off as a defensive default for tests).
+                enable_wandb=True,
                 # Regex search patterns. Listed in display order. Names
                 # match the keys emitted by `build_rollout_metrics`,
                 # `build_replay_metrics`, the trainer's reduced metrics
