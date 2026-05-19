@@ -341,15 +341,50 @@ class VLLMGenerator(Actor, Configurable):
         # requests. We never reuse IDs because vLLM keeps a finished-set
         # internally even after we drain.
         self._next_request_id: int = 0
-        # Serializes concurrent ``generate_tokens`` invocations on the
-        # actor's event loop. Monarch's Direct dispatch lets multiple
-        # endpoint coroutines run concurrently; without this lock,
-        # two ``generate_tokens`` calls interleave ``engine.step``
-        # invocations, which corrupts vLLM's continuous-batching state
-        # and hangs NCCL on a subsequent TP collective.
-        # Constructed eagerly: asyncio.Lock() binds to the running loop
-        # on first ``async with``, so no event loop is required here.
-        self._engine_lock: asyncio.Lock = asyncio.Lock()
+        # ----- Admission/stepping split (TBR-style continuous batching) -----
+        #
+        # Background: ``LLMEngine.add_request`` + ``LLMEngine.step`` are not
+        # safe to interleave from multiple concurrent coroutines (would
+        # corrupt vLLM's batching state and desync TP-rank schedulers).
+        # The naive fix — hold one lock for the full add+drain — serializes
+        # whole calls and forces vLLM down to batch=1 between turns (see
+        # round_018_opus_generator_batching_deepdive.md).
+        #
+        # TBR's fix (genai/msl/rl/backends/vllm/native_sampler): a single
+        # daemon-equivalent driver owns the step loop. Callers admit
+        # requests briefly under the same lock, then release it and await
+        # per-request futures. Between every ``engine.step()`` iteration
+        # the driver releases the lock so newly-arrived callers can admit;
+        # the engine accumulates requests across many callers and keeps
+        # the scheduler full across multi-turn rollouts.
+        #
+        # ``_engine_step_lock`` — held briefly by either:
+        #   * the driver, for one ``engine.step()`` iteration, or
+        #   * a caller, while it calls ``add_request`` for its prompts
+        #     (a few microseconds per request).
+        # ``_req_futures`` — request_id → asyncio.Future[RequestOutput],
+        #   populated by callers under the lock, consumed by the driver.
+        # ``_req_admit_versions`` — request_id → policy_version at admit
+        #   time. Snapshotted under the lock so a weight swap mid-rollout
+        #   stamps each turn with the correct version.
+        # ``_engine_driver_task`` — created lazily on first endpoint call
+        #   (so it binds to the actor's event loop).
+        # ``_engine_shutdown`` — driver exit signal.
+        self._engine_step_lock: asyncio.Lock = asyncio.Lock()
+        self._req_futures: dict[str, asyncio.Future[RequestOutput]] = {}
+        self._req_admit_versions: dict[str, int] = {}
+        self._engine_driver_task: asyncio.Task | None = None
+        self._engine_shutdown: asyncio.Event | None = None
+        # ``_admit_gate`` — closed (cleared) while ``pull_model_state_dict``
+        # is in progress so new ``generate_tokens`` callers wait for the
+        # post-pull weights to publish instead of admitting against
+        # to-be-stale weights and stretching the drain unboundedly under
+        # a steady rollout stream. Set on construction (open by default).
+        self._admit_gate: asyncio.Event | None = None
+        # Kept for backward-compatibility with any external code that
+        # still references ``_engine_lock``; pull_model_state_dict uses
+        # the same lock to drain.
+        self._engine_lock: asyncio.Lock = self._engine_step_lock
 
     @staticmethod
     def _set_determinism(debug: DebugConfig) -> None:
@@ -377,15 +412,24 @@ class VLLMGenerator(Actor, Configurable):
         *,
         sampling_config: SamplingConfig | None = None,
     ) -> list[GenerateOutput]:
-        """Submit a list of prompts, drive ``engine.step()`` to completion,
-        return outputs in submission order.
+        """Submit a list of prompts, await individual completions, return
+        outputs in submission order.
 
-        The controller serializes N concurrent rollouts into one batched
-        call so that every TP rank's engine sees the same ordered prompt
-        list and the schedulers stay in lockstep (vLLM ``external_launcher``
-        TP requires deterministic scheduling across ranks). The
-        per-request submit-queue shape was incorrect for this topology
-        — see round 7 §4.
+        Admission and stepping are decoupled: this endpoint briefly
+        acquires ``_engine_step_lock`` to call ``engine.add_request`` for
+        every prompt and stash per-request futures, then releases and
+        awaits the futures. A single background driver task
+        (:meth:`_engine_driver_loop`) owns the step loop and re-acquires
+        the lock for one ``engine.step()`` at a time, releasing between
+        iterations so other concurrent ``generate_tokens`` calls can
+        admit. The engine accumulates requests across many concurrent
+        callers and keeps the vLLM scheduler full across multi-turn
+        rollouts (no more batch=1 stalls between turns).
+
+        Every TP rank's actor runs this same code; the Monarch endpoint
+        delivery preserves submission order across ranks (single sender
+        per Monarch ValueMesh broadcast), so all ranks' drivers admit in
+        the same order and the schedulers stay in lockstep.
 
         Args:
             prompts: ``[num_prompts][prompt_tokens]`` — already tokenized.
@@ -395,6 +439,13 @@ class VLLMGenerator(Actor, Configurable):
         """
         if not prompts:
             return []
+
+        self._ensure_engine_driver()
+        # Wait for any pending weight pull to publish before admitting,
+        # so this call doesn't sample against to-be-stale weights and
+        # doesn't extend the post-backward drain.
+        if self._admit_gate is not None:
+            await self._admit_gate.wait()
 
         sc = sampling_config or self.config.sampling
         params = SamplingParams(
@@ -408,13 +459,13 @@ class VLLMGenerator(Actor, Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-        # Serialize: concurrent generate_tokens invocations must not
-        # interleave engine.add_request / engine.step pairs (would
-        # corrupt vLLM's continuous-batching state across TP ranks).
-        # ``pull_model_state_dict`` takes the same lock, so weights
-        # cannot swap mid-batch — every output in this call belongs to
-        # ``admit_version`` snapshotted under the lock.
-        async with self._engine_lock:
+        loop = asyncio.get_running_loop()
+        futures: list[asyncio.Future[RequestOutput]] = []
+        admit_version: int
+        # Brief lock — just enough to call add_request for every prompt
+        # and stash a future + version stamp for each. Releases before
+        # the long wait so the driver can step + other callers can admit.
+        async with self._engine_step_lock:
             admit_version = self.policy_version
             engine_inputs = self._engine.renderer.render_cmpl(
                 [{"prompt_token_ids": p} for p in prompts]
@@ -422,82 +473,183 @@ class VLLMGenerator(Actor, Configurable):
             first_id = self._next_request_id
             self._next_request_id += len(prompts)
             for i, engine_input in enumerate(engine_inputs):
+                req_id = str(first_id + i)
+                fut: asyncio.Future[RequestOutput] = loop.create_future()
+                self._req_futures[req_id] = fut
+                self._req_admit_versions[req_id] = admit_version
+                futures.append(fut)
                 self._engine.add_request(
-                    request_id=str(first_id + i),
+                    request_id=req_id,
                     prompt=engine_input,
                     params=params,
                 )
 
-            # Drain the engine in-process; yield between steps so the
-            # actor event loop stays responsive.
-            finished: dict[str, RequestOutput] = {}
-            target = {str(first_id + i) for i in range(len(prompts))}
-            with sl.log_trace_span("engine_steps"):
-                while target - finished.keys():
-                    outputs = self._engine.step()
-                    await asyncio.sleep(0)
-                    for o in outputs:
-                        if o.finished and o.request_id in target:
-                            finished[o.request_id] = o
-
-            # Per-batch memory surface to console — proper Metric() wiring
-            # through MetricsProcessor is a follow-up. vLLM v1's LLMEngine
-            # doesn't expose ``.scheduler.running`` directly, so we report
-            # batch size + peak memory only.
             device = torch.cuda.current_device()
             logger.info(
-                "generator batch=%d peak_alloc=%.1fGB peak_reserved=%.1fGB",
+                "generator admit batch=%d in_flight=%d peak_alloc=%.1fGB peak_reserved=%.1fGB",
                 len(prompts),
+                len(self._req_futures),
                 torch.cuda.max_memory_allocated(device) / 1e9,
                 torch.cuda.max_memory_reserved(device) / 1e9,
             )
             torch.cuda.reset_peak_memory_stats(device)
 
-            return [
-                self._to_generate_output(
-                    finished[str(first_id + i)], policy_version=admit_version
-                )
-                for i in range(len(prompts))
-            ]
+        # Lock released — driver drives step() concurrently and other
+        # callers can pile in. Await completion of just our requests.
+        with sl.log_trace_span("await_futures"):
+            outputs = await asyncio.gather(*futures)
+        return [
+            self._to_generate_output(o, policy_version=admit_version) for o in outputs
+        ]
+
+    def _ensure_engine_driver(self) -> None:
+        """Lazily create the engine driver task on first endpoint call.
+
+        Constructed eagerly with the rest of state would bind to whichever
+        loop happened to call ``__init__``; lazy construction binds it to
+        the actor's running event loop instead.
+        """
+        if self._engine_driver_task is not None and not self._engine_driver_task.done():
+            return
+        self._engine_shutdown = asyncio.Event()
+        self._admit_gate = asyncio.Event()
+        self._admit_gate.set()  # open by default
+        self._engine_driver_task = asyncio.create_task(
+            self._engine_driver_loop(), name="engine_driver"
+        )
+
+    async def _engine_driver_loop(self) -> None:
+        """Continuous-admission driver: step engine, complete futures, repeat.
+
+        Loop body (TBR ``_server_loop`` analogue, sample_method.py:537):
+        1. If nothing in flight, briefly yield and try again — this is
+           the idle path; the next caller's ``add_request`` plus the
+           lock-release wake-up below will wake us up.
+        2. Acquire the step lock, call ``engine.step()`` once, release.
+        3. For each finished output, look up its future and ``set_result``.
+        4. ``await asyncio.sleep(0)`` — single yield to give pending
+           callers a chance to acquire the lock and admit before we
+           re-lock for the next step.
+
+        Multi-step bounding (TBR's ``max_steps_per_iteration=8`` in
+        sampler_base.py:226) is unnecessary here because we already
+        release the lock between every step — admission latency is
+        bounded to one step's worth of GPU compute (~50ms).
+        """
+        engine = self._engine
+        try:
+            while not self._engine_shutdown.is_set():
+                # Idle: no requests in flight. Yield to keep loop responsive;
+                # the next add_request will give us work to do on the next tick.
+                if not self._req_futures:
+                    await asyncio.sleep(0)
+                    continue
+
+                async with self._engine_step_lock:
+                    if not engine.has_unfinished_requests():
+                        # Could have drained between the check and the lock
+                        # (e.g. shutdown). Bail back to the outer loop.
+                        continue
+                    outputs = engine.step()
+
+                # Resolve finished requests OUTSIDE the lock so callers
+                # racing to admit don't get blocked by future.set_result
+                # callbacks.
+                for o in outputs:
+                    if not o.finished:
+                        continue
+                    fut = self._req_futures.pop(o.request_id, None)
+                    self._req_admit_versions.pop(o.request_id, None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(o)
+
+                # One yield between steps — bounds admission latency to a
+                # single step (~50ms) for a caller waiting on the lock.
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("engine driver loop crashed")
+            # Cascade the failure to all in-flight callers so they don't
+            # hang forever on futures that will never resolve.
+            for fut in self._req_futures.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError("engine driver crashed"))
+            self._req_futures.clear()
+            self._req_admit_versions.clear()
+            raise
 
     @endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
-        """Pull new weights from TorchStore, reset prefix cache, bump version.
+        """Drain in-flight requests, pull new weights, reset prefix cache.
 
-        Acquires ``_engine_lock`` to serialize with ``generate_tokens``:
-        Monarch's Direct dispatch lets endpoint coroutines run
-        concurrently, so without this lock a pull could overlap with
-        an in-flight batch and corrupt the engine. The lock is the
-        single serialization point; the rest of the actor stays
-        thread/coroutine-unsafe by design.
+        Tokens generated mid-pull would be a mix of old + new weights
+        (KV cache from the old, future logits from the new), so we MUST
+        drain before swapping. The driver continues stepping in the
+        background as we wait; when ``_req_futures`` empties the engine
+        has no in-flight work and we can take the step lock for the
+        pull itself.
+
+        Lock acquisition during the pull also prevents new callers from
+        admitting requests against to-be-stale weights — they'll wait on
+        the lock and admit once the new version is published.
         """
         from monarch.rdma import is_rdma_available
 
         from torchtitan.experiments.rl.actors.trainer import _dedup_tied_tensors
 
-        async with self._engine_lock:
-            model_sd = self._get_model().model.state_dict()
-            # See trainer push for the rationale: the trainer dedups
-            # tied tensors before publishing; do the same here so the
-            # transfer plan on the receiver matches.
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=_dedup_tied_tensors(model_sd),
-                strict=False,
-                direct_rdma=is_rdma_available(),
-            )
-            self._engine.reset_prefix_cache()
-            self.policy_version = version
+        self._ensure_engine_driver()
+        # Close the admit gate so any new ``generate_tokens`` callers
+        # park before they call ``add_request``. Without this, a steady
+        # rollout stream during the drain would keep adding new requests
+        # and the drain loop would never see ``_req_futures`` empty.
+        gate_was_open = False
+        if self._admit_gate is not None:
+            gate_was_open = self._admit_gate.is_set()
+            self._admit_gate.clear()
+        try:
+            # Wait for the driver to drain in-flight rollouts. The driver
+            # task is actively stepping in the background, so this just
+            # yields between checks until everything completes.
+            while self._req_futures:
+                await asyncio.sleep(0)
+
+            async with self._engine_step_lock:
+                model_sd = self._get_model().model.state_dict()
+                # See trainer push for the rationale: the trainer dedups
+                # tied tensors before publishing; do the same here so the
+                # transfer plan on the receiver matches.
+                await ts.get_state_dict(
+                    "model_state_dict",
+                    user_state_dict=_dedup_tied_tensors(model_sd),
+                    strict=False,
+                    direct_rdma=is_rdma_available(),
+                )
+                self._engine.reset_prefix_cache()
+                self.policy_version = version
+        finally:
+            # Re-open the admit gate so parked callers can proceed.
+            if gate_was_open and self._admit_gate is not None:
+                self._admit_gate.set()
 
     @endpoint
     async def close(self) -> None:
         """Tear down vLLM in the same order as ``AsyncLLM``.
 
-        1. ``renderer.shutdown()`` — close thread pools / multimodal cache.
-        2. ``engine_core.shutdown()`` — stop the model worker + scheduler.
-        3. ``cleanup_dist_env_and_memory()`` — destroy NCCL groups.
+        1. Cancel the engine driver task (stops the step loop cleanly).
+        2. ``renderer.shutdown()`` — close thread pools / multimodal cache.
+        3. ``engine_core.shutdown()`` — stop the model worker + scheduler.
+        4. ``cleanup_dist_env_and_memory()`` — destroy NCCL groups.
         """
+        if self._engine_shutdown is not None:
+            self._engine_shutdown.set()
+        if self._engine_driver_task is not None and not self._engine_driver_task.done():
+            self._engine_driver_task.cancel()
+            try:
+                await self._engine_driver_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._engine is not None:
             renderer = getattr(self._engine, "renderer", None)
             try:
