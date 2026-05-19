@@ -341,6 +341,7 @@ class RLTrainer(Configurable):
                     r"^memory/trainer/peak_allocated_gb$",
                     r"^memory/trainer/peak_reserved_gb$",
                     r"^perf/step_time_s$",
+                    r"^perf/tokens_per_second$",
                 ],
                 console_log_keys_validation=[
                     r"^validation/reward/_mean$",
@@ -934,13 +935,29 @@ class RLTrainer(Configurable):
                 step_metrics.extend(build_replay_metrics(replay_samples))
                 # Drain producer-side rollouts seen since the last log:
                 # length, truncation, per-component reward, status mix.
+                # Also derive ``perf/tokens_per_second`` from the drained
+                # response-token totals + step time so we can compare
+                # rollout throughput against prime-rl / codex's logs.
+                drained_response_tokens = 0
                 if recent_rollouts:
                     drained_rollouts = list(recent_rollouts)
                     recent_rollouts.clear()
+                    drained_response_tokens = sum(
+                        len(t.response_token_ids)
+                        for r in drained_rollouts
+                        for t in r.turns
+                    )
                     step_metrics.extend(build_rollout_metrics(drained_rollouts))
                 step_metrics.append(
                     m.Metric("perf/step_time_s", m.NoReduce(float(step_time)))
                 )
+                if step_time > 0 and drained_response_tokens > 0:
+                    step_metrics.append(
+                        m.Metric(
+                            "perf/tokens_per_second",
+                            m.NoReduce(drained_response_tokens / step_time),
+                        )
+                    )
                 step_metrics.append(
                     m.Metric(
                         "train/skipped_zero_advantage_steps",
