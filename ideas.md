@@ -448,6 +448,15 @@
   Success criteria and expected risk: Success is trace generation plus updated bottleneck notes. Profiled tps is diagnostic only and should not be ranked against unprofiled candidates.
   Result: completed at source state `9f96d09`; rank 0 trace shows about 3.75 s CUDA kernel time, dominated by nvjet GEMMs at about 1.80 s, NCCL kernels at about 0.94 s, and flex-attention kernels at about 0.66 s.
 
+- Idea: flex attention best with local batch size 6
+  Current best source commit: 5801b0f
+  Source: memory boundary check after new best
+  Expected mechanism: Increasing local batch size from 5 to 6 raises useful tokens per step and may improve reported tokens/sec if it fits. This is the direct memory-to-throughput conversion for the current best source.
+  Supporting evidence: Run46 uses 168.96 GiB, 94.73% of B200 capacity, so local batch 6 is risky but not proven for the flex source. Earlier local-batch-6 attempts on older source lines OOMed, but the current best changed the attention backend and removed FP8.
+  Planned source/config changes: None; use current flex-without-FP8 best source.
+  Planned command or config overrides: Current best command with `--training.local_batch_size=6`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Main risk is OOM or allocator instability above the 95% memory-risk line.
+
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
   Source: profile follow-up after new best
