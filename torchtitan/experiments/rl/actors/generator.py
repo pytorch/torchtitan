@@ -432,26 +432,22 @@ class VLLMGenerator(Actor, Configurable):
             # actor event loop stays responsive.
             finished: dict[str, RequestOutput] = {}
             target = {str(first_id + i) for i in range(len(prompts))}
-            max_running = 0
             with sl.log_trace_span("engine_steps"):
                 while target - finished.keys():
                     outputs = self._engine.step()
-                    max_running = max(max_running, len(self._engine.scheduler.running))
                     await asyncio.sleep(0)
                     for o in outputs:
                         if o.finished and o.request_id in target:
                             finished[o.request_id] = o
 
-            # Per-batch memory + concurrency surface to console — proper
-            # Metric() wiring through MetricsProcessor is a follow-up
-            # (see TODO in grpo.py). For now stdout is enough to size
-            # ``max_num_seqs`` and replay batch.
+            # Per-batch memory surface to console — proper Metric() wiring
+            # through MetricsProcessor is a follow-up. vLLM v1's LLMEngine
+            # doesn't expose ``.scheduler.running`` directly, so we report
+            # batch size + peak memory only.
             device = torch.cuda.current_device()
             logger.info(
-                "generator batch=%d peak_running=%d peak_alloc=%.1fGB "
-                "peak_reserved=%.1fGB",
+                "generator batch=%d peak_alloc=%.1fGB peak_reserved=%.1fGB",
                 len(prompts),
-                max_running,
                 torch.cuda.max_memory_allocated(device) / 1e9,
                 torch.cuda.max_memory_reserved(device) / 1e9,
             )
