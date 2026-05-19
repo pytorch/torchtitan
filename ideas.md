@@ -356,6 +356,16 @@
   Planned source/config changes: Edit only `qwen3_14b()` to call `model_registry("14B", attn_backend="flex", converters=[...])`.
   Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are slower attention, compile failure, or mask overhead.
+  Result: discarded at source state `67967a3`; 8,544 tps but loss increased from 12.41705 to 13.88057, so it fails correctness sanity.
+
+- Idea: FP8 rowwise_with_gw_hp recipe on current best
+  Current best source commit: 5681e36
+  Source: quantization recipe follow-up
+  Expected mechanism: `rowwise_with_gw_hp` changes the Float8 training recipe and may preserve more high-precision gradient-weight behavior while still using FP8 for profitable linear kernels. It could improve correctness margin or kernel behavior relative to default rowwise.
+  Supporting evidence: Float8 rowwise auto-filter is the best source line so far. Broad conversion and alternate attention backends did not produce a keepable improvement, so the next quantization search should stay close to the working converter but try the other supported recipe.
+  Planned source/config changes: Restore FP8 auto-filter source, then change only `recipe_name` from `"rowwise"` to `"rowwise_with_gw_hp"`.
+  Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is slower throughput from extra high-precision work.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

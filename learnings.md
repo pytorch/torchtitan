@@ -1179,6 +1179,34 @@ Interpretation:
 - The `varlen` backend is not runnable in this environment because FA3's Python interface is missing.
 - `flex_flash` and `varlen` are both blocked by missing attention libraries. The remaining attention backend test is plain `attn_backend="flex"`, which avoids explicitly requesting the unavailable flash backend.
 
+## Experiment 41: FP8 Best With Flex Attention Backend
+
+Source state: `67967a3`.
+
+Source/config change:
+
+- `qwen3_14b()` passed `attn_backend="flex"` to `model_registry("14B", ...)`, keeping the FP8 rowwise auto-filter converter.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run41-fp8-flex-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,544, above the 8,469 current best.
+- Step 10 MFU: 35.70%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.41705 at step 1 to 13.88057 at step 10; finite but increasing.
+
+Interpretation:
+
+- Plain flex attention is faster, but it fails the short-run convergence sanity check.
+- Do not keep it despite the higher throughput. The loss regression may reflect mask/backend numerical or semantic differences.
+- Restore source to the FP8 auto-filter `sdpa` best before continuing.
+
 ## Manager Review After Experiment 29
 
 Current best:
