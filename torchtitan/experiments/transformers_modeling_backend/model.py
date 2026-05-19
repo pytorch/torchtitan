@@ -380,7 +380,7 @@ class HFTransformerModel(BaseModel):
         if model_cls is None:
             # Fallback: resolve via model_type → Auto mapping.
             # Handles cases where the config's architecture name doesn't match
-            # the actual class name (e.g. PhiMoEForCausalLM vs PhimoeForCausalLM).
+            # the actual class name.
             from transformers.models.auto.modeling_auto import (
                 MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
             )

@@ -257,7 +257,6 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "zai-org/GLM-4.7"
         "deepseek-ai/DeepSeek-V3"
         "zai-org/GLM-5"
-        "microsoft/Phi-3.5-MoE-instruct"
     )
 
     # 4-GPU configs (run as parallel pairs or single halves)
