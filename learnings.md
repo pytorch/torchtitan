@@ -1707,7 +1707,7 @@ Next implications:
 - Prioritize one narrow follow-up on the run41 flex attention branch, because it is the only measured path above the current best.
 - If flex remains correctness-bad after isolating FP8 and LR/update-size effects, return to profiling or communication-layout ideas rather than keeping a fast invalid candidate.
 
-## Manager Review After Experiment 56
+## Manager Review After Experiment 57
 
 Current best:
 
@@ -1728,4 +1728,4 @@ Next implications:
 - First priority: isolate the loss-path communication issue with an `lm_head`-only no-reshard FSDP policy. This is much narrower than whole-model no-reshard because `ChunkedCELoss` calls the separately wrapped `lm_head` repeatedly.
 - Second priority: test explicit FSDP module prefetch on the current flex best to overlap all-gathers with compute without changing the batch, AC, or converter state.
 - Third priority: revisit FP8+flex only by excluding `lm_head` from Float8 conversion while keeping `auto_filter_small_kn`; this tests whether quantized logits caused the run41 loss failure.
-- Keep the fixed-seed run as a diagnostic, not a performance priority, unless subsequent short-run loss trends remain inconsistent.
+- The fixed-seed diagnostic has now been tried and discarded at 5,899 tps with increasing loss. The queued exact-best rerun is a reasonable variance check before the next source change.
