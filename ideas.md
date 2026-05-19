@@ -488,6 +488,15 @@
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are longer compile time, no kernel change, or worse selected kernels.
   Result: discarded at source state `f2eba58`; tps dropped to 4,816 and memory rose to 171.8 GiB with allocator retries.
 
+- Idea: flex attention with context parallel degree 2
+  Current best source commit: 5801b0f
+  Source: attention/memory profile follow-up
+  Expected mechanism: Context parallelism shards the sequence dimension across two ranks and wraps flex attention to all-gather K/V. With local batch size 10 and CP=2, the effective token count is comparable to DP-only local batch 5 while each rank sees a shorter query sequence, potentially reducing flex-attention memory pressure and improving attention time.
+  Supporting evidence: Run49 profile shows flex-attention kernels are still about 659 ms and memory is near the risk line. Run51 showed direct batch increase OOMs. Qwen3 model config allows CP for FlexAttention, and TorchTitan has a standard `apply_cp_to_forward` wrapper.
+  Planned source/config changes: Allow CP in Qwen3 parallelize and call `apply_cp_to_forward` on each layer's inner attention before compile.
+  Planned command or config overrides: Current best command plus `--parallelism.context_parallel_degree=2 --parallelism.context_parallel_load_balancer=ptrr --training.local_batch_size=10`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are CP wrapper incompatibility, load-balancer/mask issues, extra K/V all-gather overhead, or higher parameter memory because FSDP degree falls from 8 to 4.
+
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
   Source: profile follow-up after new best
