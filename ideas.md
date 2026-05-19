@@ -263,6 +263,16 @@
   Planned source/config changes: Edit only `qwen3_14b()` to pass `converters=[Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)]` to `model_registry("14B", ...)`, with the required import from `torchtitan.components.quantization`.
   Planned command or config overrides: Current-best command unchanged: `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5`.
   Success criteria and expected risk: Success is tps above 8,391 with finite, non-exploding loss. Risks are torchao/compile incompatibility, FP8 numerical instability, or slower kernels if conversion includes layers that do not benefit.
+  Result: kept at source state `5681e36`; 8,429 tps, 35.22% MFU, 168.7 GiB, finite decreasing loss. This is the new best.
+
+- Idea: disable NCCL flight recorder on FP8 best
+  Current best source commit: 5681e36
+  Source: follow-up from two close command-only/compute-efficiency results
+  Expected mechanism: FP8 rowwise conversion is now the best source state. Disabling the NCCL flight recorder was close on the previous best and may still shave a small amount of communication-side overhead on the FP8 path without changing model math, converter choice, or parallel layout.
+  Supporting evidence: Run28 reached 8,378 tps versus the old 8,391 best, while run29 raised the best to 8,429 tps. The current profile diagnosis remains mixed compute/communication, and this is a command-only single-knob test.
+  Planned source/config changes: None.
+  Planned command or config overrides: FP8 best command plus `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,429 with finite decreasing loss and similar memory. Risk is no effect or a small slowdown; timeout flight-recorder diagnostics are disabled for the run.
 
 - Idea: memory-budget AC 0.9 with local batch 7
   Current best source commit: f6ae44e

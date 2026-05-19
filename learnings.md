@@ -873,3 +873,32 @@ Interpretation:
 - Disabling the flight recorder is close but does not beat the best.
 - The result suggests flight-recorder overhead is not the main limiter for this DP/FSDP run.
 - Move to a distinct compute-efficiency idea: FP8 rowwise linear conversion on the current best command.
+
+## Experiment 29: FP8 Rowwise Linear Converter
+
+Source state: `5681e36`.
+
+Source/config change:
+
+- `qwen3_14b()` now passes `Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)` to `model_registry("14B", ...)`.
+- Qwen3 `parallelize.py` remains on the no-AC compile+FSDP best path.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run29-fp8-rowwise-compile-bf16-lbs5 > run.log 2>&1
+```
+
+Result:
+
+- Status: keep, new best.
+- Step 10 `tps`: 8,429, above the previous 8,391 best.
+- Step 10 MFU: 35.22%.
+- Step 10 peak memory: 168.74 GiB, 94.61%.
+- Loss moved from 12.22943 at step 1 to 11.01705 at step 10; finite and decreasing.
+
+Interpretation:
+
+- FP8 rowwise conversion gives a small but real throughput win without changing the memory boundary.
+- Structured rank 0 timings show a modest end-to-end improvement versus run10: average `step_end` decreased from 2,440.60 ms to 2,429.64 ms, and last `step_end` decreased from 3,360.20 ms to 3,319.71 ms.
+- Since memory is still the immediate limiter and FP8 did not reduce peak memory, local-batch-6 remains risky. The next low-risk follow-up is to add the previously close `--comm.trace_buf_size=0` command-only knob on top of the FP8 best.
