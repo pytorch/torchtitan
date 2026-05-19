@@ -296,9 +296,14 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         num_steps=100,
-        num_prompts_per_step=8,
+        # Bumped 8→16 prompts and 4→8 rollout tasks (codex's measured win
+        # on the same 2-GPU 1.7B recipe at branch 939673a9d — mean batch
+        # 37 → 70, max 64 → 128). Combined with the CP38 admission/
+        # stepping split, this targets continuous batch >=64 instead of
+        # batch=1 stalls between multi-turn boundaries.
+        num_prompts_per_step=16,
         rollout_group_size=8,
-        num_rollout_tasks=4,
+        num_rollout_tasks=8,
         max_rollout_turns=8,
         num_validation_samples=20,
         log_samples=True,
