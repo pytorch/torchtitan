@@ -47,23 +47,17 @@ def _trainer(
     lr: float,
     warmup_steps: int,
     clip_eps: float = 0.2,
-    training_dtype: str | None = None,
+    training_dtype: str = "float32",
     checkpoint_interval: int = 10,
     debug: DebugConfig | None = None,
 ) -> PolicyTrainer.Config:
-    training_kwargs: dict = {}
-    if training_dtype is not None:
-        training_kwargs["dtype"] = training_dtype
-    trainer_kwargs: dict = {}
-    if debug is not None:
-        trainer_kwargs["debug"] = debug
     return PolicyTrainer.Config(
         optimizer=OptimizersContainer.Config(lr=lr),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=warmup_steps,
             decay_type="linear",
         ),
-        training=TrainingConfig(**training_kwargs),
+        training=TrainingConfig(dtype=training_dtype),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=1,
             tensor_parallel_degree=train_tp,
@@ -81,7 +75,7 @@ def _trainer(
             last_save_model_only=False,
         ),
         loss=GRPOLoss.Config(clip_eps=clip_eps),
-        **trainer_kwargs,
+        debug=debug or DebugConfig(),
     )
 
 
@@ -92,9 +86,6 @@ def _generator(
     gpu_memory_limit: float = 0.9,
     debug: DebugConfig | None = None,
 ) -> VLLMGenerator.Config:
-    kwargs: dict = {}
-    if debug is not None:
-        kwargs["debug"] = debug
     return VLLMGenerator.Config(
         model_dtype="bfloat16",
         parallelism=ParallelismConfig(
@@ -112,7 +103,7 @@ def _generator(
             top_p=0.95,
             max_tokens=max_tokens,
         ),
-        **kwargs,
+        debug=debug or DebugConfig(),
     )
 
 
