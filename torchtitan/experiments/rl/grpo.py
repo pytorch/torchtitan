@@ -71,6 +71,7 @@ from torchtitan.experiments.rl.envs.types import (
 )
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.replay import (
+    BufferClosedError,
     compute_advantages,
     ReplayBuffer,
     rollout_to_replay_samples,
@@ -308,10 +309,17 @@ class RLTrainer(Configurable):
     async def close(self) -> None:
         """Best-effort teardown of actors + proc meshes."""
         logger.info("Closing actors and process meshes")
+
+        # Wake any task parked on replay_buffer.sample(); plain Python.
+        if self.replay_buffer is not None:
+            try:
+                await self.replay_buffer.close()
+            except Exception:
+                logger.exception("replay_buffer.close failed")
+
         for name, actor in (
             ("trainer", self.trainer),
             ("generator", self.generator),
-            ("replay_buffer", self.replay_buffer),
         ):
             if actor is None:
                 continue
@@ -428,16 +436,11 @@ class RLTrainer(Configurable):
                 output_dir=config.dump_folder,
             )
 
-            # ReplayBuffer is a singleton (deque + RNG). Spawn on a
-            # dedicated single-proc mesh so add/sample serialize on the
-            # actor loop with no DP/TP fanout.
-            buffer_mesh = this_host().spawn_procs(per_host={"gpus": 1})
-            self._proc_meshes.append(buffer_mesh)
-            self.replay_buffer = buffer_mesh.spawn(
-                "replay_buffer",
-                ReplayBuffer,
-                config.replay_buffer,
-            )
+        # ReplayBuffer lives on the controller (plain class with
+        # ``asyncio.Condition``). add / sample synchronize without a
+        # Monarch round-trip; the trainer blocks until samples land
+        # instead of sleep-polling.
+        self.replay_buffer = config.replay_buffer.build()
 
         # Initialize torchstore (used by trainer.push / generator.pull).
         with sl.log_trace_span("torchstore_init"):
@@ -689,7 +692,7 @@ class RLTrainer(Configurable):
                     rollouts = await self._rollout_one_group(example)
                 samples = self._build_replay_samples(rollouts)
                 if samples:
-                    await self.replay_buffer.add.call_one(samples)
+                    await self.replay_buffer.add(samples)
 
                 if cfg.log_samples and local_step % 4 == 0:
                     _log_first_sample(rollouts)
@@ -697,14 +700,12 @@ class RLTrainer(Configurable):
 
         async def continuous_training() -> None:
             while self._train_step < num_steps and not shutdown.is_set():
-                batches_or_none = await self.replay_buffer.sample.call_one(
-                    curr_policy_version=self._train_step,
-                )
-                if batches_or_none is None:
-                    await asyncio.sleep(0.05)
-                    continue
-
-                batches_per_rank: list[list[ReplaySample]] = batches_or_none
+                try:
+                    batches_per_rank = await self.replay_buffer.sample(
+                        curr_policy_version=self._train_step,
+                    )
+                except BufferClosedError:
+                    return
                 step_start = time.perf_counter()
 
                 # Collate one TrainBatch per DP rank.

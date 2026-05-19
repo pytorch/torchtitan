@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Rollout -> :class:`ReplaySample` conversion + the :class:`ReplayBuffer` actor.
+"""Rollout -> :class:`ReplaySample` conversion + the :class:`ReplayBuffer`.
 
 Three pieces:
 
@@ -12,23 +12,25 @@ Three pieces:
   emit one :class:`ReplaySample` per contiguous prefix-runnable span.
 - :func:`compute_advantages` — group-mean baseline; returns
   ``{(group_id, sample_idx): advantage}``.
-- :class:`ReplayBuffer` — bounded FIFO actor; ``sample`` evicts entries
-  older than ``max_policy_age`` train steps before returning a batch.
+- :class:`ReplayBuffer` — bounded FIFO held on the controller (plain
+  Python class, not a Monarch actor). Producer rollout tasks and the
+  consumer training task share it through :class:`asyncio.Condition`
+  so the trainer awaits until samples land rather than sleep-polling.
 """
 
 from __future__ import annotations
 
+import asyncio
 import random
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from monarch.actor import Actor, endpoint
-
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.types import ReplaySample, RolloutOutput
 
 __all__ = [
+    "BufferClosedError",
     "ReplayBuffer",
     "compute_advantages",
     "rollout_to_replay_samples",
@@ -144,15 +146,18 @@ def compute_advantages(
 # ---------------------------------------------------------------------------
 
 
-class ReplayBuffer(Actor, Configurable):
-    """Bounded FIFO between ``continuous_rollouts`` and ``continuous_training``.
+class ReplayBuffer(Configurable):
+    """Bounded FIFO between rollout producers and the trainer consumer.
 
-    ``sample`` returns ``None`` when underfilled so the trainer can
-    poll with a short sleep until rollouts land. Each call to
-    ``sample`` first evicts entries older than ``max_policy_age`` train
-    steps; with the generator's drain-on-pull, a rollout is at most
-    one weight version behind, so ``max_policy_age=1`` is the safe
-    default.
+    Lives on the controller process. ``add`` and ``sample`` synchronize
+    through an :class:`asyncio.Condition`: the trainer's ``await sample``
+    blocks until ``add`` notifies enough rollouts have landed, or the
+    buffer is closed.
+
+    Each ``sample`` call first evicts entries older than
+    ``max_policy_age`` train steps. With the generator's drain-on-pull,
+    a rollout is at most one weight version behind, so
+    ``max_policy_age=1`` is the safe default.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -177,42 +182,58 @@ class ReplayBuffer(Actor, Configurable):
         self.config = config
         self._buffer: deque[ReplaySample] = deque(maxlen=config.max_buffer_size)
         self._rng = random.Random(config.seed)
+        self._cv: asyncio.Condition | None = None  # initialized lazily
+        self._closed: bool = False
 
-    @endpoint
+    def _cond(self) -> asyncio.Condition:
+        if self._cv is None:
+            self._cv = asyncio.Condition()
+        return self._cv
+
     async def add(self, samples: list[ReplaySample]) -> None:
-        """Append samples (oldest fall off when ``max_buffer_size`` is exceeded)."""
-        self._buffer.extend(samples)
+        """Append samples; wake consumers parked in ``sample``."""
+        cv = self._cond()
+        async with cv:
+            self._buffer.extend(samples)
+            cv.notify_all()
 
-    @endpoint
-    async def sample(
-        self, *, curr_policy_version: int
-    ) -> list[list[ReplaySample]] | None:
-        """Return one batch per DP rank or ``None`` if underfilled.
+    async def sample(self, *, curr_policy_version: int) -> list[list[ReplaySample]]:
+        """Wait until ``dp_size * batch_size`` survivors are available.
 
-        Returns shape ``[dp_size][batch_size]``: the trainer fans out
-        one batch per rank for round-robin DP.
+        Returns shape ``[dp_size][batch_size]``. Evicts stale samples
+        on every wake-up. Raises ``BufferClosedError`` when the buffer
+        is closed mid-wait.
         """
-        self._evict(curr_policy_version)
-        total = self.config.dp_size * self.config.batch_size
-        if len(self._buffer) < total:
-            return None
+        cv = self._cond()
+        async with cv:
+            while True:
+                if self._closed:
+                    raise BufferClosedError("ReplayBuffer closed during sample()")
+                self._evict(curr_policy_version)
+                total = self.config.dp_size * self.config.batch_size
+                if len(self._buffer) >= total:
+                    indices = self._rng.sample(range(len(self._buffer)), k=total)
+                    chosen = [self._buffer[i] for i in indices]
+                    return [
+                        chosen[
+                            r
+                            * self.config.batch_size : (r + 1)
+                            * self.config.batch_size
+                        ]
+                        for r in range(self.config.dp_size)
+                    ]
+                await cv.wait()
 
-        indices = self._rng.sample(range(len(self._buffer)), k=total)
-        chosen = [self._buffer[i] for i in indices]
-        return [
-            chosen[r * self.config.batch_size : (r + 1) * self.config.batch_size]
-            for r in range(self.config.dp_size)
-        ]
-
-    @endpoint
-    async def size(self) -> int:
+    def num_pending(self) -> int:
+        """Current buffer length (sync read; OK for logging only)."""
         return len(self._buffer)
 
-    @endpoint
-    async def clear(self) -> None:
-        self._buffer.clear()
-
-    # ------------------------------------------------------------------ internal
+    async def close(self) -> None:
+        """Wake all waiters with :class:`BufferClosedError`."""
+        cv = self._cond()
+        async with cv:
+            self._closed = True
+            cv.notify_all()
 
     def _evict(self, curr_policy_version: int) -> None:
         if self.config.max_policy_age is None:
@@ -222,3 +243,7 @@ class ReplayBuffer(Actor, Configurable):
             (s for s in self._buffer if s.policy_version >= cutoff),
             maxlen=self.config.max_buffer_size,
         )
+
+
+class BufferClosedError(RuntimeError):
+    """Raised by ``ReplayBuffer.sample`` when ``close`` fires mid-wait."""
