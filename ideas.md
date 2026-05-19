@@ -516,6 +516,7 @@
   Planned source/config changes: In Qwen3 FSDP wrapping, keep transformer blocks and root on the existing reshard policy, but call `fully_shard(model.lm_head, ..., reshard_after_forward=False)` as the only policy exception.
   Planned command or config overrides: Current flex best command unchanged: `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are OOM/allocator retries if loss chunks retain more than expected, or no benefit if FSDP already avoids repeated `lm_head` all-gathers.
+  Result: discarded at source state `75e484f`; loss decreased from 12.32550 to 7.94975, but step-10 throughput fell to 6,922 tps and MFU to 28.92%.
 
 - Idea: flex attention best with explicit FSDP prefetch schedule
   Current best source commit: 5801b0f

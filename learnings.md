@@ -1729,3 +1729,24 @@ Next implications:
 - Second priority: test explicit FSDP module prefetch on the current flex best to overlap all-gathers with compute without changing the batch, AC, or converter state.
 - Third priority: revisit FP8+flex only by excluding `lm_head` from Float8 conversion while keeping `auto_filter_small_kn`; this tests whether quantized logits caused the run41 loss failure.
 - The fixed-seed diagnostic has now been tried and discarded at 5,899 tps with increasing loss. The queued exact-best rerun is a reasonable variance check before the next source change.
+
+## Experiment 58: Flex Attention With `lm_head`-Only No-Reshard
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run58-flex-lm-head-no-reshard-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 6,922, below the 8,489 current best.
+- Step 10 MFU: 28.92%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.32550 at step 1 to 7.94975 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Keeping only `lm_head` unresharded after forward is materially slower than the flex best, despite preserving loss sanity.
+- Do not pursue `lm_head` no-reshard variants on this source line. The next communication idea should use overlap/prefetch rather than extra parameter residency.
