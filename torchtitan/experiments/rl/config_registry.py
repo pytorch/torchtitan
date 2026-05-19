@@ -335,14 +335,14 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
             max_generation_tokens=768,
         ),
         trainer=_trainer(
-            train_tp=2,
+            train_tp=1,
             # Conservative for 1.7B + batch=4: prime-rl uses lr=1e-5 at
             # batch=64. Step 3 -> 4 saw Loss=NaN at lr=1e-5 batch=8.
             lr=2e-6,
-            warmup_steps=4,
+            warmup_steps=0,
             checkpoint_interval=50,
         ),
-        generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
+        generator=_generator(gen_tp=1, max_tokens=768, gpu_memory_limit=0.7),
         replay_buffer=_replay(batch_size=4, max_buffer_size=512),
     )
 
