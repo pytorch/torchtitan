@@ -81,6 +81,14 @@ class Qwen3VLModel(Qwen3Model):
                         debug.moe_force_load_balance
                     )
 
+            from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
+
+            set_qwen3_vl_sharding_config(
+                self,
+                loss_parallel=not parallelism.disable_loss_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads

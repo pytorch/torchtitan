@@ -79,7 +79,6 @@ class NoParallel(ParallelStyle):
     ) -> torch.Tensor | DTensor:
         if outputs.placements != (output_layout,):
             outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
-        # back to local tensor
         return outputs.to_local() if use_local_output else outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:

@@ -51,7 +51,8 @@ def set_deepseek_v3_sharding_config(
     at runtime.
 
     MoE sub-configs (router, shared experts, routed experts) are
-    populated when TP or EP is enabled.
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
     """
 
     set_decoder_sharding_config(
