@@ -18,6 +18,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
@@ -116,6 +117,7 @@ def _vl_vision_encoder_config(
     """Build a fully-specified Qwen3VLVisionEncoder.Config."""
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
     merged_hidden_size = dim * (spatial_merge_size**2)
+    layer_norm_eps = 1e-6
     return Qwen3VLVisionEncoder.Config(
         dim=dim,
         ffn_dim=ffn_dim,
@@ -134,6 +136,14 @@ def _vl_vision_encoder_config(
         mlp_fc2=_vl_linear(ffn_dim, dim),
         merger_fc1=_vl_linear(merged_hidden_size, merged_hidden_size),
         merger_fc2=_vl_linear(merged_hidden_size, out_hidden_size),
+        block_norm=LayerNorm.Config(
+            normalized_shape=dim,
+            eps=layer_norm_eps,
+        ),
+        merger_norm=LayerNorm.Config(
+            normalized_shape=dim,
+            eps=layer_norm_eps,
+        ),
         param_init=_POS_EMBED_INIT,
     )
 
