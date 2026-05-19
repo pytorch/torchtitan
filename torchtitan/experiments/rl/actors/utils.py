@@ -23,12 +23,24 @@ from torchtitan.observability import structured_logger as sl
 
 
 @sl.log_trace_span("compute_logprobs")
-def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+def compute_logprobs(
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    *,
+    temperature: float = 1.0,
+) -> torch.Tensor:
     """Per-token log p(next | <=t) from logits + targets.
 
     Args:
         logits: ``[B, T, V]`` next-token logits (typically B=1 for varlen).
         token_ids: ``[B, T]`` token sequence.
+        temperature: divide logits by this before ``log_softmax``. Must
+            match the sampling temperature the generator used so the
+            trainer's logprobs are computed on the *same* distribution
+            the rollouts came from — without it, the importance ratio
+            ``exp(policy_lp - behavior_lp)`` is biased even at step 0
+            with identical weights. Default ``1.0`` (sampling
+            temperature has no effect).
 
     Returns:
         ``[B, T - 1]`` per-token logprobs. Position ``t`` is
@@ -44,7 +56,8 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
         # TODO: pass ``grad_placements=[Replicate(), ...]`` to make the
         # autograd contract explicit (see .claude/rules/distributed.md).
         logits = logits.to_local()
-    shift_logits = logits[:, :-1, :].float()
+    # fp32 BEFORE temperature division to preserve precision under bf16.
+    shift_logits = logits[:, :-1, :].float() / temperature
     shift_targets = token_ids[:, 1:]
     logprobs = F.log_softmax(shift_logits, dim=-1)
     return logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)

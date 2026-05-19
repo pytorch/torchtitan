@@ -795,6 +795,7 @@ class RLTrainer(Configurable):
                         await self.trainer.forward_backward.call(
                             train_batches,
                             num_global_valid_tokens=num_global_valid_tokens,
+                            sampling_temperature=cfg.generator.sampling.temperature,
                         )
                     )
                 # NaN loss → skip optim_step + push so the bad gradient

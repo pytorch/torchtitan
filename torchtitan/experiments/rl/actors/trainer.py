@@ -259,6 +259,7 @@ class PolicyTrainer(Actor, Configurable):
         train_data: list[TrainBatch],
         *,
         num_global_valid_tokens: int,
+        sampling_temperature: float = 1.0,
     ) -> dict[str, float]:
         """Forward, loss, backward — all per-token + mask.
 
@@ -267,6 +268,11 @@ class PolicyTrainer(Actor, Configurable):
             num_global_valid_tokens: total ``loss_mask`` sum across all
                 DP ranks. Normalizes the DAPO global-token-mean loss so
                 gradients are independent of how the batch is sharded.
+            sampling_temperature: the generator's ``SamplingConfig.temperature``.
+                Trainer divides logits by this before ``log_softmax``
+                so policy logprobs are computed on the same softmax-
+                shape the generator sampled from — without this, the
+                importance ratio is biased even with identical weights.
         """
         if len(self.model_parts) != 1:
             raise ValueError(
@@ -307,7 +313,9 @@ class PolicyTrainer(Actor, Configurable):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        policy_logprobs = compute_logprobs(logits, token_ids)  # [1, T-1]
+        policy_logprobs = compute_logprobs(
+            logits, token_ids, temperature=sampling_temperature
+        )  # [1, T-1]
 
         # TODO(nan-debug): remove once AlphabetSort 4B is reliably stable.
         # Pinpoint which input is non-finite when the loss explodes.
