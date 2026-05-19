@@ -22,6 +22,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
+    DebugConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -183,14 +184,21 @@ class VLLMModelWrapper(Module):
         # Fill sharding configs on the config BEFORE build so every sub-module
         # is constructed with its ShardingConfig attached (required by the
         # declarative model.parallelize() API).
-        # Only ``parallelism`` is needed here; ``training`` is intentionally
-        # omitted so the model's intrinsic ``rope.max_seq_len`` is preserved
-        # (the vLLM inference path must not shrink the RoPE cache to the
-        # trainer's default seq_len).
+        # NOTE: We pass seq_len=rope.max_seq_len so the RoPE cache stays at
+        # the model's intrinsic maximum. Using the default TrainingConfig()
+        # would shrink it to 2048, which is wrong for inference — vLLM can
+        # generate positions up to max_model_len (derived from the model's
+        # max_position_embeddings).
+        # TODO: Refactor update_from_config to separate parallelism setup
+        # from training-specific config (rope resize, debug flags).
         from types import SimpleNamespace
 
         self.config.update_from_config(
-            trainer_config=SimpleNamespace(parallelism=parallelism)
+            trainer_config=SimpleNamespace(
+                training=TrainingConfig(seq_len=self.config.rope.max_seq_len),
+                parallelism=parallelism,
+                debug=DebugConfig(),
+            )
         )
 
         # Enforce that vLLM's max_model_len does not exceed the model's
