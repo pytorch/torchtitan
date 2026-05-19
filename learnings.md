@@ -665,3 +665,27 @@ Interpretation:
 - Increasing local batch under eager selective AC did not amortize recompute overhead.
 - The larger batch also produced an unhealthy short-run loss trend.
 - Eager AC should not be kept as the best path. A compiler memory-budget AC mode may still be worth one test because it can choose a different rematerialization tradeoff under compile.
+
+## Experiment 21: Memory-Budget AC 0.8, Compile+BF16 Local Batch 6
+
+Source state: `b62adad`, using the `a593f3a` AC-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.8 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run21-memory-budget-ac08-compile-bf16-lbs6 > run.log 2>&1
+```
+
+Result:
+
+- Status: discard, but close to current best.
+- Step 10 `tps`: 8,312, just below the 8,391 current best.
+- Step 10 MFU: 34.73%.
+- Step 10 peak memory: 146.23 GiB, 81.99%.
+- Loss moved from 12.42556 at step 1 to 9.56584 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Compiler memory-budget AC is much better than eager selective AC for this workload.
+- Budget 0.8 makes local batch 6 fit and nearly matches the no-AC local-batch-5 best.
+- Since memory is only 82%, budget 0.9 is the next direct test: less rematerialization may recover speed while still fitting.

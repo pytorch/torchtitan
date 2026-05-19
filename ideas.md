@@ -221,3 +221,13 @@
   Planned source/config changes: None beyond the existing AC hook source.
   Planned command or config overrides: Current-best compile+BF16 local batch 6 command with `--activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.8`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no OOM. Risk is that memory-budget mode does not reduce enough memory or adds compile overhead.
+  Result: discarded at source state `b62adad`; 8,312 tps, 34.73% MFU, 146.2 GiB. Close, but still below best.
+
+- Idea: memory-budget activation checkpointing budget 0.9 with compile, BF16, and local batch 6
+  Current best source commit: b62adad
+  Source: direct tuning of promising memory-budget AC
+  Expected mechanism: Raising memory budget from 0.8 to 0.9 should save fewer activations for recompute, reducing overhead while still staying below the no-AC local-batch-6 OOM point.
+  Supporting evidence: Budget 0.8 reached 8,312 tps and only 146.2 GiB, leaving meaningful memory headroom. The current best is only 79 tps higher.
+  Planned source/config changes: None.
+  Planned command or config overrides: Same memory-budget AC local-batch-6 command with `--activation_checkpoint.memory_budget=0.9`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is OOM if 0.9 saves too little memory.
