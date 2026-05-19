@@ -274,3 +274,34 @@ Interpretation:
 - BF16 alone does not create enough room for `fsdp_reshard_after_forward=never`.
 - The profile's communication bottleneck remains relevant, but any no-reshard attempt needs stronger activation memory reduction than BF16 provides.
 - A coupled AC plus no-reshard experiment is justified: AC alone was slower because recompute cost dominated, but no-reshard may recover some all-gather time while AC supplies the memory headroom required for retained parameters.
+
+## Experiment 7: Full AC With FSDP Reshard Disabled
+
+Commit: `9c5ebcc`
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --parallelism.fsdp_reshard_after_forward=never --dump_folder=outputs/autoresearch/may19-qwen3-14b/run07-ac-reshard-never > run.log 2>&1
+```
+
+What changed:
+
+- Re-added `apply_ac(model, ac_config)` before FSDP wrapping.
+- Used command override `--parallelism.fsdp_reshard_after_forward=never`.
+- No dtype, batch-size, compile, TP/CP/PP/EP, optimizer, or sequence-length changes.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 5,582, far below the current best 7,254 and essentially tied with full AC alone at 5,564.
+- Step 10 MFU: 23.32%.
+- Step 10 peak memory: 72.91 GiB.
+- Loss moved from 12.41961 at step 1 to 8.34080 at step 10; finite and decreasing.
+- Later-step fwd/bwd remained about 2.25-2.33 s, close to full AC alone.
+
+Interpretation:
+
+- Disabling FSDP resharding does not recover enough communication time to offset full AC recompute.
+- The communication bucket in the profile is meaningful, but this particular memory/communication tradeoff is not a path to the current objective.
+- Current best remains the FSDP-only source at `01d1f8e` / restored branch state.
