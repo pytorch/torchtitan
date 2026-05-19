@@ -119,6 +119,10 @@ class ParallelDims:
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
             efsdp:   FSDP in the EP region.
+            grad_norm: 1D ``dp_shard * cp * tp`` mesh used by clip_grad_norm_.
+                     Excludes ``dp_replicate`` since HSDP grads are Replicate
+                     on that axis (each replica group computes the same
+                     answer in parallel).
 
         Note: Most dimensions above are created by unflattening the world mesh, except for loss,
         which is created by flattening the batch and cp dimensions.
@@ -127,6 +131,7 @@ class ParallelDims:
             ["pp", "batch", "cp", "tp"]  # dataloading_mesh
             ["pp", "dp_replicate", "fsdp", "tp"]  # dense_mesh
             ["pp", "dp_replicate", "efsdp", "ep"]  # sparse_mesh
+            ["pp", "dp_replicate", "grad_norm"]
 
         Note: DeviceMesh currently recreates the process group for each dimension.
         It should share the process group for the same dim group to avoid unnecessary
