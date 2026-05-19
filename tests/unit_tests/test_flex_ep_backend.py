@@ -20,6 +20,52 @@ def reset_flex_ep_workspace_cache():
     flex_ep_mod._clear_flex_ep_workspace_cache()
 
 
+class _FakeEPMesh:
+    def __init__(self, *, ep_size: int = 2, ep_rank: int = 0) -> None:
+        self._ep_size = ep_size
+        self._ep_rank = ep_rank
+        self._group = object()
+
+    def size(self) -> int:
+        return self._ep_size
+
+    def get_local_rank(self) -> int:
+        return self._ep_rank
+
+    def get_group(self) -> object:
+        return self._group
+
+
+def _allow_cpu_ep_workspace(monkeypatch):
+    def fake_allocate_workspace_storage(
+        *,
+        nvl_buffer_size,
+        device,
+        ep_size,
+        ep_rank,
+        ep_group,
+    ):
+        del ep_group
+        assert ep_size > 1
+        raw = torch.empty(nvl_buffer_size, device=device, dtype=torch.uint8)
+        raw.zero_()
+        peer_buffers = (raw,) * ep_size
+        # A single pointer selects PyTorch's local reference kernels while the
+        # router/workspace shape still follows EP>1.
+        buffers_cuda_ptrs = torch.tensor(
+            [peer_buffers[ep_rank].data_ptr()],
+            dtype=torch.int64,
+            device=device,
+        )
+        return raw, peer_buffers, buffers_cuda_ptrs
+
+    monkeypatch.setattr(
+        flex_ep_mod,
+        "_allocate_workspace_storage",
+        fake_allocate_workspace_storage,
+    )
+
+
 def test_make_experts_config_flex_ep():
     experts_config = make_experts_config(
         dim=16,
@@ -161,14 +207,23 @@ def test_deepseek_v3_flex_ep_config_uses_flex_grouped_experts():
 )
 def test_deepseek_v3_flex_ep_config_rejects_tp_cp_pp(parallelism_field):
     config = deepseek_v3_debugmodel_flex_ep()
+    config.parallelism.expert_parallel_degree = 2
     setattr(config.parallelism, parallelism_field, 2)
 
     with pytest.raises(ValueError, match="DP\\+EP"):
         config.model_spec.model.update_from_config(trainer_config=config)
 
 
+def test_deepseek_v3_flex_ep_config_requires_expert_parallelism():
+    config = deepseek_v3_debugmodel_flex_ep()
+
+    with pytest.raises(ValueError, match="expert_parallel_degree > 1"):
+        config.model_spec.model.update_from_config(trainer_config=config)
+
+
 def test_deepseek_v3_flex_ep_config_sets_router_force_load_balance_only():
     config = deepseek_v3_debugmodel_flex_ep()
+    config.parallelism.expert_parallel_degree = 2
     config.debug.moe_force_load_balance = True
 
     config.model_spec.model.update_from_config(trainer_config=config)
@@ -190,30 +245,6 @@ def test_flex_w13_pack_helper():
     assert w13.shape == (4, 16, 16)
     torch.testing.assert_close(w13[:, :8], w1)
     torch.testing.assert_close(w13[:, 8:], w3)
-
-
-def test_flex_ep_routers_reuse_ep1_workspace(monkeypatch):
-    monkeypatch.setattr(flex_ep_mod, "_ensure_flex_ep_imported", lambda: None)
-    router1 = flex_ep_mod.FlexEPRouter.create(
-        max_tokens=16,
-        dim=8,
-        num_experts=4,
-        top_k=2,
-        device=torch.device("cpu"),
-        ep_mesh=None,
-    )
-    router2 = flex_ep_mod.FlexEPRouter.create(
-        max_tokens=16,
-        dim=8,
-        num_experts=4,
-        top_k=2,
-        device=torch.device("cpu"),
-        ep_mesh=None,
-    )
-
-    assert router1 is not router2
-    assert router1.workspace is router2.workspace
-    assert router1.raw.data_ptr() == router2.raw.data_ptr()
 
 
 def test_flex_ep_routing_uses_factor_capacity():
@@ -267,7 +298,7 @@ def test_nvl_shared_buffer_accepts_larger_buffer_and_rejects_too_small():
     kwargs = {
         "max_tokens": 16,
         "dim": 8,
-        "ep_size": 1,
+        "ep_size": 2,
         "num_experts": 4,
         "top_k": 2,
     }
@@ -301,14 +332,15 @@ def test_flex_ep_capacity_guard_reports_capacity_without_balanced_requirement():
 
 
 def test_flex_ep_workspace_cache_and_views_include_capacity_factor(monkeypatch):
-    monkeypatch.setattr(flex_ep_mod, "_ensure_flex_ep_imported", lambda: None)
+    _allow_cpu_ep_workspace(monkeypatch)
+    ep_mesh = _FakeEPMesh()
     kwargs = {
         "max_tokens": 256,
         "dim": 8,
         "num_experts": 4,
         "top_k": 2,
         "device": torch.device("cpu"),
-        "ep_mesh": None,
+        "ep_mesh": ep_mesh,
     }
 
     router1 = flex_ep_mod.FlexEPRouter.create(**kwargs, capacity_factor=1.0)
@@ -340,6 +372,7 @@ def test_flex_ep_workspace_cache_and_views_include_capacity_factor(monkeypatch):
 def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch):
     import torch._higher_order_ops.flex_ep  # noqa: F401
 
+    _allow_cpu_ep_workspace(monkeypatch)
     zfill_calls = []
 
     def fake_zfill(input, begin_ofs, end_ofs, max_values_per_batch):
@@ -354,7 +387,7 @@ def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch):
         num_experts=4,
         top_k=2,
         device=torch.device("cpu"),
-        ep_mesh=None,
+        ep_mesh=_FakeEPMesh(),
     )
     build_dispatch_plan_fn, dispatch_fn = router.router_fns[:2]
     x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
@@ -439,13 +472,14 @@ def test_flex_ep_offset_ops_cpu_fallbacks_match_full_reference():
 
 def test_flex_ep_combine_does_not_zero_capacity_tail(monkeypatch):
     flex_ep_mod._ensure_flex_ep_imported()
+    _allow_cpu_ep_workspace(monkeypatch)
     router = flex_ep_mod.FlexEPRouter.create(
         max_tokens=5,
         dim=8,
         num_experts=4,
         top_k=2,
         device=torch.device("cpu"),
-        ep_mesh=None,
+        ep_mesh=_FakeEPMesh(),
     )
     build_dispatch_plan_fn, dispatch_fn, combine_fn, _, dispatch_bwd_fn = (
         router.router_fns

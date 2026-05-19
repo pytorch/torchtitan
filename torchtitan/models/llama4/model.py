@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_fixed_block_mask_mod,
 )
+from torchtitan.models.common.config_utils import validate_moe_comm_backend_parallelism
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -148,22 +149,10 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    token_dispatcher = getattr(
-                        layer_cfg.moe.experts, "token_dispatcher", None
+                    validate_moe_comm_backend_parallelism(
+                        layer_cfg.moe,
+                        expert_parallel_degree=parallelism.expert_parallel_degree,
                     )
-                    comm_backend = (
-                        getattr(token_dispatcher, "comm_backend", "standard")
-                        if token_dispatcher is not None
-                        else "flex_ep"
-                    )
-                    if (
-                        comm_backend in ("deepep", "hybridep")
-                        and parallelism.expert_parallel_degree == 1
-                    ):
-                        raise ValueError(
-                            f"{comm_backend.upper()} requires expert parallelism "
-                            "(expert_parallel_degree > 1)."
-                        )
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(

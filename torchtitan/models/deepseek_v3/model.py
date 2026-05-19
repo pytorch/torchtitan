@@ -16,6 +16,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     ScaledDotProductAttention,
 )
+from torchtitan.models.common.config_utils import validate_moe_comm_backend_parallelism
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
@@ -223,13 +224,9 @@ class DeepSeekV3Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    token_dispatcher = getattr(
-                        layer_cfg.moe.experts, "token_dispatcher", None
-                    )
-                    comm_backend = (
-                        getattr(token_dispatcher, "comm_backend", "standard")
-                        if token_dispatcher is not None
-                        else "flex_ep"
+                    comm_backend = validate_moe_comm_backend_parallelism(
+                        layer_cfg.moe,
+                        expert_parallel_degree=parallelism.expert_parallel_degree,
                     )
                     if comm_backend == "flex_ep" and (
                         parallelism.tensor_parallel_degree != 1
@@ -240,14 +237,6 @@ class DeepSeekV3Model(Decoder):
                             "DeepSeekV3 FlexEP v1 supports only DP+EP. Set "
                             "tensor_parallel_degree=1, context_parallel_degree=1, "
                             "and pipeline_parallel_degree=1."
-                        )
-                    if (
-                        comm_backend in ("deepep", "hybridep")
-                        and parallelism.expert_parallel_degree == 1
-                    ):
-                        raise ValueError(
-                            f"{comm_backend.upper()} requires expert parallelism "
-                            "(expert_parallel_degree > 1)."
                         )
 
             if parallelism.context_parallel_degree > 1 and not isinstance(

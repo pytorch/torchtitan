@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
+from torchtitan.models.common.config_utils import validate_moe_comm_backend_parallelism
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -77,6 +78,10 @@ class Qwen3VLModel(Qwen3Model):
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
+                    validate_moe_comm_backend_parallelism(
+                        layer_cfg.moe,
+                        expert_parallel_degree=parallelism.expert_parallel_degree,
+                    )
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )

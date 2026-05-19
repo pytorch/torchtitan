@@ -299,3 +299,28 @@ def make_experts_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
     )
+
+
+def get_moe_comm_backend(moe_config: MoE.Config) -> str:
+    token_dispatcher = getattr(moe_config.experts, "token_dispatcher", None)
+    if token_dispatcher is not None:
+        return getattr(token_dispatcher, "comm_backend", "standard")
+    if isinstance(moe_config.experts, FlexGroupedExperts.Config):
+        return "flex_ep"
+    return "standard"
+
+
+def validate_moe_comm_backend_parallelism(
+    moe_config: MoE.Config,
+    *,
+    expert_parallel_degree: int,
+) -> str:
+    comm_backend = get_moe_comm_backend(moe_config)
+    if comm_backend in ("deepep", "hybridep", "flex_ep") and (
+        expert_parallel_degree == 1
+    ):
+        raise ValueError(
+            f"{comm_backend.upper()} requires expert parallelism "
+            "(expert_parallel_degree > 1)."
+        )
+    return comm_backend

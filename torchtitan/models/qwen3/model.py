@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
     GQAttention,
     VarlenAttention,
 )
+from torchtitan.models.common.config_utils import validate_moe_comm_backend_parallelism
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -113,9 +114,13 @@ class Qwen3Model(Decoder):
                 # Sync rope max_seq_len
                 self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            if debug is not None:
-                for layer_cfg in self.layers:
-                    if layer_cfg.moe is not None:
+            for layer_cfg in self.layers:
+                if layer_cfg.moe is not None:
+                    validate_moe_comm_backend_parallelism(
+                        layer_cfg.moe,
+                        expert_parallel_degree=parallelism.expert_parallel_degree,
+                    )
+                    if debug is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
                         )
