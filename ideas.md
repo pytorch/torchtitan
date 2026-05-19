@@ -539,6 +539,15 @@
   Attempt: run60 at source state `e213be2` was invalid; external VLLM workers appeared on GPUs 4-7 and caused a contaminated OOM before any step metrics.
   Result: discarded on valid retry at source state `e213be2`; 8,762 tps with finite decreasing loss, below the 8,835 prefetch best.
 
+- Idea: rerun exact prefetch flex best
+  Current best source commit: 7c1c351
+  Source: variance check after new FSDP prefetch best
+  Expected mechanism: Repeating the exact current-best command measures run-to-run variance in both throughput and short loss trend without introducing another source or config variable.
+  Supporting evidence: Run59 improved the best from 8,489 to 8,835 tps, while the selective-FP8 follow-up reached 8,762 and preserved loss sanity. The current search has shown non-trivial throughput variance, so a direct rerun can either raise the best or confirm the prefetch gain is robust.
+  Planned source/config changes: None; use current prefetch source with flex attention and no FP8 converter.
+  Planned command or config overrides: Exact run59 command with a new dump folder.
+  Success criteria and expected risk: Keep if it beats 8,835 with finite decreasing loss; otherwise record as diagnostic variance/discard while preserving run59 as the best measured result.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
