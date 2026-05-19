@@ -711,3 +711,25 @@ Interpretation:
 
 - Do not use this run to conclude budget 0.9 is infeasible.
 - Retry memory-budget AC 0.9 after large external GPU allocations clear.
+
+## Experiment 23: Memory-Budget AC 0.9 Retry, Invalid Due External GPU Use
+
+Source state: `7ef6201`, using the `a593f3a` AC-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run23-memory-budget-ac09-compile-bf16-lbs6-retry > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid, not a candidate result.
+- The run OOMed before step 1.
+- The OOM log showed a transient external process `3474354` holding 151.35 GiB on GPU 0, plus the small 616 MiB `train_perf_model` process.
+- The external large process was gone by the post-run `nvidia-smi`.
+
+Interpretation:
+
+- This is another contaminated run. Do not use it to judge budget 0.9.
+- Retry budget 0.9 once the node is clear.

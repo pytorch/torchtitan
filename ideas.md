@@ -232,3 +232,4 @@
   Planned command or config overrides: Same memory-budget AC local-batch-6 command with `--activation_checkpoint.memory_budget=0.9`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is OOM if 0.9 saves too little memory.
   Result: invalid at source state `14a0c41`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
+  Result: invalid again at source state `7ef6201`; OOM was contaminated by a transient external 151 GiB process on GPU 0. Retry on a clear node.
