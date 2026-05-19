@@ -160,3 +160,13 @@
   Planned source/config changes: Implement Qwen3 dense sharding config for TP and call `model.parallelize(tp_mesh)` before compile and FSDP wrapping. Keep CP/PP/EP unsupported for this experiment.
   Planned command or config overrides: Current-best command plus `--parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4`.
   Success criteria and expected risk: Success is a 10-step run with finite decreasing loss and tps above 8,391. Risk is DTensor placement mismatch in Qwen3 qk norm, attention, or chunked loss.
+  Result: discarded at source state `4512daa`; TP=2 ran successfully but reached only 7,418 tps at local batch size 5, with 99.7 GiB peak memory.
+
+- Idea: TP=2 with local batch 10
+  Current best source commit: 4512daa
+  Source: result-driven follow-up from TP memory headroom
+  Expected mechanism: TP=2 local batch 5 only used 99.7 GiB and had global batch size 20. Raising local batch size to 10 restores global batch size 40, uses the memory released by output/loss sharding, and may recover or exceed the no-TP best throughput.
+  Supporting evidence: No-TP local batch 5 reached 8,391 tps at global batch size 40 but was memory-bound at 168.7 GiB. TP=2 local batch 5 was slower but had about 69 GiB more headroom.
+  Planned source/config changes: None.
+  Planned command or config overrides: TP=2/FSDP=4 compile+BF16 command with `--training.local_batch_size=10`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no OOM. Risk is activation memory scaling beyond the available headroom or TP communication still dominating.

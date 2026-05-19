@@ -479,3 +479,33 @@ Interpretation:
 - Compiling the loss is not optional for the current best local-batch-5 setup; it appears to reduce memory enough for the first backward to fit.
 - This also confirms that the loss/output projection path is the memory-critical boundary, not optimizer state.
 - The next useful memory-reduction idea should shard the output projection/loss path rather than remove loss compile.
+
+## Experiment 14: TP=2, FSDP=4, Compile+BF16 Local Batch 5
+
+Source state: `4512daa`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --parallelism.tensor_parallel_degree=2 --parallelism.data_parallel_shard_degree=4 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run14-tp2-fsdp4-compile-bf16-lbs5 > run.log 2>&1
+```
+
+What changed:
+
+- Added Qwen3 dense TP sharding via the common decoder sharding helpers.
+- Command used TP=2 and FSDP=4, with compile, BF16, loss parallel, and sequence parallel enabled.
+
+Result:
+
+- Status: discard for this command, because throughput is below the current best.
+- Step 10 `tps`: 7,418, below the 8,391 current best.
+- Step 10 MFU: 30.99%.
+- Step 10 peak memory: 99.67 GiB, 55.88%.
+- Loss moved from 3.10673 at step 1 to 2.08566 at step 10; finite and decreasing.
+- Global batch size was 20 because TP does not contribute data parallelism.
+
+Interpretation:
+
+- TP=2 is functionally viable and substantially reduces memory.
+- At the same local batch size, the extra TP communication and lower global batch lose throughput.
+- The memory headroom is large enough to test local batch size 10 under TP=2, matching the no-TP best's global batch size of 40 while retaining output/loss sharding.
