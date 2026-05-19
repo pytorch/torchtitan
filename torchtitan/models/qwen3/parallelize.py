@@ -84,10 +84,20 @@ def parallelize_qwen3(
         "reshard_after_forward": reshard_after_forward,
     }
 
-    for layer in model.layers.values():
+    layers = list(model.layers.values())
+    for layer in layers:
         fully_shard(layer, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
+
+    for layer, next_layer in zip(layers, layers[1:]):
+        layer.set_modules_to_forward_prefetch([next_layer])
+    if layers:
+        layers[-1].set_modules_to_forward_prefetch([model.lm_head])
+        model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
+        for layer, prev_layer in zip(reversed(layers[1:]), reversed(layers[:-1])):
+            layer.set_modules_to_backward_prefetch([prev_layer])
+
     disable_fsdp_gradient_division(model)
     logger.info(
         "Applied baseline Qwen3 FSDP with dp_shard=%s, reshard_after_forward=%s",
