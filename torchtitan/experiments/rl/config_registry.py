@@ -252,7 +252,9 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
         num_rollout_tasks=4,
         max_rollout_turns=8,
         num_validation_samples=20,
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        # Same torch.compile aot_eager s59-empty-sources bug as the 1.7B
+        # SumDigits config; disabled here too.
+        compile=CompileConfig(enable=False),
         train_dataset=AlphabetSortDataset.Config(
             seed=1337420,
             min_turns=3,

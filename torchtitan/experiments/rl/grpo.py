@@ -709,7 +709,15 @@ class RLTrainer(Configurable):
         cfg = self.config
         num_steps = cfg.num_steps
         shutdown = asyncio.Event()
+        # ``_train_step`` counts scheduled iterations of the training loop
+        # (skipped + real); termination compares against ``num_steps``.
+        # ``_policy_version`` counts real optimizer pushes (= the
+        # generator's weight version after pull); ``ReplayBuffer.sample``
+        # uses it to age samples, so SKIPs don't artificially evict
+        # in-flight rollouts that were sampled at the still-current
+        # generator weights.
         self._train_step = 0
+        self._policy_version = 0
 
         logger.info("Pre-training validation")
         pre_validation = await self.validate()
@@ -719,23 +727,23 @@ class RLTrainer(Configurable):
         async def continuous_rollouts(task_idx: int) -> None:
             """Run one rollout-producer coroutine.
 
-            Each task picks a unique slot ``task_idx`` from each batch of
-            ``num_rollout_tasks`` examples the dataset hands back, so the
-            ``N`` concurrent producers always sample distinct prompts
-            within one dataset step. Without this, all tasks would call
-            ``sample_groups(step=..., num_groups=1)`` and burn compute on
-            duplicate rollouts of the same prompt.
+            Each task uses ``dataset_step * num_rollout_tasks + task_idx`` as
+            the dataset step so the ``N`` concurrent producers always
+            sample distinct prompts (the dataset seeds on
+            ``f"{seed}:{step}:{group_idx}"``). Without this, all tasks
+            calling ``sample_groups(step=..., num_groups=1)`` would burn
+            compute on duplicate rollouts of the same prompt.
             """
             train_dataset: EnvDataset = cfg.train_dataset.build()
-            dataset_step = 0
+            iteration = 0
             while not shutdown.is_set():
                 examples = train_dataset.sample_groups(
-                    step=dataset_step,
-                    num_groups=cfg.num_rollout_tasks,
+                    step=iteration * cfg.num_rollout_tasks + task_idx,
+                    num_groups=1,
                 )
-                if not examples or task_idx >= len(examples):
+                if not examples:
                     return
-                example = examples[task_idx]
+                example = examples[0]
                 with sl.log_trace_span("rollout_group"):
                     rollouts = await self._run_group(
                         builder_config=cfg.train_builder,
@@ -748,14 +756,14 @@ class RLTrainer(Configurable):
                     await self.replay_buffer.add(samples)
 
                 if cfg.log_samples:
-                    if dataset_step % 4 == 0 and task_idx == 0:
+                    if iteration % 4 == 0 and task_idx == 0:
                         log_first_sample(rollouts)
                     dump_rollouts_jsonl(
                         rollouts,
                         dump_folder=cfg.dump_folder,
                         train_step=self._train_step,
                     )
-                dataset_step += 1
+                iteration += 1
 
         skipped_zero_advantage_steps = 0
 
@@ -763,8 +771,12 @@ class RLTrainer(Configurable):
             nonlocal skipped_zero_advantage_steps
             while self._train_step < num_steps and not shutdown.is_set():
                 try:
+                    # Age samples against the actual published weight
+                    # version, not the scheduled iteration. A SKIP doesn't
+                    # push new weights, so in-flight rollouts at the
+                    # current version are still on-policy.
                     batches_per_rank = await self.replay_buffer.sample(
-                        curr_policy_version=self._train_step,
+                        curr_policy_version=self._policy_version,
                     )
                 except BufferClosedError:
                     return
@@ -808,12 +820,15 @@ class RLTrainer(Configurable):
                 metrics = {**fb, **opt.metrics}
 
                 self._train_step += 1
+                self._policy_version += 1
                 sl.set_step(self._train_step)
 
                 with sl.log_trace_span("trainer_push_model_state_dict"):
                     await self.trainer.push_model_state_dict.call()
                 with sl.log_trace_span("generator_pull_model_state_dict"):
-                    await self.generator.pull_model_state_dict.call(self._train_step)
+                    await self.generator.pull_model_state_dict.call(
+                        self._policy_version
+                    )
 
                 step_time = time.perf_counter() - step_start
                 if not math.isfinite(metrics.get("loss/mean", 0.0)):
