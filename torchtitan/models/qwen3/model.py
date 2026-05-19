@@ -119,10 +119,6 @@ class Qwen3Model(Decoder):
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
                         )
-                        if hasattr(layer_cfg.moe.experts, "_debug_force_load_balance"):
-                            layer_cfg.moe.experts._debug_force_load_balance = (
-                                debug.moe_force_load_balance
-                            )
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config

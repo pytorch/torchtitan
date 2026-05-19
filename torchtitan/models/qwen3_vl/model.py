@@ -80,10 +80,6 @@ class Qwen3VLModel(Qwen3Model):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    if hasattr(layer_cfg.moe.experts, "_debug_force_load_balance"):
-                        layer_cfg.moe.experts._debug_force_load_balance = (
-                            debug.moe_force_load_balance
-                        )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:

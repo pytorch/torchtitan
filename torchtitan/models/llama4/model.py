@@ -148,10 +148,6 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    if hasattr(layer_cfg.moe.experts, "_debug_force_load_balance"):
-                        layer_cfg.moe.experts._debug_force_load_balance = (
-                            debug.moe_force_load_balance
-                        )
                     token_dispatcher = getattr(
                         layer_cfg.moe.experts, "token_dispatcher", None
                     )
