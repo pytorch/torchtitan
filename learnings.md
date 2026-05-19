@@ -1526,6 +1526,33 @@ Interpretation:
 - Memory-budget AC allows a larger batch to fit, but local batch size 7 is still slower than the no-AC flex best.
 - Since peak memory remains below the no-AC best and below the 95% risk line, test local batch size 8 once before abandoning this AC branch.
 
+## Experiment 53: Flex Attention With Memory-Budget AC And Local Batch Size 8
+
+Source state: `2ec5fb2`.
+
+Source/config change:
+
+- Same `apply_ac` hook source as run52.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=8 --comm.trace_buf_size=0 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run53-flex-memory-budget-ac09-compile-bf16-lbs8-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run OOMed during first-step backward in compiled flex-attention backward.
+- Error: `RuntimeError: CUDA driver error: out of memory`.
+- Only small external allocations were visible after the run: 616 MiB `train_perf_model` and a 1.5 GiB Python process on one GPU.
+
+Interpretation:
+
+- Memory-budget AC 0.9 cannot scale the flex best to local batch size 8.
+- The local batch 7 result was already far below the best, so do not keep the AC hook or continue this AC batch-scaling branch for now.
+- Restore the no-AC flex-without-FP8 source as the current best.
+
 ## Manager Review After Experiment 29
 
 Current best:

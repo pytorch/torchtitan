@@ -476,6 +476,7 @@
   Planned source/config changes: Keep the `apply_ac` hook source from run52.
   Planned command or config overrides: Run52 command with `--training.local_batch_size=8`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are OOM, allocator instability, or continued recompute overhead.
+  Result: crashed at source state `2ec5fb2`; local batch 8 OOMed in compiled flex-attention backward. The local batch 7 AC result was already too slow, so abandon this AC branch for now.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
