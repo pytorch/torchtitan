@@ -2039,7 +2039,6 @@ class FlexEPWorkspace:
         ep_mesh: DeviceMesh | None,
         capacity_factor: float,
     ) -> "FlexEPWorkspace":
-        capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         ep_size = 1 if ep_mesh is None else ep_mesh.size()
         ep_rank = 0 if ep_mesh is None else ep_mesh.get_local_rank()
         if num_experts % ep_size != 0:
@@ -2215,7 +2214,6 @@ class FlexEPWorkspace:
         top_k: int,
         capacity_factor: float,
     ) -> NvlSharedBuffer:
-        capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         view_key = (
             max_tokens,
             dim,
@@ -2461,7 +2459,6 @@ class FlexEPRouter:
         num_ctas: int = DEFAULT_NUM_CTAS,
         capacity_factor: float = 1.0,
     ) -> None:
-        capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
         self.max_tokens = max_tokens
         self.dim = dim
         self.num_experts = num_experts
