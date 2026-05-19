@@ -416,6 +416,7 @@
   Planned source/config changes: Restore the run41 source shape: FP8 rowwise auto-filter converter with `attn_backend="flex"`.
   Planned command or config overrides: Run41 command plus `--optimizer.lr=4e-4`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is that LR does not fix a semantic/masking issue, or that lower LR only masks an invalid attention behavior.
+  Result: discarded at source state `be0f401`; lower LR recovered finite decreasing loss, but throughput was 8,432 tps, below the 8,489 flex-without-FP8 best.
 
 - Idea: FP8 rowwise_with_gw_hp without auto-filter
   Current best source commit: 477f662

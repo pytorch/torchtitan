@@ -1348,6 +1348,34 @@ Interpretation:
 - The new current best is flex attention without the FP8 converter, with compile+BF16, local batch size 5, and NCCL flight recorder disabled.
 - Since run41's FP8+flex path was still faster at 8,544 tps but invalid, the next narrow follow-up is to test whether lowering LR recovers the loss trend while preserving the faster FP8+flex kernels.
 
+## Experiment 47: FP8 Flex Attention With Lower Learning Rate
+
+Source state: `be0f401`.
+
+Source/config change:
+
+- `qwen3_14b()` restored the FP8 rowwise auto-filter converter while keeping `attn_backend="flex"`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --optimizer.lr=4e-4 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run47-fp8-flex-lr4e-4-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,432, below the 8,489 current best.
+- Step 10 MFU: 35.23%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.55363 at step 1 to 11.81441 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Lowering LR recovered the short-run loss trend for FP8+flex, so run41's loss failure is update-size-sensitive or numerically marginal rather than an immediate semantic failure.
+- The recovered FP8+flex run is slower than the flex-without-FP8 best, so do not keep this source/command.
+- Restore the flex-without-FP8 source as the current best before continuing.
+
 ## Manager Review After Experiment 29
 
 Current best:
