@@ -120,3 +120,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current-best command plus `--training.local_batch_size=5`.
   Success criteria and expected risk: Success is tps above 8,168 with finite decreasing loss and no OOM. Risk is memory still exceeding capacity during backward.
+  Result: kept at source state `f6ae44e` with 8,391 tps, 35.06% MFU, and 168.7 GiB peak memory.
+
+- Idea: profile compile+BF16 local batch 5 best
+  Current best source commit: f6ae44e
+  Source: result-driven profile follow-up
+  Expected mechanism: The best command now differs materially from the previous profiled command. A new trace should show whether compile shifted the bottleneck toward FSDP collectives, attention, optimizer, or remaining GEMMs.
+  Supporting evidence: Current best is 8,391 tps and 94.61% memory. Further memory-increasing ideas are risky without better bottleneck evidence.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current-best command plus profiler overrides.
+  Success criteria and expected risk: Success is trace generation and a new roofline note. Profiled throughput is diagnostic only, not ranked against unprofiled candidates.

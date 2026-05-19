@@ -367,3 +367,34 @@ Interpretation:
 
 - BF16 becomes throughput-positive once the model blocks are compiled. This is the best result so far and has much safer memory than the original FSDP-only path.
 - The new memory headroom makes a local batch-size increase worth testing again, now under compile+BF16 where local batch 5 may fit.
+
+## Experiment 10: Compile And BF16 With Local Batch 5
+
+Source state: `f6ae44e`, using the `51369ea` compile-hook source.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run10-compile-bf16-lbs5 > run.log 2>&1
+```
+
+What changed:
+
+- Command-only override `--training.local_batch_size=5` on top of compile+BF16.
+- No source, FSDP, AC, sequence-length, optimizer, or parallelism changes.
+
+Result:
+
+- Status: keep, new current best.
+- Step 10 `tps`: 8,391, up from 8,168.
+- Step 10 MFU: 35.06%, up from 34.13%.
+- Step 10 peak memory: 168.74 GiB, 94.61% of reported capacity.
+- Loss moved from 12.51130 at step 1 to 10.05051 at step 10; finite and decreasing.
+- Global valid tokens rose to 163,840 at step 10.
+- Later-step fwd/bwd time was about 1.37-1.41 s versus about 1.13-1.16 s for local batch 4, but extra tokens per step improved reported tps.
+
+Interpretation:
+
+- Compile+BF16 created enough memory headroom to make local batch 5 viable and throughput-positive.
+- Peak memory is close to the program's rough 95% risk threshold but still below it for this 10-step run.
+- Local batch 6 is likely risky without another memory reduction. Before pushing memory further, profile the new best to see whether the bottleneck shifted after compile+BF16+larger batch.
