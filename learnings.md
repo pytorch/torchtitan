@@ -1472,6 +1472,33 @@ Interpretation:
 - The view-tensor FSDP warning makes this source line unattractive even though the short loss trend decreases.
 - Restore the flex-without-FP8 source as the current best.
 
+## Experiment 51: Flex Attention Best With Local Batch Size 6
+
+Source state: `4e5b73f`.
+
+Source/config change:
+
+- None. Source was the current flex-without-FP8 best.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run51-flex-compile-bf16-lbs6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run OOMed during first-step loss/backward before a step metric was emitted.
+- Rank 0 failed in `lm_head(h_chunk)` trying to allocate 892 MiB with only 683.5 MiB free.
+- Other ranks failed in FSDP backward all-gather trying to allocate 1.45 GiB with about 1.11 GiB free.
+- The training process held about 176.95-177.22 GiB, with only the known 616 MiB small `train_perf_model` process visible externally.
+
+Interpretation:
+
+- Current flex best cannot directly raise local batch size to 6; the memory headroom at local batch size 5 is not enough.
+- Any further batch-size increase needs memory relief, for example activation checkpointing or a different sharding/parallelism layout.
+
 ## Manager Review After Experiment 29
 
 Current best:

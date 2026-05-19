@@ -456,6 +456,7 @@
   Planned source/config changes: None; use current flex-without-FP8 best source.
   Planned command or config overrides: Current best command with `--training.local_batch_size=6`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Main risk is OOM or allocator instability above the 95% memory-risk line.
+  Result: crashed at source state `4e5b73f`; local batch size 6 reached about 177 GiB in the training process and OOMed during first-step loss/backward.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
