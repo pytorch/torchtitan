@@ -531,6 +531,13 @@ def cudagraph_pass(
             f"GraphModule (e.g. full_inductor_compilation)."
         )
 
+    if not is_cudagraph_compatible(gm):
+        logger.warning(
+            "Skipping cudagraph: graph is not compatible after all preceding "
+            "passes. Use --compile.disable_passes cudagraph_pass to silence."
+        )
+        return gm
+
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
     gm.forward = CUDAGraphWrapper(
