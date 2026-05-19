@@ -1610,6 +1610,34 @@ Interpretation:
 - CP=2 with flex attention is slower, more memory-risky, and fails the short loss sanity check.
 - Do not keep this CP source line. Restore the no-CP flex-without-FP8 source as the current best.
 
+## Experiment 56: Flex Attention Best With Structured Logging Disabled
+
+Source state: `b29e75a`.
+
+Source/config change:
+
+- None. Source was the current flex-without-FP8 best.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --debug.no-enable-structured-logging --dump_folder=outputs/autoresearch/may19-qwen3-14b/run56-flex-no-structured-logging-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,455, below the 8,489 current best.
+- Step 10 MFU: 31.15%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.41723 at step 1 to 19.26537 at step 10; finite but increasing.
+- Log confirmed structured logging was disabled via `DebugConfig.enable_structured_logging=False`.
+
+Interpretation:
+
+- Disabling structured logging does not improve the flex best and fails the loss sanity check in this run.
+- Keep structured logging enabled for future candidates.
+
 ## Manager Review After Experiment 29
 
 Current best:

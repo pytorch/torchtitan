@@ -506,6 +506,7 @@
   Planned source/config changes: None; use current flex-without-FP8 best source.
   Planned command or config overrides: Current best command plus `--debug.no-enable-structured-logging`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is no effect or a small regression, as seen on the older FP8 source.
+  Result: discarded at source state `b29e75a`; 7,455 tps and loss increased from 12.41723 to 19.26537.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
