@@ -781,3 +781,24 @@ Interpretation:
 - Budgets 0.8, 0.9, and 0.95 all land around 146.2 GiB and 8.31-8.33k tps, so this knob is likely selecting the same or effectively equivalent rematerialization plan.
 - The memory-budget AC line should be abandoned for now; its extra local batch does not overcome recompute/compile overhead.
 - Restore source to the no-AC best path before testing non-AC ideas, because the AC hook is not part of the current best implementation.
+
+## Experiment 26: BF16 Optimizer States, Invalid Due External GPU Use
+
+Source state: `99a75e3`, with Qwen3 source restored to the no-AC compile+FSDP best path.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --optimizer.implementation=fused_opt_states_bf16 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run26-compile-bf16-lbs5-bf16-optimizer-states > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid, not a candidate result.
+- The run OOMed during the first forward FSDP all-gather.
+- The OOM log and post-run `nvidia-smi` showed external `VLLM::Worker_TP*` processes holding about 102 GiB on GPUs 4-7.
+
+Interpretation:
+
+- This does not evaluate BF16 optimizer states because the target 8-GPU node was not available.
+- Retry the same optimizer-state candidate after large external GPU allocations clear.

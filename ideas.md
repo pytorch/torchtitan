@@ -243,6 +243,34 @@
   Planned source/config changes: None.
   Planned command or config overrides: Same memory-budget AC local-batch-6 command with `--activation_checkpoint.memory_budget=0.95`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is OOM if the compiler stores too many activations or no speed change if the selected rematerialization plan is unchanged.
+  Result: discarded at source state `4cff4ed`; 8,329 tps, 34.80% MFU, 146.2 GiB. Throughput did not improve over budgets 0.8 or 0.9, and loss barely decreased from 12.26335 to 11.98264.
+
+- Idea: disable NCCL flight recorder on current best
+  Current best source commit: f6ae44e
+  Source: profile and runtime-overhead follow-up
+  Expected mechanism: TorchTitan enables the torch/NCCL flight recorder by default with `comm.trace_buf_size=20000`. The current-best profile still has a large NCCL collective bucket, so disabling recorder writes/bookkeeping may reduce communication-side overhead without changing model math or layout.
+  Supporting evidence: The current best is mixed compute/communication bound, with the profiled compile+BF16 local-batch-5 run showing about 1.10 s of NCCL collectives. Recent memory-budget AC tuning plateaued below best, so a low-risk command-only runtime-overhead test is worthwhile.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current-best command plus `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and similar memory. Risk is little or no effect; the tradeoff is losing timeout flight-recorder diagnostics for that run.
+
+- Idea: FP8 rowwise linear converter on current best
+  Current best source commit: f6ae44e
+  Source: profile and roofline
+  Expected mechanism: GEMM/compiled matmul remains the largest profile bucket, and B200 supports hardware FP8. Applying the existing `Float8LinearConverter` to Qwen3 dense linear layers may reduce GEMM time and memory bandwidth while preserving the compile+BF16 FSDP layout.
+  Supporting evidence: The current best's profile is mixed compute/communication, but compiled matmul kernels are still the largest bucket. Memory-budget AC improved memory but not speed, so attacking matmul efficiency is the next distinct bottleneck. The program explicitly allows converter changes in `model_registry("14B", ...)`.
+  Planned source/config changes: Edit only `qwen3_14b()` to pass `converters=[Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)]` to `model_registry("14B", ...)`, with the required import from `torchtitan.components.quantization`.
+  Planned command or config overrides: Current-best command unchanged: `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite, non-exploding loss. Risks are torchao/compile incompatibility, FP8 numerical instability, or slower kernels if conversion includes layers that do not benefit.
+
+- Idea: memory-budget AC 0.9 with local batch 7
+  Current best source commit: f6ae44e
+  Source: result-driven memory-headroom follow-up
+  Expected mechanism: Memory-budget AC local batch 6 nearly matched the best while using only 146.2 GiB. Increasing only local batch size to 7 may convert that unused memory into enough additional work per step to overcome the rematerialization overhead.
+  Supporting evidence: Budgets 0.8, 0.9, and 0.95 all used the same 146.2 GiB at local batch 6 and reached 8,312-8,331 tps. Budget 0.9 had the healthiest recent loss trend, while 0.95 barely decreased loss. There is roughly 22 GiB of headroom below the no-AC local-batch-5 best's 168.7 GiB peak.
+  Planned source/config changes: Use the existing AC-hook source state needed for memory-budget AC; no new source changes.
+  Planned command or config overrides: Memory-budget AC command with `--activation_checkpoint.memory_budget=0.9 --training.local_batch_size=7`, keeping compile and BF16 enabled.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and peak memory below the OOM cliff. Risk is that memory scales above capacity or rematerialization overhead still dominates.
   Result: discarded at source state `4cff4ed`; 8,329 tps, 34.80% MFU, 146.2 GiB. Budget 0.95 did not improve on 0.9 and stayed below the best.
 
 - Idea: BF16 optimizer states on compile+BF16 local batch 5
@@ -253,3 +281,4 @@
   Planned source/config changes: Restore Qwen3 source to the no-AC best path, then no source change for the optimizer candidate.
   Planned command or config overrides: Best compile+BF16 local-batch-5 command plus `--optimizer.implementation=fused_opt_states_bf16`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is no speedup or a small slowdown if optimizer state dtype conversion overhead outweighs memory savings.
+  Result: invalid at source state `99a75e3`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
