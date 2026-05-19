@@ -1007,6 +1007,28 @@ Interpretation:
 - However, broad conversion also reduces peak memory by about 39.8 GiB versus the current best, leaving room to test a larger local batch.
 - The next direct follow-up is local batch size 8 on the no-auto-filter FP8 path to see whether extra tokens per step can amortize the broader-conversion overhead.
 
+## Experiment 34: FP8 Rowwise Without Auto-Filter, Local Batch 8, Invalid Due External GPU Use
+
+Source state: `a04a025`, using the no-auto-filter FP8 source from `582d685`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=8 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run34-fp8-rowwise-no-auto-filter-compile-bf16-lbs8-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid, not a candidate result.
+- The run OOMed before step 1 completed.
+- Post-run `nvidia-smi` showed external `VLLM::Worker_TP*` processes holding about 99 GiB on GPUs 4-7.
+- The OOM messages reported the external process memory alongside the TorchTitan rank memory.
+
+Interpretation:
+
+- Do not use this to conclude local batch 8 is infeasible.
+- Retry the same no-auto-filter FP8 local-batch-8 candidate after large external GPU allocations clear.
+
 ## Manager Review After Experiment 29
 
 Current best:

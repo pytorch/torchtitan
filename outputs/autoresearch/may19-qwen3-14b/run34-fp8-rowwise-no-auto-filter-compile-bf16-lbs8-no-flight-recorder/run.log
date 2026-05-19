@@ -1,0 +1,403 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=8 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run34-fp8-rowwise-no-auto-filter-compile-bf16-lbs8-no-flight-recorder
+W0519 14:27:19.292000 611284 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 14:27:19.292000 611284 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 14:27:19.292000 611284 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 14:27:19.292000 611284 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 14:27:27.568000 617952 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 14:27:28,450 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 14:27:28,456 - root - INFO - Float8 training active with recipe rowwise
+[rank0]:[titan] 2026-05-19 14:27:28,457 - root - INFO - Swapped to Float8Linear layers
+[rank0]:[titan] 2026-05-19 14:27:28,515 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run34-fp8-rowwise-no-auto-filter-compile-bf16-lbs8-no-flight-recorder/structured_logs/training.global_rank_0.20260519-142728-WFGPXI.jsonl
+[rank0]:[titan] 2026-05-19 14:27:29,798 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 14:27:29,801 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 14:27:29,809 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 14:27:29,809 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-19 14:27:33,263 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:[titan] 2026-05-19 14:27:33,269 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 14:27:33,301 - root - INFO - Building qwen3 14B
+[rank0]:[titan] 2026-05-19 14:27:33,398 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-19 14:27:33,590 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-19 14:27:33,590 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-19 14:27:33,590 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-19 14:27:33,609 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-19 14:27:33,701 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-19 14:27:34,251 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-19 14:27:34,252 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-19 14:27:34,254 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-19 14:27:34,254 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-19 14:27:34,272 - root - INFO - Trainer is initialized with local batch size 8, global batch size 64, gradient accumulation steps 1, sequence length 4096, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-19 14:27:34,272 - root - INFO - Training starts at step 1
+W0519 14:27:48.799000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 617952 closing signal SIGTERM
+W0519 14:27:48.800000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 617956 closing signal SIGTERM
+W0519 14:27:48.800000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 617962 closing signal SIGTERM
+W0519 14:27:48.802000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 617966 closing signal SIGTERM
+W0519 14:27:48.807000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 617974 closing signal SIGTERM
+W0519 14:27:48.810000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 617978 closing signal SIGTERM
+W0519 14:27:48.811000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 617987 closing signal SIGTERM
+E0519 14:27:53.278000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 7 (pid: 617996) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0519 14:27:53.284000 611284 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_tk56zcoz/none_inz9jc9s/attempt_0/7/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-19_14:27:53
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : -15 (pid: 617952)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 617952
+[2]:
+  time      : 2026-05-19_14:27:53
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : -15 (pid: 617956)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 617956
+[3]:
+  time      : 2026-05-19_14:27:53
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : -15 (pid: 617962)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 617962
+[4]:
+  time      : 2026-05-19_14:27:53
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : -15 (pid: 617966)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 617966
+[5]:
+  time      : 2026-05-19_14:27:45
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : 1 (pid: 617974) 
+  error_file: /tmp/torchelastic_tk56zcoz/none_inz9jc9s/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/nm/cnmzfnyb7ce7uibtixg5r375yvima426b57bc3fr623ntvzjzjma.py", line 1916, in call
+      buf58 = empty_strided_cuda((32768, 17408), (17408, 1), torch.bfloat16)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.06 GiB. GPU 4 has a total capacity of 178.35 GiB of which 343.44 MiB is free. Process 592502 has 96.66 GiB memory in use. Including non-PyTorch memory, this process has 81.32 GiB memory in use. Of the allocated memory 79.17 GiB is allocated by PyTorch, and 575.27 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[6]:
+  time      : 2026-05-19_14:27:45
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : 1 (pid: 617978) 
+  error_file: /tmp/torchelastic_tk56zcoz/none_inz9jc9s/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/2y/c2y3ctrxw7upowaedkpockni6j67ehdbkbpgqnxur44ttiawud4n.py", line 1916, in call
+      buf58 = empty_strided_cuda((32768, 17408), (17408, 1), torch.bfloat16)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.06 GiB. GPU 5 has a total capacity of 178.35 GiB of which 343.44 MiB is free. Process 592508 has 96.66 GiB memory in use. Including non-PyTorch memory, this process has 81.32 GiB memory in use. Of the allocated memory 79.17 GiB is allocated by PyTorch, and 575.27 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[7]:
+  time      : 2026-05-19_14:27:45
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : 1 (pid: 617987) 
+  error_file: /tmp/torchelastic_tk56zcoz/none_inz9jc9s/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/ka/ckap542w22jnk4ovalnuscdr37ygp4ipmmjdw664wxyrqguhfxej.py", line 1916, in call
+      buf58 = empty_strided_cuda((32768, 17408), (17408, 1), torch.bfloat16)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.06 GiB. GPU 6 has a total capacity of 178.35 GiB of which 343.44 MiB is free. Process 592510 has 96.66 GiB memory in use. Including non-PyTorch memory, this process has 81.32 GiB memory in use. Of the allocated memory 79.17 GiB is allocated by PyTorch, and 575.27 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-19_14:27:45
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 617996) 
+  error_file: /tmp/torchelastic_tk56zcoz/none_inz9jc9s/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/km/ckmetxkfqg44rqtokdlnzh3vlvirw57nrt7j2rm2adg5vl4wicwc.py", line 1916, in call
+      buf58 = empty_strided_cuda((32768, 17408), (17408, 1), torch.bfloat16)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.06 GiB. GPU 7 has a total capacity of 178.35 GiB of which 343.44 MiB is free. Process 592514 has 96.66 GiB memory in use. Including non-PyTorch memory, this process has 81.32 GiB memory in use. Of the allocated memory 79.17 GiB is allocated by PyTorch, and 575.27 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+============================================================
