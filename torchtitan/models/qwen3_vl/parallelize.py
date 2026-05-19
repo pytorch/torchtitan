@@ -29,7 +29,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
+from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.tools.logging import logger
 
 
@@ -91,23 +91,14 @@ def parallelize_qwen3_vl(
     )
 
     # model.parallelize walks every Module and applies its sharding_config
-    # (decoder dense + vision encoder). MoE is handled separately below.
-    if parallel_dims.tp_enabled:
+    # (decoder dense + MoE + vision encoder).
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
         # pyrefly: ignore [not-callable]
         model.parallelize(parallel_dims)
         if parallelism.enable_async_tensor_parallel:
             torch._inductor.config._micro_pipeline_tp = True
-
-    # MoE parallelism via legacy apply_moe_ep_tp.
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=False,
-        )
 
     # Apply activation checkpointing
     if ac_config.mode != "none":
