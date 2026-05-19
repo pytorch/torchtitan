@@ -1318,6 +1318,36 @@ Interpretation:
 - Do not pursue no-reshard variants unless a later source change creates substantially more memory headroom at local batch size 5 or higher.
 - The next best-supported branch is flex-attention correctness isolation because run41 was faster than the current best but failed loss sanity.
 
+## Experiment 46: Flex Attention Without FP8 Converter
+
+Source state: `5801b0f`.
+
+Source/config change:
+
+- `qwen3_14b()` changed `model_registry("14B", ...)` to pass `attn_backend="flex"`.
+- Removed the FP8 rowwise auto-filter converter from the Qwen3 14B model spec for this isolation test.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run46-flex-no-fp8-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep.
+- Step 10 `tps`: 8,489, above the previous 8,469 best.
+- Step 10 MFU: 35.47%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.36098 at step 1 to 11.82755 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Flex attention itself is compatible with the 10-step loss sanity check.
+- The invalid run41 behavior came from the FP8+flex combination or its update dynamics, not from plain flex attention.
+- The new current best is flex attention without the FP8 converter, with compile+BF16, local batch size 5, and NCCL flight recorder disabled.
+- Since run41's FP8+flex path was still faster at 8,544 tps but invalid, the next narrow follow-up is to test whether lowering LR recovers the loss trend while preserving the faster FP8+flex kernels.
+
 ## Manager Review After Experiment 29
 
 Current best:

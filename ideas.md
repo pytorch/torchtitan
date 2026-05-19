@@ -406,6 +406,7 @@
   Planned source/config changes: In `qwen3_14b()`, set `attn_backend="flex"` and remove the Float8 converter; keep the rest of the current-best source and FSDP/compile path unchanged.
   Planned command or config overrides: Current best command shape with `--comm.trace_buf_size=0`, `--compile.enable`, `--training.dtype=bfloat16`, and `--training.local_batch_size=5`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is that removing FP8 loses too much throughput or flex attention still fails loss sanity.
+  Result: kept at source state `5801b0f`; 8,489 tps, 35.47% MFU, 169.0 GiB, finite decreasing loss. This is the new best and shows plain flex attention is correct enough for the short sanity check.
 
 - Idea: flex attention with lower learning rate
   Current best source commit: 477f662
