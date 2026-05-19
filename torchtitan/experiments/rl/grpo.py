@@ -361,7 +361,6 @@ class RLTrainer(Configurable):
         self.replay_buffer: ReplayBuffer | None = None
         self._proc_meshes: list = []
         self._renderer_pool = None
-        self._stop_token_ids: list[int] = []
         self._completion_fn = None
 
     # ------------------------------------------------------------------ setup / close
@@ -508,9 +507,7 @@ class RLTrainer(Configurable):
 
         # Build the renderer pool on the controller (shared by all rollouts).
         self._renderer_pool = config.renderer.build(config.hf_assets_path)
-        self._stop_token_ids = list(self._renderer_pool.get_stop_token_ids())
 
-        # The completion fn closure captures (generator, stop_token_ids).
         self._completion_fn = self._build_completion_fn()
 
         # Initial weight sync.
@@ -590,18 +587,6 @@ class RLTrainer(Configurable):
 
         return completion_fn
 
-    def _sampling_with_stops(self, sampling: SamplingConfig) -> SamplingConfig:
-        """Inject renderer-derived stop tokens; idempotent."""
-        if sampling.stop_token_ids:
-            return sampling
-        return SamplingConfig(
-            n=sampling.n,
-            temperature=sampling.temperature,
-            top_p=sampling.top_p,
-            max_tokens=sampling.max_tokens,
-            stop_token_ids=list(self._stop_token_ids),
-        )
-
     async def _rollout_one_group(self, example: EnvExample) -> list[RolloutOutput]:
         """Build envs, run the group, return rollouts."""
         builder: EnvBuilder = self.config.train_builder.build()
@@ -634,13 +619,6 @@ class RLTrainer(Configurable):
         return out
 
     # ------------------------------------------------------------------ trainer-side helpers
-
-    def _shard_samples(self, samples: list[ReplaySample]) -> list[list[ReplaySample]]:
-        """Round-robin samples across DP ranks."""
-        return [
-            [samples[i] for i in range(rank, len(samples), self.trainer_dp_degree)]
-            for rank in range(self.trainer_dp_degree)
-        ]
 
     @staticmethod
     def _collate(samples: list[ReplaySample]) -> TrainBatch:

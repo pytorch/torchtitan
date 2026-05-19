@@ -347,7 +347,9 @@ class VLLMGenerator(Actor, Configurable):
         # two ``generate_tokens`` calls interleave ``engine.step``
         # invocations, which corrupts vLLM's continuous-batching state
         # and hangs NCCL on a subsequent TP collective.
-        self._engine_lock: asyncio.Lock | None = None
+        # Constructed eagerly: asyncio.Lock() binds to the running loop
+        # on first ``async with``, so no event loop is required here.
+        self._engine_lock: asyncio.Lock = asyncio.Lock()
 
     @staticmethod
     def _set_determinism(debug: DebugConfig) -> None:
@@ -366,11 +368,6 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     # ------------------------------------------------------------------ endpoints
-
-    @endpoint
-    async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
-        """Sync the structured-logger step counter from the controller."""
-        sl.set_step(step, relative_step=relative_step)
 
     @endpoint
     @sl.log_trace_span("generate_tokens")
@@ -398,8 +395,6 @@ class VLLMGenerator(Actor, Configurable):
         """
         if not prompts:
             return []
-        if self._engine_lock is None:
-            self._engine_lock = asyncio.Lock()
 
         sc = sampling_config or self.config.sampling
         params = SamplingParams(
@@ -430,7 +425,7 @@ class VLLMGenerator(Actor, Configurable):
                 )
 
             # Drain the engine in-process; yield between steps so other
-            # endpoints (sync_log_step, pull_model_state_dict) can land.
+            # endpoints (e.g. pull_model_state_dict) can land.
             finished: dict[str, RequestOutput] = {}
             target = {str(first_id + i) for i in range(len(prompts))}
             with sl.log_trace_span("engine_steps"):

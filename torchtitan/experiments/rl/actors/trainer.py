@@ -229,11 +229,7 @@ class PolicyTrainer(Actor, Configurable):
             model.init_weights(buffer_device=None)
         return model
 
-    @endpoint
-    async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
-        sl.set_step(step, relative_step=relative_step)
-
-    def reduce_forward_backward_metrics(
+    def _reduce_forward_backward_metrics(
         self,
         *,
         sum_reduced_metrics: dict[str, torch.Tensor],
@@ -341,7 +337,7 @@ class PolicyTrainer(Actor, Configurable):
         max_reduced_metrics = {
             "bit_wise/logprob_diff/max": drift.logprob_diff_max,
         }
-        return self.reduce_forward_backward_metrics(
+        return self._reduce_forward_backward_metrics(
             sum_reduced_metrics=sum_reduced_metrics,
             max_reduced_metrics=max_reduced_metrics,
         )
@@ -379,11 +375,6 @@ class PolicyTrainer(Actor, Configurable):
                 "train/policy_version": float(self.policy_version),
             },
         )
-
-    @endpoint
-    @sl.log_trace_span("save_checkpoint")
-    async def save_checkpoint(self, step: int, last_step: bool = False) -> bool:
-        return self.checkpointer.save(step, last_step=last_step)
 
     @endpoint
     @sl.log_trace_span("push_model_state_dict")

@@ -224,10 +224,6 @@ class ReplayBuffer(Configurable):
                     ]
                 await cv.wait()
 
-    def num_pending(self) -> int:
-        """Current buffer length (sync read; OK for logging only)."""
-        return len(self._buffer)
-
     async def close(self) -> None:
         """Wake all waiters with :class:`BufferClosedError`."""
         cv = self._cond()

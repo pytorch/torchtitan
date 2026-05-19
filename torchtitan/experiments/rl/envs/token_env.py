@@ -112,7 +112,6 @@ class TokenEnv:
                     reward=self._config.context_overflow_reward,
                     done=True,
                     status=RolloutStatus.TRUNCATED,
-                    metadata={"reason": "length"},
                 ),
                 [],
             )
@@ -128,7 +127,6 @@ class TokenEnv:
                     reward=self._config.failed_parse_reward,
                     done=True,
                     status=RolloutStatus.ERROR,
-                    metadata={"reason": "parse_error", "exc": type(exc).__name__},
                 ),
                 [],
             )
@@ -145,7 +143,6 @@ class TokenEnv:
                     reward=self._config.context_overflow_reward,
                     done=True,
                     status=RolloutStatus.TRUNCATED,
-                    metadata={**env_step.metadata, "reason": "context_overflow"},
                 ),
                 response_messages,
             )
@@ -181,7 +178,6 @@ class TokenEnv:
                 reward=self._config.failed_parse_reward,
                 done=True,
                 status=RolloutStatus.ERROR,
-                metadata={"reason": "step_timeout"},
             )
 
     async def _render_prompt(self) -> list[int]:

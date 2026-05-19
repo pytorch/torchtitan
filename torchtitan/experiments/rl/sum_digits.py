@@ -40,7 +40,7 @@ from torchtitan.experiments.rl.types import RolloutStatus
 __all__ = ["SumDigitsBuilder", "SumDigitsDataset", "SumDigitsEnv"]
 
 
-SYSTEM_PROMPT = (
+_SYSTEM_PROMPT = (
     "You are a careful arithmetic assistant. Given a list of integers, "
     "compute the sum of all their digits and respond with exactly "
     "`<answer>NUMBER</answer>` where NUMBER is the digit sum."
@@ -59,7 +59,7 @@ class SumDigitsEnv(MessageEnv):
     async def reset(self) -> EnvReset:
         return EnvReset(
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": f"What is the digit sum of {self._numbers}?",

@@ -86,7 +86,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 n=1,  # GRPO siblings come from rollout_group_size
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=200,
+                max_tokens=512,
             ),
         ),
         replay_buffer=ReplayBuffer.Config(
@@ -176,7 +176,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
         rollout_group_size=8,
         num_rollout_tasks=2,
         max_rollout_turns=1,
-        num_validation_samples=20,
+        num_validation_samples=4,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         train_dataset=SumDigitsDataset.Config(seed=42),
         train_builder=SumDigitsBuilder.Config(),
@@ -218,7 +218,7 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 n=1,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=200,
+                max_tokens=512,
             ),
             debug=batch_invariant_config,
         ),

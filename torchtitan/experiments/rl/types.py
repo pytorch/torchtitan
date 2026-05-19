@@ -16,8 +16,9 @@ Three layers (top to bottom in trainer-data flow):
 3. **Trainer carrier** (``ReplaySample``, ``TrainBatch``): per-token
    sequences with ``loss_mask`` ready for the trainer's GRPO loss.
 
-``Completion`` survives at the generator boundary (one sample from
-vLLM); everything trainer-facing flows through ``ReplaySample``.
+Everything trainer-facing flows through ``ReplaySample``; the
+generator-facing wire type (``GenerateOutput``) lives in
+``actors/generator.py``.
 """
 
 from __future__ import annotations
@@ -54,27 +55,6 @@ class RolloutStatus(StrEnum):
 
 
 # ---------------------------------------------------------------------------
-# Generator boundary
-# ---------------------------------------------------------------------------
-
-
-@dataclass(kw_only=True, slots=True)
-class Completion:
-    """One vLLM sample exposed via the standalone ``generate.py`` CLI.
-
-    Not used by the rollout driver; the per-rollout path uses the
-    slimmer :class:`actors.generator.GenerateOutput`.
-    """
-
-    policy_version: int
-    prompt_idx: int
-    text: str
-    token_ids: list[int]
-    token_logprobs: list[float]
-    finish_reason: str | None = None
-
-
-# ---------------------------------------------------------------------------
 # Rollout carriers (consumed by the rollout driver + replay-sample builder)
 # ---------------------------------------------------------------------------
 
@@ -89,8 +69,10 @@ class RolloutTurn:
     :class:`ReplaySample`\\ s.
 
     ``policy_version`` is the weight version that produced this turn's
-    response tokens. ``RolloutOutput.behavior_version`` takes the
-    conservative ``min`` across turns when a rollout spans a swap.
+    response tokens. When a multi-turn rollout spans a weight swap,
+    ``rollout_to_replay_samples`` stamps each emitted ``ReplaySample``
+    with ``min(turn_versions)`` so off-policy age is computed against
+    the oldest weights in the span.
     """
 
     prompt_token_ids: list[int]  # [prompt_tokens]
@@ -129,15 +111,6 @@ class RolloutOutput:
     reward_components: dict[str, float] = field(default_factory=dict)
     """Per-component breakdown of ``reward`` (env-specific keys; e.g.
     ``{"correctness": 1.0, "format": 0.5}`` for SumDigits)."""
-
-    @property
-    def behavior_version(self) -> int:
-        """Min ``policy_version`` across turns — the conservative stamp
-        used by the replay buffer's age policy. Rollouts that span a
-        weight swap are treated as stale on the older of the two
-        versions.
-        """
-        return min((t.policy_version for t in self.turns), default=-1)
 
 
 def validate_rollout_output(o: RolloutOutput) -> None:

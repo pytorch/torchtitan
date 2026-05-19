@@ -51,14 +51,6 @@ __all__ = [
 class EnvReset:
     """Initial observation from ``MessageEnv.reset``.
 
-    ``messages`` is the conversation seed (typically a system + user
-    pair, sometimes just a user turn). ``tools``, when non-empty, is
-    the OpenAI tool catalogue rendered into the prompt.
-
-    ``metadata`` is JSON-only so a future remote-env proxy can
-    serialize the reset value without re-typing the protocol. Don't
-    put torch tensors or live handles here.
-
     Example::
 
         EnvReset(messages=[
@@ -69,21 +61,19 @@ class EnvReset:
 
     messages: list[Message]
     tools: list[ToolSpec] = field(default_factory=list)
-    metadata: dict[str, JsonValue] = field(default_factory=dict)
 
 
 @dataclass(kw_only=True, slots=True)
 class EnvStep:
     """Env reply to one assistant message.
 
-    Terminal steps stamp ``reward`` (the rollout-level scalar) and set
-    ``done=True``. Non-terminal steps return follow-up ``messages`` to
-    append to the running conversation; rewards on non-terminal steps
-    are optional (multi-turn envs may emit per-turn shaping rewards).
+    Terminal steps stamp ``reward`` and set ``done=True``.
+    Non-terminal steps return follow-up ``messages`` to append to the
+    running conversation.
 
-    ``status`` is the *env-side* terminal status. The ``TokenEnv``
-    adapter reconciles this with the generator's ``finish_reason``
-    (e.g. ``"length"``) to produce the per-turn ``RolloutStatus``.
+    ``status`` is the *env-side* terminal status; ``TokenEnv``
+    reconciles it with the generator's ``finish_reason`` (e.g.
+    ``"length"``) to produce the per-turn :class:`RolloutStatus`.
 
     Example (terminal)::
 
@@ -100,7 +90,6 @@ class EnvStep:
     reward_components: dict[str, float] = field(default_factory=dict)
     done: bool = False
     status: RolloutStatus | None = None
-    metadata: dict[str, JsonValue] = field(default_factory=dict)
 
 
 @runtime_checkable
