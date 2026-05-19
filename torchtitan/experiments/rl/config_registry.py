@@ -278,13 +278,13 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
         ),
         trainer=_trainer(
             train_tp=2,
-            # Lower than prime-rl's 1e-5 because our effective batch is
-            # 8 rather than 64; per-rollout step size needs the same
-            # scaling for stability. Step 3 -> 4 saw NaN at lr=1e-5.
-            lr=5e-6,
+            # Conservative for 1.7B + batch=4: prime-rl uses lr=1e-5 at
+            # batch=64. Step 3 -> 4 saw Loss=NaN at lr=1e-5 batch=8.
+            lr=2e-6,
             warmup_steps=4,
             checkpoint_interval=50,
+            clip_eps=0.1,
         ),
         generator=_generator(gen_tp=2, max_tokens=768, gpu_memory_limit=0.7),
-        replay_buffer=_replay(batch_size=8, max_buffer_size=512),
+        replay_buffer=_replay(batch_size=4, max_buffer_size=512),
     )
