@@ -38,7 +38,6 @@ import logging
 import math
 import os
 import time
-from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -69,6 +68,12 @@ from torchtitan.experiments.rl.envs.types import (
     EnvExample,
     MessageEnv,
 )
+from torchtitan.experiments.rl.metrics import (
+    aggregate_rewards,
+    dump_rollouts_jsonl,
+    format_validation,
+    log_first_sample,
+)
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.replay import (
     BufferClosedError,
@@ -77,12 +82,7 @@ from torchtitan.experiments.rl.replay import (
     rollout_to_replay_samples,
 )
 from torchtitan.experiments.rl.rollouts import do_rollout_group
-from torchtitan.experiments.rl.types import (
-    ReplaySample,
-    RolloutOutput,
-    RolloutStatus,
-    TrainBatch,
-)
+from torchtitan.experiments.rl.types import ReplaySample, RolloutOutput, TrainBatch
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -587,18 +587,30 @@ class RLTrainer(Configurable):
 
         return completion_fn
 
-    async def _rollout_one_group(self, example: EnvExample) -> list[RolloutOutput]:
-        """Build envs, run the group, return rollouts."""
-        builder: EnvBuilder = self.config.train_builder.build()
+    async def _run_group(
+        self,
+        *,
+        builder_config: Configurable.Config,
+        example: EnvExample,
+        group_size: int,
+        sampling: SamplingConfig,
+    ) -> list[RolloutOutput]:
+        """Build ``group_size`` sibling envs from ``example`` and roll them out.
+
+        Shared by training (``continuous_rollouts``: train builder,
+        ``rollout_group_size``, sampling config) and validation
+        (``validate``: validation builder, ``group_size=1``, greedy).
+        """
+        builder: EnvBuilder = builder_config.build()
         envs: Sequence[MessageEnv] = await builder.make_envs(
             example,
-            group_size=self.config.rollout_group_size,
+            group_size=group_size,
         )
         return await do_rollout_group(
             envs=envs,
             renderer=self._renderer_pool,
             completion_fn=self._completion_fn,
-            sampling=self.config.generator.sampling,
+            sampling=sampling,
             group_id=example.task_id,
             max_turns=self.config.max_rollout_turns,
             token_env_config=self.config.token_env,
@@ -679,22 +691,17 @@ class RLTrainer(Configurable):
             max_tokens=cfg.generator.sampling.max_tokens,
         )
 
-        async def _one(example):
-            builder: EnvBuilder = cfg.validation_builder.build()
-            envs = await builder.make_envs(example, group_size=1)
-            outputs = await do_rollout_group(
-                envs=envs,
-                renderer=self._renderer_pool,
-                completion_fn=self._completion_fn,
+        async def _one(example: EnvExample) -> RolloutOutput:
+            outputs = await self._run_group(
+                builder_config=cfg.validation_builder,
+                example=example,
+                group_size=1,
                 sampling=greedy,
-                group_id=example.task_id,
-                max_turns=cfg.max_rollout_turns,
-                token_env_config=cfg.token_env,
             )
             return outputs[0]
 
         rollouts = await asyncio.gather(*[_one(ex) for ex in examples])
-        return _aggregate_rewards(rollouts)
+        return aggregate_rewards(rollouts)
 
     # ------------------------------------------------------------------ training loop
 
@@ -706,7 +713,7 @@ class RLTrainer(Configurable):
 
         logger.info("Pre-training validation")
         pre_validation = await self.validate()
-        logger.info("Pre:  %s", _format_validation(pre_validation))
+        logger.info("Pre:  %s", format_validation(pre_validation))
         sl.log_trace_instant("training_start")
 
         async def continuous_rollouts(task_idx: int) -> None:
@@ -730,15 +737,20 @@ class RLTrainer(Configurable):
                     return
                 example = examples[task_idx]
                 with sl.log_trace_span("rollout_group"):
-                    rollouts = await self._rollout_one_group(example)
+                    rollouts = await self._run_group(
+                        builder_config=cfg.train_builder,
+                        example=example,
+                        group_size=cfg.rollout_group_size,
+                        sampling=cfg.generator.sampling,
+                    )
                 samples = self._build_replay_samples(rollouts)
                 if samples:
                     await self.replay_buffer.add(samples)
 
                 if cfg.log_samples:
                     if dataset_step % 4 == 0 and task_idx == 0:
-                        _log_first_sample(rollouts)
-                    _dump_rollouts_jsonl(
+                        log_first_sample(rollouts)
+                    dump_rollouts_jsonl(
                         rollouts,
                         dump_folder=cfg.dump_folder,
                         train_step=self._train_step,
@@ -857,8 +869,8 @@ class RLTrainer(Configurable):
         post_validation = await self.validate()
         logger.info(
             "Summary:\n  Pre:  %s\n  Post: %s",
-            _format_validation(pre_validation),
-            _format_validation(post_validation),
+            format_validation(pre_validation),
+            format_validation(post_validation),
         )
 
 
@@ -884,105 +896,6 @@ def _any_advantage_signal(
             if abs(sample.advantage) > eps:
                 return True
     return False
-
-
-# ---------------------------------------------------------------------------
-# Logging helpers
-# ---------------------------------------------------------------------------
-
-
-def _aggregate_rewards(
-    rollouts: Sequence[RolloutOutput],
-) -> dict[str, float | dict[str, float]]:
-    """Mean reward + per-component mean across non-ERROR rollouts."""
-    scored = [r for r in rollouts if r.reward is not None]
-    rewards = [float(r.reward) for r in scored]  # type: ignore[arg-type]
-    components: dict[str, list[float]] = defaultdict(list)
-    for r in scored:
-        for k, v in r.reward_components.items():
-            components[k].append(float(v))
-    total = len(rollouts) or 1
-    return {
-        "mean_reward": sum(rewards) / total,
-        "components": {k: sum(v) / total for k, v in components.items()},
-        "total": len(rollouts),
-        "fraction_truncated": (
-            sum(1 for r in rollouts if r.status == RolloutStatus.TRUNCATED) / total
-        ),
-    }
-
-
-def _format_validation(result: dict) -> str:
-    comp_str = ", ".join(f"{k}={v:+.3f}" for k, v in result["components"].items())
-    return (
-        f"mean_reward={result['mean_reward']:+.3f} "
-        f"({comp_str}) | truncated={result['fraction_truncated']:.0%}"
-    )
-
-
-def _log_first_sample(rollouts: Sequence[RolloutOutput]) -> None:
-    """Log the first rollout's last assistant message for quick sanity."""
-    if not rollouts:
-        return
-    r = rollouts[0]
-    if not r.turns or not r.turns[-1].response_messages:
-        return
-    msg = r.turns[-1].response_messages[0]
-    content = str(msg.get("content") or "")[:200].replace("\n", " ")
-    reward_str = "n/a" if r.reward is None else f"{r.reward:+.3f}"
-    logger.info(
-        "  [%s/%d] reward=%s  A: %s",
-        r.group_id,
-        r.sample_idx,
-        reward_str,
-        content,
-    )
-
-
-def _dump_rollouts_jsonl(
-    rollouts: Sequence[RolloutOutput],
-    *,
-    dump_folder: str,
-    train_step: int,
-) -> None:
-    """Append one JSON line per rollout to ``{dump_folder}/rollouts.jsonl``.
-
-    Best-effort: a write failure logs but doesn't crash the rollout loop.
-    Schema is shallow on purpose — full messages + reward + status, no
-    token ids — so an inspector subagent can read the file directly.
-    """
-    import json
-
-    path = os.path.join(dump_folder, "rollouts.jsonl")
-    try:
-        os.makedirs(dump_folder, exist_ok=True)
-        with open(path, "a") as f:
-            for r in rollouts:
-                turns = [
-                    {
-                        "prompt_messages": t.prompt_messages,
-                        "response_messages": t.response_messages,
-                        "policy_version": t.policy_version,
-                        "num_response_tokens": len(t.response_token_ids),
-                    }
-                    for t in r.turns
-                ]
-                f.write(
-                    json.dumps(
-                        {
-                            "train_step": train_step,
-                            "group_id": r.group_id,
-                            "sample_idx": r.sample_idx,
-                            "status": str(r.status),
-                            "reward": r.reward,
-                            "reward_components": r.reward_components,
-                            "turns": turns,
-                        }
-                    )
-                    + "\n"
-                )
-    except OSError as exc:
-        logger.warning("rollouts.jsonl write failed: %s", exc)
 
 
 async def main() -> None:
