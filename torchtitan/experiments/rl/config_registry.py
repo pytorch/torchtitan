@@ -382,9 +382,15 @@ def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
             "torchtitan/experiments/rl/example_checkpoint/Qwen3-4B-Instruct-2507"
         ),
         num_steps=25,
-        num_prompts_per_step=4,
+        # Bumped to feed the CP38 continuous-batching admission window:
+        # 4B prompts × 8 group_size × 8 tasks = 256 max in-flight rollouts,
+        # well above what vLLM's 2-GPU scheduler can actually run
+        # concurrently (~64-128) but ensuring the queue never goes empty.
+        # Without CP38 + CP39 the engine drains to batch=1 between turn
+        # boundaries; with them we target mean batch ~70 (codex measured).
+        num_prompts_per_step=8,
         rollout_group_size=8,
-        num_rollout_tasks=4,
+        num_rollout_tasks=8,
         max_rollout_turns=5,
         num_validation_samples=20,
         log_samples=True,
