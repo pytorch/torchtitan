@@ -169,7 +169,7 @@ def parallelize_qwen3_vl(
         raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
 
     if parallel_dims.tp_enabled:
-        # Apply TP to vision encoder (still uses parallelize_module path)
+        # TODO(@fegin): Apply TP to vision encoder (still uses parallelize_module path)
         if model.vision_encoder is not None:
             _apply_tp_to_vision_encoder(
                 model.vision_encoder, parallel_dims.get_mesh("tp")
