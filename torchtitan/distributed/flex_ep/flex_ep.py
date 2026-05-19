@@ -2011,6 +2011,23 @@ def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
     return device.type, device_index
 
 
+def _require_expert_parallel_mesh(
+    ep_mesh: DeviceMesh | None,
+) -> tuple[int, int, Any]:
+    if ep_mesh is None:
+        raise ValueError(
+            "FlexGroupedExperts requires expert parallelism "
+            "(expert_parallel_degree > 1)."
+        )
+    ep_size = ep_mesh.size()
+    if ep_size <= 1:
+        raise ValueError(
+            "FlexGroupedExperts requires expert parallelism "
+            "(expert_parallel_degree > 1)."
+        )
+    return ep_size, ep_mesh.get_local_rank(), ep_mesh.get_group()
+
+
 def _clear_flex_ep_workspace_cache() -> None:
     _FLEX_EP_WORKSPACE_CACHE.clear()
 
@@ -2036,24 +2053,24 @@ class FlexEPWorkspace:
         num_experts: int,
         top_k: int,
         device: torch.device,
-        ep_mesh: DeviceMesh | None,
+        ep_size: int,
+        ep_rank: int,
+        ep_group: Any,
         capacity_factor: float,
     ) -> "FlexEPWorkspace":
-        ep_size = 1 if ep_mesh is None else ep_mesh.size()
-        ep_rank = 0 if ep_mesh is None else ep_mesh.get_local_rank()
+        if ep_size <= 1:
+            raise ValueError(
+                "FlexGroupedExperts requires expert parallelism "
+                "(expert_parallel_degree > 1)."
+            )
         if num_experts % ep_size != 0:
             raise ValueError(
                 f"num_experts ({num_experts}) must be divisible by ep_size "
                 f"({ep_size})."
             )
-
-        if ep_size == 1:
-            ep_group = None
-            ep_group_key = None
-        else:
-            assert ep_mesh is not None
-            ep_group = ep_mesh.get_group()
-            ep_group_key = id(ep_group)
+        if not 0 <= ep_rank < ep_size:
+            raise ValueError(f"ep_rank ({ep_rank}) must be in [0, {ep_size}).")
+        ep_group_key = id(ep_group)
         device = torch.device(device)
         device_type, device_index = _device_cache_key(device)
         cache_key = (
@@ -2245,51 +2262,47 @@ def _allocate_workspace_storage(
     ep_rank: int,
     ep_group: Any,
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...], torch.Tensor]:
-    if ep_size == 1:
-        raw = torch.empty(nvl_buffer_size, device=device, dtype=torch.uint8)
-        raw.zero_()
-        peer_buffers = (raw,)
-    else:
-        if device.type != "cuda":
-            raise ValueError(
-                f"FlexGroupedExperts EP>1 requires CUDA tensors, got {device}."
-            )
-        _require_ep_backend_ops()
-        try:
-            import torch.distributed as dist
-            import torch.distributed._symmetric_memory as symm_mem
-        except ImportError as e:
-            raise ImportError(
-                "FlexGroupedExperts EP>1 requires PyTorch symmetric memory."
-            ) from e
-        if not symm_mem.is_nvshmem_available():
-            raise RuntimeError(
-                "FlexGroupedExperts EP>1 requires NVSHMEM symmetric memory."
-            )
-        symm_mem.set_backend("NVSHMEM")
-        allocation_dtype = torch.int64
-        raw_storage = symm_mem.empty(
-            _align_up(nvl_buffer_size, allocation_dtype.itemsize)
-            // allocation_dtype.itemsize,
-            device=device,
-            dtype=allocation_dtype,
+    if ep_size <= 1:
+        raise ValueError(
+            "FlexGroupedExperts requires expert parallelism "
+            "(expert_parallel_degree > 1)."
         )
-        raw = raw_storage.view(torch.uint8)[:nvl_buffer_size]
-        raw.zero_()
-        handle = symm_mem.rendezvous(raw_storage, ep_group)
-        peer_storages = tuple(
-            (
-                raw_storage
-                if peer == ep_rank
-                else handle.get_buffer(peer, raw_storage.shape, raw_storage.dtype)
-            )
-            for peer in range(ep_size)
+    if device.type != "cuda":
+        raise ValueError(f"FlexGroupedExperts EP>1 requires CUDA tensors, got {device}.")
+    _require_ep_backend_ops()
+    try:
+        import torch.distributed as dist
+        import torch.distributed._symmetric_memory as symm_mem
+    except ImportError as e:
+        raise ImportError(
+            "FlexGroupedExperts EP>1 requires PyTorch symmetric memory."
+        ) from e
+    if not symm_mem.is_nvshmem_available():
+        raise RuntimeError("FlexGroupedExperts EP>1 requires NVSHMEM symmetric memory.")
+    symm_mem.set_backend("NVSHMEM")
+    allocation_dtype = torch.int64
+    raw_storage = symm_mem.empty(
+        _align_up(nvl_buffer_size, allocation_dtype.itemsize)
+        // allocation_dtype.itemsize,
+        device=device,
+        dtype=allocation_dtype,
+    )
+    raw = raw_storage.view(torch.uint8)[:nvl_buffer_size]
+    raw.zero_()
+    handle = symm_mem.rendezvous(raw_storage, ep_group)
+    peer_storages = tuple(
+        (
+            raw_storage
+            if peer == ep_rank
+            else handle.get_buffer(peer, raw_storage.shape, raw_storage.dtype)
         )
-        peer_buffers = tuple(
-            peer_storage.view(torch.uint8)[:nvl_buffer_size]
-            for peer_storage in peer_storages
-        )
-        dist.barrier(group=ep_group)
+        for peer in range(ep_size)
+    )
+    peer_buffers = tuple(
+        peer_storage.view(torch.uint8)[:nvl_buffer_size]
+        for peer_storage in peer_storages
+    )
+    dist.barrier(group=ep_group)
 
     buffer = NvlSharedBuffer.view_from_buffer(
         peer_buffers[ep_rank],
@@ -2491,21 +2504,22 @@ class FlexEPRouter:
         num_experts: int,
         top_k: int,
         device: torch.device,
-        ep_mesh: DeviceMesh | None,
+        ep_mesh: DeviceMesh,
         num_ctas: int = DEFAULT_NUM_CTAS,
         capacity_factor: float = 1.0,
     ) -> "FlexEPRouter":
-        _ensure_flex_ep_imported()
         capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
-        ep_size = 1 if ep_mesh is None else ep_mesh.size()
-        ep_rank = 0 if ep_mesh is None else ep_mesh.get_local_rank()
+        ep_size, ep_rank, ep_group = _require_expert_parallel_mesh(ep_mesh)
+        _ensure_flex_ep_imported()
         workspace = FlexEPWorkspace.get_or_create(
             max_tokens=max_tokens,
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
             device=device,
-            ep_mesh=ep_mesh,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            ep_group=ep_group,
             capacity_factor=capacity_factor,
         )
         return cls(

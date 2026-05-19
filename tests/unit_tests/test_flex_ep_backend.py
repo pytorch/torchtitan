@@ -221,6 +221,19 @@ def test_deepseek_v3_flex_ep_config_requires_expert_parallelism():
         config.model_spec.model.update_from_config(trainer_config=config)
 
 
+@pytest.mark.parametrize("ep_mesh", (None, _FakeEPMesh(ep_size=1)))
+def test_flex_ep_router_requires_multi_rank_ep_mesh(ep_mesh):
+    with pytest.raises(ValueError, match="expert_parallel_degree > 1"):
+        flex_ep_mod.FlexEPRouter.create(
+            max_tokens=16,
+            dim=8,
+            num_experts=4,
+            top_k=2,
+            device=torch.device("cpu"),
+            ep_mesh=ep_mesh,
+        )
+
+
 def test_deepseek_v3_flex_ep_config_sets_router_force_load_balance_only():
     config = deepseek_v3_debugmodel_flex_ep()
     config.parallelism.expert_parallel_degree = 2
