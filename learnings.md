@@ -1809,3 +1809,24 @@ Retry interpretation:
 
 - Keeping `lm_head` in BF16 fixes the short-run loss issue seen in the faster FP8+flex run41, but selective FP8 still does not beat the prefetch-only source.
 - Restore the no-FP8 prefetch source and avoid further nearby FP8 coverage tweaks unless a profile shows a specific dense-GEMM bottleneck.
+
+## Experiment 62: Exact Rerun Of Prefetch Flex Best
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run62-rerun-prefetch-flex-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard as a variance check; it did not beat run59.
+- Step 10 `tps`: 8,829, below the 8,835 current best by 6 tps.
+- Step 10 MFU: 36.89%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.31141 at step 1 to 6.95173 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The prefetch best is reproducible within a narrow range: run59 at 8,835 tps and run62 at 8,829 tps.
+- Keep source state `7c1c351` as the current best. The next useful step is profiling this prefetch source or testing a narrower prefetch variant, not repeating the exact command again immediately.

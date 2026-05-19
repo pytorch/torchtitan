@@ -547,6 +547,7 @@
   Planned source/config changes: None; use current prefetch source with flex attention and no FP8 converter.
   Planned command or config overrides: Exact run59 command with a new dump folder.
   Success criteria and expected risk: Keep if it beats 8,835 with finite decreasing loss; otherwise record as diagnostic variance/discard while preserving run59 as the best measured result.
+  Result: discarded at source state `025f0c3`; 8,829 tps with finite decreasing loss, close to but below the 8,835 prefetch best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
