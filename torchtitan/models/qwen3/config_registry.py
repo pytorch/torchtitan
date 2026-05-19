@@ -190,6 +190,7 @@ def qwen3_14b() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry(
             "14B",
+            attn_backend="flex_flash",
             converters=[
                 Float8LinearConverter.Config(
                     recipe_name="rowwise",
