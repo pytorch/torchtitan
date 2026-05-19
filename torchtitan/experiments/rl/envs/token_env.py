@@ -132,16 +132,25 @@ class TokenEnv:
         # of the target text before hitting the cap. The terminal
         # status is overridden to TRUNCATED so downstream metrics
         # still distinguish length-stops from clean completions.
+        # If the env's response is non-terminal (intermediate turn that
+        # would normally trigger a follow-up), fall back to
+        # ``truncation_reward`` — ``validate_rollout_output`` requires
+        # a non-None reward on every non-ERROR terminal rollout.
         truncated = completion.finish_reason == "length"
         env_step = await self._call_step(assistant_msg)
         response_messages = [assistant_msg, *env_step.messages]
         self._messages.append(assistant_msg)
         self._messages.extend(env_step.messages)
         if truncated:
+            reward = (
+                env_step.reward
+                if env_step.reward is not None
+                else self._config.truncation_reward
+            )
             return (
                 EnvStep(
                     messages=env_step.messages,
-                    reward=env_step.reward,
+                    reward=reward,
                     reward_components=env_step.reward_components,
                     done=True,
                     status=RolloutStatus.TRUNCATED,
