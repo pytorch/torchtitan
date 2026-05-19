@@ -559,10 +559,13 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     ) -> None:
         """Install the EP mesh used by DeepEP dispatch / combine.
 
-        ``tp_mesh`` is ignored — DeepEP does not use SP token splitting.
+        ``tp_mesh`` provides SP coordinates so combine can expand its output
+        to full sequence length (matching AllToAll's convention).
         """
-        del tp_mesh
         self.ep_mesh = ep_mesh
+        if tp_mesh is not None:
+            self.sp_size = tp_mesh.size()
+            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -602,13 +605,32 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
     ) -> torch.Tensor:
         """Combine tokens via DeepEP.
 
-        Combine is async — shared_experts runs while the combine is in
-        flight, then sync_combine() waits before the addition.
+        When sp_size == 1, combine is async — sync_combine() is deferred
+        to MoE.forward, enabling overlap with shared_experts.
+        When sp_size > 1, there is no overlap: sync is forced here because
+        the SP expansion must read the combine result before returning.
         """
-        from torchtitan.distributed.deepep.deepep import combine_tokens
+        from torchtitan.distributed.deepep.deepep import (
+            combine_tokens,
+            sync_combine,
+        )
 
         # pyrefly: ignore [bad-argument-type]
-        return combine_tokens(routed_output, metadata.state)
+        routed_output = combine_tokens(routed_output, metadata.state)
+
+        if self.sp_size > 1:
+            sync_combine()
+            out = torch.zeros(
+                routed_output.shape[0] * self.sp_size,
+                routed_output.shape[-1],
+                device=routed_output.device,
+                dtype=routed_output.dtype,
+            )
+            offset = routed_output.shape[0] * self.sp_rank
+            out[offset : offset + routed_output.shape[0]] = routed_output
+            return out
+
+        return routed_output
 
 
 class HybridEPTokenDispatcher(LocalTokenDispatcher):
@@ -660,6 +682,8 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
         self.ep_mesh: DeviceMesh | None = None
+        self.sp_size: int = 1
+        self.sp_rank: int | torch.SymInt = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -673,10 +697,13 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
     ) -> None:
         """Install the EP mesh used by HybridEP dispatch / combine.
 
-        ``tp_mesh`` is ignored — HybridEP does not use SP token splitting.
+        ``tp_mesh`` provides SP coordinates so combine can expand its output
+        to full sequence length (matching AllToAll's convention).
         """
-        del tp_mesh
         self.ep_mesh = ep_mesh
+        if tp_mesh is not None:
+            self.sp_size = tp_mesh.size()
+            self.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     # pyrefly: ignore [bad-override]
     def dispatch(
@@ -719,8 +746,21 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         """Combine tokens via HybridEP."""
         from torchtitan.distributed.deepep import hybridep
 
-        return hybridep.combine_tokens(
+        routed_output = hybridep.combine_tokens(
             routed_output,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
             pad_multiple=self.pad_multiple,
         )
+
+        if self.sp_size > 1:
+            out = torch.zeros(
+                routed_output.shape[0] * self.sp_size,
+                routed_output.shape[-1],
+                device=routed_output.device,
+                dtype=routed_output.dtype,
+            )
+            offset = routed_output.shape[0] * self.sp_rank
+            out[offset : offset + routed_output.shape[0]] = routed_output
+            return out
+
+        return routed_output
