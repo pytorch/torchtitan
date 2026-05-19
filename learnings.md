@@ -1290,6 +1290,34 @@ Interpretation:
 - Disabling FSDP reshard-after-forward at local batch size 5 is not viable; the extra parameter/gradient residency exhausts the B200 memory margin.
 - The failure happened close to fitting on ranks with only small external allocations, so a local-batch-size-4 follow-up is a reasonable communication/memory tradeoff. It must overcome the smaller global batch to beat 8,469 tps.
 
+## Experiment 45: FP8 No-Reshard With Local Batch Size 4
+
+Source state: `d8ba324`.
+
+Source/config change:
+
+- None. Source was the restored FP8 rowwise auto-filter best.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=4 --comm.trace_buf_size=0 --parallelism.fsdp_reshard_after_forward=never --dump_folder=outputs/autoresearch/may19-qwen3-14b/run45-fp8-no-reshard-compile-bf16-lbs4-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 6,939, far below the 8,469 current best.
+- Step 10 MFU: 28.99%.
+- Step 10 peak memory: 165.71 GiB, 92.91%.
+- Loss moved from 12.46997 at step 1 to 7.50736 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Lowering local batch size gives no-reshard enough memory to run, but the communication savings do not offset the smaller global batch and no-reshard overhead.
+- Do not pursue no-reshard variants unless a later source change creates substantially more memory headroom at local batch size 5 or higher.
+- The next best-supported branch is flex-attention correctness isolation because run41 was faster than the current best but failed loss sanity.
+
 ## Manager Review After Experiment 29
 
 Current best:

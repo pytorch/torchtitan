@@ -396,6 +396,7 @@
   Planned source/config changes: None; use the restored FP8 rowwise auto-filter source.
   Planned command or config overrides: Current best command plus `--parallelism.fsdp_reshard_after_forward=never --training.local_batch_size=4`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are slower throughput from smaller batch size or residual OOM if no-reshard residency dominates.
+  Result: discarded at source state `d8ba324`; it fit but reached only 6,939 tps, 28.99% MFU, 165.7 GiB, with finite decreasing loss.
 
 - Idea: flex attention without FP8 converter
   Current best source commit: 477f662
