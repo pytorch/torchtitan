@@ -127,7 +127,19 @@ class GRPOLoss(Configurable):
         loss_mask: torch.Tensor,  # [1, T - 1]
         num_global_valid_tokens: torch.Tensor,  # scalar
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        ratio = torch.exp(policy_logprobs - behavior_logprobs)
+        # Compute the log-ratio only at loss positions; off-mask
+        # positions carry stale ``behavior_logprobs=0.0`` (prompts).
+        # Clamp the diff so a ``-inf`` logprob from vLLM (bf16
+        # softmax underflow on an unlikely sampled token) doesn't
+        # explode the ratio and NaN-poison the sum.
+        mask_bool = loss_mask > 0.5
+        logprob_diff = torch.where(
+            mask_bool,
+            policy_logprobs - behavior_logprobs,
+            torch.zeros_like(policy_logprobs),
+        )
+        logprob_diff = torch.clamp(logprob_diff, min=-20.0, max=20.0)
+        ratio = torch.exp(logprob_diff)
         clipped = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
         per_token_pg = -torch.minimum(
             ratio * advantages_per_token,
