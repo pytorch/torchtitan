@@ -36,6 +36,7 @@ def _ops_filter_with_distributed(name: str) -> bool:
             "torch.ops._c10d_functional",
             "torch.ops._dtensor",
             "torch.ops.device_mesh",
+            "torch.ops.bucketing",
         )
     )
 

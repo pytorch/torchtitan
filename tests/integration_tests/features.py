@@ -53,16 +53,19 @@ def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
     """Inject ``--parallelism.full_dtensor`` into every variant.
 
     All features.py tests run under full_dtensor except PP-only variants
-    (see ``_is_pp_only``); legacy non-full_dtensor coverage lives in
-    models.py. CP variants also switch to FlexAttention config because
+    (see ``_is_pp_only``) and CP + compile variants (upstream symint
+    limitation); legacy non-full_dtensor coverage lives in models.py.
+    CP variants also switch to FlexAttention config because
     full_dtensor + CP is not supported with SDPA / Varlen.
     """
     new_args = []
     for variant in t.override_args:
         prefix: list[str] = []
-        if not _is_pp_only(variant, t.ngpu):
+        has_cp = any("context_parallel_degree" in arg for arg in variant)
+        has_compile = any("compile.enable" in arg for arg in variant)
+        if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
             prefix.append("--parallelism.full_dtensor")
-        if any("context_parallel_degree" in arg for arg in variant):
+        if has_cp:
             prefix.append("--module llama3 --config llama3_debugmodel_flex_attn")
         new_args.append(tuple(prefix) + tuple(variant))
     return dataclasses.replace(t, override_args=tuple(new_args))
