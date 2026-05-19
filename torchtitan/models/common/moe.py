@@ -278,8 +278,11 @@ class MoE(Module):
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
           - LocalTokenDispatcher (no EP): scatter_add only.
           - AllToAll: all-to-all communication, then scatter_add.
-          - DeepEP/HybridEP: async combine_tokens.
-    3. Shared experts run on DTensor (overlaps with DeepEP async combine).
+          - DeepEP: async combine_tokens (sync deferred to step 4 when
+            sp_size == 1; forced inside combine when sp_size > 1).
+          - HybridEP: synchronous combine_tokens.
+    3. Shared experts run on DTensor. Overlaps with DeepEP async combine
+       when sp_size == 1; no overlap otherwise.
     4. Routed and shared expert outputs are summed.
     """
 
@@ -361,7 +364,10 @@ class MoE(Module):
         # shared_experts runs in parallel with deepep combine communication.
         shared_out = self.shared_experts(x) if self.shared_experts is not None else None
 
-        if isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher):
+        if (
+            isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
+            and self.experts.token_dispatcher.sp_size == 1
+        ):
             # Sync the combine operation before using routed_output.
             # This inserts a CUDA stream wait, ensuring combine is complete before
             # the subsequent addition or reshape operations read routed output.
