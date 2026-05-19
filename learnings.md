@@ -802,3 +802,50 @@ Interpretation:
 
 - This does not evaluate BF16 optimizer states because the target 8-GPU node was not available.
 - Retry the same optimizer-state candidate after large external GPU allocations clear.
+
+## Manager Review After Experiment 26
+
+Current best:
+
+- Source state `f6ae44e`.
+- Command shape: compile enabled, BF16 training dtype, local batch size 5, TP/CP/PP/EP disabled, FSDP across 8 B200s.
+- Metrics: 8,391 tps, 35.06% MFU, 168.7 GiB peak memory, finite decreasing loss.
+
+Search state:
+
+- No-AC local batch 6 is blocked by loss-path OOM.
+- TP=2 is functional and saves memory but is throughput-negative even with local batch 8 and async TP.
+- Eager selective/full AC are too slow for the objective.
+- Compiler memory-budget AC is close, but local-batch-6 budget tuning alone does not beat the current best; budgets 0.8, 0.9, and 0.95 all land around 146.2 GiB and 8.31-8.33k tps.
+- The profile still supports a mixed compute/communication diagnosis: matmul kernels are the largest bucket, NCCL collectives are also material, and memory is the immediate limiter for larger no-AC batches.
+- The BF16 optimizer-state run is invalid because external GPU users contaminated the memory result; it remains untested.
+
+Next implications:
+
+- Retry the BF16 optimizer-state candidate on a clear node before drawing a conclusion.
+- Add one low-risk command-only runtime-overhead test on the current best by disabling NCCL flight recorder.
+- Add one distinct compute-efficiency idea using the allowed FP8 linear converter, because AC and TP have not beaten the current best and GEMMs remain the largest profile bucket.
+
+## Experiment 27: BF16 Optimizer States Retry
+
+Source state: `51434eb`, with Qwen3 source restored to the no-AC compile+FSDP best path.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --optimizer.implementation=fused_opt_states_bf16 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run27-compile-bf16-lbs5-bf16-optimizer-states-retry > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,029, below the 8,391 current best.
+- Step 10 MFU: 33.55%.
+- Step 10 peak memory: 168.74 GiB, 94.61%.
+- Loss moved from 12.35819 at step 1 to 11.80107 at step 10; finite and slightly decreasing.
+
+Interpretation:
+
+- BF16 optimizer states did not reduce reported peak memory on the steady-state step and slowed the run.
+- Structured rank 0 timings regressed versus run10: average `fwd_bwd_end` rose from 1,419.67 ms to 1,533.56 ms, and average `optim_end` rose from 44.95 ms to 47.62 ms.
+- The optimizer-state knob should be discarded. The next narrow no-source test is disabling the NCCL flight recorder with `--comm.trace_buf_size=0`.

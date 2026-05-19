@@ -282,3 +282,4 @@
   Planned command or config overrides: Best compile+BF16 local-batch-5 command plus `--optimizer.implementation=fused_opt_states_bf16`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is no speedup or a small slowdown if optimizer state dtype conversion overhead outweighs memory savings.
   Result: invalid at source state `99a75e3`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
+  Result: discarded on valid retry at source state `51434eb`; 8,029 tps, 33.55% MFU, 168.7 GiB. Optimizer and fwd/bwd timings regressed, so do not keep this knob.
