@@ -6,7 +6,7 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import Placement, Replicate, Shard
 
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.decoder_sharding import (
@@ -18,7 +18,15 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
 )
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
+
+
+_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
+    "w1": Shard(1),
+    "w2": Shard(2),
+    "w3": Shard(1),
+}
 
 if TYPE_CHECKING:
     from torchtitan.models.qwen3_vl.model import Qwen3VLModel
@@ -29,6 +37,7 @@ def set_qwen3_vl_sharding_config(
     *,
     loss_parallel: bool,
     tp_enabled: bool,
+    ep_enabled: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3-VL sub-configs.
 
@@ -43,7 +52,9 @@ def set_qwen3_vl_sharding_config(
     # Decoder dense (top-level: tok_embeddings, norm, lm_head).
     set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=False)
     for layer_cfg in config.layers:
-        _set_qwen3_vl_layer_sharding(layer_cfg, tp_enabled=tp_enabled)
+        _set_qwen3_vl_layer_sharding(
+            layer_cfg, tp_enabled=tp_enabled, ep_enabled=ep_enabled
+        )
 
     # Vision encoder.
     if config.vision_encoder is not None:
@@ -54,11 +65,11 @@ def _set_qwen3_vl_layer_sharding(
     layer_cfg,
     *,
     tp_enabled: bool,
+    ep_enabled: bool,
 ) -> None:
     """Set sharding on one Qwen3-VL decoder layer.
 
-    Mirrors qwen3 with enable_sp=False. MoE sharding is handled
-    separately by the MoE config-based sharding PR.
+    Mirrors qwen3 with enable_sp=False.
     """
     attention = layer_cfg.attention
     assert isinstance(attention, GQAttention.Config)
@@ -85,6 +96,16 @@ def _set_qwen3_vl_layer_sharding(
             layer_cfg.feed_forward,
             attn_x_placement=Replicate(),
             enable_sp=False,
+        )
+
+    # MoE FFN (MoE-enabled layers only).
+    if layer_cfg.moe is not None and (tp_enabled or ep_enabled):
+        set_moe_sharding_config(
+            layer_cfg.moe,
+            tp_enabled=tp_enabled,
+            ep_enabled=ep_enabled,
+            enable_sp=False,
+            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
 
 
