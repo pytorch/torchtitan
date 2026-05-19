@@ -811,6 +811,20 @@ class RLTrainer(Configurable):
                 num_global_valid_tokens = sum(
                     int(b.loss_mask.sum().item()) for b in train_batches
                 )
+                if num_global_valid_tokens == 0:
+                    # Pathological batch: every sample is a single-response
+                    # truncation with no loss tokens after the global shift.
+                    # Dividing by zero in the loss yields NaN and trips the
+                    # fail-fast check. Treat it like the zero-advantage skip.
+                    skipped_zero_advantage_steps += 1
+                    self._train_step += 1
+                    sl.set_step(self._train_step)
+                    logger.info(
+                        "Step %2d | SKIPPED (no loss tokens; cumulative=%d)",
+                        self._train_step,
+                        skipped_zero_advantage_steps,
+                    )
+                    continue
 
                 with sl.log_trace_span("trainer_forward_backward_call"):
                     fb = self._get_rank_0_value(
