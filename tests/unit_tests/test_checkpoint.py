@@ -751,7 +751,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager.maybe_wait_for_staging()
 
     def test_maybe_wait_for_saving_when_checkpoint_disabled(self):
-        """Verify that calling maybe_wait_for_staging succeeds without errors when the manager is disabled."""
+        """Verify that calling maybe_wait_for_saving succeeds without errors when the manager is disabled."""
 
         config = CheckpointManager.Config(enable=False)
         manager = CheckpointManager(

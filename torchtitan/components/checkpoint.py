@@ -642,14 +642,15 @@ class CheckpointManager(Configurable):
 
             # Map the loaded HF tensors back to the internal model FQNs
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
+            self.states[MODEL].load_state_dict(state_dict)
         else:
             # Standard DCP load directly into the provided state_dict
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
-        # TODO: Since we flatten the model states in state_dict, we need to
-        # manually call load_state_dict() for the model. Need to fix this.
-        if MODEL in self.states:
-            self.states[MODEL].load_state_dict(state_dict)
+            # TODO: Since we flatten the model states in state_dict, we need to
+            # manually call load_state_dict() for the model. Need to fix this.
+            if MODEL in self.states:
+                self.states[MODEL].load_state_dict(state_dict)
 
     @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
