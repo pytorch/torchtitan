@@ -367,11 +367,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del model
 
                 for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
+                    with preserve_buffer_spmd(m):
+                        m.to_empty(device=init_device)
+                        with torch.no_grad():
+                            # TODO: Change this back to init_weights once
+                            # autoparallel contains the wrap_init_states
+                            cast(BaseModel, m).init_weights(
+                                buffer_device=buffer_device
+                            )
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -684,7 +687,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if self.step == 1 and os.environ.get("TORCHTITAN_DEBUG_TENSOR_HASHES"):
             from torch.utils._debug_mode import DebugMode
 
-            debug_mode = DebugMode(record_ids=True, record_nn_module=True)
+            debug_mode = DebugMode(record_ids=True, record_nn_module=False)
             debug_context = debug_mode
             hash_context = DebugMode.log_tensor_hashes(
                 hash_fn=["norm", "hash_tensor"],
@@ -911,7 +914,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
 
-            with set_current_mesh(parallel_dims._global_meshes["dense"]):
+            with set_current_mesh(
+                parallel_dims.resolve_mesh(
+                    (MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP)
+                )
+            ):
                 loss = self.forward_backward_step(
                     input_dict=input_dict,
                     labels=labels,

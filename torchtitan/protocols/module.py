@@ -60,7 +60,7 @@ def named_placement_to_spmd(named: NamedPlacement) -> NamedPlacement:
     if mesh_names is None:
         return dict(named)
     resolved = dict(named)
-    if MeshAxisName.DP in resolved:
+    if MeshAxisName.DP in resolved and MeshAxisName.DP not in mesh_names:
         dp_value = resolved.pop(MeshAxisName.DP)
         for axis_name in (MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD):
             if axis_name in mesh_names:
@@ -339,10 +339,9 @@ class Module(nn.Module, Configurable):
                 fn = self.local_spmd(fn, sharding_config.local_spmd)
 
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
-            with set_current_mesh(mesh):
-                args, kwargs = self._shard_inputs(args, kwargs)
-                outputs = fn(*args, **kwargs)
-                return self._shard_outputs(outputs)
+            args, kwargs = self._shard_inputs(args, kwargs)
+            outputs = fn(*args, **kwargs)
+            return self._shard_outputs(outputs)
 
         self.forward = with_redistribution
 

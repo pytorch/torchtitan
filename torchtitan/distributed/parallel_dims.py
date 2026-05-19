@@ -181,6 +181,11 @@ class ParallelDims:
             ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
             (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
         )
+        spmd_dense_mesh = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "dp", "cp", "tp"),
+            (self.pp, batch, self.cp, self.tp),
+        )
         fsdp_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "fsdp", "tp"),
@@ -196,6 +201,7 @@ class ParallelDims:
             "dataloading": dataloading_mesh,
             "loss": loss_mesh,
             "dense": dense_mesh,
+            "spmd_dense": spmd_dense_mesh,
             "fsdp": fsdp_mesh,
             "sparse": full_sparse_mesh,
         }
@@ -204,6 +210,7 @@ class ParallelDims:
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
+            "dp": spmd_dense_mesh["dp"],
             "dp_replicate": dense_mesh["dp_replicate"],
             "dp_shard": dense_mesh["dp_shard"],
             "fsdp": fsdp_mesh["fsdp"],
@@ -215,7 +222,7 @@ class ParallelDims:
 
         self._validate_meshes()
 
-        candidate_spmd_dense_axes = ["dp_replicate", "dp_shard", "cp", "tp"]
+        candidate_spmd_dense_axes = ["dp", "cp", "tp"]
         candidate_spmd_sparse_axes = ["dp_replicate", "efsdp", "ep"]
         activated_spmd_dense_mesh = self.get_activated_mesh(candidate_spmd_dense_axes)
         activated_spmd_sparse_mesh = self.get_activated_mesh(candidate_spmd_sparse_axes)
@@ -238,6 +245,7 @@ class ParallelDims:
             "pp": self.pp,
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
+            "dp": self.dp_replicate * self.dp_shard,
             "dp_replicate": self.dp_replicate,
             "dp_shard": self.dp_shard,
             "fsdp": self.dp_shard * self.cp,
@@ -387,7 +395,9 @@ class ParallelDims:
 
         if axes_set & {"ep", "efsdp"}:
             return self.get_activated_mesh(["dp_replicate", "efsdp", "ep"])
-        if axes_set & {"dp", "dp_replicate", "dp_shard", "cp", "tp"}:
+        if axes_set & {"dp", "cp", "tp"}:
+            return self.get_activated_mesh(["dp", "cp", "tp"])
+        if axes_set & {"dp_replicate", "dp_shard"}:
             return self.get_activated_mesh(["dp_replicate", "dp_shard", "cp", "tp"])
 
         candidates: list[DeviceMesh] = []
