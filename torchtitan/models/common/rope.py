@@ -243,8 +243,7 @@ def _reshape_for_broadcast_complex(
         assert freqs_cis.shape == (seqlen, x.shape[-1])
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return freqs_cis.view(*shape)
-    _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
-    if positions.size(0) == 1:
+    elif positions.size(0) == 1:
         assert positions.shape == (1, seqlen)
         freqs_cis = freqs_cis[positions.squeeze(0)]
         assert freqs_cis.shape == (seqlen, x.shape[-1])
@@ -281,8 +280,7 @@ def _reshape_for_broadcast_cos_sin(
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
-    _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
-    if positions.size(0) == 1:
+    elif positions.size(0) == 1:
         assert positions.shape == (1, seqlen)
         rope_cache = rope_cache[positions.squeeze(0)]
         assert rope_cache.shape == (seqlen, head_dim * 2)
@@ -360,6 +358,8 @@ def apply_rotary_emb_complex(
         positions: optional position indices
     """
     positions = _maybe_wrap_positions(positions, xq)
+    if positions is not None:
+        _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, xq_, positions)
@@ -381,6 +381,8 @@ def apply_rotary_emb_single_complex(
         positions: optional position indices
     """
     positions = _maybe_wrap_positions(positions, x)
+    if positions is not None:
+        _maybe_check_max_pos(positions, max_valid_pos=freqs_cis.shape[0] - 1)
     dtype = x.dtype
     x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast_complex(freqs_cis, x, positions)
@@ -404,6 +406,8 @@ def apply_rotary_emb_cos_sin(
         positions: optional position indices
     """
     positions = _maybe_wrap_positions(positions, xq)
+    if positions is not None:
+        _maybe_check_max_pos(positions, max_valid_pos=rope_cache.shape[0] - 1)
     head_dim = xq.shape[-1]
     if rope_cache.ndim != 4:
         rope_cache = _reshape_for_broadcast_cos_sin(rope_cache, xq, positions)

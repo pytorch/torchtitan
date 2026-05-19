@@ -74,20 +74,17 @@ class Llama3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
+            training = trainer_config.training
             parallelism = trainer_config.parallelism
-            training = getattr(trainer_config, "training", None)
-
-            if training is not None:
-                seq_len = training.seq_len
-                if seq_len > self.rope.max_seq_len:
-                    raise ValueError(
-                        f"Training sequence length {seq_len} exceeds "
-                        f"model's maximum supported sequence length "
-                        f"{self.rope.max_seq_len}. The model cannot "
-                        f"produce valid RoPE embeddings for positions "
-                        f"beyond this limit."
-                    )
-                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+            seq_len = training.seq_len
+            if seq_len > self.rope.max_seq_len:
+                raise ValueError(
+                    f"Training sequence length {seq_len} exceeds model's "
+                    f"maximum supported sequence length "
+                    f"{self.rope.max_seq_len}. The model cannot produce "
+                    f"valid RoPE embeddings for positions beyond this limit."
+                )
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config
