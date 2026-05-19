@@ -1638,6 +1638,33 @@ Interpretation:
 - Disabling structured logging does not improve the flex best and fails the loss sanity check in this run.
 - Keep structured logging enabled for future candidates.
 
+## Experiment 57: Flex Attention Best With Fixed Debug Seed
+
+Source state: `ba3af10`.
+
+Source/config change:
+
+- None. Source was the current flex-without-FP8 best.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --debug.seed=42 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run57-flex-seed42-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 5,899, below the 8,489 current best.
+- Step 10 MFU: 24.65%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.66785 at step 1 to 13.76234 at step 10; finite but increasing.
+
+Interpretation:
+
+- Fixed seed 42 does not make the flex best a better command; it fails the short loss sanity check and is much slower in this run.
+- Recent flex runs show high measurement and loss-trend variance. Rerun the exact current-best command once to estimate variance before adding more speculative knobs.
+
 ## Manager Review After Experiment 29
 
 Current best:
@@ -1679,3 +1706,26 @@ Next implications:
 - Do not continue logging-overhead or nearby FP8 recipe sweeps.
 - Prioritize one narrow follow-up on the run41 flex attention branch, because it is the only measured path above the current best.
 - If flex remains correctness-bad after isolating FP8 and LR/update-size effects, return to profiling or communication-layout ideas rather than keeping a fast invalid candidate.
+
+## Manager Review After Experiment 56
+
+Current best:
+
+- Source state: `5801b0f`.
+- Command shape: flex attention, no FP8 converter, compile enabled, BF16 training dtype, local batch size 5, `--comm.trace_buf_size=0`, no AC/TP/CP/PP/EP, FSDP across 8 B200s.
+- Metrics: 8,489 tps, 35.47% MFU, 168.96 GiB peak memory, finite decreasing loss.
+
+Search state:
+
+- The current flex profile is still mixed compute/communication: about 1.80 s nvjet GEMMs, 0.94 s NCCL kernels, and 0.66 s flex-attention kernels on rank 0.
+- Direct memory-to-batch conversion is closed for now: no-AC local batch size 6 OOMed, memory-budget AC local batch size 7 was too slow, and local batch size 8 OOMed.
+- Whole-model communication tradeoffs are closed for now: full no-reshard OOMed at local batch size 5 and was much slower at local batch size 4; CP=2 was slower, memory-risky, and failed loss sanity.
+- Nearby runtime overhead and compiler knobs are not promising: structured logging disabled regressed badly, and Inductor GEMM max autotune was much slower with allocator retries.
+- FP8+flex remains interesting only as a selective-coverage idea. Lowering LR made loss decrease but did not beat the BF16 flex best, and high-precision FP8 without auto-filter was both slow and memory-risky.
+
+Next implications:
+
+- First priority: isolate the loss-path communication issue with an `lm_head`-only no-reshard FSDP policy. This is much narrower than whole-model no-reshard because `ChunkedCELoss` calls the separately wrapped `lm_head` repeatedly.
+- Second priority: test explicit FSDP module prefetch on the current flex best to overlap all-gathers with compute without changing the batch, AC, or converter state.
+- Third priority: revisit FP8+flex only by excluding `lm_head` from Float8 conversion while keeping `auto_filter_small_kn`; this tests whether quantized logits caused the run41 loss failure.
+- Keep the fixed-seed run as a diagnostic, not a performance priority, unless subsequent short-run loss trends remain inconsistent.

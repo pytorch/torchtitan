@@ -508,14 +508,51 @@
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is no effect or a small regression, as seen on the older FP8 source.
   Result: discarded at source state `b29e75a`; 7,455 tps and loss increased from 12.41723 to 19.26537.
 
+- Idea: flex attention best with lm_head-only no-reshard
+  Current best source commit: 5801b0f
+  Source: Manager review after run56
+  Expected mechanism: `ChunkedCELoss` calls `model.lm_head` directly for each hidden-state chunk. Keeping only the separately FSDP-wrapped `lm_head` unresharded after forward may avoid repeated loss-path all-gathers without retaining every transformer block's full parameters.
+  Supporting evidence: Full no-reshard at local batch size 5 OOMed, and no-reshard at local batch size 4 was far too slow, so whole-model no-reshard is closed. The current flex profile still shows about 0.94 s NCCL kernels, and the current best has roughly 9 GiB of physical memory headroom. The 14B `lm_head` BF16 weight is about 1.55 GiB, so an `lm_head`-only residency tradeoff is much narrower than whole-model no-reshard.
+  Planned source/config changes: In Qwen3 FSDP wrapping, keep transformer blocks and root on the existing reshard policy, but call `fully_shard(model.lm_head, ..., reshard_after_forward=False)` as the only policy exception.
+  Planned command or config overrides: Current flex best command unchanged: `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are OOM/allocator retries if loss chunks retain more than expected, or no benefit if FSDP already avoids repeated `lm_head` all-gathers.
+
+- Idea: flex attention best with explicit FSDP prefetch schedule
+  Current best source commit: 5801b0f
+  Source: Manager review after run56
+  Expected mechanism: Explicitly setting one-module-ahead FSDP forward and backward prefetch on Qwen3 transformer blocks can overlap part of the all-gather work with compute. This attacks the 0.94 s NCCL bucket without changing model math, precision, batch size, or attention backend.
+  Supporting evidence: Current Qwen3 parallelization wraps each block and `lm_head` but does not set `set_modules_to_forward_prefetch` or `set_modules_to_backward_prefetch`. The transformers-modeling backend has a reference prefetch pattern for decoder blocks. Batch growth, AC, CP, and full no-reshard are already slower or OOM, so overlap is the remaining narrow communication lever.
+  Planned source/config changes: Add a Qwen3-specific prefetch chain after FSDP wrapping: each block prefetches the next block in forward, `lm_head` or the final wrapped module at the tail, and each block prefetches the previous block in backward. Do not change reshard policy, batch size, AC, TP, CP, or converters in the same run.
+  Planned command or config overrides: Current flex best command unchanged.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is higher peak memory or allocator retries from earlier all-gathers; if that happens, discard rather than pairing with AC immediately.
+
+- Idea: flex attention with FP8 rowwise auto-filter but BF16 lm_head
+  Current best source commit: 5801b0f
+  Source: Manager review after run56
+  Expected mechanism: Run41 showed flex attention plus FP8 rowwise was the fastest raw path but failed loss sanity. Skipping only `lm_head` in the Float8 converter keeps the loss projection in BF16 while preserving FP8 for most transformer-block GEMMs, testing whether the invalid loss was driven by quantized logits rather than flex attention or block GEMMs.
+  Supporting evidence: Flex without FP8 is the current best and trains normally. FP8+flex at lower learning rates trained but was slower, while high-precision FP8 without auto-filter was much slower and memory-risky. A `filter_fqns` skip for `lm_head` is a narrow allowed converter-coverage change, not a broad recipe sweep.
+  Planned source/config changes: In `qwen3_14b()`, use `model_registry("14B", attn_backend="flex", converters=[Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn", "lm_head"], model_compile_enabled=True)])`.
+  Planned command or config overrides: Current flex best command shape with `--compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are still-invalid loss if attention/MLP FP8 is the issue, or slower throughput if `lm_head` FP8 supplied most of the speedup.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
-  Source: loss-sanity stability check after noisy flex follow-ups
+  Source: lower-priority diagnostic after noisy flex follow-ups
   Expected mechanism: Setting `--debug.seed=42` should make initialization/data ordering more reproducible without changing kernels or parallelism. It may help distinguish throughput changes from stochastic loss-trend noise in the current best source.
   Supporting evidence: Some flex-source follow-ups with tiny command changes produced increasing short-run loss, while run46 decreased. Program guidance uses seed 42 for numerical validation, and this is a command-only check that does not use deterministic warn-only.
   Planned source/config changes: None; use current flex-without-FP8 best source.
   Planned command or config overrides: Current best command plus `--debug.seed=42`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risk is no speed change or a lower-throughput but more stable diagnostic result.
+  Result: discarded at source state `ba3af10`; 5,899 tps and loss increased from 12.66785 to 13.76234.
+
+- Idea: rerun exact flex attention best
+  Current best source commit: 5801b0f
+  Source: variance check after noisy flex follow-ups
+  Expected mechanism: Repeating the exact current-best command measures run-to-run variance in throughput and the short loss trend. This helps decide whether run46 is robust enough to remain the best or whether more validation is needed.
+  Supporting evidence: Several command-only follow-ups on the same flex source produced lower tps and increasing loss. The exact best command has only one keep result so far.
+  Planned source/config changes: None; use current flex-without-FP8 best source.
+  Planned command or config overrides: Exact run46 command with a new dump folder.
+  Success criteria and expected risk: Keep if it beats 8,489 with finite decreasing loss; otherwise record as diagnostic variance/discard while preserving run46 as the best measured result.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
