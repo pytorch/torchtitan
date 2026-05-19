@@ -478,6 +478,15 @@
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are OOM, allocator instability, or continued recompute overhead.
   Result: crashed at source state `2ec5fb2`; local batch 8 OOMed in compiled flex-attention backward. The local batch 7 AC result was already too slow, so abandon this AC branch for now.
 
+- Idea: flex attention best with Inductor GEMM max autotune
+  Current best source commit: 5801b0f
+  Source: profile follow-up on GEMM bucket
+  Expected mechanism: Rank 0 profile for the flex best shows B200 nvjet GEMM kernels as the largest CUDA kernel bucket. Enabling Inductor GEMM max autotune may select faster matmul kernels for the compiled blocks and improve reported tokens/sec.
+  Supporting evidence: Run49 profile attributed about 1.80 s of the profiled step to nvjet GEMM kernels, larger than NCCL or flex-attention kernels. This is a command/environment-only tuning knob and does not change model math.
+  Planned source/config changes: None; use current flex-without-FP8 best source.
+  Planned command or config overrides: Current best command with `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` in the environment.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are longer compile time, no kernel change, or worse selected kernels.
+
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
   Source: profile follow-up after new best
