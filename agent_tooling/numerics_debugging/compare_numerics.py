@@ -8,7 +8,7 @@
 """Compare two numerics activation logs and generate an interactive HTML diff.
 
 Inputs are the per-rank text logs produced by
-``torchtitan.tools.activation_tracer.dump_captures_to_file`` (typically
+``agent_tooling.numerics_debugging.activation_tracer.dump_captures_to_file`` (typically
 written to ``{dump_folder}/numerics/rank_{rank}_activations.log`` when
 ``--profiler.dump_numerics`` is set). Each log is a sequence of
 ``[module_fqn/op_N_opname]`` blocks with per-op stats (Shape, output hash,
@@ -1084,7 +1084,7 @@ function toggleIH(el) {{
 def main():
     """CLI entry point: parse two logs, match entries, write HTML diff.
 
-    Invoked via ``python -m torchtitan.tools.compare_numerics`` or
+    Invoked via ``python -m agent_tooling.numerics_debugging.compare_numerics`` or
     directly. See module docstring for the typical workflow.
     """
     parser = argparse.ArgumentParser(description="Compare numerics activation logs")

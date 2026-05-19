@@ -514,7 +514,7 @@ class DebugModeTracer:
     ``op.record``; after ``__exit__`` the captured operator stream is
     walked once to materialize a ``dict[str, CapturedActivation]``
     keyed by ``module_fqn/op_N_opname`` and consumable by
-    :mod:`torchtitan.tools.compare_numerics`.
+    :mod:`agent_tooling.numerics_debugging.compare_numerics`.
 
     Args:
         model: The model whose activations to capture.  Used to install
