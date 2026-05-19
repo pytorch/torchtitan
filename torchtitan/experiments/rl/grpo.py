@@ -57,30 +57,12 @@ from torchtitan.protocols.model_spec import ModelSpec
 logger = logging.getLogger(__name__)
 
 
-def _sample_boundaries_from_positions(positions: torch.Tensor) -> list[list[int]]:
-    """Derive per-row sample start indices from position resets.
-
-    Padding regions also reset to 0, so callers must use
-    ``response_mask`` to skip them.
-    """
-    B, L = positions.shape
-    boundaries: list[list[int]] = []
-    for b in range(B):
-        row_positions = positions[b]
-        starts = [0]
-        for i in range(1, L):
-            if row_positions[i] == 0:
-                starts.append(i)
-        boundaries.append(starts)
-    return boundaries
-
-
 class GRPOLoss(Configurable):
     """Clipped GRPO surrogate loss with per-sample ratio.
 
-    Computes the mean logprob per sample (using position-derived boundaries),
-    exponentiates to get the importance sampling ratio, then applies PPO
-    clipping. Operates on packed [B, L] tensors.
+    Identifies samples by contiguous runs of 1s in ``response_mask``,
+    computes per-sample mean response logprob, exponentiates to get
+    the importance sampling ratio, then applies PPO clipping.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -96,16 +78,14 @@ class GRPOLoss(Configurable):
         policy_logprobs: torch.Tensor,
         response_mask: torch.Tensor,
         advantages: torch.Tensor,
-        positions: torch.Tensor,
         global_valid_tokens: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Per-sample GRPO clipped surrogate on packed [B, L] tensors.
 
-        Uses ``positions`` to find sample boundaries within packed rows,
-        computes per-sample mean response logprob, then applies the clipped
-        surrogate with per-sample advantages.
+        Each contiguous run of 1s in ``response_mask`` is one sample's
+        response. Per-sample mean response logprob is exponentiated to
+        get the ratio, then clipped.
         """
-        boundaries = _sample_boundaries_from_positions(positions)
         B, L = policy_logprobs.shape
 
         per_sample_ratios: list[torch.Tensor] = []
@@ -113,22 +93,34 @@ class GRPOLoss(Configurable):
         per_sample_response_lens: list[int] = []
 
         for b in range(B):
-            starts = boundaries[b]
-            for s_idx, start in enumerate(starts):
-                end = starts[s_idx + 1] if s_idx + 1 < len(starts) else L
-                sample_mask = response_mask[b, start:end]
-                num_response = sample_mask.sum()
-                # Skip padding regions (response_mask all zeros)
-                if num_response == 0:
-                    continue
-                sample_logprobs = policy_logprobs[b, start:end]
-                mean_logprob = (sample_logprobs * sample_mask).sum() / num_response
-                per_sample_ratios.append(torch.exp(mean_logprob))
-                sample_adv = advantages[b, start:end]
-                per_sample_advantages.append(
-                    (sample_adv * sample_mask).sum() / num_response
+            mask_row = response_mask[b]
+            # Find contiguous runs of 1s: each run is one sample's response.
+            # -1 means not inside a response region.
+            response_start = -1
+            for i in range(L):
+                if mask_row[i] == 1 and response_start < 0:
+                    response_start = i
+                elif mask_row[i] == 0 and response_start >= 0:
+                    self._accumulate_sample(
+                        policy_logprobs[b],
+                        advantages[b],
+                        response_start,
+                        i,
+                        per_sample_ratios,
+                        per_sample_advantages,
+                        per_sample_response_lens,
+                    )
+                    response_start = -1
+            if response_start >= 0:
+                self._accumulate_sample(
+                    policy_logprobs[b],
+                    advantages[b],
+                    response_start,
+                    L,
+                    per_sample_ratios,
+                    per_sample_advantages,
+                    per_sample_response_lens,
                 )
-                per_sample_response_lens.append(int(num_response.item()))
 
         if not per_sample_ratios:
             zero = policy_logprobs.new_zeros(())
@@ -165,6 +157,22 @@ class GRPOLoss(Configurable):
             }
 
         return pg_loss, metrics
+
+    @staticmethod
+    def _accumulate_sample(
+        logprobs_row: torch.Tensor,
+        advantages_row: torch.Tensor,
+        start: int,
+        end: int,
+        ratios: list[torch.Tensor],
+        advs: list[torch.Tensor],
+        lens: list[int],
+    ) -> None:
+        n = end - start
+        mean_logprob = logprobs_row[start:end].mean()
+        ratios.append(torch.exp(mean_logprob))
+        advs.append(advantages_row[start:end].mean())
+        lens.append(n)
 
 
 class Provisioner:
@@ -253,22 +261,18 @@ def _prepare_reward_metrics(
 
 
 class Batcher(Configurable):
-    """Packs episodes into a global batch split across DP ranks and grad accum steps.
+    """Packs episodes into ``[B, seq_length]`` batches for the trainer.
 
-    The number of gradient
-    accumulation steps is derived as
-    ``global_batch_size // (local_batch_size * dp_degree)``.
+    In synced GRPO the trainer consumes ALL generations — no truncation,
+    no explicit ``global_batch_size``. Episodes are greedy-packed into
+    fixed-length rows, padded to ``local_batch_size * dp_degree`` if
+    needed, and split into ``[grad_accum_steps][dp_degree]`` microbatches.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         local_batch_size: int = 1
         """Per-DP-rank batch size (packed rows per forward pass)."""
-
-        global_batch_size: int = -1
-        """Total packed rows per optimizer step. ``-1`` (default) auto-sizes
-        to fit all episodes. When set explicitly, must be a multiple of
-        ``local_batch_size * dp_degree``; excess rows are truncated."""
 
         seq_length: int = 2048
         """Tokens per packed row. Must not exceed the model's intrinsic
@@ -280,7 +284,6 @@ class Batcher(Configurable):
 
     def __init__(self, config: Config):
         self.local_batch_size = config.local_batch_size
-        self.global_batch_size = config.global_batch_size
         self.seq_length = config.seq_length
         self.input_ids_pad_value = config.input_ids_pad_value
 
@@ -290,43 +293,26 @@ class Batcher(Configurable):
         *,
         dp_degree: int,
     ) -> tuple[list[list[TrainBatch]], int]:
-        """Pack episodes into a structured global batch.
+        """Pack all episodes into a structured batch — no truncation.
 
         Returns:
             per_step_batches: shape ``[gradient_accumulation_steps][dp_degree]``,
                 each entry is a ``TrainBatch`` with ``local_batch_size`` rows.
-            global_valid_tokens: total response tokens across the global batch
-                (excludes padding rows). Use this to normalize the loss so that
+            global_valid_tokens: total response tokens across the batch
+                (excludes padding rows). Used to normalize the loss so that
                 gradient accumulation matches a single large-batch step.
         """
         chunk = self.local_batch_size * dp_degree
         packed_rows = list(self._pack_episodes(episodes))
 
-        if self.global_batch_size < 0:
-            global_batch_size = max(
-                ((len(packed_rows) + chunk - 1) // chunk) * chunk, chunk
-            )
-        else:
-            global_batch_size = self.global_batch_size
-            assert global_batch_size > 0
-            assert global_batch_size % chunk == 0, (
-                f"global_batch_size ({global_batch_size}) must be a multiple of "
-                f"local_batch_size ({self.local_batch_size}) * dp_degree "
-                f"({dp_degree})"
-            )
-            if len(packed_rows) > global_batch_size:
-                logger.warning(
-                    f"Episodes packed into {len(packed_rows)} rows, exceeding "
-                    f"global_batch_size {global_batch_size}; truncating. "
-                    f"Consider increasing global_batch_size or reducing "
-                    f"num_prompts_per_step."
-                )
-                packed_rows = packed_rows[:global_batch_size]
-        gradient_accumulation_steps = global_batch_size // chunk
-
-        if len(packed_rows) < global_batch_size:
-            pad_count = global_batch_size - len(packed_rows)
+        # Pad to the nearest multiple of chunk so rows divide evenly
+        # across grad accum steps and DP ranks.
+        total_rows = max(((len(packed_rows) + chunk - 1) // chunk) * chunk, chunk)
+        if len(packed_rows) < total_rows:
+            pad_count = total_rows - len(packed_rows)
             packed_rows.extend(self._pad_row() for _ in range(pad_count))
+
+        gradient_accumulation_steps = total_rows // chunk
 
         global_valid_tokens = sum(
             int(row["response_mask"].sum().item()) for row in packed_rows
@@ -436,7 +422,7 @@ class RLTrainer(Configurable):
         """torch.compile config shared by trainer and generator."""
 
         batcher: Batcher.Config = field(default_factory=Batcher.Config)
-        """Batcher config: local_batch_size, global_batch_size, seq_length."""
+        """Batcher config: local_batch_size, seq_length."""
 
         trainer: PolicyTrainer.Config = field(
             default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
