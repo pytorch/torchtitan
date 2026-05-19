@@ -8,12 +8,18 @@
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.testing._internal.common_fsdp import FSDPTestMultiThread
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
+from torch.testing._internal.common_fsdp import (
+    FSDPTest,
+    FSDPTestMultiThread,
+    get_devtype,
+)
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.flex_shard import BucketSpec
+from torchtitan.experiments.flex_shard import BucketSpec, flex_shard
 from torchtitan.experiments.flex_shard.example import (
     make_ragged_placement_fn,
     per_param_ragged_placements,
@@ -24,6 +30,9 @@ from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     ShardedBucketStorage,
 )
 from torchtitan.experiments.flex_shard.tests.common import single_rank_cpu_mesh
+
+
+device_type = torch.device(get_devtype())
 
 
 def _make_param_info(
@@ -47,6 +56,18 @@ def _make_param_info(
         storage_nbytes=local_numel * tensor.dtype.itemsize,
         global_numel=tensor.numel(),
     )
+
+
+class _TinyRaggedModule(nn.Module):
+    def __init__(self, device: torch.device | str) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(
+            torch.arange(16, dtype=torch.float32, device=device).view(4, 4)
+        )
+        self.bias = nn.Parameter(torch.arange(4, dtype=torch.float32, device=device))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x @ self.weight.t() + self.bias
 
 
 class TestRaggedShardPlacement(TestCase):
@@ -119,6 +140,39 @@ class TestRaggedShardPlacement(TestCase):
             placements = per_param_ragged_placements([("weight", weight)], mesh)
 
         self.assertEqual(placements["weight"], (RaggedShard((0,), (1,)),))
+
+    def test_rejects_mixed_ragged_placements_in_one_bucket(self):
+        from torchtitan.experiments.flex_shard.flex_shard.utils import (
+            _validate_bucket_uniform_dtype_and_placement,
+        )
+
+        assignments = [["weight", "bias"]]
+        placements = {
+            "weight": (RaggedShard(dims=(0,), local_units=(1, 3)),),
+            "bias": (RaggedShard(dims=(0,), local_units=(2, 2)),),
+        }
+        buckets = [
+            BucketSpec(
+                ["*"],
+                placement_fn=make_ragged_placement_fn(
+                    dims=(0,),
+                    local_units=(1, 3),
+                ),
+                reshard_after_forward=False,
+            )
+        ]
+        named_params = [
+            ("weight", nn.Parameter(torch.empty(4, 4))),
+            ("bias", nn.Parameter(torch.empty(4))),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "mixed placements"):
+            _validate_bucket_uniform_dtype_and_placement(
+                assignments,
+                placements,
+                buckets,
+                named_params,
+            )
 
 
 class TestRaggedShardDistributed(FSDPTestMultiThread):
@@ -270,6 +324,77 @@ class TestRaggedShardDistributed(FSDPTestMultiThread):
 
         self.assertEqual(full_param, weight)
         self.assertEqual(local_grad, local_shard)
+
+
+class TestRaggedShardRuntime(FSDPTest):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @skip_if_lt_x_gpu(2)
+    def test_flex_shard_forward_backward_on_cuda_mesh(self):
+        mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+        placement = RaggedShard(dims=(0,), local_units=(1, 3))
+        reference = _TinyRaggedModule(device_type.type)
+        model = _TinyRaggedModule(device_type.type)
+        for param in [*reference.parameters(), *model.parameters()]:
+            dist.broadcast(param.data, src=0)
+        x = torch.arange(8, dtype=torch.float32, device=device_type).view(2, 4)
+        dist.broadcast(x, src=0)
+
+        ref_output = reference(x)
+        ref_output.sum().backward()
+        for param in reference.parameters():
+            if param.grad is not None:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        original_params = {
+            fqn: param.detach().clone() for fqn, param in model.named_parameters()
+        }
+
+        flex_shard(
+            model,
+            mesh,
+            buckets=[
+                BucketSpec(
+                    ["*"],
+                    placement_fn=make_ragged_placement_fn(
+                        dims=(0,),
+                        local_units=(1, 3),
+                    ),
+                    reshard_after_forward=False,
+                )
+            ],
+        )
+        output = model(x)
+        output.sum().backward()
+
+        self.assertEqual(output, ref_output.detach())
+        reference_params = dict(reference.named_parameters())
+        state_dict = model.state_dict()
+        for fqn, param in model.named_parameters():
+            expected_param = placement.extract_local_shard(
+                original_params[fqn],
+                self.rank,
+                self.world_size,
+            )
+            self.assertEqual(param.detach(), expected_param)
+            self.assertEqual(state_dict[fqn], expected_param)
+            param_grad = param.grad
+            ref_grad = reference_params[fqn].grad
+            self.assertIsNotNone(param_grad)
+            self.assertIsNotNone(ref_grad)
+            assert param_grad is not None
+            assert ref_grad is not None
+            expected_grad = placement.extract_local_shard(
+                ref_grad.detach(),
+                self.rank,
+                self.world_size,
+            )
+            self.assertEqual(param_grad.detach(), expected_grad)
 
 
 if __name__ == "__main__":
