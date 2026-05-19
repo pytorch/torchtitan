@@ -336,6 +336,16 @@
   Planned source/config changes: Edit only `qwen3_14b()` to call `model_registry("14B", attn_backend="flex_flash", converters=[...])`.
   Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are compile overhead, FlexAttention incompatibility with this Qwen3 mask/shape, or slower attention kernels.
+  Result: crashed at source state `ad43e66`; CUTE flash attention library is unavailable, so Inductor cannot lower `BACKEND="FLASH"`.
+
+- Idea: FP8 best with varlen attention backend
+  Current best source commit: 5681e36
+  Source: attention-backend follow-up after `flex_flash` environment crash
+  Expected mechanism: Qwen3 supports `attn_backend="varlen"`, which uses the varlen attention path and avoids FlexAttention's unavailable CUTE flash backend. It may improve or at least change the large attention-backward bucket seen in the profile.
+  Supporting evidence: Run38 profile shows flash attention backward around 599 ms. `flex_flash` could not run because CUTE flash is missing; `varlen` is the other Qwen3 attention backend likely to exercise a different attention implementation on B200.
+  Planned source/config changes: Edit only `qwen3_14b()` to call `model_registry("14B", attn_backend="varlen", converters=[...])`.
+  Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are varlen metadata overhead, compile/runtime incompatibility, or slower attention.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

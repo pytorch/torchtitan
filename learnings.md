@@ -1129,6 +1129,31 @@ Interpretation:
 - The best is still mixed compute/communication-bound, with attention now large enough to justify one attention-backend experiment.
 - Since TP and AC lines failed to beat the best and memory remains near the risk line, the next narrow source/config test is `attn_backend="flex_flash"` while keeping FP8 auto-filtering and the best command.
 
+## Experiment 39: FP8 Best With Flex Flash Attention Backend
+
+Source state: `ad43e66`.
+
+Source/config change:
+
+- `qwen3_14b()` passed `attn_backend="flex_flash"` to `model_registry("14B", ...)`, keeping the FP8 rowwise auto-filter converter.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run39-fp8-flex-flash-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run failed during Inductor lowering before step 1 completed.
+- Error: `BACKEND='FLASH' but flash attention cannot be used: CUTE flash attention library is not available`.
+
+Interpretation:
+
+- The `flex_flash` backend is not runnable in this environment because the needed CUTE flash attention library is unavailable.
+- Attention remains a profile-visible bottleneck, so the next attention-backend test should avoid the CUTE flash path. Try Qwen3 `attn_backend="varlen"`.
+
 ## Manager Review After Experiment 29
 
 Current best:
