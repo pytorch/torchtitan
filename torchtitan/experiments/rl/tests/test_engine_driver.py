@@ -227,3 +227,48 @@ def test_driver_restarts_on_next_admit():
 
 def test_driver_crash_propagates_to_pending_futures():
     asyncio.run(_impl_test_driver_crash_propagates_to_pending_futures())
+
+
+async def _impl_test_pull_blocks_new_admits_until_drain():
+    """While a pull is in progress (gate closed), new generate_tokens
+    callers must park until the gate reopens. Verifies the admit-gate
+    semantics protecting the drain from a steady rollout stream.
+
+    Uses asyncio.Events to deterministically sequence the pull against
+    a concurrent generate_tokens call.
+    """
+    generator = _make_generator()
+    # Kick the driver to life so the gate exists.
+    await _call_generate_tokens(generator, [[1, 2, 3]])
+    await asyncio.sleep(0)
+    assert generator._admit_gate is not None
+    assert generator._admit_gate.is_set()
+
+    # Close the gate manually to simulate "pull in progress".
+    generator._admit_gate.clear()
+
+    # Fire a generate_tokens call concurrently; it MUST park on the gate.
+    admit_started = asyncio.Event()
+    admit_finished = asyncio.Event()
+
+    async def parked_admit():
+        admit_started.set()
+        await _call_generate_tokens(generator, [[4, 5, 6]])
+        admit_finished.set()
+
+    task = asyncio.create_task(parked_admit())
+    await admit_started.wait()
+    await asyncio.sleep(0.01)  # let it park on the gate
+    assert not admit_finished.is_set(), "admit must wait for gate"
+    assert not generator._engine.add_requests or len(
+        generator._engine.add_requests
+    ) == 1, "no new add_request while gate is closed (1 from the first call)"
+
+    # Reopen the gate. The parked call should now complete.
+    generator._admit_gate.set()
+    await asyncio.wait_for(task, timeout=5.0)
+    assert admit_finished.is_set()
+
+
+def test_pull_blocks_new_admits_until_drain():
+    asyncio.run(_impl_test_pull_blocks_new_admits_until_drain())
