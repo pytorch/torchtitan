@@ -579,6 +579,15 @@
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is lower tps if backward prefetch was hiding necessary parameter all-gathers.
   Result: discarded at source state `1996329`; 8,596 tps with finite slightly decreasing loss, below the 8,835 bidirectional prefetch best.
 
+- Idea: backward-only FSDP prefetch on prefetch flex best
+  Current best source commit: 7c1c351
+  Source: asymmetric prefetch follow-up after run65
+  Expected mechanism: Keep backward one-module prefetch while removing forward prefetch. This isolates whether the current best depends mainly on backward parameter-gather overlap, and it may reduce forward-pass communication contention.
+  Supporting evidence: Forward-only prefetch regressed to 8,596 tps, so backward prefetch appears useful. The complementary backward-only test is the smallest remaining way to identify whether forward prefetch is also necessary.
+  Planned source/config changes: In Qwen3 FSDP wrapping, remove `set_modules_to_forward_prefetch` calls and keep the one-module backward prefetch chain from `lm_head` through the transformer blocks. Do not change batch size, reshard policy, converters, AC, or command flags.
+  Planned command or config overrides: Exact current best command with a new dump folder.
+  Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is lower tps if forward prefetch was hiding important forward all-gathers.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
