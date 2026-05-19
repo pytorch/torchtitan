@@ -845,6 +845,23 @@ class RLTrainer(Configurable):
                             num_global_valid_tokens=num_global_valid_tokens,
                         )
                     )
+                # NaN loss → skip optim_step + push so the bad gradient
+                # never lands on the weights. The trainer's
+                # ``zero_grad`` at the start of the next forward wipes
+                # the stale NaN gradient. Counts as a SKIP for the
+                # scheduled-step budget; ``_policy_version`` is not
+                # incremented because no new weights were published.
+                if not math.isfinite(fb.get("loss/mean", 0.0)):
+                    skipped_zero_advantage_steps += 1
+                    self._train_step += 1
+                    sl.set_step(self._train_step)
+                    logger.warning(
+                        "Step %2d | SKIPPED (NaN loss; cumulative skips=%d)",
+                        self._train_step,
+                        skipped_zero_advantage_steps,
+                    )
+                    continue
+
                 with sl.log_trace_span("trainer_optim_step_call"):
                     opt = self._get_rank_0_value(await self.trainer.optim_step.call())
                 metrics = {**fb, **opt.metrics}
