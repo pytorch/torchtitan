@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 from torch.utils.data import IterableDataset
 
@@ -27,9 +27,14 @@ from torch.utils.data import IterableDataset
 class InterleavedDataset(IterableDataset):
     """Randomly interleaves multiple IterableDatasets weighted by sampling probability.
 
-    At each step a source is drawn proportionally to its weight.  Iteration
-    stops as soon as any source is exhausted, defining a natural epoch
-    boundary consistent with HuggingFaceTextDataset / ChatDataset.
+    At each step a source is drawn proportionally to its weight.
+
+    ``stopping_strategy`` controls when iteration ends:
+
+    - ``"on_first_exhausted"`` (default): stops as soon as any source raises
+      ``StopIteration``, defining a natural epoch boundary.
+    - ``"all_exhausted"``: an exhausted source is restarted and iteration
+      continues until every source has been exhausted at least once.
 
     All sources must implement ``state_dict`` / ``load_state_dict``.
     Re-looping, infinite behaviour, and within-source shuffling are each
@@ -41,6 +46,9 @@ class InterleavedDataset(IterableDataset):
         datasets: list,
         weights: list[float],
         seed: int | None = None,
+        stopping_strategy: Literal[
+            "on_first_exhausted", "all_exhausted"
+        ] = "on_first_exhausted",
     ) -> None:
         if not datasets:
             raise ValueError("At least one dataset must be provided.")
@@ -54,6 +62,12 @@ class InterleavedDataset(IterableDataset):
         total = sum(weights)
         if total == 0:
             raise ValueError("Sum of weights must be positive.")
+
+        if stopping_strategy not in ("on_first_exhausted", "all_exhausted"):
+            raise ValueError(
+                "stopping_strategy must be 'on_first_exhausted' or 'all_exhausted', "
+                f"got {stopping_strategy!r}"
+            )
 
         missing = [
             type(ds).__name__
@@ -72,22 +86,25 @@ class InterleavedDataset(IterableDataset):
         self._datasets = list(datasets)
         self._probs = [w / total for w in weights]
         self._rng = random.Random(seed)
+        self._stopping_strategy = stopping_strategy
 
     def __iter__(self) -> Iterator:
-        """Yield weighted-interleaved samples across all sources.
-
-        A source is selected at each step proportionally to its weight.
-        Iteration stops as soon as any source raises StopIteration.
-        """
+        """Yield weighted-interleaved samples across all sources."""
         indices = list(range(len(self._datasets)))
         iterators = [iter(ds) for ds in self._datasets]
+        exhausted = [False] * len(self._datasets)
 
         while True:
             idx = self._rng.choices(indices, weights=self._probs, k=1)[0]
             try:
                 yield next(iterators[idx])
             except StopIteration:
-                return
+                if self._stopping_strategy == "on_first_exhausted":
+                    return
+                exhausted[idx] = True
+                if all(exhausted):
+                    return
+                iterators[idx] = iter(self._datasets[idx])
 
     def state_dict(self) -> dict[str, Any]:
         """Snapshot of interleaver RNG and all source states."""

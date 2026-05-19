@@ -63,6 +63,10 @@ class TestInterleavedDatasetInit(unittest.TestCase):
         with self.assertRaises(ValueError):
             InterleavedDataset([_MockDataset([1])], [0.0])
 
+    def test_rejects_invalid_stopping_strategy(self):
+        with self.assertRaises(ValueError):
+            InterleavedDataset([_MockDataset([1])], [1.0], stopping_strategy="unknown")
+
     def test_normalizes_weights(self):
         ds_a, ds_b = _MockDataset([1]), _MockDataset([2])
         interleaved = InterleavedDataset([ds_a, ds_b], [2.0, 8.0])
@@ -164,6 +168,55 @@ class TestInterleavedDatasetCheckpointing(unittest.TestCase):
         interleaved2 = InterleavedDataset([ds_a2, ds_b2], [1.0, 1.0], seed=13)
         interleaved2.load_state_dict(state)
         self.assertEqual(list(interleaved2), original_tail)
+
+
+class TestAllExhaustedStrategy(unittest.TestCase):
+    def test_shorter_source_loops(self):
+        """Shorter source loops until the longer one is exhausted."""
+        ds_short = _MockDataset([99])
+        ds_long = _MockDataset(list(range(5)))
+        samples = list(
+            InterleavedDataset(
+                [ds_short, ds_long], [1.0, 1.0], seed=0,
+                stopping_strategy="all_exhausted",
+            )
+        )
+        self.assertGreater(samples.count(99), 1)
+        self.assertEqual(sorted(v for v in samples if v != 99), list(range(5)))
+
+    def test_all_sources_seen_at_least_once(self):
+        """Every item from every source appears at least once."""
+        ds_a = _MockDataset([1, 2])
+        ds_b = _MockDataset([10, 20, 30])
+        samples = list(
+            InterleavedDataset(
+                [ds_a, ds_b], [1.0, 1.0], seed=0,
+                stopping_strategy="all_exhausted",
+            )
+        )
+        for v in [1, 2, 10, 20, 30]:
+            self.assertIn(v, samples)
+
+    def test_equal_sources_no_loops(self):
+        """Sources of equal length exhaust at the same time — no looping needed."""
+        ds_a = _MockDataset([1, 2, 3])
+        ds_b = _MockDataset([4, 5, 6])
+        samples = list(
+            InterleavedDataset(
+                [ds_a, ds_b], [1.0, 1.0], seed=0,
+                stopping_strategy="all_exhausted",
+            )
+        )
+        self.assertEqual(sorted(samples), [1, 2, 3, 4, 5, 6])
+
+    def test_on_first_exhausted_unchanged(self):
+        """Default strategy still stops on first exhaustion."""
+        ds_short = _MockDataset([99])
+        ds_long = _MockDataset(list(range(50)))
+        samples = list(
+            InterleavedDataset([ds_short, ds_long], [1.0, 1.0], seed=0)
+        )
+        self.assertLess(len(samples), 50)
 
 
 if __name__ == "__main__":

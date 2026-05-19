@@ -304,6 +304,9 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
         seed: int = 42
         """Interleaving seed"""
 
+        stopping_strategy: str = "on_first_exhausted"
+        """When to stop iteration: 'on_first_exhausted' or 'all_exhausted'"""
+
         def __post_init__(self) -> None:
             if not self.sources:
                 raise ValueError("At least one source should be defined.")
@@ -340,6 +343,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
             ],
             weights=[source.weight for source in config.sources],
             seed=config.seed,
+            stopping_strategy=config.stopping_strategy,
         )
 
         dataloader_kwargs = {
@@ -705,6 +709,9 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
         seed: int = 42
         """Interleaving seed"""
 
+        stopping_strategy: str = "on_first_exhausted"
+        """When to stop iteration: 'on_first_exhausted' or 'all_exhausted'"""
+
         def __post_init__(self) -> None:
             if not self.sources:
                 raise ValueError("At least one source should be defined.")
@@ -743,6 +750,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
             ],
             weights=[source.weight for source in config.sources],
             seed=config.seed,
+            stopping_strategy=config.stopping_strategy,
         )
 
         dataloader_kwargs = {
