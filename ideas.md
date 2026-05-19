@@ -386,6 +386,43 @@
   Planned source/config changes: None; use the restored FP8 rowwise auto-filter source.
   Planned command or config overrides: Current best command plus `--parallelism.fsdp_reshard_after_forward=never`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Main risk is OOM because the current best already reaches 168.7 GiB peak memory.
+  Result: crashed at source state `401de15`; first-step loss backward OOMed while trying to allocate 2.90 GiB with the training process already at about 175.35 GiB.
+
+- Idea: FP8 no-reshard with local batch size 4
+  Current best source commit: 477f662
+  Source: follow-up to no-reshard local batch 5 OOM
+  Expected mechanism: Lowering local batch size by one should reduce activation memory enough for `fsdp_reshard_after_forward=never` to fit. If no-reshard removes enough FSDP all-gather overhead, it may compensate for the smaller global batch and beat the current tokens/sec best.
+  Supporting evidence: Run44 OOMed while trying to allocate 2.90 GiB with about 175.35 GiB already held by the training process. Current best local batch 5 with resharding uses 168.7 GiB and the profile shows all-gather/reduce-scatter time is material. Local batch 4 is the nearest lower-memory no-reshard test.
+  Planned source/config changes: None; use the restored FP8 rowwise auto-filter source.
+  Planned command or config overrides: Current best command plus `--parallelism.fsdp_reshard_after_forward=never --training.local_batch_size=4`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are slower throughput from smaller batch size or residual OOM if no-reshard residency dominates.
+
+- Idea: flex attention without FP8 converter
+  Current best source commit: 477f662
+  Source: correctness isolation after fast flex run
+  Expected mechanism: Run41 with flex attention plus FP8 was faster than the best but failed loss sanity. Removing the FP8 converter while keeping flex attention tests whether the bad loss came from the FP8+flex interaction rather than flex attention itself. If loss becomes healthy, flex may still beat the current best or identify a keepable attention path.
+  Supporting evidence: Run41 reached 8,544 tps, above the 8,469 best, but loss increased from 12.41705 to 13.88057. The kept FP8 sdpa path trains normally, so the invalidity is specific to flex attention or its interaction with FP8.
+  Planned source/config changes: In `qwen3_14b()`, set `attn_backend="flex"` and remove the Float8 converter; keep the rest of the current-best source and FSDP/compile path unchanged.
+  Planned command or config overrides: Current best command shape with `--comm.trace_buf_size=0`, `--compile.enable`, `--training.dtype=bfloat16`, and `--training.local_batch_size=5`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is that removing FP8 loses too much throughput or flex attention still fails loss sanity.
+
+- Idea: flex attention with lower learning rate
+  Current best source commit: 477f662
+  Source: correctness recovery after fast flex run
+  Expected mechanism: If flex attention's higher throughput is valid but its short-run loss is update-size sensitive, lowering the learning rate may restore the 10-step loss trend without changing kernel/runtime performance materially.
+  Supporting evidence: Run41 had the best raw throughput at 8,544 tps but loss increased. The configured LR is 8e-4 with a 10-step adjusted warmup; a smaller LR such as 4e-4 changes optimizer update size while preserving the fast flex kernels.
+  Planned source/config changes: Restore the run41 source shape: FP8 rowwise auto-filter converter with `attn_backend="flex"`.
+  Planned command or config overrides: Run41 command plus `--optimizer.lr=4e-4`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is that LR does not fix a semantic/masking issue, or that lower LR only masks an invalid attention behavior.
+
+- Idea: FP8 rowwise_with_gw_hp without auto-filter
+  Current best source commit: 477f662
+  Source: quantization recipe fallback after auto-filter crash
+  Expected mechanism: `rowwise_with_gw_hp` crashed only because torchao's `_auto_filter_for_recipe` does not support that recipe. Removing `auto_filter_small_kn` tests the recipe itself on this stack while accepting broader conversion coverage.
+  Supporting evidence: Run42 failed before training with `Unsupported recipe: ROWWISE_WITH_GW_HP`. Broad default-rowwise conversion without auto-filter was slower, so this is lower priority than flex correctness isolation, but it is the only remaining way to evaluate the high-precision-gradient FP8 recipe.
+  Planned source/config changes: In `qwen3_14b()`, use `Float8LinearConverter.Config(recipe_name="rowwise_with_gw_hp", model_compile_enabled=True)` with no `filter_fqns`.
+  Planned command or config overrides: Current best command shape with `--comm.trace_buf_size=0`, `--compile.enable`, `--training.dtype=bfloat16`, and `--training.local_batch_size=5`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is slower throughput from broader conversion and high-precision gradient-weight work.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

@@ -1263,6 +1263,33 @@ Interpretation:
 - Keep structured logging at the default enabled value for future runs.
 - The current best remains FP8 rowwise auto-filter with NCCL flight recorder disabled.
 
+## Experiment 44: FP8 Best With FSDP Reshard-After-Forward Disabled
+
+Source state: `401de15`.
+
+Source/config change:
+
+- None. Source was the restored FP8 rowwise auto-filter best.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --parallelism.fsdp_reshard_after_forward=never --dump_folder=outputs/autoresearch/may19-qwen3-14b/run44-fp8-no-reshard-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run OOMed during the first-step loss backward before any step metrics were emitted.
+- Error: `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.90 GiB`.
+- Rank 0 reported 175.35 GiB in the training process plus the known 616 MiB small `train_perf_model` process.
+- Rank 4 also reported 175.35 GiB in the training process plus a 1.73 GiB external Python process. No external process exceeded the 5 GiB contamination threshold.
+
+Interpretation:
+
+- Disabling FSDP reshard-after-forward at local batch size 5 is not viable; the extra parameter/gradient residency exhausts the B200 memory margin.
+- The failure happened close to fitting on ranks with only small external allocations, so a local-batch-size-4 follow-up is a reasonable communication/memory tradeoff. It must overcome the smaller global batch to beat 8,469 tps.
+
 ## Manager Review After Experiment 29
 
 Current best:
@@ -1283,3 +1310,24 @@ Next implications:
 - After the queued FP8 + `--comm.trace_buf_size=0` run, profile whichever FP8 command is best unless the result clearly points to a different immediate bottleneck.
 - Try a B200-native MXFP8 linear converter as a distinct quantization hypothesis; docs claim MXFP8 is intended for Blackwell and can outperform plain FP8 on dense GEMMs.
 - If MXFP8 is not viable or is slower, refine the kept FP8 rowwise converter by changing conversion coverage rather than changing unrelated training knobs.
+
+## Manager Review After Experiment 43
+
+Current best:
+
+- Source state: run30 FP8 rowwise auto-filter best.
+- Command shape: compile enabled, BF16 training dtype, local batch size 5, `--comm.trace_buf_size=0`, TP/CP/PP/EP disabled, FSDP across 8 B200s.
+- Metrics: 8,469 tps, 35.39% MFU, 168.7 GiB peak memory, finite decreasing loss.
+
+Search state:
+
+- Quantization: FP8 rowwise auto-filter is the kept source line. MXFP8 is blocked on this installed stack, broad FP8 conversion is slower, and `rowwise_with_gw_hp` is unsupported with auto-filter.
+- Attention: `flex_flash` and `varlen` are blocked by missing libraries. Plain `flex` is faster but failed convergence sanity.
+- Batch/memory: memory remains near the 95% risk line, and prior local-batch increases either OOMed or lost throughput.
+- Overhead: disabling NCCL flight recorder helped and is part of the best; disabling structured logging did not help.
+
+Next implications:
+
+- Do not continue logging-overhead or nearby FP8 recipe sweeps.
+- Prioritize one narrow follow-up on the run41 flex attention branch, because it is the only measured path above the current best.
+- If flex remains correctness-bad after isolating FP8 and LR/update-size effects, return to profiling or communication-layout ideas rather than keeping a fast invalid candidate.
