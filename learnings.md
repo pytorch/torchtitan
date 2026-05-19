@@ -1861,3 +1861,24 @@ Interpretation:
 
 - The remaining profile is mixed GEMM plus communication. Reduce-scatter is now the largest visible NCCL bucket, while all-gather is smaller and likely partly hidden by prefetch.
 - Next source experiments should refine prefetch scheduling or reduce gradient communication exposure; nearby FP8 coverage did not beat the best.
+
+## Experiment 64: Two-Module FSDP Prefetch Window
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run64-flex-two-module-prefetch-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,627, below the 8,835 current best.
+- Step 10 MFU: 36.04%.
+- Step 10 peak memory: 169.33 GiB, 94.94%.
+- Loss moved from 12.38179 at step 1 to 5.68745 at step 10; finite and decreasing.
+
+Interpretation:
+
+- A two-module prefetch window is too aggressive: it increases peak memory and slows throughput.
+- Restore the one-module prefetch schedule. If refining prefetch further, prefer narrower/asymmetric schedules rather than wider windows.

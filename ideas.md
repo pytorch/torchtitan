@@ -567,6 +567,7 @@
   Planned source/config changes: In Qwen3 FSDP wrapping, change the explicit prefetch lists so each layer prefetches up to the next two FSDP modules in forward, and each layer/lm_head prefetches up to the previous two modules in backward. Do not change reshard policy, converters, AC, batch size, or command flags.
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is valid OOM or lower tps from too much early parameter residency/communication contention.
+  Result: discarded at source state `388fdfd`; 8,627 tps with finite decreasing loss, and peak memory rose to 169.33 GiB.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
