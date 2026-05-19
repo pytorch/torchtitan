@@ -184,7 +184,11 @@ def compile_time_passes(
     fused_dir = config.compile.fused_kernel_dir
     if fused_dir:
         passes.append(
-            functools.partial(fused_kernel_pass, kernel_dir=fused_dir)
+            functools.partial(
+                fused_kernel_pass,
+                kernel_dir=fused_dir,
+                extractor=config.compile.fused_kernel_extractor,
+            )
         )
 
     inductor_compilation = config.compile.inductor_compilation

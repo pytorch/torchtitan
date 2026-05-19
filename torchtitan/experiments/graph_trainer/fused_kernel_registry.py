@@ -35,6 +35,7 @@ import hashlib
 import importlib.util
 import operator
 import re
+from abc import ABC, abstractmethod
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,15 +149,17 @@ def _iter_node_args(node: torch.fx.Node):
 
 
 # ---------------------------------------------------------------------------
-# Region discovery
+# Region: a fusible subgraph with inputs and outputs
 # ---------------------------------------------------------------------------
 
 @dataclass
-class _Region:
+class Region:
+    """A fusible subgraph discovered by a RegionExtractor."""
+
     nodes: list[torch.fx.Node]
-    norm_fqn: str
     external_inputs: list[torch.fx.Node]
     output_nodes: list[torch.fx.Node]
+    norm_fqn: str = ""
 
     @property
     def num_compute_ops(self) -> int:
@@ -175,7 +178,7 @@ class _Region:
         return max_bytes
 
 
-def _compute_region_hash(region: _Region) -> str:
+def _compute_region_hash(region: Region) -> str:
     """Stable hash from op targets + input/output shapes."""
     parts = []
     for n in region.nodes:
@@ -192,11 +195,15 @@ def _compute_region_hash(region: _Region) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
+# ---------------------------------------------------------------------------
+# Region extractors (pluggable)
+# ---------------------------------------------------------------------------
+
+
 def _split_connected(nodes: list[torch.fx.Node]) -> list[list[torch.fx.Node]]:
     """Split into connected components via union-find."""
     if not nodes:
         return []
-    node_set = {n.name for n in nodes}
     name_to_idx = {n.name: i for i, n in enumerate(nodes)}
     parent = list(range(len(nodes)))
 
@@ -223,90 +230,145 @@ def _split_connected(nodes: list[torch.fx.Node]) -> list[list[torch.fx.Node]]:
     return [[nodes[i] for i in sorted(idxs)] for idxs in groups.values()]
 
 
-def _discover_regions(
-    gm: torch.fx.GraphModule,
-    *,
-    min_ops: int = 2,
-    min_compute_ops: int = 1,
-    min_count: int = 2,
-) -> list[_Region]:
-    """Discover fusible regions in the graph."""
-    # Segment at fqn boundaries
-    raw_regions: list[tuple[list[torch.fx.Node], str]] = []
-    current: list[torch.fx.Node] = []
-    current_fqn = ""
+def _build_region(comp: list[torch.fx.Node], norm_fqn: str = "") -> Region:
+    """Build a Region from a list of connected nodes."""
+    node_names = {n.name for n in comp}
 
-    for node in gm.graph.nodes:
-        if node.op != "call_function":
-            continue
-        fqn = _normalize_fqn(_get_node_fqn(node))
-        if fqn != current_fqn:
-            if current:
-                raw_regions.append((current, current_fqn))
-            current = []
-            current_fqn = fqn
-        current.append(node)
-    if current:
-        raw_regions.append((current, current_fqn))
+    external_inputs: list[torch.fx.Node] = []
+    seen: set[str] = set()
+    for n in comp:
+        for arg in _iter_node_args(n):
+            if arg.name not in node_names and arg.name not in seen:
+                seen.add(arg.name)
+                external_inputs.append(arg)
 
-    # Split connected components, filter unfusable
-    all_regions: list[_Region] = []
-    for chunk, norm_fqn in raw_regions:
-        for comp in _split_connected(chunk):
+    output_nodes: list[torch.fx.Node] = []
+    for n in comp:
+        for user in n.users:
+            if user.name not in node_names:
+                if n not in output_nodes:
+                    output_nodes.append(n)
+                break
+    if not output_nodes:
+        output_nodes = [comp[-1]]
+
+    return Region(
+        nodes=comp, norm_fqn=norm_fqn,
+        external_inputs=external_inputs,
+        output_nodes=output_nodes,
+    )
+
+
+class RegionExtractor(ABC):
+    """Base class for fusible region extractors."""
+
+    @abstractmethod
+    def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
+        """Discover all fusible regions in the graph."""
+        ...
+
+
+class FqnRegionExtractor(RegionExtractor):
+    """Segments at module_fqn boundaries, splits connected components,
+    filters by handcoded op lists."""
+
+    def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
+        raw_regions: list[tuple[list[torch.fx.Node], str]] = []
+        current: list[torch.fx.Node] = []
+        current_fqn = ""
+
+        for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
+            fqn = _normalize_fqn(_get_node_fqn(node))
+            if fqn != current_fqn:
+                if current:
+                    raw_regions.append((current, current_fqn))
+                current = []
+                current_fqn = fqn
+            current.append(node)
+        if current:
+            raw_regions.append((current, current_fqn))
+
+        all_regions: list[Region] = []
+        for chunk, norm_fqn in raw_regions:
+            for comp in _split_connected(chunk):
+                if any(_is_unfusable(n) for n in comp):
+                    continue
+                compute = {str(n.target) for n in comp if str(n.target) not in _METADATA_OPS}
+                if compute and compute <= _ALREADY_OPTIMIZED_OPS:
+                    continue
+                all_regions.append(_build_region(comp, norm_fqn))
+
+        return all_regions
+
+
+class InductorRegionExtractor(RegionExtractor):
+    """Uses inductor's ``is_fusible_node`` and ``CapabilityBasedPartitioner``
+    to discover fusible regions — matches inductor's actual fusion decisions."""
+
+    def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
+        try:
+            from torch._inductor.fx_passes.fusion_regions import (
+                is_fusible_node,
+                is_view_node,
+            )
+            from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner
+            from torch.fx.passes.operator_support import create_op_support
+        except ImportError:
+            logger.warning(
+                "InductorRegionExtractor: inductor partitioner not available, "
+                "falling back to FqnRegionExtractor"
+            )
+            return FqnRegionExtractor().extract(gm)
+
+        def _is_supported(_submodules, node):
+            return is_fusible_node(node)
+
+        support = create_op_support(_is_supported)
+        partitioner = CapabilityBasedPartitioner(
+            gm, support, allows_single_node_partition=True,
+        )
+        partitions = partitioner.propose_partitions()
+
+        all_regions: list[Region] = []
+        for partition in partitions:
+            comp = list(partition.nodes.keys())
+            # Skip view-only partitions
+            if all(is_view_node(n) or n.op != "call_function" for n in comp):
+                continue
+            # Filter unfusable ops that slipped through
             if any(_is_unfusable(n) for n in comp):
                 continue
-            compute = {str(n.target) for n in comp if str(n.target) not in _METADATA_OPS}
-            if compute and compute <= _ALREADY_OPTIMIZED_OPS:
-                continue
+            norm_fqn = _normalize_fqn(_get_node_fqn(comp[0])) if comp else ""
+            all_regions.append(_build_region(comp, norm_fqn))
 
-            node_names = {n.name for n in comp}
+        return all_regions
 
-            # External inputs
-            external_inputs: list[torch.fx.Node] = []
-            seen: set[str] = set()
-            for n in comp:
-                for arg in _iter_node_args(n):
-                    if arg.name not in node_names and arg.name not in seen:
-                        seen.add(arg.name)
-                        external_inputs.append(arg)
 
-            # Output nodes: consumed outside the region
-            output_nodes: list[torch.fx.Node] = []
-            for n in comp:
-                for user in n.users:
-                    if user.name not in node_names:
-                        if n not in output_nodes:
-                            output_nodes.append(n)
-                        break
-            if not output_nodes:
-                output_nodes = [comp[-1]]
-
-            all_regions.append(_Region(
-                nodes=comp, norm_fqn=norm_fqn,
-                external_inputs=external_inputs,
-                output_nodes=output_nodes,
-            ))
-
-    return all_regions
+_EXTRACTORS: dict[str, type[RegionExtractor]] = {
+    "fqn": FqnRegionExtractor,
+    "inductor": InductorRegionExtractor,
+}
 
 
 def _filter_regions(
-    regions: list[_Region],
+    regions: list[Region],
     *,
     min_ops: int = 2,
     min_compute_ops: int = 1,
     min_count: int = 2,
-) -> tuple[list[_Region], Counter[str]]:
+) -> tuple[list[Region], Counter[str]]:
     """Filter and deduplicate regions. Returns (unique regions, hash counts)."""
     hash_counts: Counter[str] = Counter()
-    hash_to_region: dict[str, _Region] = {}
+    hash_to_region: dict[str, Region] = {}
     for r in regions:
         h = _compute_region_hash(r)
         hash_counts[h] += 1
         if h not in hash_to_region:
             hash_to_region[h] = r
 
-    result: list[_Region] = []
+    result: list[Region] = []
     for h, count in hash_counts.items():
         r = hash_to_region[h]
         if len(r.nodes) < min_ops:
@@ -325,7 +387,7 @@ def _filter_regions(
 # ---------------------------------------------------------------------------
 
 def _create_subgraph_module(
-    region: _Region,
+    region: Region,
 ) -> torch.fx.GraphModule:
     """Create a GraphModule that executes the region's ops."""
     nodes = region.nodes
@@ -482,7 +544,7 @@ def _format_arg_for_problem(
 
 
 def _write_problem(
-    region: _Region,
+    region: Region,
     output_dir: Path,
     count: int,
 ) -> None:
@@ -575,7 +637,7 @@ def get_init_inputs():
 
 def _replace_region(
     gm: torch.fx.GraphModule,
-    region: _Region,
+    region: Region,
     module_name: str,
     subgraph_module: torch.fx.GraphModule,
 ) -> None:
@@ -628,17 +690,23 @@ def fused_kernel_pass(
     example_inputs: tuple | None = None,
     *,
     kernel_dir: str = "",
+    extractor: str = "fqn",
     min_ops: int = 2,
     min_compute_ops: int = 1,
     min_count: int = 2,
 ) -> torch.fx.GraphModule:
     """Single-pass extract + replace + accelerate.
 
-    Discovers fusible regions, replaces each with a ``call_module``
-    wrapping the original subgraph (zero-overhead eager fallback).
-    If a kernel exists in ``{kernel_dir}/{hash}/kernel.py``, swaps
-    the module's forward. If not, writes ``problem.py`` for offline
+    Discovers fusible regions using the selected extractor, replaces each
+    with a ``call_module`` wrapping the original subgraph (zero-overhead
+    eager fallback). If a kernel exists in ``{kernel_dir}/{hash}/kernel.py``,
+    swaps the module's forward. If not, writes ``problem.py`` for offline
     kernel generation.
+
+    Args:
+        extractor: Region extraction strategy. Options:
+            ``"fqn"``: segments at module_fqn boundaries (default)
+            ``"inductor"``: uses inductor's ``is_fusible_node`` partitioner
 
     No-op when ``kernel_dir`` is empty.
     """
@@ -648,8 +716,15 @@ def fused_kernel_pass(
     kdir = Path(kernel_dir)
     kdir.mkdir(parents=True, exist_ok=True)
 
-    # Discover all regions, then filter
-    all_regions = _discover_regions(gm)
+    # Discover all regions using the selected extractor
+    extractor_cls = _EXTRACTORS.get(extractor)
+    if extractor_cls is None:
+        logger.warning(
+            f"Unknown extractor '{extractor}', available: {list(_EXTRACTORS.keys())}. "
+            "Falling back to 'fqn'."
+        )
+        extractor_cls = FqnRegionExtractor
+    all_regions = extractor_cls().extract(gm)
     unique_regions, hash_counts = _filter_regions(
         all_regions, min_ops=min_ops, min_compute_ops=min_compute_ops,
         min_count=min_count,
@@ -663,7 +738,7 @@ def fused_kernel_pass(
 
     # Collect ALL instances (not just unique) for replacement
     node_order = {n: i for i, n in enumerate(gm.graph.nodes)}
-    instances: list[tuple[int, str, _Region]] = []
+    instances: list[tuple[int, str, Region]] = []
     for r in all_regions:
         h = _compute_region_hash(r)
         if h in valid_hashes:

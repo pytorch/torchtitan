@@ -92,6 +92,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     in a region's subdirectory (keyed by hash), the module's forward is
     swapped to use the optimized kernel. When empty, the pass is a no-op."""
 
+    fused_kernel_extractor: str = "fqn"
+    """Region extraction strategy for the fused kernel pass.
+        fqn: segment at module_fqn boundaries + union-find connectivity (default)
+        inductor: use inductor's is_fusible_node + CapabilityBasedPartitioner
+    """
+
     precompile_artifact_dir: str = ""
     """
     Directory for precompiled artifacts. Setting this enables precompile:
