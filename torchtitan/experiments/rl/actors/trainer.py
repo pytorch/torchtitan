@@ -425,12 +425,24 @@ class PolicyTrainer(Actor, Configurable):
     @endpoint
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
-        """Publish weights for generator consumption via TorchStore."""
+        """Publish weights for generator consumption via TorchStore.
+
+        See the matching docstring on
+        :meth:`VLLMGenerator.pull_model_state_dict` for why we disable
+        ``direct_rdma`` under TCP fallback; ``MONARCH_FORCE_DIRECT_RDMA=1``
+        overrides.
+        """
         from monarch.rdma import is_rdma_available
 
+        tcp_fallback = (
+            os.environ.get("MONARCH_RDMA_DISABLE_IBVERBS") == "1"
+            and os.environ.get("MONARCH_RDMA_ALLOW_TCP_FALLBACK") == "1"
+        )
+        force_direct = os.environ.get("MONARCH_FORCE_DIRECT_RDMA") == "1"
+        use_direct = is_rdma_available() and (not tcp_fallback or force_direct)
         await ts.put_state_dict(
             self.model.state_dict(),
             "model_state_dict",
-            direct_rdma=is_rdma_available(),
+            direct_rdma=use_direct,
             transfer_dtype=self._transfer_dtype,
         )
