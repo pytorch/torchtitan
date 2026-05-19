@@ -474,11 +474,16 @@ class VLLMGenerator(Actor, Configurable):
         """
         from monarch.rdma import is_rdma_available
 
+        from torchtitan.experiments.rl.actors.trainer import _dedup_tied_tensors
+
         async with self._engine_lock:
             model_sd = self._get_model().model.state_dict()
+            # See trainer push for the rationale: the trainer dedups
+            # tied tensors before publishing; do the same here so the
+            # transfer plan on the receiver matches.
             await ts.get_state_dict(
                 "model_state_dict",
-                user_state_dict=model_sd,
+                user_state_dict=_dedup_tied_tensors(model_sd),
                 strict=False,
                 direct_rdma=is_rdma_available(),
             )

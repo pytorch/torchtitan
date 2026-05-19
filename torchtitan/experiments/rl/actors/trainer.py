@@ -57,6 +57,30 @@ from torchtitan.tools.logging import init_logger
 logger = logging.getLogger(__name__)
 
 
+def _dedup_tied_tensors(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Keep one entry per unique ``data_ptr``; drops aliases.
+
+    Qwen3 ties ``tok_embeddings.weight`` and ``lm_head.weight`` when
+    ``enable_weight_tying=True`` — both are the same buffer. Emitting
+    both into the RDMA transfer plan registers the same memory twice
+    and ~doubles the per-rank read budget. The receiver re-ties on
+    its end via ``init_weights``, so dropping one alias is safe.
+
+    Stable: keeps the FIRST seen alias (Python 3.7+ dict insertion
+    order is preserved), so the surviving key is deterministic.
+    """
+    seen: set[int] = set()
+    out: dict[str, torch.Tensor] = {}
+    for name, tensor in state_dict.items():
+        ptr = tensor.data_ptr()
+        if ptr in seen:
+            logger.debug("Dropping tied-weight alias %s (shares storage)", name)
+            continue
+        seen.add(ptr)
+        out[name] = tensor
+    return out
+
+
 class PolicyTrainer(Actor, Configurable):
     """Updates policy weights from :class:`TrainBatch`es.
 
@@ -433,11 +457,20 @@ class PolicyTrainer(Actor, Configurable):
     @endpoint
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
-        """Publish weights for generator consumption via TorchStore."""
+        """Publish weights for generator consumption via TorchStore.
+
+        Deduplicates tensors that share a ``data_ptr`` (e.g. tied
+        embeddings: ``tok_embeddings.weight`` and ``lm_head.weight``
+        in Qwen3 when ``enable_weight_tying=True``). Without dedup the
+        torchstore source registers the same memory under two
+        ``RDMABuffer``s, doubling the RDMA op count and exposing a
+        per-buffer timeout on big tensors over TCP fallback. The
+        receiver re-ties on its end via ``init_weights``.
+        """
         from monarch.rdma import is_rdma_available
 
         await ts.put_state_dict(
-            self.model.state_dict(),
+            _dedup_tied_tensors(self.model.state_dict()),
             "model_state_dict",
             direct_rdma=is_rdma_available(),
             transfer_dtype=self._transfer_dtype,
