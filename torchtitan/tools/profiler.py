@@ -20,6 +20,7 @@ from torchtitan.config.function import Function
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
+from torchtitan.tools.activation_tracer import NumericsDebugger
 
 # Paths expects by meta internal tooling
 PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
@@ -162,6 +163,10 @@ class Profiler(Configurable):
         This is used to configure torch.profiler.schedule.
         """
 
+        dump_numerics: bool = False
+        """Dump per-op activation logs for numerics debugging.
+        Writes to {dump_folder}/numerics/rank_{rank}_activations.log."""
+
         enable_memory_snapshot: bool = False
         """Whether to dump memory snapshot."""
 
@@ -184,6 +189,7 @@ class Profiler(Configurable):
         global_step: int = 0,
         base_folder: str = "",
         leaf_folder: str = "",
+        model: torch.nn.Module | None = None,  # for numerics debugger
     ) -> None:
         self._config = config
         self._global_step = global_step
@@ -191,6 +197,10 @@ class Profiler(Configurable):
         self._leaf_folder = leaf_folder
         self.torch_profiler = None
         self.memory_profiler = None
+        self.numerics_debugger = None
+        # Numerics debugger needs the model to monkeypatch module forwards
+        # for ActivationTracer dispatch interception.
+        self._model = model
 
     def active(
         self,
@@ -225,6 +235,9 @@ class Profiler(Configurable):
             base_folder=self._base_folder,
             leaf_folder=self._leaf_folder,
         )
+        self.numerics_debugger = self.build_numerics_debugger(
+            base_folder=self._base_folder,
+        )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -235,6 +248,9 @@ class Profiler(Configurable):
             if isinstance(exc_val, torch.OutOfMemoryError):
                 self.memory_profiler.step(exit_ctx=True)
             self.memory_profiler = None
+        if self.numerics_debugger is not None:
+            self.numerics_debugger.__exit__(exc_type, exc_val, exc_tb)
+            self.numerics_debugger = None
         return False
 
     def step(self) -> None:
@@ -246,6 +262,8 @@ class Profiler(Configurable):
         if self.memory_profiler is not None:
             with sl.log_trace_span("memory_profiler_step_call"):
                 self.memory_profiler.step()
+        if self.numerics_debugger is not None:
+            self.numerics_debugger.step()
 
     def build_torch_profiler(
         self,
@@ -355,3 +373,19 @@ class Profiler(Configurable):
         return MemoryProfiler(
             global_step, cfg.profile_freq, snapshot_dir, leaf_folder, rank
         )
+
+    def build_numerics_debugger(self, *, base_folder: str):
+        """Create and return a :class:`NumericsDebugger`, or ``None`` if disabled."""
+        cfg = self._config
+        if not cfg.dump_numerics or self._model is None:
+            return None
+
+        dump_dir = os.path.join(base_folder, "numerics")
+        debugger = NumericsDebugger(
+            enabled=True,
+            model=self._model,
+            dump_dir=dump_dir,
+            capture_step=cfg.profile_freq,
+        )
+        debugger.__enter__()
+        return debugger
