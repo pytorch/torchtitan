@@ -1751,12 +1751,13 @@ def _validate_flex_ep_capacity_factor(capacity_factor: float) -> float:
     return float(capacity_factor)
 
 
-def _compute_capacity_factor_max_tokens_recv(
+def _compute_max_tokens_recv(
     max_tokens: int,
     ep_size: int,
     num_experts: int,
     top_k: int,
-    capacity_factor: float,
+    *,
+    capacity_factor: float = 1.0,
 ) -> int:
     capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
     local_experts = num_experts // ep_size
@@ -1766,40 +1767,6 @@ def _compute_capacity_factor_max_tokens_recv(
     return (
         _align_up(max_unaligned_tokens, TOKEN_ALIGNMENT)
         + TOKEN_ALIGNMENT * local_experts
-    )
-
-
-def _compute_flex_ep_max_tokens_recv(
-    max_tokens: int,
-    ep_size: int,
-    num_experts: int,
-    top_k: int,
-    *,
-    capacity_factor: float,
-) -> int:
-    return _compute_capacity_factor_max_tokens_recv(
-        max_tokens,
-        ep_size,
-        num_experts,
-        top_k,
-        capacity_factor,
-    )
-
-
-def _compute_max_tokens_recv(
-    max_tokens: int,
-    ep_size: int,
-    num_experts: int,
-    top_k: int,
-    *,
-    capacity_factor: float = 1.0,
-) -> int:
-    return _compute_flex_ep_max_tokens_recv(
-        max_tokens,
-        ep_size,
-        num_experts,
-        top_k,
-        capacity_factor=capacity_factor,
     )
 
 
@@ -1948,7 +1915,7 @@ class NvlSharedBuffer:
                 f"num_experts ({num_experts}) must be divisible by ep_size "
                 f"({ep_size})."
             )
-        max_tokens_received = _compute_flex_ep_max_tokens_recv(
+        max_tokens_received = _compute_max_tokens_recv(
             max_tokens,
             ep_size,
             num_experts,
@@ -2215,7 +2182,7 @@ class FlexEPWorkspace:
         capacity_factor: float,
     ) -> None:
         local_experts = num_experts // self.ep_size
-        max_recv_tokens = _compute_flex_ep_max_tokens_recv(
+        max_recv_tokens = _compute_max_tokens_recv(
             max_tokens,
             self.ep_size,
             num_experts,
@@ -2593,7 +2560,7 @@ class FlexEPRouter:
 
     def _make_router_fns(self) -> RouterFns:
         local_experts = self.num_experts // self.ep_size
-        max_recv_tokens = _compute_flex_ep_max_tokens_recv(
+        max_recv_tokens = _compute_max_tokens_recv(
             self.max_tokens,
             self.ep_size,
             self.num_experts,
