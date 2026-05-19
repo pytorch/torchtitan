@@ -340,7 +340,8 @@ class CheckpointManager(Configurable):
                 raise ValueError("keep_latest_k cannot be negative.")
             if self.keep_latest_k == 1:
                 raise ValueError(
-                    "keep_latest_k cannot be 1; maintain at least 2 replicas."
+                    "We need to maintain at least 2 checkpoint replicas, "
+                    "as the last one may be in the process of being saved."
                 )
 
             # 2. Path Normalization & Warning
