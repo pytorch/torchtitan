@@ -346,6 +346,16 @@
   Planned source/config changes: Edit only `qwen3_14b()` to call `model_registry("14B", attn_backend="varlen", converters=[...])`.
   Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are varlen metadata overhead, compile/runtime incompatibility, or slower attention.
+  Result: crashed at source state `06f1c41`; `flash_attn_interface` is missing when varlen attention tries to activate FA3.
+
+- Idea: FP8 best with flex attention backend
+  Current best source commit: 5681e36
+  Source: attention-backend follow-up after `flex_flash` and `varlen` library crashes
+  Expected mechanism: Plain `attn_backend="flex"` uses compiled FlexAttention without forcing `BACKEND="FLASH"`, so it may run without the missing CUTE/FA3 libraries and provide a different attention implementation for the profile-visible attention bucket.
+  Supporting evidence: Run38 profile shows attention backward is large. `flex_flash` and `varlen` are blocked by missing libraries, leaving plain `flex` as the only remaining Qwen3 attention backend in scope.
+  Planned source/config changes: Edit only `qwen3_14b()` to call `model_registry("14B", attn_backend="flex", converters=[...])`.
+  Planned command or config overrides: Current best command with `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risks are slower attention, compile failure, or mask overhead.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

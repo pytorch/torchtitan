@@ -1154,6 +1154,31 @@ Interpretation:
 - The `flex_flash` backend is not runnable in this environment because the needed CUTE flash attention library is unavailable.
 - Attention remains a profile-visible bottleneck, so the next attention-backend test should avoid the CUTE flash path. Try Qwen3 `attn_backend="varlen"`.
 
+## Experiment 40: FP8 Best With Varlen Attention Backend
+
+Source state: `06f1c41`.
+
+Source/config change:
+
+- `qwen3_14b()` passed `attn_backend="varlen"` to `model_registry("14B", ...)`, keeping the FP8 rowwise auto-filter converter.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run40-fp8-varlen-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run failed during model build before training.
+- Error: `ModuleNotFoundError: No module named 'flash_attn_interface'` while `VarlenAttention` tried to activate FA3.
+
+Interpretation:
+
+- The `varlen` backend is not runnable in this environment because FA3's Python interface is missing.
+- `flex_flash` and `varlen` are both blocked by missing attention libraries. The remaining attention backend test is plain `attn_backend="flex"`, which avoids explicitly requesting the unavailable flash backend.
+
 ## Manager Review After Experiment 29
 
 Current best:

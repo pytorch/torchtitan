@@ -1,0 +1,653 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run40-fp8-varlen-compile-bf16-lbs5-no-flight-recorder
+W0519 14:42:57.579000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 14:42:57.579000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 14:42:57.579000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 14:42:57.579000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 14:43:05.494000 2754387 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 14:43:06,521 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 14:43:06,529 - root - INFO - Float8 training active with recipe rowwise
+[rank0]:[titan] 2026-05-19 14:43:06,529 - root - INFO - Using _auto_filter_for_recipe to avoid converting linear layers with dims too small to benefit from float8 training. See torchtitan/components/quantization/float8.md for more info.
+[rank0]:[titan] 2026-05-19 14:43:06,530 - root - INFO - Swapped to Float8Linear layers
+[rank0]:[titan] 2026-05-19 14:43:06,590 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run40-fp8-varlen-compile-bf16-lbs5-no-flight-recorder/structured_logs/training.global_rank_0.20260519-144306-PIPGRX.jsonl
+[rank0]:[titan] 2026-05-19 14:43:07,679 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 14:43:07,681 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 14:43:07,689 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 14:43:07,689 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-19 14:43:10,974 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 14:43:10,979 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[rank0]: Traceback (most recent call last):
+[rank0]:[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:[rank0]:     main()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 51, in main
+[rank0]:[rank0]:     trainer = config.build()  # pyrefly: ignore [missing-attribute]
+[rank0]:[rank0]:               ^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+[rank0]:[rank0]:     return f(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+[rank0]:[rank0]:     model = model_config.build()
+[rank0]:[rank0]:             ^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+[rank0]:[rank0]:     super().__init__(config)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+[rank0]:[rank0]:     self.layers[str(i)] = layer_config.build()
+[rank0]:[rank0]:                           ^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+[rank0]:[rank0]:     self.attention = config.attention.build()
+[rank0]:[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+[rank0]:[rank0]:     self.inner_attention = config.inner_attention.build()
+[rank0]:[rank0]:                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+[rank0]:[rank0]:     instance = Configurable.Config.build(self, **kwargs)
+[rank0]:[rank0]:                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+[rank0]:[rank0]:     return self._owner(config=replace(self))
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+[rank0]:[rank0]:     activate_flash_attention_impl("FA3")
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+[rank0]:[rank0]:     handle = register_fn()
+[rank0]:[rank0]:              ^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+[rank0]:[rank0]:     _fa3_import_module(module_path)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+[rank0]:[rank0]:     importlib.import_module(module_path)
+[rank0]:[rank0]:   File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+[rank0]:[rank0]:     return _bootstrap._gcd_import(name[level:], package, level)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+[rank0]:[rank0]:   File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+[rank0]:[rank0]:   File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+[rank0]:[rank0]: ModuleNotFoundError: No module named 'flash_attn_interface'
+[rank0]:[titan] 2026-05-19 14:43:11,006 - root - INFO - Building qwen3 14B
+[rank0]:[rank0]:[W519 14:43:11.201876332 ProcessGroupNCCL.cpp:1648] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+W0519 14:43:12.450000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2754415 closing signal SIGTERM
+W0519 14:43:12.451000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2754424 closing signal SIGTERM
+W0519 14:43:12.452000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2754435 closing signal SIGTERM
+W0519 14:43:12.453000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2754438 closing signal SIGTERM
+W0519 14:43:12.454000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2754456 closing signal SIGTERM
+W0519 14:43:12.456000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2754459 closing signal SIGTERM
+W0519 14:43:12.457000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2754470 closing signal SIGTERM
+E0519 14:43:14.206000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 0 (pid: 2754387) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0519 14:43:14.211000 2747532 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/0/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : -15 (pid: 2754415)  (SIGTERM)
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/1/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+[2]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 2754424) 
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/2/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+[3]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : -15 (pid: 2754435)  (SIGTERM)
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/3/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+[4]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : -15 (pid: 2754438)  (SIGTERM)
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+[5]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : -15 (pid: 2754456)  (SIGTERM)
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+[6]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : -15 (pid: 2754459)  (SIGTERM)
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+[7]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : -15 (pid: 2754470)  (SIGTERM)
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-19_14:43:11
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 2754387) 
+  error_file: /tmp/torchelastic_e7033k1d/none_i2n_5mye/attempt_0/0/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 258, in __init__
+      model = model_config.build()
+              ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 172, in __init__
+      super().__init__(config)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 99, in __init__
+      self.layers[str(i)] = layer_config.build()
+                            ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 43, in __init__
+      self.attention = config.attention.build()
+                       ^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 624, in __init__
+      self.inner_attention = config.inner_attention.build()
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/protocols/module.py", line 51, in build
+      instance = Configurable.Config.build(self, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/config/configurable.py", line 121, in build
+      return self._owner(config=replace(self))
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/attention.py", line 98, in __init__
+      activate_flash_attention_impl("FA3")
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_registry.py", line 97, in activate_flash_attention_impl
+      handle = register_fn()
+               ^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 63, in register_flash_attention_fa3
+      _fa3_import_module(module_path)
+    File "/home/avenkataraman/github/pytorch/torch/nn/attention/_fa3.py", line 72, in _fa3_import_module
+      importlib.import_module(module_path)
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+      return _bootstrap._gcd_import(name[level:], package, level)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+    File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+    File "<frozen importlib._bootstrap>", line 1324, in _find_and_load_unlocked
+  ModuleNotFoundError: No module named 'flash_attn_interface'
+  
+============================================================
