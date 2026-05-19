@@ -376,6 +376,16 @@
   Planned source/config changes: Restore the FP8 rowwise auto-filter source; no source changes for the candidate.
   Planned command or config overrides: Current best command plus `--debug.enable_structured_logging=False`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is that structured logging overhead is negligible or the CLI spelling for disabling the boolean needs adjustment.
+  Result: discarded at source state `748f640`; 8,439 tps, 35.26% MFU, 168.7 GiB, finite decreasing loss. Keep structured logging enabled.
+
+- Idea: FP8 best with FSDP reshard-after-forward disabled
+  Current best source commit: 477f662
+  Source: communication-overhead follow-up from profile
+  Expected mechanism: The FP8-best profile still showed large NCCL all-gather and reduce-scatter kernel time. Setting `--parallelism.fsdp_reshard_after_forward=never` may reduce repeated FSDP all-gathers and improve tokens/sec if the extra parameter residency fits.
+  Supporting evidence: Run38 profile attributed about 693 ms of rank-0 CUDA kernel time to NCCL kernels, with all-gather and reduce-scatter both substantial. Previous no-reshard testing before the current FP8 source line OOMed, but the current best includes FP8 conversion and disabled NCCL flight recorder, so the exact best command has not tested this tradeoff.
+  Planned source/config changes: None; use the restored FP8 rowwise auto-filter source.
+  Planned command or config overrides: Current best command plus `--parallelism.fsdp_reshard_after_forward=never`.
+  Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Main risk is OOM because the current best already reaches 168.7 GiB peak memory.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

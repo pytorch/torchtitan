@@ -1234,6 +1234,35 @@ Interpretation:
 - Since `rowwise_with_gw_hp` cannot be combined with the profitable `auto_filter_small_kn` coverage, do not keep this source line. Restore the current best FP8 rowwise auto-filter recipe before continuing.
 - With quantization coverage, MXFP8, and attention-backend variants now exhausted or blocked, the next narrow search area is overhead reduction in the current best command. Structured trace logging is enabled by default and is a command-only knob worth testing separately from NCCL flight-recorder logging.
 
+## Experiment 43: FP8 Best With Structured Logging Disabled
+
+Source state: `748f640`.
+
+Source/config change:
+
+- None. Source was the restored FP8 rowwise auto-filter best.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --debug.no-enable-structured-logging --dump_folder=outputs/autoresearch/may19-qwen3-14b/run43-fp8-no-structured-logging-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,439, below the 8,469 current best.
+- Step 10 MFU: 35.26%.
+- Step 10 peak memory: 168.74 GiB, 94.61%.
+- Loss moved from 12.51420 at step 1 to 11.45786 at step 10; finite and decreasing.
+- Log confirmed structured logging was disabled via `DebugConfig.enable_structured_logging=False`.
+
+Interpretation:
+
+- Structured trace logging is not the source of the remaining gap; disabling it slightly regressed reported throughput.
+- Keep structured logging at the default enabled value for future runs.
+- The current best remains FP8 rowwise auto-filter with NCCL flight recorder disabled.
+
 ## Manager Review After Experiment 29
 
 Current best:
