@@ -496,6 +496,7 @@
   Planned source/config changes: Allow CP in Qwen3 parallelize and call `apply_cp_to_forward` on each layer's inner attention before compile.
   Planned command or config overrides: Current best command plus `--parallelism.context_parallel_degree=2 --parallelism.context_parallel_load_balancer=ptrr --training.local_batch_size=10`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are CP wrapper incompatibility, load-balancer/mask issues, extra K/V all-gather overhead, or higher parameter memory because FSDP degree falls from 8 to 4.
+  Result: discarded at source state `c36ca11`; it ran but reached only 4,531 tps, used 170.2 GiB with allocator retries, and loss increased from 12.30233 to 17.01370.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

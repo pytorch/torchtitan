@@ -1582,6 +1582,34 @@ Interpretation:
 - Inductor GEMM max autotuning is counterproductive for this workload and increases memory risk.
 - Do not continue nearby Inductor GEMM autotune sweeps unless a later profile or source change materially changes the compiled matmul shapes.
 
+## Experiment 55: Flex Attention With Context Parallel Degree 2
+
+Source state: `c36ca11`.
+
+Source/config change:
+
+- Allowed CP in Qwen3 parallelization and called `apply_cp_to_forward` on each layer's inner attention before compile.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=10 --comm.trace_buf_size=0 --parallelism.context_parallel_degree=2 --parallelism.context_parallel_load_balancer=ptrr --dump_folder=outputs/autoresearch/may19-qwen3-14b/run55-flex-cp2-ptrr-compile-bf16-lbs10-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 4,531, below the 8,489 current best.
+- Step 10 MFU: 18.93%.
+- Step 10 peak memory: 170.21 GiB, 95.44%.
+- Loss moved from 12.30233 at step 1 to 17.01370 at step 10; finite but increasing.
+- Runtime emitted nine CUDA allocator retry warnings.
+
+Interpretation:
+
+- CP=2 with flex attention is slower, more memory-risky, and fails the short loss sanity check.
+- Do not keep this CP source line. Restore the no-CP flex-without-FP8 source as the current best.
+
 ## Manager Review After Experiment 29
 
 Current best:

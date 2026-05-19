@@ -21,7 +21,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
@@ -50,6 +49,8 @@ def parallelize_qwen3(
     """
     if parallel_dims.tp_enabled:
         raise NotImplementedError("Qwen3 DP-only parallelize does not support TP.")
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError("Qwen3 DP-only parallelize does not support CP.")
     if parallel_dims.pp_enabled:
         raise NotImplementedError("Qwen3 DP-only parallelize does not support PP.")
     if parallel_dims.ep_enabled:
@@ -63,12 +64,6 @@ def parallelize_qwen3(
     if training.enable_cpu_offload:
         raise NotImplementedError(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
-        )
-
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            [layer.attention.inner_attention for layer in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
         )
 
     if compile_config.enable and "model" in compile_config.components:
