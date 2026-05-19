@@ -306,7 +306,7 @@ class Trainer(ForgeEngine):
             [p for m in self.model_parts for p in m.parameters()],
             self.config.training.max_norm,
             foreach=True,
-            parallel_dims=parallel_dims,
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
