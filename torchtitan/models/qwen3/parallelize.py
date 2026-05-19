@@ -47,27 +47,33 @@ def parallelize_qwen3(
     mesh shape, hardware topology, memory budget, model flavor, and enabled
     TorchTitan features. It does not need to be a universal implementation.
     """
-    if parallel_dims.tp_enabled:
-        raise NotImplementedError("Qwen3 DP-only parallelize does not support TP.")
     if parallel_dims.cp_enabled:
-        raise NotImplementedError("Qwen3 DP-only parallelize does not support CP.")
+        raise NotImplementedError("Qwen3 autoresearch parallelize does not support CP.")
     if parallel_dims.pp_enabled:
-        raise NotImplementedError("Qwen3 DP-only parallelize does not support PP.")
+        raise NotImplementedError("Qwen3 autoresearch parallelize does not support PP.")
     if parallel_dims.ep_enabled:
-        raise NotImplementedError("Qwen3 DP-only parallelize does not support EP.")
+        raise NotImplementedError("Qwen3 autoresearch parallelize does not support EP.")
+
+    if parallel_dims.tp_enabled:
+        tp_mesh = parallel_dims.get_mesh("tp")
+        model.parallelize(tp_mesh)
+        logger.info(
+            "Applied Qwen3 tensor parallelism with tp=%s",
+            parallel_dims.tp,
+        )
+
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile(model, compile_config)
 
     if skip_dp or not parallel_dims.dp_enabled:
         return model
 
     if parallel_dims.dp_replicate != 1:
-        raise NotImplementedError("Qwen3 baseline FSDP bootstrap does not support HSDP.")
+        raise NotImplementedError("Qwen3 autoresearch FSDP does not support HSDP.")
     if training.enable_cpu_offload:
         raise NotImplementedError(
-            "Qwen3 baseline FSDP bootstrap does not support CPU offload."
+            "Qwen3 autoresearch FSDP does not support CPU offload."
         )
-
-    if compile_config.enable and "model" in compile_config.components:
-        apply_compile(model, compile_config)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
@@ -90,7 +96,7 @@ def parallelize_qwen3(
     fully_shard(model, **fsdp_config)
     disable_fsdp_gradient_division(model)
     logger.info(
-        "Applied baseline Qwen3 FSDP with dp_shard=%s, reshard_after_forward=%s",
+        "Applied Qwen3 FSDP with dp_shard=%s, reshard_after_forward=%s",
         parallel_dims.dp_shard,
         reshard_after_forward,
     )
