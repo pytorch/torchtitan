@@ -360,11 +360,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del model
 
                 for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
+                    with preserve_buffer_spmd(m):
+                        m.to_empty(device=init_device)
+                        with torch.no_grad():
+                            # TODO: Change this back to init_weights once
+                            # autoparallel contains the wrap_init_states
+                            cast(BaseModel, m).init_weights(
+                                buffer_device=buffer_device
+                            )
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -755,7 +758,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
 
-            with set_current_mesh(parallel_dims._global_meshes["dense"]):
+            with set_current_mesh(
+                parallel_dims.resolve_mesh(
+                    (MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP)
+                )
+            ):
                 loss = self.forward_backward_step(
                     input_dict=input_dict,
                     labels=labels,
