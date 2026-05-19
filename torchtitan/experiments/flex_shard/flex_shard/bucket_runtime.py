@@ -550,25 +550,23 @@ class BucketRuntime:
             self.context.queue_reduce_grad_wait()
 
     def pre_forward_hook(self, mod, args) -> None:
-        if torch.compiler.is_compiling():
-            return
         local_shards = self._local_shards(use_autograd=True)
-        prefetched_result = self.take_pending()
+        is_compiling = torch.compiler.is_compiling()
+        prefetched_result = None if is_compiling else self.take_pending()
         runtime = BucketUnshardRuntime(
             bucket=self,
             prefetched_result=prefetched_result,
         )
         full_params = list(_BucketUnshard.apply(runtime, *local_shards))
-        self.prefetch_next()
-        self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
+        if not is_compiling:
+            self.prefetch_next()
+            self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
         for bucket_param, full_param in zip(
             self.bucket_params, full_params, strict=True
         ):
             bucket_param.unsharded_param_slot._current_unsharded_param = full_param
 
     def post_forward_hook(self, mod, args, output) -> None:
-        if torch.compiler.is_compiling():
-            return
         for bucket_param in self.bucket_params:
             bucket_param.unsharded_param_slot._current_unsharded_param = None
 
@@ -592,6 +590,7 @@ class _BucketUnshard(torch.autograd.Function):
     ) -> tuple[torch.Tensor, ...]:
         ctx.runtime = runtime
         ctx.num_inputs = len(local_shards)
+        ctx.local_shard_dtypes = tuple(shard.dtype for shard in local_shards)
 
         result = runtime.prefetched_result
         runtime.prefetched_result = None
@@ -620,19 +619,44 @@ class _BucketUnshard(torch.autograd.Function):
     ) -> tuple[Any, ...]:
         runtime: BucketUnshardRuntime = ctx.runtime
         bucket = runtime.bucket
+        input_grads: list[torch.Tensor | None] = [None] * ctx.num_inputs
         grads: list[torch.Tensor] = []
         valid_infos: list[ParamInfo] = []
         valid_param_owners: list[ParamOwnerRef] = []
-        for grad, bucket_param in zip(
-            full_param_grads,
-            bucket.bucket_params,
-            strict=True,
+        valid_indices: list[int] = []
+        for idx, (grad, bucket_param) in enumerate(
+            zip(
+                full_param_grads,
+                bucket.bucket_params,
+                strict=True,
+            )
         ):
             if grad is None:
                 continue
+            valid_indices.append(idx)
             grads.append(grad.contiguous())
             valid_infos.append(bucket_param.param_info)
             valid_param_owners.append(bucket_param.param_owner)
+
+        if grads and torch.compiler.is_compiling():
+            result = begin_reduce_grad(
+                grads,
+                valid_infos,
+                bucket.bucket_storage._mesh,
+                bucket.context.reduce_grad_stream,
+                debug_fqn=bucket.debug_fqn,
+            )
+            sharded_grads = result.finish()
+            for input_idx, sharded_grad in zip(
+                valid_indices,
+                sharded_grads,
+                strict=True,
+            ):
+                input_dtype = ctx.local_shard_dtypes[input_idx]
+                if sharded_grad.dtype != input_dtype:
+                    sharded_grad = sharded_grad.to(input_dtype)
+                input_grads[input_idx] = sharded_grad
+            return (None, *input_grads)
 
         if grads:
             if bucket.context.should_defer_reduce_grad_for_backward_prefetch(bucket):
@@ -723,6 +747,9 @@ def _install_bucket_unshard_hooks(
     unshard call (one collective per bucket), then fills each
     UnshardedParamSlot so the property getter can return the hook-provided
     tensor.
+
+    CUDA buckets use the same custom autograd bucket path in eager and compile
+    so Dynamo traces the same bucket pre-hook and parameter access logic.
     """
     for bucket_storage in bucket_storages:
         if not bucket_storage._param_infos:
