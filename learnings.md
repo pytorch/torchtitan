@@ -1441,6 +1441,37 @@ Interpretation:
 - No-reshard is not viable at local batch size 5 and too slow at local batch size 4, so the NCCL bucket is difficult to attack with the already-tested FSDP policy knob.
 - GEMM remains the biggest profile bucket. The remaining in-scope source/config ideas should focus on compute kernels or memory headroom rather than logging or optimizer overhead.
 
+## Experiment 50: Flex Attention With Rowwise High-Precision FP8 Recipe Without Auto-Filter
+
+Source state: `bca5b86`.
+
+Source/config change:
+
+- `qwen3_14b()` used `attn_backend="flex"` plus `Float8LinearConverter.Config(recipe_name="rowwise_with_gw_hp", model_compile_enabled=True)`.
+- No `auto_filter_small_kn` was used, avoiding the unsupported auto-filter path from run42.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run50-flex-fp8-rowwise-gw-hp-no-filter-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 6,226, far below the 8,489 current best.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 172.36 GiB, 96.64%.
+- Loss moved from 12.26059 at step 1 to 8.27428 at step 10; finite and decreasing.
+- Runtime emitted an FSDP2 warning that `FSDPFloat8Linear` returned a view tensor, which can drop pre-backward hooks under in-place ops.
+- Runtime also emitted six CUDA allocator retry warnings.
+
+Interpretation:
+
+- The high-precision FP8 recipe can run without auto-filter, but it is much slower and memory-risky.
+- The view-tensor FSDP warning makes this source line unattractive even though the short loss trend decreases.
+- Restore the flex-without-FP8 source as the current best.
+
 ## Manager Review After Experiment 29
 
 Current best:

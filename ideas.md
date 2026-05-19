@@ -436,6 +436,7 @@
   Planned source/config changes: In `qwen3_14b()`, use `Float8LinearConverter.Config(recipe_name="rowwise_with_gw_hp", model_compile_enabled=True)` with no `filter_fqns`.
   Planned command or config overrides: Current best command shape with `--comm.trace_buf_size=0`, `--compile.enable`, `--training.dtype=bfloat16`, and `--training.local_batch_size=5`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is slower throughput from broader conversion and high-precision gradient-weight work.
+  Result: discarded at source state `bca5b86`; it ran without auto-filter but reached only 6,226 tps, used 172.4 GiB, emitted allocator retries, and warned about FSDPFloat8Linear returning a view tensor.
 
 - Idea: profile current flex-attention best
   Current best source commit: 5801b0f
