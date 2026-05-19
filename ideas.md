@@ -559,6 +559,15 @@
   Success criteria and expected risk: Success is trace generation and a concrete bottleneck note in `learnings.md`. Profiled throughput is diagnostic only and should not be ranked against unprofiled candidates.
   Result: completed at source state `1e8f047`; profiled step-10 tps was 8,484. Rank0 trace shows ~5.61 s total CUDA kernel time, with ~2.40 s NCCL kernels, ~2.05 s nvjet GEMM kernels, and ~0.78 s flex-attention kernels.
 
+- Idea: two-module FSDP prefetch window on prefetch flex best
+  Current best source commit: 7c1c351
+  Source: profile follow-up after run63
+  Expected mechanism: The one-module prefetch schedule improved throughput by overlapping FSDP all-gathers with compute. Asking each module to prefetch the next two modules may hide more of the remaining all-gather and backward parameter-gather latency while keeping the same math, precision, batch size, and attention backend.
+  Supporting evidence: Run63 still shows 0.63 s rank0 all-gather kernel time and 2.40 s total NCCL kernel time, while memory remains at the same reported 168.10 GiB. The B200 nvidia-smi allocation is close to capacity, so this is a narrow test rather than a broad no-reshard change.
+  Planned source/config changes: In Qwen3 FSDP wrapping, change the explicit prefetch lists so each layer prefetches up to the next two FSDP modules in forward, and each layer/lm_head prefetches up to the previous two modules in backward. Do not change reshard policy, converters, AC, batch size, or command flags.
+  Planned command or config overrides: Exact current best command with a new dump folder.
+  Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is valid OOM or lower tps from too much early parameter residency/communication contention.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
