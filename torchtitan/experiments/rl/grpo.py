@@ -306,6 +306,18 @@ class RLTrainer(Configurable):
         log_samples: bool = False
         """Log first completion per group to stdout each step."""
 
+        pull_every_n_steps: int = 1
+        """Push/pull cadence. Default 1 pulls every step (most on-policy).
+
+        Raise to amortize the ~25s torchstore TCP-fallback weight pull
+        across N steps when the pull dominates step time (50% in CP37
+        traces). The generator stays N-1 train steps behind the
+        trainer at most; combined with ``replay_buffer.max_policy_age``
+        this caps the staleness of training samples. Set in concert
+        with ``max_policy_age >= pull_every_n_steps`` so rollouts
+        produced under the older weights aren't evicted before they
+        reach the trainer."""
+
         compile: CompileConfig = field(default_factory=CompileConfig)
         """torch.compile config shared by trainer and generator."""
 
@@ -899,15 +911,20 @@ class RLTrainer(Configurable):
                 metrics = {**fb, **opt.metrics}
 
                 self._train_step += 1
-                self._policy_version += 1
                 sl.set_step(self._train_step)
 
-                with sl.log_trace_span("trainer_push_model_state_dict"):
-                    await self.trainer.push_model_state_dict.call()
-                with sl.log_trace_span("generator_pull_model_state_dict"):
-                    await self.generator.pull_model_state_dict.call(
-                        self._policy_version
-                    )
+                # Push/pull every N train steps to amortize the ~25s
+                # torchstore TCP-fallback transfer cost. ``_policy_version``
+                # only bumps when a sync actually happens — the buffer's
+                # age math measures real on-policy staleness.
+                if self._train_step % cfg.pull_every_n_steps == 0:
+                    self._policy_version += 1
+                    with sl.log_trace_span("trainer_push_model_state_dict"):
+                        await self.trainer.push_model_state_dict.call()
+                    with sl.log_trace_span("generator_pull_model_state_dict"):
+                        await self.generator.pull_model_state_dict.call(
+                            self._policy_version
+                        )
 
                 step_time = time.perf_counter() - step_start
                 # Trip fail-fast on NaN/Inf in *any* health-bearing metric.

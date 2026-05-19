@@ -397,6 +397,12 @@ def rl_grpo_qwen3_4b_alphabet() -> RLTrainer.Config:
         rollout_group_size=8,
         num_rollout_tasks=8,
         max_rollout_turns=5,
+        # Amortize the ~25s torchstore TCP-fallback weight pull across
+        # 2 train steps (pull every other step instead of every step).
+        # Net effect: ~50% reduction in pull overhead, generator sees
+        # weights at most 1 train step stale. DAPO's clipping handles
+        # this staleness fine; if convergence breaks, drop back to 1.
+        pull_every_n_steps=2,
         num_validation_samples=20,
         log_samples=True,
         # Same s59 empty-sources torch.compile bug as 1.7B layer shapes.
