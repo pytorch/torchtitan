@@ -466,6 +466,16 @@
   Planned source/config changes: Re-add the standard `apply_ac` hook in Qwen3 parallelize, before compile, using the existing TorchTitan helper.
   Planned command or config overrides: Current best command shape with `--activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --training.local_batch_size=7`.
   Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are recompute overhead, OOM at local batch 7, or compile/memory-budget incompatibility.
+  Result: discarded at source state `7d49b01`; local batch 7 fit with 7,840 tps, 32.76% MFU, 167.3 GiB, and finite decreasing loss.
+
+- Idea: flex attention with memory-budget AC and local batch size 8
+  Current best source commit: 5801b0f
+  Source: memory-budget AC batch scaling follow-up
+  Expected mechanism: Local batch 7 with memory-budget AC fit below the memory risk line but was slower. Increasing to local batch 8 may better amortize recompute overhead and use the memory headroom.
+  Supporting evidence: Run52 local batch 7 used only 167.27 GiB with AC 0.9, lower than the no-AC local batch 5 best. This leaves enough headroom to justify one larger-batch AC test.
+  Planned source/config changes: Keep the `apply_ac` hook source from run52.
+  Planned command or config overrides: Run52 command with `--training.local_batch_size=8`.
+  Success criteria and expected risk: Success is tps above 8,489 with finite decreasing loss. Risks are OOM, allocator instability, or continued recompute overhead.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

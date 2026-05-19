@@ -1499,6 +1499,33 @@ Interpretation:
 - Current flex best cannot directly raise local batch size to 6; the memory headroom at local batch size 5 is not enough.
 - Any further batch-size increase needs memory relief, for example activation checkpointing or a different sharding/parallelism layout.
 
+## Experiment 52: Flex Attention With Memory-Budget AC And Local Batch Size 7
+
+Source state: `7d49b01`.
+
+Source/config change:
+
+- Reintroduced the standard TorchTitan `apply_ac` hook in Qwen3 parallelization before model compile.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=7 --comm.trace_buf_size=0 --activation_checkpoint.mode=memory_budget --activation_checkpoint.memory_budget=0.9 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run52-flex-memory-budget-ac09-compile-bf16-lbs7-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,840, below the 8,489 current best.
+- Step 10 MFU: 32.76%.
+- Step 10 peak memory: 167.27 GiB, 93.79%.
+- Loss moved from 12.39671 at step 1 to 10.41591 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Memory-budget AC allows a larger batch to fit, but local batch size 7 is still slower than the no-AC flex best.
+- Since peak memory remains below the no-AC best and below the 95% risk line, test local batch size 8 once before abandoning this AC branch.
+
 ## Manager Review After Experiment 29
 
 Current best:
