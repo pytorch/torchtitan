@@ -50,6 +50,16 @@
   Planned source/config changes: None initially; command-only override.
   Planned command or config overrides: Baseline command plus `--training.dtype=bfloat16`.
   Success criteria and expected risk: Success is higher tps or lower peak memory with finite decreasing loss. Risk is numerical behavior changes or no throughput gain if FSDP/collectives dominate.
+  Result: discarded at source state `73e33ba`: 7,222 tps and 160.7 GiB, slightly slower than current best but much safer memory.
+
+- Idea: BF16 training dtype with larger local batch
+  Current best source commit: 73e33ba
+  Source: result-driven follow-up
+  Expected mechanism: BF16-only reduced peak memory from 173.9 GiB to 160.7 GiB at local batch 4. Increasing local batch size should raise tokens per step and may improve reported tokens/sec if the extra activation memory fits.
+  Supporting evidence: FSDP-only local batch 4 is at 97.51% memory, but BF16 local batch 4 is at 90.11%. The next small batch increase uses that recovered headroom directly.
+  Planned source/config changes: None; command-only coupled overrides.
+  Planned command or config overrides: Baseline command plus `--training.dtype=bfloat16 --training.local_batch_size=5`.
+  Success criteria and expected risk: Success is tps above 7,254 with finite decreasing loss and peak memory below the OOM/risky range. Risk is OOM because activation memory may scale enough to exceed the B200 capacity.
 
 - Idea: profile current best after runnable baseline
   Current best source commit: pending first runnable result

@@ -157,3 +157,34 @@ Interpretation:
 - The recomputation cost is large enough that full AC loses the primary objective at the existing local batch size.
 - Memory headroom from full AC is real and may be useful only if converted into more work per step, such as a larger local batch, but that should be tested as a separate narrow command/config idea from an explicitly AC-enabled source state.
 - Current best remains `01d1f8e` because it has higher reported tps and completed the 10-step run. Its 97.51% memory remains a risk.
+
+## Experiment 3: Full BF16 Training Dtype
+
+Source state: `73e33ba` with source restored to the `01d1f8e` FSDP-best implementation.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --training.dtype=bfloat16 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run03-bf16-training > run.log 2>&1
+```
+
+What changed:
+
+- Command-only override `--training.dtype=bfloat16`.
+- No source, FSDP, AC, compile, batch-size, sequence-length, optimizer, or parallelism changes.
+
+Result:
+
+- Status: discard for primary objective.
+- Step 10 `tps`: 7,222, slightly below 7,254 for `01d1f8e`.
+- Step 10 MFU: 30.17%, slightly below 30.31%.
+- Step 10 peak memory: 160.71 GiB, down from 173.91 GiB.
+- Model memory after init dropped from 8.62 GiB to 4.18 GiB.
+- Loss moved from 12.15456 at step 1 to 9.81666 at step 10; finite and decreasing.
+- Later-step fwd/bwd timing was similar to FSDP-only, around 1.61-1.65 s.
+
+Interpretation:
+
+- BF16 full training materially reduces parameter/model memory and lowers peak step memory to about 90.11% capacity, but it does not improve throughput at local batch size 4.
+- Because throughput is almost tied and memory is much safer, BF16 is a good ingredient only if the saved memory can be converted into more useful tokens/sec with a larger local batch or another memory-using speed knob.
+- Current best for primary objective remains `01d1f8e` / restored source `73e33ba`.
