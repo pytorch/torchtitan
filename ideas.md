@@ -577,6 +577,7 @@
   Planned source/config changes: In Qwen3 FSDP wrapping, keep the current one-module forward prefetch chain through `lm_head`, but remove `set_modules_to_backward_prefetch` calls. Do not change batch size, reshard policy, converters, AC, or command flags.
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is lower tps if backward prefetch was hiding necessary parameter all-gathers.
+  Result: discarded at source state `1996329`; 8,596 tps with finite slightly decreasing loss, below the 8,835 bidirectional prefetch best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

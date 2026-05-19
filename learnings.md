@@ -1882,3 +1882,24 @@ Interpretation:
 
 - A two-module prefetch window is too aggressive: it increases peak memory and slows throughput.
 - Restore the one-module prefetch schedule. If refining prefetch further, prefer narrower/asymmetric schedules rather than wider windows.
+
+## Experiment 65: Forward-Only FSDP Prefetch
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run65-flex-forward-only-prefetch-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,596, below the 8,835 current best.
+- Step 10 MFU: 35.92%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.51793 at step 1 to 12.50715 at step 10; finite and slightly decreasing.
+
+Interpretation:
+
+- Backward prefetch is contributing to the current best despite the visible reduce-scatter bucket. Removing it regresses throughput.
+- Restore the one-module bidirectional prefetch schedule as the best known prefetch policy.
