@@ -315,6 +315,7 @@
   Planned source/config changes: None beyond the no-auto-filter FP8 source from `582d685`.
   Planned command or config overrides: Broad FP8 command with `--training.local_batch_size=7`, keeping `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is still OOM or slow throughput from broad FP8 overhead.
+  Result: invalid at source state `4c7d50e`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

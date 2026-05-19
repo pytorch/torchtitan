@@ -1051,6 +1051,28 @@ Interpretation:
 - Broad FP8 local batch 8 is just over the memory cliff, so it is infeasible without another memory-saving change.
 - Local batch 7 is the next boundary to test because it may fit while using much more of the memory headroom than local batch 5.
 
+## Experiment 36: FP8 Rowwise Without Auto-Filter, Local Batch 7, Invalid Due External GPU Use
+
+Source state: `4c7d50e`, using the no-auto-filter FP8 source from `582d685`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=7 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run36-fp8-rowwise-no-auto-filter-compile-bf16-lbs7-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid, not a candidate result.
+- The run OOMed before step 1 completed.
+- Post-run `nvidia-smi` showed external `VLLM::Worker_TP*` processes holding about 99 GiB on GPUs 4-7.
+- The OOM messages reported both the TorchTitan rank memory and the external VLLM process memory.
+
+Interpretation:
+
+- Do not use this to conclude local batch 7 is infeasible.
+- Retry the same no-auto-filter FP8 local-batch-7 candidate on a clear node.
+
 ## Manager Review After Experiment 29
 
 Current best:
