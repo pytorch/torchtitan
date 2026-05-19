@@ -190,3 +190,4 @@
   Planned source/config changes: Call `maybe_enable_async_tp(parallelism, compile_config, tp_mesh)` in the Qwen3 TP path before model compile.
   Planned command or config overrides: TP=2/FSDP=4 compile+BF16 local batch 8 command plus `--parallelism.enable_async_tensor_parallel`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is compile failure or no throughput gain.
+  Result: discarded at source state `46e6f5e`; async TP ran but Inductor found no matching fusion patterns and throughput was 7,827 tps.
