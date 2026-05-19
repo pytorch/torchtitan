@@ -437,6 +437,15 @@
   Planned command or config overrides: Current best command shape with `--comm.trace_buf_size=0`, `--compile.enable`, `--training.dtype=bfloat16`, and `--training.local_batch_size=5`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is slower throughput from broader conversion and high-precision gradient-weight work.
 
+- Idea: profile current flex-attention best
+  Current best source commit: 5801b0f
+  Source: profile refresh after new best
+  Expected mechanism: The current best changed the attention backend and removed FP8, so the previous FP8-best profile no longer describes the kept kernel/communication mix. Profiling should identify whether the next candidate should target attention, GEMMs, FSDP communication, loss/lm_head, or memory pressure.
+  Supporting evidence: Run46 became the new best at 8,489 tps with flex attention and no FP8 converter. Earlier run38 profile showed attention and NCCL were both significant, but it used the old FP8 SDPA source line.
+  Planned source/config changes: None; use the current flex-without-FP8 best source.
+  Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is trace generation plus updated bottleneck notes. Profiled tps is diagnostic only and should not be ranked against unprofiled candidates.
+
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
   Source: profile follow-up after new best
