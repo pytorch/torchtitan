@@ -121,19 +121,11 @@ class Llama4Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-
-            training = trainer_config.training
+            Decoder.Config.update_from_config(
+                self, trainer_config=trainer_config, **kwargs
+            )
             parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                raise ValueError(
-                    f"Training sequence length {seq_len} exceeds model's "
-                    f"maximum supported sequence length "
-                    f"{self.rope.max_seq_len}. The model cannot produce "
-                    f"valid RoPE embeddings for positions beyond this limit."
-                )
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+            debug = getattr(trainer_config, "debug", None)
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
@@ -145,9 +137,10 @@ class Llama4Model(Decoder):
                             "Failed to use grouped mm, which is only supported on SM90 or later",
                         )
                         layer_cfg.moe.experts.use_grouped_mm = False
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
-                    )
+                    if debug is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
                     comm_backend = getattr(
                         layer_cfg.moe.experts.token_dispatcher,
                         "comm_backend",
