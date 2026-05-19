@@ -6,6 +6,20 @@
 
 """Experimental FlexEP backend helpers."""
 
-from torchtitan.distributed.flex_ep.flex_ep import FlexEPRouter, NvlSharedBuffer
+from torchtitan.distributed.flex_ep.flex_ep import (
+    flex_ep_weighted_sum,
+    FlexEPDispatchPlan,
+    FlexEPRouterOperands,
+    FlexEPRouter,
+    FlexEPWorkspace,
+    NvlSharedBuffer,
+)
 
-__all__ = ["FlexEPRouter", "NvlSharedBuffer"]
+__all__ = [
+    "FlexEPDispatchPlan",
+    "FlexEPRouterOperands",
+    "FlexEPRouter",
+    "FlexEPWorkspace",
+    "NvlSharedBuffer",
+    "flex_ep_weighted_sum",
+]

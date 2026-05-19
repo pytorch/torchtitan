@@ -9,18 +9,19 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
+    parallelize_module,
     PrepareModuleInputOutput,
     RowwiseParallel,
-    parallelize_module,
 )
+
 from torchtitan.config import (
-    TORCH_DTYPE_MAP,
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
+    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
@@ -34,8 +35,8 @@ from torchtitan.distributed.fsdp import (
 )
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
-    NoParallel,
     maybe_enable_async_tp,
+    NoParallel,
 )
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.llama4.model import Llama4Model
@@ -434,9 +435,11 @@ def apply_moe_ep_tp(
         else:
             experts_mesh = ep_mesh
             experts_plan = ExpertParallel()
-            # pyrefly: ignore [missing-attribute]
             dispatcher = getattr(
-                transformer_block.moe.experts, "token_dispatcher", None
+                # pyrefly: ignore[missing-attribute]
+                transformer_block.moe.experts,
+                "token_dispatcher",
+                None,
             )
             if tp_mesh is not None and dispatcher is None:
                 raise ValueError(

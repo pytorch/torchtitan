@@ -223,6 +223,10 @@ class DeepSeekV3Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
+                    if hasattr(layer_cfg.moe.experts, "_debug_force_load_balance"):
+                        layer_cfg.moe.experts._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
                     token_dispatcher = getattr(
                         layer_cfg.moe.experts, "token_dispatcher", None
                     )
@@ -231,6 +235,16 @@ class DeepSeekV3Model(Decoder):
                         if token_dispatcher is not None
                         else "flex_ep"
                     )
+                    if comm_backend == "flex_ep" and (
+                        parallelism.tensor_parallel_degree != 1
+                        or parallelism.context_parallel_degree != 1
+                        or parallelism.pipeline_parallel_degree != 1
+                    ):
+                        raise ValueError(
+                            "DeepSeekV3 FlexEP v1 supports only DP+EP. Set "
+                            "tensor_parallel_degree=1, context_parallel_degree=1, "
+                            "and pipeline_parallel_degree=1."
+                        )
                     if (
                         comm_backend in ("deepep", "hybridep")
                         and parallelism.expert_parallel_degree == 1

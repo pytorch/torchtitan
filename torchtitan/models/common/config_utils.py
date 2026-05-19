@@ -264,6 +264,16 @@ def make_experts_config(
             )
         if not use_grouped_mm:
             raise ValueError("comm_backend='flex_ep' requires use_grouped_mm=True.")
+        flex_ep_capacity_factor = (
+            1.0
+            if non_blocking_capacity_factor is None
+            else non_blocking_capacity_factor
+        )
+        if not 0 < flex_ep_capacity_factor <= 1.0:
+            raise ValueError(
+                "comm_backend='flex_ep' requires non_blocking_capacity_factor "
+                "to satisfy 0 < non_blocking_capacity_factor <= 1.0."
+            )
         return FlexGroupedExperts.Config(
             dim=dim,
             hidden_dim=hidden_dim,
@@ -271,6 +281,7 @@ def make_experts_config(
             top_k=top_k,
             score_before_experts=score_before_experts,
             use_grouped_mm=use_grouped_mm,
+            flex_ep_capacity_factor=flex_ep_capacity_factor,
             param_init=param_init,
         )
 

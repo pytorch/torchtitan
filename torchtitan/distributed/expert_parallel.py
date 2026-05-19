@@ -7,11 +7,12 @@
 import torch.nn as nn
 from torch.distributed.tensor import (
     DeviceMesh,
-    Shard,
     distribute_module,
     distribute_tensor,
+    Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
+
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
@@ -66,6 +67,7 @@ class ExpertParallel(ParallelStyle):
             # the FX graph rank-agnostic.
             mod.token_dispatcher.ep_mesh = device_mesh
         elif hasattr(mod, "ep_mesh"):
+            # pyrefly: ignore[bad-argument-type]
             mod.ep_mesh = device_mesh
         else:
             raise ValueError(

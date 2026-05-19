@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -233,13 +234,14 @@ class GptOssMoE(MoE):
         super().__init__(config)
 
         # Override the base GroupedExperts with GptOssGroupedExperts
+        experts_config = cast(GroupedExperts.Config, config.experts)
         gptoss_experts_config = GptOssGroupedExperts.Config(
-            dim=config.experts.dim,
-            hidden_dim=config.experts.hidden_dim,
-            num_experts=config.experts.num_experts,
+            dim=experts_config.dim,
+            hidden_dim=experts_config.hidden_dim,
+            num_experts=experts_config.num_experts,
             swiglu_limit=config.swiglu_limit,
-            use_grouped_mm=config.experts.use_grouped_mm,
-            param_init=config.experts.param_init,
-            token_dispatcher=config.experts.token_dispatcher,
+            use_grouped_mm=experts_config.use_grouped_mm,
+            param_init=experts_config.param_init,
+            token_dispatcher=experts_config.token_dispatcher,
         )
         self.experts = gptoss_experts_config.build()
