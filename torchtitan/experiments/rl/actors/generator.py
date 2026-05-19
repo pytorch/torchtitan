@@ -440,12 +440,17 @@ class VLLMGenerator(Actor, Configurable):
         if not prompts:
             return []
 
-        self._ensure_engine_driver()
         # Wait for any pending weight pull to publish before admitting,
         # so this call doesn't sample against to-be-stale weights and
-        # doesn't extend the post-backward drain.
-        if self._admit_gate is not None:
-            await self._admit_gate.wait()
+        # doesn't extend the post-backward drain. (``_ensure_engine_driver``
+        # is invoked inside the lock below, after add_request, so it
+        # can't race with the driver's exit decision.)
+        if self._admit_gate is None:
+            # First call ever — driver hasn't been created yet, gate is
+            # implicitly open. Create both eagerly so the gate exists
+            # before any pull tries to clear it.
+            self._ensure_engine_driver()
+        await self._admit_gate.wait()
 
         sc = sampling_config or self.config.sampling
         params = SamplingParams(
@@ -483,6 +488,17 @@ class VLLMGenerator(Actor, Configurable):
                     prompt=engine_input,
                     params=params,
                 )
+
+            # Restart the driver if it exited while we were waiting on
+            # the gate. Called UNDER THE LOCK so the old driver (if
+            # still running) cannot decide-to-exit-and-finish between
+            # our check and our admission — both would race the lock,
+            # and one wins. If we win, we admit + ensure; the next
+            # driver iteration sees our requests. If the old driver
+            # wins, it sees engine.has_unfinished_requests() == False
+            # AT THE MOMENT IT CHECKED (before our admit), exits, and
+            # we then take the lock, admit, and start a fresh driver.
+            self._ensure_engine_driver()
 
             device = torch.cuda.current_device()
             logger.info(
