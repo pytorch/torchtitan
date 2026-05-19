@@ -478,24 +478,13 @@ class VLLMGenerator(Actor, Configurable):
         """
         from monarch.rdma import is_rdma_available
 
-        # On hosts where IBVERBS is disabled and we're on TCP fallback,
-        # direct_rdma reads time out under contention (the actual
-        # transport is TCP and chunk reads stall when other tenants
-        # are heavy). Fall back to the staged path; slower but reliable.
-        # Set ``MONARCH_FORCE_DIRECT_RDMA=1`` to override.
-        tcp_fallback = (
-            os.environ.get("MONARCH_RDMA_DISABLE_IBVERBS") == "1"
-            and os.environ.get("MONARCH_RDMA_ALLOW_TCP_FALLBACK") == "1"
-        )
-        force_direct = os.environ.get("MONARCH_FORCE_DIRECT_RDMA") == "1"
-        use_direct = is_rdma_available() and (not tcp_fallback or force_direct)
         async with self._engine_lock:
             model_sd = self._get_model().model.state_dict()
             await ts.get_state_dict(
                 "model_state_dict",
                 user_state_dict=model_sd,
                 strict=False,
-                direct_rdma=use_direct,
+                direct_rdma=is_rdma_available(),
             )
             self._engine.reset_prefix_cache()
             self.policy_version = version
