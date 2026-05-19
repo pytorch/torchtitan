@@ -86,7 +86,13 @@ def parallelize_qwen3(
 
     for layer in model.layers.values():
         fully_shard(layer, **fsdp_config)
-    fully_shard(model.lm_head, **fsdp_config)
+    fully_shard(
+        model.lm_head,
+        **{
+            **fsdp_config,
+            "reshard_after_forward": False,
+        },
+    )
     fully_shard(model, **fsdp_config)
     disable_fsdp_gradient_division(model)
     logger.info(
