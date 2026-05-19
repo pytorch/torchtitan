@@ -22,15 +22,25 @@
   Planned source/config changes: Apply the existing TorchTitan activation checkpoint helper to Qwen3 without changing FSDP, compile, or batch knobs.
   Planned command or config overrides: Reuse the baseline command with only the dump folder/run log changed for artifact isolation.
   Success criteria and expected risk: Success is equal or better 10-step completion with lower peak memory and no convergence regression. Risk is extra recompute reducing tokens/sec if memory is not the bottleneck.
+  Result: discarded as commit `dc2765b`. Peak memory dropped to 47.0 GiB, but tps dropped to 5,564 from the current-best 7,254.
 
 - Idea: disable full activation checkpointing after baseline AC is honored
-  Current best source commit: pending activation-checkpoint result
+  Current best source commit: 01d1f8e
   Source: manager-generated follow-up
   Expected mechanism: If applying configured full AC reduces memory too much while costing recompute, a later command-only override can test whether disabling AC improves tokens/sec while staying under the memory risk threshold.
-  Supporting evidence: Manager review suggested this as a speed experiment, but the current best without AC already uses 97.51% memory, so it should not run until after the baseline AC hook is implemented and measured.
+  Supporting evidence: Full AC was discarded at 5,564 tps. The current best already effectively behaves like no AC and reaches 7,254 tps, so this idea is satisfied by the current best and should not be run as a separate experiment unless AC becomes part of a later kept source state.
   Planned source/config changes: None if the AC hook exists; use only the CLI override `--activation_checkpoint.mode=none`.
   Planned command or config overrides: Baseline command plus `--activation_checkpoint.mode=none`.
   Success criteria and expected risk: Success is higher step-10 tps with finite loss and peak memory below the risky range. Main risk is OOM or unstable memory near capacity.
+
+- Idea: full AC with larger local batch
+  Current best source commit: dc2765b for the AC source state, not the current best
+  Source: result-driven follow-up
+  Expected mechanism: Full AC lowers peak memory to 47.0 GiB, leaving enough memory to increase local batch size and potentially convert recompute-heavy memory savings into higher useful tokens/sec.
+  Supporting evidence: `dc2765b` was slower at local batch 4 but used only 26.37% memory. The program values memory savings only when converted into more tokens/sec.
+  Planned source/config changes: This should be considered only if deliberately testing from the AC source state; source AC plus larger batch are coupled for this hypothesis.
+  Planned command or config overrides: Candidate command would add a single local batch-size increase to the AC source state, for example `--training.local_batch_size=8`, while preserving model, data, checkpoint, and 10-step cap.
+  Success criteria and expected risk: Success is tps above 7,254 with finite decreasing loss and memory below the risk threshold. Risk is comparing a bundled source-and-command state unless the source state is clearly the previously measured AC candidate.
 
 - Idea: full BF16 training dtype
   Current best source commit: 01d1f8e

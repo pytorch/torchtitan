@@ -126,3 +126,34 @@ Interpretation:
 - Memory is already above the program's rough 95% risk threshold. The run completed, but this leaves little room for allocator variation or later optimizations that raise activation/parameter residency.
 - The current source still does not apply the configured `activation_checkpoint.mode="full"`. Given the 97.51% peak memory, the next narrow idea should apply the baseline full activation checkpointing before any speed-focused memory-increasing idea.
 - Roofline status is still unclear without a profiler trace. The low model memory at initialization (8.62 GiB) but high step peak implies activations/FSDP all-gather residency dominate peak memory. Later per-step timings suggest fwd/bwd dominates wall time, but we need a trace to separate compute from FSDP collectives and recompute.
+
+## Experiment 2: Apply Configured Full Activation Checkpointing
+
+Commit: `dc2765b`
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run02-full-ac > run.log 2>&1
+```
+
+What changed:
+
+- Added `apply_ac(model, ac_config)` before FSDP wrapping in `parallelize_qwen3()`.
+- Left FSDP policy, launch command, batch size, sequence length, dtype, optimizer, TP/CP/PP/EP, compile, and resharding unchanged.
+
+Result:
+
+- Status: discard for primary objective.
+- Step 10 `tps`: 5,564, down from 7,254 for `01d1f8e`.
+- Step 10 MFU: 23.25%, down from 30.31%.
+- Step 10 peak memory: 47.04 GiB, down from 173.91 GiB.
+- Loss moved from 12.49552 at step 1 to 10.12602 at step 10; finite and decreasing.
+- Later-step fwd/bwd time rose to roughly 2.27-2.32 s from roughly 1.60-1.63 s without AC.
+
+Interpretation:
+
+- Full AC successfully attacks activation memory, so the high peak in the FSDP-only best is activation-driven rather than optimizer-state-driven.
+- The recomputation cost is large enough that full AC loses the primary objective at the existing local batch size.
+- Memory headroom from full AC is real and may be useful only if converted into more work per step, such as a larger local batch, but that should be tested as a separate narrow command/config idea from an explicitly AC-enabled source state.
+- Current best remains `01d1f8e` because it has higher reported tps and completed the 10-step run. Its 97.51% memory remains a risk.
