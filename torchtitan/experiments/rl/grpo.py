@@ -38,6 +38,7 @@ import logging
 import math
 import os
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -71,10 +72,13 @@ from torchtitan.experiments.rl.envs.types import (
 from torchtitan.experiments.rl.loss import DAPOLoss
 from torchtitan.experiments.rl.metrics import (
     aggregate_rewards,
+    build_replay_metrics,
+    build_rollout_metrics,
     dump_rollouts_jsonl,
     format_validation,
     log_first_sample,
 )
+from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.replay import (
     BufferClosedError,
@@ -313,6 +317,40 @@ class RLTrainer(Configurable):
 
         replay_buffer: ReplayBuffer.Config = field(default_factory=ReplayBuffer.Config)
 
+        metrics: m.MetricsProcessor.Config = field(
+            default_factory=lambda: m.MetricsProcessor.Config(
+                # Regex search patterns. Listed in display order. Names
+                # match the keys emitted by `build_rollout_metrics`,
+                # `build_replay_metrics`, the trainer's reduced metrics
+                # dict, and the per-step logging block in `train`.
+                console_log_keys_train=[
+                    r"^loss/mean$",
+                    r"^loss/ratio/mean$",
+                    r"^loss/clip/high_fraction$",
+                    r"^loss/dual_clip/clip_fraction$",
+                    r"^train/grad_norm/mean$",
+                    r"^train/lr$",
+                    r"^train/skipped_zero_advantage_steps$",
+                    r"^reward/_mean$",
+                    r"^reward/_max$",
+                    r"^reward/zero_std_frac$",
+                    r"^reward/group_std/mean$",
+                    r"^rollout/response_length/mean$",
+                    r"^rollout/response_length/max$",
+                    r"^rollout/truncated_fraction/mean$",
+                    r"^memory/trainer/peak_allocated_gb$",
+                    r"^memory/trainer/peak_reserved_gb$",
+                    r"^perf/step_time_s$",
+                ],
+                console_log_keys_validation=[
+                    r"^validation/reward/_mean$",
+                    r"^validation/reward/_max$",
+                    r"^validation/truncated_fraction/mean$",
+                    r"^validation/response_length/mean$",
+                ],
+            )
+        )
+
         def __post_init__(self) -> None:
             if self.generator.sampling.n != 1:
                 raise ValueError(
@@ -330,6 +368,11 @@ class RLTrainer(Configurable):
         self._proc_meshes: list = []
         self._renderer_pool = None
         self._completion_fn = None
+        # Build the typed-metrics processor eagerly so per-step logging
+        # works as soon as ``train()`` starts.
+        self.metrics_processor: m.MetricsProcessor = config.metrics.build(
+            log_dir=config.dump_folder,
+        )
 
     # ------------------------------------------------------------------ setup / close
 
@@ -354,6 +397,11 @@ class RLTrainer(Configurable):
                 await actor.close.call()
             except Exception:
                 logger.exception("%s.close failed", name)
+
+        try:
+            self.metrics_processor.close()
+        except Exception:
+            logger.exception("metrics_processor.close failed")
 
         for i, mesh in enumerate(self._proc_meshes):
             try:
@@ -657,8 +705,16 @@ class RLTrainer(Configurable):
     # ------------------------------------------------------------------ validation
 
     @sl.log_trace_span("validate")
-    async def validate(self) -> dict[str, float | dict[str, float]]:
-        """Greedy held-out rollouts; no buffer."""
+    async def validate(
+        self,
+    ) -> tuple[dict[str, float | dict[str, float]], list[RolloutOutput]]:
+        """Greedy held-out rollouts; no buffer.
+
+        Returns ``(summary_dict, rollouts)`` — the summary is what
+        ``format_validation`` prints; the raw rollouts feed
+        ``build_rollout_metrics`` so the MetricsProcessor backend
+        gets length / truncation / per-component stats too.
+        """
         cfg = self.config
         dataset: EnvDataset = cfg.validation_dataset.build()
         examples = dataset.sample_groups(
@@ -682,7 +738,7 @@ class RLTrainer(Configurable):
             return outputs[0]
 
         rollouts = await asyncio.gather(*[_one(ex) for ex in examples])
-        return aggregate_rewards(rollouts)
+        return aggregate_rewards(rollouts), list(rollouts)
 
     # ------------------------------------------------------------------ training loop
 
@@ -701,9 +757,17 @@ class RLTrainer(Configurable):
         self._policy_version = 0
 
         logger.info("Pre-training validation")
-        pre_validation = await self.validate()
+        pre_validation, pre_rollouts = await self.validate()
         logger.info("Pre:  %s", format_validation(pre_validation))
+        self._log_validation_metrics(pre_validation, pre_rollouts, step=0)
         sl.log_trace_instant("training_start")
+
+        # Recent-rollouts ring buffer so the per-train-step
+        # MetricsProcessor.log() emits producer-side stats
+        # (length, truncation, per-component rewards) alongside the
+        # trainer metrics. Bounded so a slow trainer doesn't grow
+        # this unboundedly behind a fast producer.
+        recent_rollouts: deque[RolloutOutput] = deque(maxlen=256)
 
         async def continuous_rollouts(task_idx: int) -> None:
             """Run one rollout-producer coroutine.
@@ -735,6 +799,7 @@ class RLTrainer(Configurable):
                 samples = self._build_replay_samples(rollouts)
                 if samples:
                     await self.replay_buffer.add(samples)
+                recent_rollouts.extend(rollouts)
 
                 if cfg.log_samples:
                     if iteration % 4 == 0 and task_idx == 0:
@@ -857,16 +922,33 @@ class RLTrainer(Configurable):
                     logger.error("Non-finite %s; training diverged", ", ".join(bad))
                     shutdown.set()
                     break
-                logger.info(
-                    "Step %2d | Loss: %+.4f | ratio_clip=%.3f | grad_norm=%.3f | "
-                    "time=%.1fs | trainer_mem alloc=%.1fGB reserved=%.1fGB",
-                    self._train_step,
-                    metrics.get("loss/mean", 0.0),
-                    metrics.get("loss/ratio/clipped_frac", 0.0),
-                    metrics.get("train/grad_norm/mean", 0.0),
-                    step_time,
-                    metrics.get("memory/trainer/peak_allocated_gb", 0.0),
-                    metrics.get("memory/trainer/peak_reserved_gb", 0.0),
+                # Typed metric records — MetricsProcessor.log applies the
+                # console allow-list and dispatches to backends. We
+                # include trainer-side scalars (already SUM/MAX-reduced
+                # across DP ranks) plus replay-batch stats (per-batch
+                # reward/advantage distribution, group_std).
+                step_metrics: list[m.Metric] = [
+                    m.Metric(k, m.NoReduce(float(v))) for k, v in metrics.items()
+                ]
+                replay_samples = [s for batch in batches_per_rank for s in batch]
+                step_metrics.extend(build_replay_metrics(replay_samples))
+                # Drain producer-side rollouts seen since the last log:
+                # length, truncation, per-component reward, status mix.
+                if recent_rollouts:
+                    drained_rollouts = list(recent_rollouts)
+                    recent_rollouts.clear()
+                    step_metrics.extend(build_rollout_metrics(drained_rollouts))
+                step_metrics.append(
+                    m.Metric("perf/step_time_s", m.NoReduce(float(step_time)))
+                )
+                step_metrics.append(
+                    m.Metric(
+                        "train/skipped_zero_advantage_steps",
+                        m.NoReduce(float(skipped_zero_advantage_steps)),
+                    )
+                )
+                self.metrics_processor.log(
+                    step=self._train_step, metrics=step_metrics
                 )
 
         # Fail-fast: any task error triggers shutdown.
@@ -906,12 +988,43 @@ class RLTrainer(Configurable):
                 await asyncio.gather(*rollout_tasks, return_exceptions=True)
 
         sl.log_trace_instant("training_end")
-        post_validation = await self.validate()
+        post_validation, post_rollouts = await self.validate()
+        self._log_validation_metrics(
+            post_validation, post_rollouts, step=self._train_step
+        )
         logger.info(
             "Summary:\n  Pre:  %s\n  Post: %s",
             format_validation(pre_validation),
             format_validation(post_validation),
         )
+
+    def _log_validation_metrics(
+        self,
+        result: dict,
+        rollouts: list[RolloutOutput],
+        *,
+        step: int,
+    ) -> None:
+        """Emit typed Metric records for validation.
+
+        Combines the ``aggregate_rewards`` summary (mean reward,
+        component breakdown, truncated fraction) with the raw
+        rollout-level stats from :func:`build_rollout_metrics`
+        (length, status mix, per-component reward). The result is the
+        same shape main's validate emitted before the rewrite.
+        """
+        recs: list[m.Metric] = [
+            m.Metric("validation/reward", m.Mean(result["mean_reward"])),
+            m.Metric("validation/reward", m.Max(result["mean_reward"])),
+            m.Metric(
+                "validation/truncated_fraction",
+                m.NoReduce(float(result["fraction_truncated"])),
+            ),
+        ]
+        for k, v in result.get("components", {}).items():
+            recs.append(m.Metric(f"validation/component/{k}", m.NoReduce(float(v))))
+        recs.extend(build_rollout_metrics(rollouts, prefix="validation"))
+        self.metrics_processor.log(step=step, metrics=recs, is_validation=True)
 
 
 # ---------------------------------------------------------------------------

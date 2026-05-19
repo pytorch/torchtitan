@@ -7,10 +7,14 @@
 """Rollout-side metric builders and rollout sample loggers.
 
 Lives outside :mod:`grpo` so the controller stays focused on actor
-orchestration. Two complementary surfaces:
+orchestration. Three complementary surfaces:
 
 - :func:`aggregate_rewards` + :func:`format_validation` — produce the
   short mean/component summary the validation log prints.
+- :func:`build_rollout_metrics` + :func:`build_replay_metrics` —
+  emit typed ``m.Metric`` records for the per-step MetricsProcessor
+  log (rollout length stats, reward / advantage SummaryStats,
+  group_std, zero_std fraction, per-component reward breakdown).
 - :func:`log_first_sample` + :func:`dump_rollouts_jsonl` — surface
   representative rollouts to stdout and a JSONL file for an inspector
   subagent (gated on ``config.log_samples``).
@@ -21,19 +25,133 @@ from __future__ import annotations
 import json
 import logging
 import os
+import statistics
 from collections import defaultdict
 from collections.abc import Sequence
 
-from torchtitan.experiments.rl.types import RolloutOutput, RolloutStatus
+from torchtitan.experiments.rl.observability import metrics as m
+from torchtitan.experiments.rl.types import (
+    ReplaySample,
+    RolloutOutput,
+    RolloutStatus,
+)
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "aggregate_rewards",
+    "build_replay_metrics",
+    "build_rollout_metrics",
     "dump_rollouts_jsonl",
     "format_validation",
     "log_first_sample",
 ]
+
+
+def build_rollout_metrics(
+    rollouts: Sequence[RolloutOutput],
+    *,
+    prefix: str = "rollout",
+) -> list[m.Metric]:
+    """Length, truncation, status, and per-reward-component records.
+
+    Every emitted key starts with ``prefix/`` so the same helper can
+    be used for both training-time rollouts (``prefix="rollout"``) and
+    validation rollouts (``prefix="validation"``) without colliding
+    with the unprefixed ``reward`` SummaryStats emitted by
+    :func:`build_replay_metrics`.
+
+    Lengths are computed over the whole rollout (sum across turns) so
+    multi-turn samples are reported correctly. Truncation rate uses
+    the rollout-level status.
+    """
+    if not rollouts:
+        return []
+    response_lens: list[int] = []
+    prompt_lens: list[int] = []
+    total_lens: list[int] = []
+    truncated: list[float] = []
+    errored: list[float] = []
+    completed: list[float] = []
+    num_turns: list[int] = []
+    component_values: dict[str, list[float]] = defaultdict(list)
+    rewards: list[float] = []
+    for r in rollouts:
+        r_resp = sum(len(t.response_token_ids) for t in r.turns)
+        r_prompt = r.turns[0].prompt_token_ids.__len__() if r.turns else 0
+        response_lens.append(r_resp)
+        prompt_lens.append(r_prompt)
+        total_lens.append(r_prompt + r_resp)
+        num_turns.append(len(r.turns))
+        truncated.append(1.0 if r.status == RolloutStatus.TRUNCATED else 0.0)
+        errored.append(1.0 if r.status == RolloutStatus.ERROR else 0.0)
+        completed.append(1.0 if r.status == RolloutStatus.COMPLETED else 0.0)
+        if r.reward is not None:
+            rewards.append(float(r.reward))
+        for name, value in r.reward_components.items():
+            component_values[name].append(float(value))
+
+    records: list[m.Metric] = [
+        m.Metric(f"{prefix}/response_length", m.Mean.from_list(response_lens)),
+        m.Metric(f"{prefix}/response_length", m.Max.from_list(response_lens)),
+        m.Metric(f"{prefix}/prompt_length", m.Mean.from_list(prompt_lens)),
+        m.Metric(f"{prefix}/prompt_length", m.Max.from_list(prompt_lens)),
+        m.Metric(f"{prefix}/total_length", m.Max.from_list(total_lens)),
+        m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
+        m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
+        m.Metric(f"{prefix}/truncated_fraction", m.Mean.from_list(truncated)),
+        m.Metric(f"{prefix}/error_fraction", m.Mean.from_list(errored)),
+        m.Metric(f"{prefix}/completed_fraction", m.Mean.from_list(completed)),
+    ]
+    # All keys prefixed so the same builder can be re-used for both
+    # rollouts (prefix="rollout") and validation (prefix="validation")
+    # without colliding with replay's unprefixed ``reward`` SummaryStats.
+    if rewards:
+        records.append(
+            m.Metric(f"{prefix}/reward", m.SummaryStats.from_list(rewards))
+        )
+    for name, values in sorted(component_values.items()):
+        records.append(
+            m.Metric(f"{prefix}/component/{name}", m.Mean.from_list(values))
+        )
+    return records
+
+
+def build_replay_metrics(samples: Sequence[ReplaySample]) -> list[m.Metric]:
+    """Advantage + reward stats + per-group reward std + policy_version range.
+
+    Group-std and zero-std-fraction quantify how often a group's
+    rollouts collapse to the same reward (= no learning signal).
+    """
+    if not samples:
+        return []
+    by_group: dict[str, list[float]] = defaultdict(list)
+    rewards: list[float] = []
+    advantages: list[float] = []
+    policy_versions: list[int] = []
+    for s in samples:
+        rewards.append(float(s.reward))
+        advantages.append(float(s.advantage))
+        policy_versions.append(int(s.policy_version))
+        by_group[s.group_id].append(float(s.reward))
+    group_stds = [
+        statistics.pstdev(r) if len(r) > 1 else 0.0 for r in by_group.values()
+    ]
+    zero_std_frac = (
+        sum(1 for s in group_stds if s == 0.0) / len(group_stds)
+        if group_stds
+        else 0.0
+    )
+    records: list[m.Metric] = [
+        m.Metric("reward", m.SummaryStats.from_list(rewards)),
+        m.Metric("advantage", m.SummaryStats.from_list(advantages)),
+        m.Metric("reward/group_std", m.Mean.from_list(group_stds)),
+        m.Metric("reward/group_std", m.Max.from_list(group_stds)),
+        m.Metric("reward/zero_std_frac", m.NoReduce(zero_std_frac)),
+        m.Metric("replay/policy_version", m.Min.from_list(policy_versions)),
+        m.Metric("replay/policy_version", m.Max.from_list(policy_versions)),
+    ]
+    return records
 
 
 def aggregate_rewards(
