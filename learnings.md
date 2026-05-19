@@ -188,3 +188,31 @@ Interpretation:
 - BF16 full training materially reduces parameter/model memory and lowers peak step memory to about 90.11% capacity, but it does not improve throughput at local batch size 4.
 - Because throughput is almost tied and memory is much safer, BF16 is a good ingredient only if the saved memory can be converted into more useful tokens/sec with a larger local batch or another memory-using speed knob.
 - Current best for primary objective remains `01d1f8e` / restored source `73e33ba`.
+
+## Experiment 4: BF16 Training Dtype With Local Batch 5
+
+Source state: `c65a743` with source still matching the FSDP-best implementation.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --training.dtype=bfloat16 --training.local_batch_size=5 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run04-bf16-lbs5 > run.log 2>&1
+```
+
+What changed:
+
+- Command-only coupled overrides: `--training.dtype=bfloat16` and `--training.local_batch_size=5`.
+- No source, FSDP, AC, compile, sequence-length, optimizer, or parallelism changes.
+
+Result:
+
+- Status: crash.
+- The run built the model and initialized the trainer with local batch size 5, global batch size 40, and sequence length 4096.
+- It OOMed during the first backward inside `ChunkedCELoss`, while calling `chunk_loss.backward()`.
+- Error reported about 177.63 GiB in use on GPUs with 178.35 GiB capacity, and a failed 1.45 GiB allocation.
+
+Interpretation:
+
+- BF16's recovered memory is not enough to raise local batch from 4 to 5 without activation checkpointing or another memory reduction.
+- The batch-size path is blocked unless paired with a stronger memory-saving source state such as AC or TP. Since full AC at batch 4 was much slower, blind batch-size search is not currently attractive.
+- The search should pivot to profiling the current best to see whether compute kernels, FSDP collectives, or launch/data overhead dominate before making another source change.
