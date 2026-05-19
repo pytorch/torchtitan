@@ -125,24 +125,29 @@ class TokenEnv:
 
         assistant_msg = _assistant_message(parsed)
 
-        # Length-stop: keep the partial assistant message (the trainer
-        # needs the response tokens for credit assignment), but skip
-        # ``env.step`` since the env can't grade a truncated turn.
-        if completion.finish_reason == "length":
-            self._messages.append(assistant_msg)
-            return (
-                EnvStep(
-                    reward=self._config.truncation_reward,
-                    done=True,
-                    status=RolloutStatus.TRUNCATED,
-                ),
-                [assistant_msg],
-            )
-
+        # Length-stop: still call ``env.step`` so the env can score
+        # the partial assistant message (prime-rl/verifiers behavior;
+        # see prime_rl_deepdive Q2). Returning a hard ``truncation_reward``
+        # discards meaningful gradient on rollouts that emitted some
+        # of the target text before hitting the cap. The terminal
+        # status is overridden to TRUNCATED so downstream metrics
+        # still distinguish length-stops from clean completions.
+        truncated = completion.finish_reason == "length"
         env_step = await self._call_step(assistant_msg)
         response_messages = [assistant_msg, *env_step.messages]
         self._messages.append(assistant_msg)
         self._messages.extend(env_step.messages)
+        if truncated:
+            return (
+                EnvStep(
+                    messages=env_step.messages,
+                    reward=env_step.reward,
+                    reward_components=env_step.reward_components,
+                    done=True,
+                    status=RolloutStatus.TRUNCATED,
+                ),
+                response_messages,
+            )
 
         if not env_step.done and await self._exceeds_context():
             return (
