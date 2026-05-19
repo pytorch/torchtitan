@@ -332,10 +332,9 @@ class Module(nn.Module, Configurable):
                 fn = self.local_spmd(fn, sharding_config.local_spmd)
 
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
-            with set_current_mesh(mesh):
-                args, kwargs = self._shard_inputs(args, kwargs)
-                outputs = fn(*args, **kwargs)
-                return self._shard_outputs(outputs)
+            args, kwargs = self._shard_inputs(args, kwargs)
+            outputs = fn(*args, **kwargs)
+            return self._shard_outputs(outputs)
 
         self.forward = with_redistribution
 
