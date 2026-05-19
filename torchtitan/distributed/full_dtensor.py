@@ -41,12 +41,6 @@ def validate_config(
         VarlenAttention,
     )
 
-    if parallel_dims.ep_enabled:
-        raise NotImplementedError(
-            "full_dtensor is not supported with Expert Parallel. "
-            "Disable EP or disable full_dtensor."
-        )
-
     if parallel_dims.cp_enabled:
         if any(
             isinstance(m, (ScaledDotProductAttention, VarlenAttention))
@@ -86,6 +80,18 @@ def _get_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
 
 
 _DENSE_SPMD_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
+_SPARSE_SPMD_AXES = ["dp_replicate", "efsdp", "ep"]
+
+
+def get_sparse_dp_mesh_axes(parallel_dims: ParallelDims) -> DataParallelMeshDims:
+    """Build ``DataParallelMeshDims`` for routed-expert (sparse) parameters.
+
+    Sparse FSDP storage axis is ``efsdp`` (mirrors dense ``dp_shard``);
+    ``dp_replicate`` is shared with the dense path.
+    """
+    shard: str | None = "efsdp" if parallel_dims.ep_enabled else None
+    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+    return DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
 def resolve_fsdp_mesh(
@@ -95,6 +101,21 @@ def resolve_fsdp_mesh(
     spmd_mesh = parallel_dims.get_activated_mesh(_DENSE_SPMD_AXES)
     assert spmd_mesh is not None
     return spmd_mesh, _get_dp_mesh_axes(parallel_dims)
+
+
+def resolve_sparse_fsdp_mesh(
+    parallel_dims: ParallelDims,
+) -> tuple[DeviceMesh | None, DataParallelMeshDims | None]:
+    """Sparse counterpart of ``resolve_fsdp_mesh`` for routed experts.
+
+    Returns ``(None, None)`` when EP is disabled; otherwise the sparse
+    SPMD mesh + sparse DP axes.
+    """
+    if not parallel_dims.ep_enabled:
+        return None, None
+    sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_SPMD_AXES)
+    assert sparse_mesh is not None
+    return sparse_mesh, get_sparse_dp_mesh_axes(parallel_dims)
 
 
 def parallelize_inputs(
