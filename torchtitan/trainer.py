@@ -588,6 +588,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         """
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # in case of interleaved dataset
+        # TODO: log source_idx to track per-source sample distribution
+        source_idx = extra_inputs.pop("source_idx", None)
         # extra_kwargs are forwarded to all PP stages; extra_inputs are only
         # available to the first stage.  Positions go into extra_kwargs so
         # every stage can apply RoPE correctly.
