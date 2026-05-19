@@ -30,7 +30,9 @@ run_bench() {
     echo "=========================================="
     local dump="$PROFILE_DIR/$trace_subdir"
     rm -rf "$dump"
-    NGPU=$NGPU LOCAL_RANK=0 python3 -m torchtitan.train \
+    NGPU=$NGPU torchrun --nproc_per_node=$NGPU --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+        --local-ranks-filter 0 --role rank --tee 3 \
+        -m torchtitan.train \
         --module graph_trainer.llama3 \
         --config graph_trainer_llama3_8b \
         --compile.mode aot_fx_trace \
@@ -41,7 +43,7 @@ run_bench() {
         \
         --metrics.no-enable_tensorboard \
         --comm.trace_buf_size=0 \
-        --comm.mode=fake_backend \
+        --compile.disable_passes custom_codegen_pass \
         --profiler.enable_profiling \
         --profiler.profile_freq 10 \
         --dump_folder "$dump" \
