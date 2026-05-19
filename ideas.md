@@ -191,3 +191,12 @@
   Planned command or config overrides: TP=2/FSDP=4 compile+BF16 local batch 8 command plus `--parallelism.enable_async_tensor_parallel`.
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is compile failure or no throughput gain.
   Result: discarded at source state `46e6f5e`; async TP ran but Inductor found no matching fusion patterns and throughput was 7,827 tps.
+
+- Idea: selective activation checkpointing with compile, BF16, and local batch 6
+  Current best source commit: 5abcfd3
+  Source: loss-path memory boundary follow-up
+  Expected mechanism: Selective AC should reduce activation memory enough for no-TP local batch 6 to fit while avoiding the large recompute cost of full AC. Combining it with compile and BF16 may preserve enough throughput for the extra batch tokens to beat local batch 5.
+  Supporting evidence: No-TP compile+BF16 local batch 6 OOMed in the loss path, while full AC previously reduced memory but was too slow before the compile+BF16 improvements. TP reduced memory but added too much communication. Activation checkpointing is an allowed knob and Qwen3 14B already has an AC config.
+  Planned source/config changes: Add the existing `apply_ac(model, ac_config, model_compile_enabled=...)` hook before compile and FSDP wrapping in Qwen3 parallelize.
+  Planned command or config overrides: Current-best command with `--training.local_batch_size=6 --activation_checkpoint.mode=selective`.
+  Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss and no OOM. Risk is selective AC overhead still outweighing the larger batch.
