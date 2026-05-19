@@ -21,7 +21,6 @@ Three pieces:
 from __future__ import annotations
 
 import asyncio
-import random
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -175,61 +174,50 @@ class ReplayBuffer(Configurable):
         max_buffer_size: int = 2048
         """Hard cap on stored samples; oldest fall off on overflow."""
 
-        seed: int = 0
-        """Seed for the in-actor sampling RNG."""
-
     def __init__(self, config: Config) -> None:
         self.config = config
         self._buffer: deque[ReplaySample] = deque(maxlen=config.max_buffer_size)
-        self._rng = random.Random(config.seed)
-        self._cv: asyncio.Condition | None = None  # initialized lazily
+        # Constructed eagerly: asyncio.Condition binds to the running
+        # loop on first ``async with``, so no event loop is required.
+        self._cv: asyncio.Condition = asyncio.Condition()
         self._closed: bool = False
-
-    def _cond(self) -> asyncio.Condition:
-        if self._cv is None:
-            self._cv = asyncio.Condition()
-        return self._cv
 
     async def add(self, samples: list[ReplaySample]) -> None:
         """Append samples; wake consumers parked in ``sample``."""
-        cv = self._cond()
-        async with cv:
+        async with self._cv:
             self._buffer.extend(samples)
-            cv.notify_all()
+            self._cv.notify_all()
 
     async def sample(self, *, curr_policy_version: int) -> list[list[ReplaySample]]:
-        """Wait until ``dp_size * batch_size`` survivors are available.
+        """Wait until ``dp_size * batch_size`` survivors are available, then
+        pop them off the front in arrival order.
 
         Returns shape ``[dp_size][batch_size]``. Evicts stale samples
         on every wake-up. Raises ``BufferClosedError`` when the buffer
         is closed mid-wait.
         """
-        cv = self._cond()
-        async with cv:
+        async with self._cv:
             while True:
                 if self._closed:
                     raise BufferClosedError("ReplayBuffer closed during sample()")
                 self._evict(curr_policy_version)
                 total = self.config.dp_size * self.config.batch_size
                 if len(self._buffer) >= total:
-                    indices = self._rng.sample(range(len(self._buffer)), k=total)
-                    chosen = [self._buffer[i] for i in indices]
+                    # Pop the oldest ``total`` samples (FIFO) and shard them
+                    # round-robin across DP ranks so each rank's batch sees
+                    # a mix of groups.
+                    chosen = [self._buffer.popleft() for _ in range(total)]
                     return [
-                        chosen[
-                            r
-                            * self.config.batch_size : (r + 1)
-                            * self.config.batch_size
-                        ]
+                        chosen[r :: self.config.dp_size]
                         for r in range(self.config.dp_size)
                     ]
-                await cv.wait()
+                await self._cv.wait()
 
     async def close(self) -> None:
         """Wake all waiters with :class:`BufferClosedError`."""
-        cv = self._cond()
-        async with cv:
+        async with self._cv:
             self._closed = True
-            cv.notify_all()
+            self._cv.notify_all()
 
     def _evict(self, curr_policy_version: int) -> None:
         if self.config.max_policy_age is None:

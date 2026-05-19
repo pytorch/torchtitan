@@ -41,13 +41,21 @@ __all__ = ["TokenEnv", "TokenEnvConfig"]
 class TokenEnvConfig:
     """Termination knobs for :class:`TokenEnv`.
 
-    Defaults match tinker's ``EnvFromMessageEnv``: zero reward on parse
-    failure / length stop / context overflow. Envs that want a negative
-    shaping reward (e.g. `-1.0` on parse failure) override per-instance.
+    Defaults match tinker's ``EnvFromMessageEnv``: zero reward on every
+    adapter-side termination. Envs that want a negative shaping reward
+    (e.g. `-1.0` on parse failure) override per-instance.
+
+    The two rewards line up with the two non-COMPLETED rollout statuses
+    so a metrics consumer can route them by status:
+
+    - ``error_reward`` — parse failure (renderer raised) or step timeout
+      (``RolloutStatus.ERROR``).
+    - ``truncation_reward`` — generator length-stop or env-side context
+      overflow (``RolloutStatus.TRUNCATED``).
     """
 
-    failed_parse_reward: float = 0.0
-    context_overflow_reward: float = 0.0
+    error_reward: float = 0.0
+    truncation_reward: float = 0.0
     max_trajectory_tokens: int | None = None
     max_generation_tokens: int | None = None
     step_timeout_s: float | None = None
@@ -106,25 +114,18 @@ class TokenEnv:
         - next prompt would exceed ``max_trajectory_tokens`` →
           terminal ``EnvStep`` (TRUNCATED).
         """
-        if completion.finish_reason == "length":
-            return (
-                EnvStep(
-                    reward=self._config.context_overflow_reward,
-                    done=True,
-                    status=RolloutStatus.TRUNCATED,
-                ),
-                [],
-            )
-
         try:
             parsed: ParsedResponse = self._renderer.parse_response(
                 completion.response_token_ids
             )
         except Exception as exc:
+            # If the model length-stopped, an incomplete tail is the
+            # expected reason for a parse error; still emit ERROR so
+            # the metric reflects renderer reality.
             logger.warning("renderer.parse_response raised: %s", exc, exc_info=False)
             return (
                 EnvStep(
-                    reward=self._config.failed_parse_reward,
+                    reward=self._config.error_reward,
                     done=True,
                     status=RolloutStatus.ERROR,
                 ),
@@ -132,6 +133,21 @@ class TokenEnv:
             )
 
         assistant_msg = _assistant_message(parsed)
+
+        # Length-stop: keep the partial assistant message (the trainer
+        # needs the response tokens for credit assignment), but skip
+        # ``env.step`` since the env can't grade a truncated turn.
+        if completion.finish_reason == "length":
+            self._messages.append(assistant_msg)
+            return (
+                EnvStep(
+                    reward=self._config.truncation_reward,
+                    done=True,
+                    status=RolloutStatus.TRUNCATED,
+                ),
+                [assistant_msg],
+            )
+
         env_step = await self._call_step(assistant_msg)
         response_messages = [assistant_msg, *env_step.messages]
         self._messages.append(assistant_msg)
@@ -140,7 +156,7 @@ class TokenEnv:
         if not env_step.done and await self._exceeds_context():
             return (
                 EnvStep(
-                    reward=self._config.context_overflow_reward,
+                    reward=self._config.truncation_reward,
                     done=True,
                     status=RolloutStatus.TRUNCATED,
                 ),
@@ -175,7 +191,7 @@ class TokenEnv:
             return await asyncio.wait_for(coro, timeout=self._config.step_timeout_s)
         except asyncio.TimeoutError:
             return EnvStep(
-                reward=self._config.failed_parse_reward,
+                reward=self._config.error_reward,
                 done=True,
                 status=RolloutStatus.ERROR,
             )

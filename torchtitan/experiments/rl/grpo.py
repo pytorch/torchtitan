@@ -726,8 +726,14 @@ class RLTrainer(Configurable):
                 if samples:
                     await self.replay_buffer.add(samples)
 
-                if cfg.log_samples and local_step % 4 == 0:
-                    _log_first_sample(rollouts)
+                if cfg.log_samples:
+                    if local_step % 4 == 0:
+                        _log_first_sample(rollouts)
+                    _dump_rollouts_jsonl(
+                        rollouts,
+                        dump_folder=cfg.dump_folder,
+                        train_step=self._train_step,
+                    )
                 local_step += 1
 
         async def continuous_training() -> None:
@@ -875,6 +881,52 @@ def _log_first_sample(rollouts: Sequence[RolloutOutput]) -> None:
         reward_str,
         content,
     )
+
+
+def _dump_rollouts_jsonl(
+    rollouts: Sequence[RolloutOutput],
+    *,
+    dump_folder: str,
+    train_step: int,
+) -> None:
+    """Append one JSON line per rollout to ``{dump_folder}/rollouts.jsonl``.
+
+    Best-effort: a write failure logs but doesn't crash the rollout loop.
+    Schema is shallow on purpose — full messages + reward + status, no
+    token ids — so an inspector subagent can read the file directly.
+    """
+    import json
+
+    path = os.path.join(dump_folder, "rollouts.jsonl")
+    try:
+        os.makedirs(dump_folder, exist_ok=True)
+        with open(path, "a") as f:
+            for r in rollouts:
+                turns = [
+                    {
+                        "prompt_messages": t.prompt_messages,
+                        "response_messages": t.response_messages,
+                        "policy_version": t.policy_version,
+                        "num_response_tokens": len(t.response_token_ids),
+                    }
+                    for t in r.turns
+                ]
+                f.write(
+                    json.dumps(
+                        {
+                            "train_step": train_step,
+                            "group_id": r.group_id,
+                            "sample_idx": r.sample_idx,
+                            "status": str(r.status),
+                            "reward": r.reward,
+                            "reward_components": r.reward_components,
+                            "turns": turns,
+                        }
+                    )
+                    + "\n"
+                )
+    except OSError as exc:
+        logger.warning("rollouts.jsonl write failed: %s", exc)
 
 
 async def main() -> None:

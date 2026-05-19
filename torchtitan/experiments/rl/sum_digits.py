@@ -52,14 +52,15 @@ _ANSWER_RE = re.compile(r"<answer>\s*(-?\d+)\s*</answer>")
 class SumDigitsEnv(MessageEnv):
     """Single-turn digit-sum task. ``reset`` → system+user; ``step`` scores."""
 
-    def __init__(self, *, numbers: Sequence[int]) -> None:
+    def __init__(self, *, numbers: Sequence[int], system_prompt: str) -> None:
         self._numbers = list(numbers)
         self._target = sum(int(d) for n in self._numbers for d in str(abs(n)))
+        self._system_prompt = system_prompt
 
     async def reset(self) -> EnvReset:
         return EnvReset(
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt},
                 {
                     "role": "user",
                     "content": f"What is the digit sum of {self._numbers}?",
@@ -89,7 +90,8 @@ class SumDigitsBuilder(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass  # No per-builder state; payload carries the numbers.
+        system_prompt: str = _SYSTEM_PROMPT
+        """Override to encourage e.g. short thinking on a Qwen3 model."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -101,7 +103,10 @@ class SumDigitsBuilder(Configurable):
         assert isinstance(
             numbers, list
         ), f"payload['numbers'] must be list, got {type(numbers).__name__}"
-        return [SumDigitsEnv(numbers=numbers) for _ in range(group_size)]
+        return [
+            SumDigitsEnv(numbers=numbers, system_prompt=self.config.system_prompt)
+            for _ in range(group_size)
+        ]
 
 
 class SumDigitsDataset(Configurable):

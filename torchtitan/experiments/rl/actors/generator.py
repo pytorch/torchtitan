@@ -411,7 +411,11 @@ class VLLMGenerator(Actor, Configurable):
         # Serialize: concurrent generate_tokens invocations must not
         # interleave engine.add_request / engine.step pairs (would
         # corrupt vLLM's continuous-batching state across TP ranks).
+        # ``pull_model_state_dict`` takes the same lock, so weights
+        # cannot swap mid-batch — every output in this call belongs to
+        # ``admit_version`` snapshotted under the lock.
         async with self._engine_lock:
+            admit_version = self.policy_version
             engine_inputs = self._engine.renderer.render_cmpl(
                 [{"prompt_token_ids": p} for p in prompts]
             )
@@ -424,8 +428,8 @@ class VLLMGenerator(Actor, Configurable):
                     params=params,
                 )
 
-            # Drain the engine in-process; yield between steps so other
-            # endpoints (e.g. pull_model_state_dict) can land.
+            # Drain the engine in-process; yield between steps so the
+            # actor event loop stays responsive.
             finished: dict[str, RequestOutput] = {}
             target = {str(first_id + i) for i in range(len(prompts))}
             with sl.log_trace_span("engine_steps"):
@@ -437,7 +441,9 @@ class VLLMGenerator(Actor, Configurable):
                             finished[o.request_id] = o
 
             return [
-                self._to_generate_output(finished[str(first_id + i)])
+                self._to_generate_output(
+                    finished[str(first_id + i)], policy_version=admit_version
+                )
                 for i in range(len(prompts))
             ]
 
@@ -446,22 +452,25 @@ class VLLMGenerator(Actor, Configurable):
     async def pull_model_state_dict(self, version: int) -> None:
         """Pull new weights from TorchStore, reset prefix cache, bump version.
 
-        ``generate_tokens`` is batched-and-drained per call, so no
-        in-flight requests exist when this endpoint runs (Monarch
-        endpoint dispatch on the same actor serializes endpoint bodies
-        with each other).
+        Acquires ``_engine_lock`` to serialize with ``generate_tokens``:
+        Monarch's Direct dispatch lets endpoint coroutines run
+        concurrently, so without this lock a pull could overlap with
+        an in-flight batch and corrupt the engine. The lock is the
+        single serialization point; the rest of the actor stays
+        thread/coroutine-unsafe by design.
         """
         from monarch.rdma import is_rdma_available
 
-        model_sd = self._get_model().model.state_dict()
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=model_sd,
-            strict=False,
-            direct_rdma=is_rdma_available(),
-        )
-        self._engine.reset_prefix_cache()
-        self.policy_version = version
+        async with self._engine_lock:
+            model_sd = self._get_model().model.state_dict()
+            await ts.get_state_dict(
+                "model_state_dict",
+                user_state_dict=model_sd,
+                strict=False,
+                direct_rdma=is_rdma_available(),
+            )
+            self._engine.reset_prefix_cache()
+            self.policy_version = version
 
     @endpoint
     async def close(self) -> None:
@@ -482,8 +491,14 @@ class VLLMGenerator(Actor, Configurable):
 
     # ------------------------------------------------------------------ internal
 
-    def _to_generate_output(self, output: RequestOutput) -> GenerateOutput:
+    def _to_generate_output(
+        self, output: RequestOutput, *, policy_version: int
+    ) -> GenerateOutput:
         """Build a :class:`GenerateOutput` from one finished ``RequestOutput``.
+
+        ``policy_version`` is the weight version snapshotted at admission
+        under ``_engine_lock`` — NOT ``self.policy_version`` at output time,
+        which would mis-stamp every turn rolled out across a weight swap.
 
         Assumes ``SamplingParams.n == 1`` (the controller fans GRPO siblings
         out at the env-builder layer). With ``n > 1`` we return the first
@@ -494,7 +509,7 @@ class VLLMGenerator(Actor, Configurable):
         per_token_lp = [list(d.values())[0].logprob for d in sample.logprobs]
         _emit_request_metrics(output, prefix="generator")
         return GenerateOutput(
-            policy_version=self.policy_version,
+            policy_version=policy_version,
             response_token_ids=list(sample.token_ids),
             response_logprobs=per_token_lp,
             finish_reason=sample.finish_reason,

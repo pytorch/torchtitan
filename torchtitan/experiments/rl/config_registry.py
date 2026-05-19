@@ -99,7 +99,18 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
-    """GRPO config for Qwen3-1.7B (6 GPUs: 4 gen + 2 train) — SumDigits or AlphabetSort."""
+    """GRPO config for Qwen3-1.7B (4 GPUs: 2 gen + 2 train) — SumDigits smoke.
+
+    Encourages brief thinking (Qwen3 chat template emits ``<think>``) so
+    the model has scratch space before ``<answer>``, then a larger
+    ``max_tokens`` budget so it actually finishes inside the cap.
+    """
+    short_thinking_prompt = (
+        "You are a careful arithmetic assistant. Given a list of integers, "
+        "compute the sum of all their digits. Think briefly (≤30 tokens) "
+        "and then respond with exactly `<answer>NUMBER</answer>` where "
+        "NUMBER is the digit sum."
+    )
     return RLTrainer.Config(
         model_spec=model_registry("1.7B", attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
@@ -109,11 +120,12 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         num_rollout_tasks=4,
         max_rollout_turns=1,
         num_validation_samples=20,
+        log_samples=True,
         compile=CompileConfig(enable=True, backend="aot_eager"),
         train_dataset=SumDigitsDataset.Config(seed=42),
-        train_builder=SumDigitsBuilder.Config(),
+        train_builder=SumDigitsBuilder.Config(system_prompt=short_thinking_prompt),
         validation_dataset=SumDigitsDataset.Config(seed=99),
-        validation_builder=SumDigitsBuilder.Config(),
+        validation_builder=SumDigitsBuilder.Config(system_prompt=short_thinking_prompt),
         renderer=RendererConfig(name="auto"),
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=2e-6),
@@ -139,7 +151,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             model_dtype="bfloat16",
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
-                tensor_parallel_degree=4,
+                tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
                 enable_sequence_parallel=False,
                 disable_loss_parallel=True,
@@ -149,7 +161,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
                 n=1,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=300,
+                max_tokens=1024,
             ),
         ),
         replay_buffer=ReplayBuffer.Config(
@@ -273,8 +285,8 @@ def rl_grpo_qwen3_1_7b_alphabet() -> RLTrainer.Config:
         ),
         renderer=RendererConfig(name="auto"),
         token_env=TokenEnvConfig(
-            failed_parse_reward=0.0,
-            context_overflow_reward=0.0,
+            error_reward=0.0,
+            truncation_reward=0.0,
             max_trajectory_tokens=2048,
             max_generation_tokens=768,
         ),
