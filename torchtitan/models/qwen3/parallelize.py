@@ -26,6 +26,7 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
 
@@ -56,6 +57,7 @@ def parallelize_qwen3(
 
     if parallel_dims.tp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
         model.parallelize(tp_mesh)
         logger.info(
             "Applied Qwen3 tensor parallelism with tp=%s",
