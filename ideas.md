@@ -316,6 +316,16 @@
   Planned command or config overrides: Broad FP8 command with `--training.local_batch_size=7`, keeping `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,469 with finite decreasing loss. Risk is still OOM or slow throughput from broad FP8 overhead.
   Result: invalid at source state `4c7d50e`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
+  Result: discarded on valid retry at source state `4549f88`; 8,413 tps, MFU N/A, 171.2 GiB. It fits but remains slower than the auto-filter FP8 best and is memory-risky.
+
+- Idea: profile current FP8 best
+  Current best source commit: 5681e36
+  Source: Manager review and post-quantization bottleneck refresh
+  Expected mechanism: The current best now includes FP8 rowwise auto-filtering and `--comm.trace_buf_size=0`, so the old profile no longer reflects the best kernel/communication mix. A new profile should identify whether the next idea should target attention, remaining GEMMs, communication, or memory.
+  Supporting evidence: Quantization changed throughput and the broad-FP8 memory/throughput tradeoff was non-obvious. Program.md directs profiling when ideas run low or after materially changing the best command.
+  Planned source/config changes: Restore FP8 auto-filter source; no source changes for the profile run.
+  Planned command or config overrides: Current best command plus profiler overrides: `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is trace generation and updated roofline notes. Profiled throughput is diagnostic and not ranked against unprofiled candidates.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36

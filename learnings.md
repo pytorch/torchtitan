@@ -1073,6 +1073,30 @@ Interpretation:
 - Do not use this to conclude local batch 7 is infeasible.
 - Retry the same no-auto-filter FP8 local-batch-7 candidate on a clear node.
 
+## Experiment 37: FP8 Rowwise Without Auto-Filter, Local Batch 7 Retry
+
+Source state: `4549f88`, using the no-auto-filter FP8 source from `582d685`.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=7 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run37-fp8-rowwise-no-auto-filter-compile-bf16-lbs7-no-flight-recorder-retry > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,413, below the 8,469 current best.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 171.18 GiB, 95.98%.
+- Loss moved from 12.47352 at step 1 to 11.22023 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Local batch 7 fits, but it is slower than the auto-filter FP8 best and above the 95% memory-risk threshold.
+- The broad FP8 path should be abandoned: batch 5 is slow, batch 7 is still slower and memory-risky, and batch 8 OOMs.
+- Restore source to the FP8 auto-filter best before continuing. The next useful step is to profile the current best command.
+
 ## Manager Review After Experiment 29
 
 Current best:
