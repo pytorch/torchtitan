@@ -1404,6 +1404,43 @@ Interpretation:
 - The faster invalid run41 does not translate into a keepable FP8+flex configuration under the LR recovery tests tried so far.
 - Restore the flex-without-FP8 source as the current best.
 
+## Experiment 49: Profile Current Flex-Attention Best
+
+Source state: `9f96d09`.
+
+Source/config change:
+
+- None. Source was the current flex-without-FP8 best.
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run49-profile-flex-best --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic discard; profiled throughput is not ranked against unprofiled candidates.
+- Step 10 `tps`: 8,246.
+- Step 10 MFU: 34.45%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.39286 at step 1 to 7.64441 at step 10; finite and decreasing.
+- Traces were written under `outputs/autoresearch/may19-qwen3-14b/run49-profile-flex-best/profiling/traces/iteration_10/`.
+
+Profile notes from rank 0 trace:
+
+- CUDA kernel total: about 3.75 s for the profiled step.
+- B200 nvjet GEMM kernels total about 1.80 s and remain the largest bucket.
+- NCCL kernels total about 0.94 s: reduce-scatter about 491 ms and all-gather about 450 ms. NCCL GPU annotations total about 731 ms.
+- Flex-attention kernels total about 659 ms, dominated by `triton_tem_fused_flex_attention_backward_transpose_view_3` at about 563 ms and a forward/transpose flex kernel at about 92 ms.
+- Optimizer remains small: optimizer GPU annotation about 7.6 ms and optimizer-like kernels about 39 ms.
+
+Interpretation:
+
+- Compared with the prior FP8-best profile, flex attention improved the kept throughput but did not remove the main compute/communication limits.
+- No-reshard is not viable at local batch size 5 and too slow at local batch size 4, so the NCCL bucket is difficult to attack with the already-tested FSDP policy knob.
+- GEMM remains the biggest profile bucket. The remaining in-scope source/config ideas should focus on compute kernels or memory headroom rather than logging or optimizer overhead.
+
 ## Manager Review After Experiment 29
 
 Current best:

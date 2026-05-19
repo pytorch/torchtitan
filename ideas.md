@@ -445,6 +445,7 @@
   Planned source/config changes: None; use the current flex-without-FP8 best source.
   Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is trace generation plus updated bottleneck notes. Profiled tps is diagnostic only and should not be ranked against unprofiled candidates.
+  Result: completed at source state `9f96d09`; rank 0 trace shows about 3.75 s CUDA kernel time, dominated by nvjet GEMMs at about 1.80 s, NCCL kernels at about 0.94 s, and flex-attention kernels at about 0.66 s.
 
 - Idea: profile FP8 best after flight-recorder test
   Current best source commit: 5681e36
