@@ -18,14 +18,21 @@ resume an existing experiment, and must never CHEAT by inspecting, checking out,
 diffing against, reading logs from, or otherwise using any existing
 `autoresearch-parallelize/*` experiment branch.
 
-To set up a new experiment, work with the user to:
+To set up a new experiment:
 
-1. **Record the baseline train command**: get the command that defines the
-   target workload and starting point. This includes launcher, config file,
-   overrides, world size, model flavor, sequence length, precision, compile
-   flags, parallelism flags, and initial training settings. The agent may tune
-   allowed `qwen3_14b()` config fields during search as long as the model,
-   data source, checkpoint behavior, and hardware target remain the same.
+1. **Infer and record the baseline train command**: the human will not provide
+   a baseline command. The Worker/Executor must determine the command that
+   defines the target workload and starting point from this program, the
+   experiment-loop rules, the Qwen3 14B config, TorchTitan launcher patterns,
+   and the available machine or cluster environment. This includes launcher,
+   config file, overrides, world size, model flavor, sequence length, precision,
+   compile flags, parallelism flags, and initial training settings. If several
+   commands are plausible, choose one conservative command that exercises the
+   Qwen3 14B workload on the available hardware, record the evidence and
+   reasoning in `learnings.md`, and proceed. Do not ask the human to provide a
+   baseline command. The agent may tune allowed `qwen3_14b()` config fields
+   during search as long as the model, data source, checkpoint behavior, and
+   hardware target remain the same.
 2. **Agree on a run tag**: propose a tag based on today's date and workload
    name, for example `may14-qwen3-8xh100`. The branch
    `autoresearch-parallelize/<tag>` must not already exist.
@@ -62,7 +69,8 @@ To set up a new experiment, work with the user to:
 7. **Record the starting point**: identify the current source commit, current
    best commit if one exists, and any measured throughput/MFU row already in
    `results.tsv`. The Qwen3 scaffold may not yet be the best implementation;
-   that is expected. Do not ask the human for a runnable baseline during setup.
+   that is expected. Do not ask the human for a runnable baseline or a baseline
+   command during setup.
 8. **Summarize setup**: record the train command, hardware, editable files,
    current source commit, current best if known, and objective in `learnings.md`
    before starting the autonomous loops.
@@ -82,11 +90,11 @@ logs are setup work. Editing `parallelize.py`, `sharding.py`,
 `config_registry.py`, or launch knobs is experiment work and must follow the
 one-idea rule below.
 
-The recorded baseline command is a contract. Do not silently add or remove
-compile, FSDP, activation checkpointing, precision, quantization, batch size,
-resharding, TP, CP, PP, EP, optimizer, metrics, or communication knobs during
-the first runnable attempt. Each such change is an experiment idea unless it is
-already present in the recorded baseline command.
+The inferred and recorded baseline command is a contract. Do not silently add or
+remove compile, FSDP, activation checkpointing, precision, quantization, batch
+size, resharding, TP, CP, PP, EP, optimizer, metrics, or communication knobs
+during the first runnable attempt. Each such change is an experiment idea unless
+it is already present in the recorded baseline command.
 
 ## Editable Scope
 
@@ -107,7 +115,7 @@ may change how `parallelize_qwen3()` orchestrates runtime parallelism, how
 settings such as parallelism degrees, batch sizes, microbatch sizes, activation
 checkpointing, compile settings, FSDP reshard policy, pipeline schedule, and
 other CLI/config overrides, as long as the resulting command still represents
-the same target model/workload class agreed with the human.
+the same target model/workload class inferred and recorded during setup.
 
 Within `qwen3_14b()`, you may tune any `Trainer.Config` values except these
 fixed fields:
