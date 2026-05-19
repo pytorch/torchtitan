@@ -29,7 +29,8 @@ from torchtitan.experiments.rl.alphabet_sort import (
     AlphabetSortDataset,
 )
 from torchtitan.experiments.rl.envs.token_env import TokenEnvConfig
-from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.grpo import RLTrainer
+from torchtitan.experiments.rl.loss import DAPOLoss
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.replay import ReplayBuffer
 from torchtitan.experiments.rl.sum_digits import SumDigitsBuilder, SumDigitsDataset
@@ -46,8 +47,9 @@ def _trainer(
     train_tp: int,
     lr: float,
     warmup_steps: int,
-    kl_tau: float = 1e-3,
-    dppo_mask: float = 0.2,
+    clip_low: float = 0.2,
+    clip_high: float = 0.28,
+    dual_clip_c: float = 3.0,
     training_dtype: str = "float32",
     checkpoint_interval: int = 10,
     debug: DebugConfig | None = None,
@@ -75,8 +77,8 @@ def _trainer(
             interval=checkpoint_interval,
             last_save_model_only=False,
         ),
-        loss=GRPOLoss.Config(
-            kl_tau=kl_tau, dppo_mask_high=dppo_mask, dppo_mask_low=dppo_mask
+        loss=DAPOLoss.Config(
+            clip_low=clip_low, clip_high=clip_high, dual_clip_c=dual_clip_c
         ),
         debug=debug or DebugConfig(),
     )

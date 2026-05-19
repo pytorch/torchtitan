@@ -78,7 +78,7 @@ class PolicyTrainer(Actor, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         loss: Configurable.Config = field(default_factory=Configurable.Config)
-        """Loss function config (typically :class:`GRPOLoss.Config`)."""
+        """Loss function config (typically :class:`DAPOLoss.Config`)."""
         ac_config: ActivationCheckpointConfig = field(
             default_factory=lambda: ActivationCheckpointConfig(mode="none")
         )
@@ -310,7 +310,7 @@ class PolicyTrainer(Actor, Configurable):
         policy_logprobs = compute_logprobs(logits, token_ids)  # [1, T-1]
 
         with sl.log_trace_span("loss_fn"):
-            loss, loss_metrics = self.loss_fn(
+            loss_out = self.loss_fn(
                 policy_logprobs=policy_logprobs,
                 behavior_logprobs=behavior_logprobs,
                 advantages_per_token=advantages_per_token,
@@ -320,7 +320,7 @@ class PolicyTrainer(Actor, Configurable):
 
         self.optimizers.zero_grad()
         with sl.log_trace_span("model_backward"):
-            loss.backward()
+            loss_out.loss.backward()
 
         drift: PartialLogprobDrift = verify_logprob_identity(
             behavior_logprobs=behavior_logprobs,
@@ -330,11 +330,12 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         sum_reduced_metrics = {
-            **loss_metrics,
+            **loss_out.sum_metrics,
             "bit_wise/logprob_diff/mean": drift.logprob_diff_mean,
             "bit_wise/ratio_tokens_different/mean": drift.ratio_tokens_different,
         }
         max_reduced_metrics = {
+            **loss_out.max_metrics,
             "bit_wise/logprob_diff/max": drift.logprob_diff_max,
         }
         return self._reduce_forward_backward_metrics(

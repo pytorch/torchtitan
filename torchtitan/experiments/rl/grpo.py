@@ -68,6 +68,7 @@ from torchtitan.experiments.rl.envs.types import (
     EnvExample,
     MessageEnv,
 )
+from torchtitan.experiments.rl.loss import DAPOLoss
 from torchtitan.experiments.rl.metrics import (
     aggregate_rewards,
     dump_rollouts_jsonl,
@@ -87,126 +88,6 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# DPPO+KL loss — per-token, mask-aware, DAPO global-token-mean normalization
-# ---------------------------------------------------------------------------
-
-
-class GRPOLoss(Configurable):
-    """Prime-rl's DPPO+KL loss with DAPO global-token-mean normalization.
-
-    Two components per loss-mask token:
-
-    - **Policy gradient (DPPO)**: ``advantage * importance_ratio`` with a
-      sign-aware trust-region DROP mask instead of PPO ratio clipping.
-      A token is dropped when ``trainer_prob - inference_prob`` exceeds
-      ``dppo_mask_high`` on positive advantages or falls below
-      ``-dppo_mask_low`` on negative ones.
-    - **KL penalty**: ``kl_tau * log_importance_ratio**2`` on every
-      loss-mask token. This is the load-bearing stability term — GRPO
-      without it diverges within ~25 train steps on multi-turn reward
-      surfaces like AlphabetSort.
-
-    Final loss = ``(-pg + kl_tau * kl).sum() / num_global_valid_tokens``.
-
-    Ported from prime-rl's ``default_loss_fn``
-    (``src/prime_rl/trainer/rl/loss.py``). Their version uses raw
-    per-batch sum; we divide by ``num_global_valid_tokens`` to keep
-    gradients independent of how the batch is sharded.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        dppo_mask_high: float = 0.2
-        """Drop tokens with positive advantage whose ``prob_diff`` exceeds
-        this threshold (trust-region violation in the upweight direction)."""
-
-        dppo_mask_low: float = 0.2
-        """Drop tokens with negative advantage whose ``prob_diff`` falls
-        below ``-dppo_mask_low`` (trust-region violation in downweight)."""
-
-        kl_tau: float = 1e-3
-        """KL penalty coefficient on ``log_importance_ratio**2``."""
-
-        adv_tau: float = 1.0
-        """Multiplier on advantages before the PG term (1.0 = unchanged)."""
-
-    def __init__(self, config: Config) -> None:
-        self.dppo_mask_high = config.dppo_mask_high
-        self.dppo_mask_low = config.dppo_mask_low
-        self.kl_tau = config.kl_tau
-        self.adv_tau = config.adv_tau
-
-    def __call__(
-        self,
-        *,
-        policy_logprobs: torch.Tensor,  # [1, T - 1]
-        behavior_logprobs: torch.Tensor,  # [1, T - 1]
-        advantages_per_token: torch.Tensor,  # [1, T - 1]
-        loss_mask: torch.Tensor,  # [1, T - 1]
-        num_global_valid_tokens: torch.Tensor,  # scalar
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        # Compute the log-ratio only at loss positions; off-mask
-        # positions carry stale ``behavior_logprobs=0.0`` (prompts).
-        # Clamp the diff so a ``-inf`` logprob from vLLM (bf16 softmax
-        # underflow on an unlikely sampled token) doesn't explode the
-        # ratio and NaN-poison the sum (NaN * 0 == NaN in IEEE 754).
-        mask_bool = loss_mask > 0.5
-        log_importance_ratio = torch.where(
-            mask_bool,
-            policy_logprobs - behavior_logprobs,
-            torch.zeros_like(policy_logprobs),
-        )
-        log_importance_ratio = torch.clamp(log_importance_ratio, min=-20.0, max=20.0)
-        importance_ratio = torch.exp(log_importance_ratio)
-
-        # DPPO sign-aware trust-region drop. ``inference_prob`` is
-        # ``exp(behavior_logprobs)`` but masked to 0 at off-mask
-        # positions so a stale behavior_logprob=0 doesn't produce a
-        # spurious prob_diff there.
-        trainer_prob = torch.where(
-            mask_bool, torch.exp(policy_logprobs), torch.zeros_like(policy_logprobs)
-        )
-        inference_prob = torch.where(
-            mask_bool,
-            torch.exp(behavior_logprobs),
-            torch.zeros_like(behavior_logprobs),
-        )
-        prob_diff = trainer_prob - inference_prob
-        positive_adv = advantages_per_token > 0
-        negative_adv = advantages_per_token < 0
-        dppo_high = prob_diff > self.dppo_mask_high
-        dppo_low = prob_diff < -self.dppo_mask_low
-        dppo_invalid = torch.where(positive_adv, dppo_high, dppo_low & negative_adv)
-        keep_mask = mask_bool & ~dppo_invalid
-
-        # PG term + KL stability term, summed over loss positions.
-        adv = self.adv_tau * advantages_per_token
-        pg_per_token = keep_mask.float() * adv * importance_ratio
-        kl_per_token = loss_mask * log_importance_ratio**2
-        loss = (
-            -pg_per_token.sum() + self.kl_tau * kl_per_token.sum()
-        ) / num_global_valid_tokens
-
-        with torch.no_grad():
-            ratio_masked = importance_ratio * loss_mask
-            dppo_dropped = (
-                dppo_invalid & mask_bool
-            ).float().sum() / num_global_valid_tokens
-            metrics = {
-                "loss/mean": loss.detach(),
-                "loss/pg/mean": -pg_per_token.sum().detach() / num_global_valid_tokens,
-                "loss/kl/mean": kl_per_token.sum().detach() / num_global_valid_tokens,
-                "loss/importance_ratio/mean": ratio_masked.sum()
-                / num_global_valid_tokens,
-                "loss/importance_ratio/max": (ratio_masked.detach().max()),
-                "loss/dppo_dropped_frac": dppo_dropped,
-                # Legacy alias so the controller's existing log line still works.
-                "loss/ratio/clipped_frac": dppo_dropped,
-            }
-        return loss, metrics
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +283,7 @@ class RLTrainer(Configurable):
         """torch.compile config shared by trainer and generator."""
 
         trainer: PolicyTrainer.Config = field(
-            default_factory=lambda: PolicyTrainer.Config(loss=GRPOLoss.Config())
+            default_factory=lambda: PolicyTrainer.Config(loss=DAPOLoss.Config())
         )
 
         generator: VLLMGenerator.Config = field(default_factory=VLLMGenerator.Config)
