@@ -1830,3 +1830,34 @@ Interpretation:
 
 - The prefetch best is reproducible within a narrow range: run59 at 8,835 tps and run62 at 8,829 tps.
 - Keep source state `7c1c351` as the current best. The next useful step is profiling this prefetch source or testing a narrower prefetch variant, not repeating the exact command again immediately.
+
+## Experiment 63: Profile Prefetch Flex Best
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run63-profile-prefetch-flex-best --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic discard; profiling overhead means this is not ranked against unprofiled candidates.
+- Step 10 `tps`: 8,484.
+- Step 10 MFU: 35.45%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.46043 at step 1 to 6.99815 at step 10; finite and decreasing.
+- Traces were generated under `outputs/autoresearch/may19-qwen3-14b/run63-profile-prefetch-flex-best/profiling/traces/iteration_10/`.
+
+Rank 0 trace summary:
+
+- Profiled wall step: 5.66 s.
+- Total CUDA kernel time: 5.61 s.
+- NCCL kernels: 2.40 s total, including 1.76 s reduce-scatter and 0.63 s all-gather.
+- nvjet GEMM kernels: 2.05 s.
+- Flex attention kernels: 0.78 s.
+- Compared with run49 before explicit prefetch, rank0 profiled wall step fell from 5.77 s to 5.66 s even though visible NCCL kernel time rose from 0.94 s to 2.40 s, which indicates more communication is being exposed/overlapped rather than simply removed.
+
+Interpretation:
+
+- The remaining profile is mixed GEMM plus communication. Reduce-scatter is now the largest visible NCCL bucket, while all-gather is smaller and likely partly hidden by prefetch.
+- Next source experiments should refine prefetch scheduling or reduce gradient communication exposure; nearby FP8 coverage did not beat the best.

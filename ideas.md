@@ -557,6 +557,7 @@
   Planned source/config changes: None; use current prefetch source with flex attention and no FP8 converter.
   Planned command or config overrides: Add `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1` to the exact prefetch best command.
   Success criteria and expected risk: Success is trace generation and a concrete bottleneck note in `learnings.md`. Profiled throughput is diagnostic only and should not be ranked against unprofiled candidates.
+  Result: completed at source state `1e8f047`; profiled step-10 tps was 8,484. Rank0 trace shows ~5.61 s total CUDA kernel time, with ~2.40 s NCCL kernels, ~2.05 s nvjet GEMM kernels, and ~0.78 s flex-attention kernels.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
