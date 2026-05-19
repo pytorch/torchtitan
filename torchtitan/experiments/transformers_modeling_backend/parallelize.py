@@ -6,7 +6,6 @@
 
 import torch
 import torch.nn as nn
-from torch.utils import checkpoint as torch_checkpoint
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import (
@@ -245,24 +244,6 @@ def _experts_restore_post_hook(module, args, output):
     return output
 
 
-def _ignore_profiler_ops_for_sac() -> None:
-    # TODO: Remove once profiler ops are added to SAC_IGNORED_OPS upstream in
-    # PyTorch. Profiler ops are pure side effects with no gradient impact and
-    # should always be skipped by SAC.
-    #
-    # FSDP hooks emit profiler ranges from inside HF expert calls. Those
-    # profiler side effects can appear with different invocation counts during
-    # SAC recompute, but they do not affect model values or gradients.
-    try:
-        profiler_ops = (
-            torch.ops.profiler._record_function_enter_new.default,
-            torch.ops.profiler._record_function_exit._RecordFunction,
-        )
-    except AttributeError:
-        return
-
-    torch_checkpoint.SAC_IGNORED_OPS.update(profiler_ops)
-
 
 # ---------------------------------------------------------------------------
 # Main parallelization entry point
@@ -316,7 +297,6 @@ def parallelize_hf_transformers(
     )
 
     if ac_config.mode != "none":
-        _ignore_profiler_ops_for_sac()
         apply_ac(model, ac_config)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
@@ -750,24 +730,27 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     dp_mod_ep_mesh: DeviceMesh | None = None,
-    gradient_divide_factor: int | None = None,
 ):
-    """
-    Apply data parallelism (via FSDP2) to the model.
+    """Apply data parallelism (via FSDP2) to the model.
+
+    When EP is enabled (``ep_degree > 1``), uses flat FSDP with
+    ``shard_placement_fn`` to route expert params to ``dp_mod_ep_mesh``
+    and other params to ``dp_mesh`` within a single ``fully_shard`` call
+    per transformer block — matching native titan's approach and avoiding
+    nested FSDP hooks that cause SAC op-count mismatches during recompute.
 
     Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-
+        model: The model to apply data parallelism to.
+        dp_mesh: The device mesh for data parallelism (FSDP or HSDP).
+        param_dtype: Data type for model parameters.
+        reduce_dtype: Data type for gradient reduction.
+        pp_enabled: Whether pipeline parallelism is enabled.
+        cpu_offload: Whether to offload model parameters to CPU.
+        reshard_after_forward_policy: Resharding policy after forward pass.
+            "default", "always", or "never".
+        ep_degree: Expert parallelism degree (1 = no EP).
+        dp_mod_ep_mesh: DP mesh for expert params when EP is enabled.
+            Required when ``ep_degree > 1``.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -790,39 +773,73 @@ def apply_fsdp(
         )
 
     for transformer_block in model.layers:
-        # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
-        # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining dp_mod_ep_mesh
+        # NOTE: When EP is enabled, we use shard_placement_fn to route
+        # expert params to dp_mod_ep_mesh and other params to dp_mesh,
+        # all within a single fully_shard call (flat FSDP, no nesting).
+        # This avoids nested FSDP hooks on the experts module which
+        # cause SAC op-count mismatches during recompute.
         if (
             hasattr(transformer_block, "moe_enabled")
             and transformer_block.moe_enabled
             and ep_degree > 1
         ):
-            fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-            moe_block = transformer_block.mlp
-            experts = moe_block.experts
-            # Expert params are DTensor Shard(0) on EP mesh. After FSDP,
-            # local dim-0 has num_experts/ep_degree experts. When
-            # efsdp_size > num_local, dim-0 can't be sharded further.
-            _experts_shard_placement_fn = None
-            assert dp_mod_ep_mesh is not None
-            num_local_experts = experts.num_experts // ep_degree
-            if dp_mod_ep_mesh.size() > num_local_experts:
-                _experts_shard_placement_fn = lambda param: Shard(1)
-
-            fully_shard(
-                experts,
-                **fsdp_mod_ep_config,
-                reshard_after_forward=reshard_after_forward,
-                shard_placement_fn=_experts_shard_placement_fn,
+            from torch.distributed.fsdp._fully_shard._fsdp_common import (
+                FSDPMeshInfo,
+                HSDPMeshInfo,
+                ShardPlacementResult,
             )
 
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
+            assert dp_mod_ep_mesh is not None
+            experts = transformer_block.mlp.experts
+            expert_params = set(experts.parameters())
+            num_local_experts = experts.num_experts // ep_degree
+
+            if dp_mod_ep_mesh.size() > num_local_experts:
+                expert_shard_placement = Shard(1)
+            else:
+                expert_shard_placement = Shard(0)
+
+            def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
+                if mesh.ndim == 1:
+                    return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
+                if mesh.ndim == 2:
+                    return HSDPMeshInfo(
+                        mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
+                    )
+                raise ValueError(
+                    f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."
+                )
+
+            edp_mesh_info = _get_fsdp_mesh_info(dp_mod_ep_mesh)
+            dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+
+            def _shard_placement_fn(
+                param: nn.Parameter,
+                _expert_params: set = expert_params,
+                _expert_placement: Shard = expert_shard_placement,
+                _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
+                _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
+            ) -> ShardPlacementResult:
+                if param in _expert_params:
+                    return ShardPlacementResult(
+                        placement=_expert_placement, mesh_info=_edp_mesh_info
+                    )
+                return ShardPlacementResult(
+                    placement=Shard(0), mesh_info=_dp_mesh_info
+                )
+
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+                shard_placement_fn=_shard_placement_fn,
+            )
+        else:
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
@@ -839,7 +856,10 @@ def apply_fsdp(
     disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
-    # in EP could interfere with implicit prefetching in FSDP
+    # in EP could interfere with implicit prefetching in FSDP.
+    # With flat FSDP (no nested experts group), prefetching targets
+    # transformer blocks only — expert params are part of the block's
+    # FSDPState and prefetched together with the block.
     if ep_degree == 1:
         return
 
@@ -854,14 +874,9 @@ def apply_fsdp(
         transformer_blocks, next_transformer_blocks
     ):
         if next_transformer_block is not None:
-            if next_transformer_block.moe_enabled:
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block, next_transformer_block.mlp.experts]
-                )
-            else:
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block]
-                )
+            transformer_block.set_modules_to_forward_prefetch(
+                [next_transformer_block]
+            )
         elif model.norm is not None and model.lm_head is not None:
             transformer_block.set_modules_to_forward_prefetch(
                 [model.norm, model.lm_head]
@@ -882,13 +897,8 @@ def apply_fsdp(
         reversed_transformer_blocks, prev_transformer_blocks
     ):
         if prev_transformer_block is not None:
-            if prev_transformer_block.moe_enabled:
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block, prev_transformer_block.mlp.experts]
-                )
-            else:
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block]
-                )
+            transformer_block.set_modules_to_backward_prefetch(
+                [prev_transformer_block]
+            )
         elif model.tok_embeddings is not None:
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
