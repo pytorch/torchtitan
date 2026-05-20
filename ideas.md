@@ -1341,3 +1341,13 @@
   Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to import `apply_ac` and call it when `ac_config.mode != "none"` before `apply_compile`.
   Planned command or config overrides: Current durable zero-CTA command with seq128/local_batch160.
   Success criteria and expected risk: The same batch run is expected to be slower; success is enough memory reduction with finite decreasing loss to justify a follow-up larger batch. Risk is large recomputation slowdown, compile/checkpoint incompatibility, or no usable memory headroom.
+  Result: follow-up at source state `5995609`; 8,462 tps with finite decreasing loss and only 37.00 GiB peak memory. Same-batch throughput is too slow, but the memory drop is large enough to justify one larger-batch test before discarding or restoring.
+
+- Idea: SDPA zero-CTA full AC seq128 local batch 640
+  Current best source commit: 5995609
+  Source: batch-scale follow-up after full AC created large memory headroom
+  Expected mechanism: Full AC at batch160 uses only 37.00 GiB. Increasing local batch to 640 uses 4x tokens per step, which may amortize fixed overhead and improve GEMM utilization enough to offset recomputation while staying below the memory risk line.
+  Supporting evidence: The AC run's peak memory is less than one quarter of the no-AC durable run. Even roughly linear activation scaling should keep batch640 comfortably under B200 memory.
+  Planned source/config changes: Keep the AC source from run141.
+  Planned command or config overrides: Current zero-CTA AC command with `--training.local_batch_size=640`.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is recomputation dominating or tiny c4_test dataset re-looping.

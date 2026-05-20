@@ -3533,3 +3533,24 @@ Interpretation:
 
 - Disabling NVLS does not improve the zero-CTA durable command.
 - Leave NCCL's NVLS/default selection alone; keep only `NCCL_CTA_POLICY=2`.
+
+## Experiment 141: SDPA Zero-CTA Seq128 Local Batch 160 With Configured Full Activation Checkpointing Applied
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run141-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-full-ac-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: follow-up, not keep at same batch.
+- Step 10 `tps`: 8,462, below the no-AC zero-CTA durable command.
+- Step 10 MFU: 31.69%.
+- Step 10 peak memory: 37.00 GiB, 20.74%.
+- Loss moved from 12.60180 at step 1 to 5.92940 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Applying full AC is functionally correct and dramatically reduces peak memory, but same-batch throughput is too slow.
+- The memory drop is large enough to test a larger AC batch before deciding whether to restore the no-AC durable source.
