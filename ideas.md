@@ -935,6 +935,15 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator retries. Risks are still crossing the memory cliff or remaining below plain SDPA due to FP8 overhead.
   Result: discarded at source state `ed3051d`; 9,888 tps with finite decreasing loss and 154.89 GiB peak memory. Better than batch160 broad FP8 but still below plain SDPA.
 
+- Idea: broad FP8 SDPA seq128 with local batch 220
+  Current best source commit: 846907b
+  Source: final midpoint after broad FP8 batch200 fit and batch240 crashed
+  Expected mechanism: Local batch 220 may further amortize broad-FP8 overhead while staying below the memory cliff, possibly closing the remaining gap to plain SDPA.
+  Supporting evidence: Batch200 reached 9,888 tps at 154.89 GiB, while batch240 crashed at 172.59 GiB after allocator warnings. Batch220 is the remaining midpoint with plausible headroom.
+  Planned source/config changes: None; keep SDPA plus broad FP8 rowwise converter without auto-filter.
+  Planned command or config overrides: Run104 command shape with `--training.local_batch_size=220`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator retries. Risks are entering the same allocator-pressure regime as batch240 or still missing the plain SDPA best.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
