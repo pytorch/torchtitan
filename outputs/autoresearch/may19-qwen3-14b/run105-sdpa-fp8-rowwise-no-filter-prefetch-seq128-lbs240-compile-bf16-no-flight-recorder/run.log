@@ -1,0 +1,265 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=240 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run105-sdpa-fp8-rowwise-no-filter-prefetch-seq128-lbs240-compile-bf16-no-flight-recorder
+W0519 19:50:31.611000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 19:50:31.611000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 19:50:31.611000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 19:50:31.611000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 19:50:38.389000 1568803 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 19:50:39,072 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 19:50:39,078 - root - INFO - Float8 training active with recipe rowwise
+[rank0]:[titan] 2026-05-19 19:50:39,078 - root - INFO - Swapped to Float8Linear layers
+[rank0]:[titan] 2026-05-19 19:50:39,130 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run105-sdpa-fp8-rowwise-no-filter-prefetch-seq128-lbs240-compile-bf16-no-flight-recorder/structured_logs/training.global_rank_0.20260519-195039-3QKFRU.jsonl
+[rank0]:[titan] 2026-05-19 19:50:40,867 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 19:50:40,869 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 19:50:40,876 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 19:50:40,877 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-19 19:50:44,271 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 19:50:44,275 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-19 19:50:44,402 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 19:50:44,485 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-19 19:50:44,606 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-19 19:50:44,606 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-19 19:50:44,607 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-19 19:50:44,623 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-19 19:50:44,700 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-19 19:50:45,184 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-19 19:50:45,185 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-19 19:50:45,187 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-19 19:50:45,187 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-19 19:50:45,203 - root - INFO - Trainer is initialized with local batch size 240, global batch size 1920, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-19 19:50:45,204 - root - INFO - Training starts at step 1
+[rank0]:/home/avenkataraman/github/pytorch/torch/distributed/fsdp/_fully_shard/_fsdp_state.py:317: UserWarning: FSDP2-wrapped module (FSDPFloat8Linear) returned a view tensor. An in-place op on this view (e.g., `x += y`) will silently drop the pre-backward hook and skip the all-gather, which can cause backward to fail or produce wrong gradients. Use out-of-place ops (`out = out + y`, not `out += y`) or `.clone()` the output before any in-place op.
+[rank0]:  output = self._register_pre_backward_hook(output)
+[rank0]:/home/avenkataraman/github/pytorch/torch/distributed/fsdp/_fully_shard/_fsdp_state.py:317: UserWarning: FSDP2-wrapped module (FSDPFloat8Linear) returned a view tensor. An in-place op on this view (e.g., `x += y`) will silently drop the pre-backward hook and skip the all-gather, which can cause backward to fail or produce wrong gradients. Use out-of-place ops (`out = out + y`, not `out += y`) or `.clone()` the output before any in-place op.
+[rank0]:  output = self._register_pre_backward_hook(output)
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-19 19:51:11,322 - root - INFO - [31mstep:  1  [32mloss: 12.39296  [38;2;180;60;0mgrad_norm: 27.0000  [38;2;54;234;195mmemory: 172.59GiB(96.77%)  [34mtps: 1,150  [36mtflops: 96.88  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-19 19:51:11,323 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:[rank0]:[W519 19:51:11.382409199 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:51:13.454098730 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:51:31.885560090 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:51:34.644656800 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:51:47.800276404 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:51:49.641153727 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:52:00.191496991 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:52:01.644578098 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[W519 19:52:12.769205661 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 14286848, total: 191503138816).
+[rank0]:[rank0]:[E519 19:52:14.553434411 ProcessGroupNCCL.cpp:2198] [PG ID 0 PG GUID 0(default_pg) Rank 0] Process group watchdog thread terminated with exception: CUDA error: an illegal memory access was encountered
+[rank0]:Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+[rank0]:CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+[rank0]:For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+[rank0]:
+[rank0]:Exception raised from query at /home/avenkataraman/github/pytorch/c10/cuda/CUDAEvent.h:111 (most recent call first):
+[rank0]:frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x7f12d9986028 in /home/avenkataraman/github/pytorch/torch/lib/libc10.so)
+[rank0]:frame #1: <unknown function> + 0x48e14 (0x7f12fff58e14 in /home/avenkataraman/github/pytorch/torch/lib/libc10_cuda.so)
+[rank0]:frame #2: c10::cuda::c10_cuda_check_implementation(int, char const*, char const*, unsigned int, bool) + 0x4ed (0x7f12fff589ad in /home/avenkataraman/github/pytorch/torch/lib/libc10_cuda.so)
+[rank0]:frame #3: c10d::ProcessGroupNCCL::WorkNCCL::finishedGPUExecutionInternal() const + 0x56 (0x7f1250f37a76 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #4: c10d::ProcessGroupNCCL::WorkNCCL::isCompleted() + 0x70 (0x7f1250f41330 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #5: c10d::ProcessGroupNCCL::Watchdog::runLoop() + 0xac5 (0x7f1250f4ded5 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #6: c10d::ProcessGroupNCCL::Watchdog::run() + 0x152 (0x7f1250f504c2 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #7: <unknown function> + 0xdf0e6 (0x7f12ffaea0e6 in /home/avenkataraman/.conda/envs/pytorch-3.12/bin/../lib/libstdc++.so.6)
+[rank0]:frame #8: <unknown function> + 0x8b31a (0x7f1300a8b31a in /lib64/libc.so.6)
+[rank0]:frame #9: <unknown function> + 0x110410 (0x7f1300b10410 in /lib64/libc.so.6)
+[rank0]:
+[rank0]:terminate called after throwing an instance of 'c10::DistBackendError'
+[rank0]:  what():  [PG ID 0 PG GUID 0(default_pg) Rank 0] Process group watchdog thread terminated with exception: CUDA error: an illegal memory access was encountered
+[rank0]:Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+[rank0]:CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+[rank0]:For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+[rank0]:
+[rank0]:Exception raised from query at /home/avenkataraman/github/pytorch/c10/cuda/CUDAEvent.h:111 (most recent call first):
+[rank0]:frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x7f12d9986028 in /home/avenkataraman/github/pytorch/torch/lib/libc10.so)
+[rank0]:frame #1: <unknown function> + 0x48e14 (0x7f12fff58e14 in /home/avenkataraman/github/pytorch/torch/lib/libc10_cuda.so)
+[rank0]:frame #2: c10::cuda::c10_cuda_check_implementation(int, char const*, char const*, unsigned int, bool) + 0x4ed (0x7f12fff589ad in /home/avenkataraman/github/pytorch/torch/lib/libc10_cuda.so)
+[rank0]:frame #3: c10d::ProcessGroupNCCL::WorkNCCL::finishedGPUExecutionInternal() const + 0x56 (0x7f1250f37a76 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #4: c10d::ProcessGroupNCCL::WorkNCCL::isCompleted() + 0x70 (0x7f1250f41330 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #5: c10d::ProcessGroupNCCL::Watchdog::runLoop() + 0xac5 (0x7f1250f4ded5 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #6: c10d::ProcessGroupNCCL::Watchdog::run() + 0x152 (0x7f1250f504c2 in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #7: <unknown function> + 0xdf0e6 (0x7f12ffaea0e6 in /home/avenkataraman/.conda/envs/pytorch-3.12/bin/../lib/libstdc++.so.6)
+[rank0]:frame #8: <unknown function> + 0x8b31a (0x7f1300a8b31a in /lib64/libc.so.6)
+[rank0]:frame #9: <unknown function> + 0x110410 (0x7f1300b10410 in /lib64/libc.so.6)
+[rank0]:
+[rank0]:Exception raised from run at /home/avenkataraman/github/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp:2204 (most recent call first):
+[rank0]:frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x7f12d9986028 in /home/avenkataraman/github/pytorch/torch/lib/libc10.so)
+[rank0]:frame #1: <unknown function> + 0x81955a (0x7f1250a1955a in /home/avenkataraman/github/pytorch/torch/lib/libtorch_cuda.so)
+[rank0]:frame #2: <unknown function> + 0xdf0e6 (0x7f12ffaea0e6 in /home/avenkataraman/.conda/envs/pytorch-3.12/bin/../lib/libstdc++.so.6)
+[rank0]:frame #3: <unknown function> + 0x8b31a (0x7f1300a8b31a in /lib64/libc.so.6)
+[rank0]:frame #4: <unknown function> + 0x110410 (0x7f1300b10410 in /lib64/libc.so.6)
+[rank0]:
+[rank0]:Fatal Python error: Aborted
+[rank0]:
+[rank0]:Thread 0x00007f0ee7bff640 (most recent call first):
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/_inductor/compile_worker/timer.py", line 42 in check
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1012 in run
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1075 in _bootstrap_inner
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1032 in _bootstrap
+[rank0]:
+[rank0]:Thread 0x00007f0efdffb640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0efe7fc640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0efeffd640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0eff7fe640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0efffff640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0f14ffd640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0f157fe640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0f15fff640 (most recent call first):
+[rank0]:  <no Python frame>
+[rank0]:
+[rank0]:Thread 0x00007f0f44f9e640 (most recent call first):
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 359 in wait
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 655 in wait
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/tqdm/_monitor.py", line 60 in run
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1075 in _bootstrap_inner
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1032 in _bootstrap
+[rank0]:
+[rank0]:Thread 0x00007f0f54ff9640 (most recent call first):
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/_inductor/compile_worker/subproc_pool.py", line 76 in _recv_msg
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/_inductor/compile_worker/subproc_pool.py", line 271 in _read_thread
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1012 in run
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1075 in _bootstrap_inner
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1032 in _bootstrap
+[rank0]:
+[rank0]:Thread 0x00007f0f4579f640 (most recent call first):
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 359 in wait
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 655 in wait
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/tqdm/_monitor.py", line 60 in run
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1075 in _bootstrap_inner
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/threading.py", line 1032 in _bootstrap
+[rank0]:
+[rank0]:Thread 0x00007f1300c0a740 (most recent call first):
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 153 in forward
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625 in apply
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_training_tensor.py", line 237 in hp_tensor_and_scale_to_float8
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_scaling_utils.py", line 65 in hp_tensor_to_float8_dynamic
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 73 in forward
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625 in apply
+[rank0]:  File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchao/float8/float8_linear.py", line 264 in forward
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832 in inner
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884 in _call_impl
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778 in _wrapped_call_impl
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325 in __call__
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687 in forward_backward_step
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441 in sync_wrapper
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733 in train_step
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831 in train
+[rank0]:  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367 in wrapper
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 65 in main
+[rank0]:  File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79 in <module>
+[rank0]:  File "<frozen runpy>", line 88 in _run_code
+[rank0]:  File "<frozen runpy>", line 198 in _run_module_as_main
+[rank0]:
+[rank0]:Extension modules: numpy._core._multiarray_umath, numpy.linalg._umath_linalg, torch._C, torch._C._dynamo.autograd_compiler, torch._C._dynamo.eval_frame, torch._C._dynamo.guards, torch._C._dynamo.utils, torch._C._fft, torch._C._linalg, torch._C._nested, torch._C._nn, torch._C._sparse, torch._C._special, cuda.bindings._bindings.cydriver, cuda.bindings.cydriver, cuda.bindings.driver, cuda.bindings._bindings.cyruntime_ptds, cuda.bindings._bindings.cyruntime, cuda.bindings.cyruntime, cuda.bindings.runtime, numpy.random._common, numpy.random.bit_generator, numpy.random._bounded_integers, numpy.random._pcg64, numpy.random._generator, numpy.random._mt19937, numpy.random._philox, numpy.random._sfc64, numpy.random.mtrand, google._upb._message, markupsafe._speedups, pyarrow.lib, _cyutility, pandas._libs._cyutility, pandas._libs.tslibs.ccalendar, pandas._libs.tslibs.np_datetime, pandas._libs.tslibs.dtypes, pandas._libs.tslibs.base, pandas._libs.tslibs.nattype, pandas._libs.tslibs.timezones, pandas._libs.properties, pandas._libs.tslibs.fields, pandas._libs.tslibs.timedeltas, pandas._libs.tslibs.tzconversion, pandas._libs.tslibs.timestamps, pandas._libs.tslibs.offsets, pandas._libs.tslibs.strptime, pandas._libs.tslibs.parsing, pandas._libs.tslibs.conversion, pandas._libs.tslibs.period, pandas._libs.tslibs.vectorized, pandas._libs.ops_dispatch, pandas._libs.missing, pandas._libs.hashtable, pandas._libs.algos, pandas._libs.interval, pandas._libs.lib, pyarrow._compute, pandas._libs.ops, pandas._libs.hashing, pandas._libs.arrays, pandas._libs.tslib, pandas._libs.sparse, pandas._libs.internals, pandas._libs.indexing, pandas._libs.index, pandas._libs.writers, pandas._libs.join, pandas._libs.window.aggregations, pandas._libs.window.indexers, pandas._libs.reshape, pandas._libs.groupby, pandas._libs.json, pandas._libs.parsers, pandas._libs.testing, pyarrow._acero, pyarrow._fs, pyarrow._csv, pyarrow._json, pyarrow._substrait, pyarrow._dataset, pyarrow._dataset_orc, pyarrow._parquet, pyarrow._azurefs, pyarrow._hdfs, pyarrow._gcsfs, pyarrow._s3fs, pyarrow._parquet_encryption, pyarrow._dataset_parquet_encryption, pyarrow._dataset_parquet, yaml._yaml, charset_normalizer.md, charset_normalizer.cd, requests.packages.charset_normalizer.md, requests.packages.chardet.md, requests.packages.charset_normalizer.cd, requests.packages.chardet.cd, multidict._multidict, yarl._quoting_c, propcache._helpers_c, aiohttp._http_writer, aiohttp._http_parser, aiohttp._websocket.mask, aiohttp._websocket.reader_c, frozenlist._frozenlist, xxhash._xxhash, cuda_utils (total: 107)
+W0519 19:52:19.991000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 1568804 closing signal SIGTERM
+W0519 19:52:19.991000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 1568805 closing signal SIGTERM
+W0519 19:52:19.994000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 1568806 closing signal SIGTERM
+W0519 19:52:19.997000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 1568808 closing signal SIGTERM
+W0519 19:52:19.997000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 1568810 closing signal SIGTERM
+W0519 19:52:19.999000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 1568811 closing signal SIGTERM
+W0519 19:52:20.003000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 1568812 closing signal SIGTERM
+E0519 19:52:27.196000 1566690 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: -6) local_rank: 0 (pid: 1568803) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+=========================================================
+torchtitan.train FAILED
+---------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-19_19:52:27
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : -15 (pid: 1568804)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 1568804
+[2]:
+  time      : 2026-05-19_19:52:27
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : -15 (pid: 1568805)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 1568805
+[3]:
+  time      : 2026-05-19_19:52:27
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : -15 (pid: 1568806)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 1568806
+[4]:
+  time      : 2026-05-19_19:52:27
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : -15 (pid: 1568808)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 1568808
+[5]:
+  time      : 2026-05-19_19:52:27
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : -15 (pid: 1568810)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 1568810
+[6]:
+  time      : 2026-05-19_19:52:27
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : -15 (pid: 1568811)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 1568811
+[7]:
+  time      : 2026-05-19_19:52:27
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : -15 (pid: 1568812)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 1568812
+---------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-19_19:52:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : -6 (pid: 1568803)  (SIGABRT)
+  error_file: <N/A>
+  traceback : Signal 6 (SIGABRT) received by PID 1568803
+=========================================================

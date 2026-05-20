@@ -923,6 +923,7 @@
   Planned source/config changes: None; keep SDPA plus broad FP8 rowwise converter without auto-filter.
   Planned command or config overrides: Run104 command shape with `--training.local_batch_size=240`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and peak memory below the 95% risk line. Risks are FP8 overhead still dominating, new memory cliff behavior, or loss instability from the larger batch.
+  Result: crashed at source state `88ac4aa`; step 1 reached 172.59 GiB / 96.77%, logged repeated expandable-segment OOM mapping warnings, then failed with `cudaErrorIllegalAddress`.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

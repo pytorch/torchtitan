@@ -2775,3 +2775,24 @@ Interpretation:
 
 - Broad FP8 coverage is slower at the same batch size, but it dramatically lowers peak memory.
 - Before restoring, test whether the extra memory headroom can be converted into throughput with a larger seq128 local batch.
+
+## Experiment 105: Broad FP8 SDPA Seq128 Local Batch 240
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=240 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run105-sdpa-fp8-rowwise-no-filter-prefetch-seq128-lbs240-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- Step 1 reached 172.59 GiB, 96.77%.
+- The run logged repeated expandable-segment OOM mapping warnings.
+- The process failed after step 1 with `cudaErrorIllegalAddress`.
+- The step 1 loss was finite at 12.39296, but no step 10 metric was produced.
+
+Interpretation:
+
+- Local batch 240 is too aggressive for broad FP8 despite the batch160 memory headroom.
+- The crash looks memory-pressure related rather than externally contaminated. If continuing this branch, use a lower intermediate batch size.
