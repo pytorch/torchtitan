@@ -5799,3 +5799,26 @@ Interpretation:
 
 - Forcing a minimum of 32 NCCL channels is clean but slower than the default channel selection.
 - Channel-count overrides have now regressed in both lower-cap and higher-floor directions; keep default channel selection with `NCCL_CTA_POLICY=2`.
+
+## Experiment 240: Metrics Log Frequency 1 With CUDA_DEVICE_MAX_CONNECTIONS=2
+
+Command:
+
+```bash
+CUDA_DEVICE_MAX_CONNECTIONS=2 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run240-cuda-device-max-connections2-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,328, below the run215 10,625 measured peak.
+- Step 10 MFU: 38.67%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.49743 at step 1 to 7.52525 at step 10; finite and overall decreasing.
+- Steps 2-5 were below the default command's typical warmed band, consistent with weaker overlap.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Limiting CUDA device connections to 2 is clean but slower.
+- Keep the default CUDA connection count; the earlier `=1` result and this moderate `=2` result both indicate queue limiting hurts this FSDP/GEMM overlap pattern.

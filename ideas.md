@@ -2331,3 +2331,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=2` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is worse overlap or lower GEMM concurrency if queue limiting is still too restrictive.
+  Result: discarded at source state `a6b8b7b`; 10,328 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A two-connection limit is still too restrictive for this command and reduces steady-state throughput, so keep the default CUDA connection count.
