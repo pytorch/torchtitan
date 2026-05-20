@@ -1100,3 +1100,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact run115 command with a new dump folder.
   Success criteria and expected risk: Keep if it remains above 10,005 tps with finite decreasing loss. Risk is normal variance, dataset re-loop noise, or the larger effective batch giving a less healthy short-run loss trend.
+  Result: discarded at source state `1c9fd82`; 9,935 tps with finite decreasing loss and 169.49 GiB peak memory. Accumulation 4 does not validate and the dataset re-loop warning appears again, so do not treat gradient accumulation as a durable improvement.
