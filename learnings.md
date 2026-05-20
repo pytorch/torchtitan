@@ -3660,3 +3660,36 @@ Interpretation:
 
 - Loss chunks 7 is lower-memory than chunks 6, but slower.
 - Loss chunking is bracketed: chunks 6 is the durable choice; chunks 5 is too memory-heavy and slower, chunks 7 is lower-memory and slower, chunks 4 failed validation.
+
+## Experiment 147: Profile Current Durable SDPA Zero-CTA Loss Chunks 6 Command
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run147-profile-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic.
+- Step 10 `tps`: 9,185 under profiler overhead.
+- Step 10 MFU: 34.40%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.37211 at step 1 to 7.55839 at step 10; finite and decreasing.
+
+Rank0 kernel buckets from `rank0_trace.json`:
+
+- GEMM: about 2.14s.
+- NCCL: about 1.45s, mostly reduce-scatter and all-gather.
+- Copy/split: about 0.17s.
+- Attention: about 0.09s.
+- RMSNorm: about 0.09s.
+- SiLU: about 0.075s.
+- Optimizer: about 0.015s.
+- Loss kernels: about 0.013s.
+
+Interpretation:
+
+- Chunks=6 made loss kernels negligible; the current durable command is now dominated by GEMM and NCCL.
+- Zero-CTA reduced but did not eliminate NCCL cost compared with the older SDPA profile.
+- Further progress likely needs GEMM-side changes, communication overlap/layout changes, or another validated command-level compiler/communication interaction.

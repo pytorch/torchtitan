@@ -1401,3 +1401,4 @@
   Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
   Planned command or config overrides: Current durable command plus profiler flags `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: This is diagnostic; success is a completed 10-step run with finite decreasing loss and usable profile artifacts/logs. Profile overhead means tps is not compared to the best.
+  Result: diagnostic complete at source state `e12f3b3`; profiled run completed with finite decreasing loss, 9,185 tps under profiler overhead, and 169.10 GiB peak memory. Rank0 kernel buckets were about 2.14s GEMM, 1.45s NCCL, 0.17s copy/split, 0.09s attention, 0.09s RMSNorm, 0.075s SiLU, 0.015s optimizer, and 0.013s loss.
