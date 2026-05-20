@@ -2082,3 +2082,12 @@
   Planned command or config overrides: Exact run214 command.
   Success criteria and expected risk: Keep `--metrics.log_freq=1` as the new durable best if the rerun remains above 10,504 with finite overall-decreasing loss and no allocator/NCCL warnings. Otherwise keep `--metrics.log_freq=2`.
   Result: kept at source state `45a3de3`; 10,625 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This validates `--metrics.log_freq=1` as the new durable best and closes the log-frequency bracket.
+
+- Idea: metrics log frequency 1 with structured logging disabled
+  Current best source commit: b3f90e19
+  Source: logging-overhead retest after `metrics.log_freq=1` made every step emit metrics
+  Expected mechanism: Add `--debug.no-enable-structured-logging` to the new best command. With `metrics.log_freq=1`, structured JSONL receives a metric record every step, so disabling it may reduce host-side per-step logging overhead and raise the final step-10 reported `tps`.
+  Supporting evidence: Disabling structured logging regressed under the older `log_freq=10` command, but the logging cadence has changed materially. The final-step objective now includes metric logging each step, making this a different overhead regime worth isolating once.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current best command plus `--debug.no-enable-structured-logging`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is the prior regression repeats or the flag changes structured trace behavior in a way that slows execution.
