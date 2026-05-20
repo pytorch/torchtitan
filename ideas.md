@@ -3032,3 +3032,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_NCHANNELS=32` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is worse compute overlap from extra communication channels or no effect if NVLS is not selected.
   Result: discarded at source state `19f9650`; 10,449 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Higher NVLS channel count is also below peak, so keep NCCL's default NVLS channel selection.
+
+- Idea: exact current best rerun after NVLS tuning closure
+  Current best source commit: ed2f2e45
+  Source: calibration after NVLS chunk-size and channel-count brackets were closed below peak
+  Expected mechanism: Repeat the exact durable command to measure current variance after several NVLS-related runtime probes. Exact reruns remain the highest measured samples in this experiment and provide a comparator before moving to lower-confidence knobs.
+  Supporting evidence: Runs 307-310 all landed below the durable peak while exact reruns periodically sample near 10.6k tps. The latest source is restored and clean.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
