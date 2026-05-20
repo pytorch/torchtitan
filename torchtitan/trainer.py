@@ -4,17 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import json
 import os
+import re
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
+import torch.utils._pytree as pytree
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
@@ -42,12 +46,18 @@ from torchtitan.config.configs import (
 )
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-
+from torchtitan.distributed.spmd_state import is_spmd_active, set_current_mesh
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import (
+    named_placement_to_assert_type,
+    named_placement_to_spmd,
+    preserve_buffer_spmd,
+)
+from torchtitan.protocols.types import MeshAxisName
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
@@ -357,11 +367,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 del model
 
                 for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
+                    with preserve_buffer_spmd(m):
+                        m.to_empty(device=init_device)
+                        with torch.no_grad():
+                            # TODO: Change this back to init_weights once
+                            # autoparallel contains the wrap_init_states
+                            cast(BaseModel, m).init_weights(
+                                buffer_device=buffer_device
+                            )
                     m.train()
 
                 # confirm that user will be able to view loss metrics on the console
@@ -384,11 +397,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
+                with preserve_buffer_spmd(model):
+                    model.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
 
                 self.model_parts = [model]
@@ -461,10 +475,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-        )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(False)
+
+        if isinstance(self.loss_fn, ChunkedCELoss):
+            self.loss_fn.enable_sp = (
+                parallel_dims.tp_enabled and config.parallelism.enable_sequence_parallel
+            )
+            self.loss_fn.loss_parallel = (
+                parallel_dims.tp_enabled
+                and not config.parallelism.disable_loss_parallel
+            )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -646,36 +666,61 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
+        typecheck_scope = (
+            spmd.typecheck(local=False)
+            if self.config.debug.spmd_typechecking
+            else contextlib.nullcontext()
+        )
 
         inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
             input_dict, labels
         )
 
+        if is_spmd_active() and isinstance(global_valid_tokens, torch.Tensor):
+            spmd.assert_type(global_valid_tokens, spmd.I)
+        if is_spmd_active():
+            self._annotate_inputs_spmd(inputs, labels, extra_inputs, extra_kwargs)
+
+        debug_mode = None
+        debug_context = contextlib.nullcontext()
+        hash_context = contextlib.nullcontext()
+        if self.step == 1 and os.environ.get("TORCHTITAN_DEBUG_TENSOR_HASHES"):
+            from torch.utils._debug_mode import DebugMode
+
+            debug_mode = DebugMode(record_ids=True, record_nn_module=False)
+            debug_context = debug_mode
+            hash_context = DebugMode.log_tensor_hashes(
+                hash_fn=["norm", "hash_tensor"],
+                hash_inputs=True,
+            )
+
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             loss_kwargs = {"global_valid_tokens": global_valid_tokens}
-            with self.train_context():
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
-                )
-                if self.pp_has_first_stage:
-                    self.pp_schedule.step(
-                        inputs,
-                        **extra_inputs,
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        loss_kwargs=loss_kwargs,
-                        return_outputs=False,
+            with debug_context, hash_context:
+                with self.train_context():
+                    targets, losses = (
+                        (labels, []) if self.pp_has_last_stage else (None, None)
                     )
-                else:
-                    self.pp_schedule.step(
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        loss_kwargs=loss_kwargs,
-                        return_outputs=False,
-                    )
+                    with typecheck_scope:
+                        if self.pp_has_first_stage:
+                            self.pp_schedule.step(
+                                inputs,
+                                **extra_inputs,
+                                **extra_kwargs,
+                                target=targets,
+                                losses=losses,
+                                loss_kwargs=loss_kwargs,
+                                return_outputs=False,
+                            )
+                        else:
+                            self.pp_schedule.step(
+                                **extra_kwargs,
+                                target=targets,
+                                losses=losses,
+                                loss_kwargs=loss_kwargs,
+                                return_outputs=False,
+                            )
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -688,23 +733,147 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
-            with self.train_context():
-                pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                # Under non-full_dtensor, labels stay as plain tensors. See
-                # ``cross_entropy_loss`` for why pred must also be plain.
-                # Remove once non-full_dtensor is no longer supported.
-                if (
-                    isinstance(pred, DTensor)
-                    and not self.config.parallelism.full_dtensor
-                    and self.config.parallelism.disable_loss_parallel
-                ):
-                    pred = pred.to_local()
-                loss = self.loss_fn(pred, labels, global_valid_tokens)
-                del pred
-                loss.backward()
+            with debug_context, hash_context:
+                with self.train_context():
+                    with typecheck_scope:
+                        pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                        # Under non-full_dtensor, labels stay as plain tensors. See
+                        # ``cross_entropy_loss`` for why pred must also be plain.
+                        # Remove once non-full_dtensor is no longer supported.
+                        if (
+                            isinstance(pred, DTensor)
+                            and not self.config.parallelism.full_dtensor
+                            and self.config.parallelism.disable_loss_parallel
+                        ):
+                            pred = pred.to_local()
+                        loss = self.loss_fn(pred, labels, global_valid_tokens)
+                    del pred
+                    loss.backward()
+
+        if debug_mode is not None:
+            self._dump_debug_mode(debug_mode)
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
+
+    def _dump_debug_mode(self, debug_mode) -> None:
+        root = os.environ.get(
+            "TORCHTITAN_DEBUG_TENSOR_HASHES_DIR",
+            "/tmp/torchtitan_debug_tensor_hashes",
+        )
+        worktree = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.getcwd().strip(os.sep))
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        out_dir = os.path.join(root, worktree)
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"rank{rank:05d}_step{self.step:06d}.txt")
+        with open(out_path, "w") as f:
+            f.write(f"cwd: {os.getcwd()}\n")
+            f.write(f"rank: {rank}\n")
+            f.write(f"step: {self.step}\n\n")
+            f.write(debug_mode.debug_string())
+            f.write("\n")
+
+    def _debug_state_hashes_enabled(self) -> bool:
+        return self.step == 1 and bool(os.environ.get("TORCHTITAN_DEBUG_STATE_HASHES"))
+
+    def _dump_state_hashes(self, tag: str) -> None:
+        from torch.utils._debug_mode import hash_tensor_fn, norm_hash_fn
+
+        root = os.environ.get(
+            "TORCHTITAN_DEBUG_STATE_HASHES_DIR",
+            os.environ.get(
+                "TORCHTITAN_DEBUG_TENSOR_HASHES_DIR",
+                "/tmp/torchtitan_debug_state_hashes",
+            ),
+        )
+        worktree = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.getcwd().strip(os.sep))
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        out_dir = os.path.join(root, worktree)
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(
+            out_dir, f"rank{rank:05d}_step{self.step:06d}_{tag}.jsonl"
+        )
+
+        def tensor_record(
+            name: str, kind: str, tensor: torch.Tensor | None
+        ) -> dict[str, object]:
+            if tensor is None:
+                return {"name": name, "kind": kind, "is_none": True}
+            local = tensor.detach()
+            placements = getattr(local, "placements", None)
+            if hasattr(local, "to_local"):
+                local = local.to_local()
+            local = local.contiguous()
+            return {
+                "name": name,
+                "kind": kind,
+                "global_shape": list(tensor.shape),
+                "local_shape": list(local.shape),
+                "dtype": str(local.dtype),
+                "placements": str(placements) if placements is not None else None,
+                "norm_hash": norm_hash_fn(local, use_scalar=True),
+                "tensor_hash": str(hash_tensor_fn(local, use_scalar=True)),
+            }
+
+        with open(out_path, "w") as f:
+            for part_idx, model in enumerate(self.model_parts):
+                for name, param in model.named_parameters():
+                    record_name = f"model_parts.{part_idx}.{name}"
+                    f.write(json.dumps(tensor_record(record_name, "param", param)))
+                    f.write("\n")
+                    f.write(json.dumps(tensor_record(record_name, "grad", param.grad)))
+                    f.write("\n")
+
+    def _annotate_inputs_spmd(
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        extra_inputs: dict[str, torch.Tensor],
+        extra_kwargs: dict[str, Any],
+    ) -> None:
+        """Annotate configured forward inputs with spmd types.
+
+        Called after ``post_dataloading_process`` so that tensors created
+        there (e.g. positions) are also annotated.
+        """
+        spmd_input_config = getattr(self.model_config, "spmd_input_config", None)
+        if spmd_input_config is None:
+            raise NotImplementedError(
+                f"{type(self.model_config).__name__} does not define "
+                "spmd_input_config for SPMD typechecking."
+            )
+
+        def is_named_placement(x: object) -> bool:
+            return isinstance(x, dict) and all(isinstance(k, MeshAxisName) for k in x)
+
+        def annotate_input_type(value: object, placements: object) -> None:
+            if not isinstance(value, torch.Tensor):
+                return
+            types, partition_spec = named_placement_to_assert_type(
+                placements,
+                value.ndim,
+            )
+            if types:
+                spmd.assert_type(value, types, partition_spec=partition_spec)
+
+        def annotate_tree(value: object, placements: object) -> None:
+            pytree.tree_map(
+                annotate_input_type,
+                value,
+                placements,
+                is_leaf=is_named_placement,
+            )
+
+        if spmd_input_config.inputs is not None:
+            annotate_tree(inputs, spmd_input_config.inputs)
+        if spmd_input_config.labels is not None:
+            annotate_tree(labels, spmd_input_config.labels)
+        for name, placements in spmd_input_config.extra_inputs.items():
+            if name in extra_inputs:
+                annotate_tree(extra_inputs[name], placements)
+        for name, placements in spmd_input_config.extra_kwargs.items():
+            if name in extra_kwargs:
+                annotate_tree(extra_kwargs[name], placements)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -745,13 +914,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
 
-            loss = self.forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                # pyrefly: ignore [bad-argument-type]
-                global_valid_tokens=global_valid_tokens,
-            )
+            with set_current_mesh(
+                parallel_dims.resolve_mesh(
+                    (MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP)
+                )
+            ):
+                loss = self.forward_backward_step(
+                    input_dict=input_dict,
+                    labels=labels,
+                    # pyrefly: ignore [bad-argument-type]
+                    global_valid_tokens=global_valid_tokens,
+                )
             accumulated_losses.append(loss.detach())
+
+        if self._debug_state_hashes_enabled():
+            self._dump_state_hashes("post_backward")
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
@@ -761,8 +938,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 pp_mesh=parallel_dims.get_optional_mesh("pp"),
                 ep_enabled=parallel_dims.ep_enabled,
             )
+            if self._debug_state_hashes_enabled():
+                self._dump_state_hashes("post_clip")
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
+            if self._debug_state_hashes_enabled():
+                self._dump_state_hashes("post_optim")
             self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
