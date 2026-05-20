@@ -1141,3 +1141,12 @@
   Planned command or config overrides: Current durable best command plus `--optimizer.implementation=foreach`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower optimizer step or higher memory than fused AdamW.
   Result: discarded at source state `5b3e20c`; 9,930 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Keep default fused AdamW.
+
+- Idea: SDPA seq128 local batch 160 with structured logging disabled
+  Current best source commit: 846907b
+  Source: overhead cleanup after kernel and optimizer knobs plateaued
+  Expected mechanism: `debug.enable_structured_logging=false` turns trace spans and scalar writes into no-ops while preserving normal console metrics. Removing per-step JSONL trace overhead may slightly improve short-sequence tps.
+  Supporting evidence: The debug config explicitly describes this as fully eliminating trace overhead. A prior older flex-source structured-logging test was not useful, but SDPA seq128 has a different bottleneck mix and the command is isolated.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Current durable best command plus `--debug.enable_structured_logging=false`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no measurable effect or a run-variance regression.
