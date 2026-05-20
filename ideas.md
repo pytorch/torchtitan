@@ -815,6 +815,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory below the robust batch-160 baseline. Risks are the instability seen in earlier embedding-wrap reruns or slower root/loss scheduling.
   Result: discarded at source state `d9c1bc6`; 9,285 tps with finite decreasing loss and 167.75 GiB peak memory. The memory reduction is real but the throughput cost is too high.
 
+- Idea: separate tok_embeddings FSDP wrap with endpoint prefetch at seq128 batch160
+  Current best source commit: 03d00df
+  Source: isolate whether endpoint prefetch is required for the separate-embedding source to work at the seq128 shape
+  Expected mechanism: Separately wrapping `tok_embeddings` reduced memory but slowed throughput without endpoint prefetch. Adding a forward prefetch from embeddings to the first block and a terminal backward prefetch from the first block to embeddings may hide the extra embedding FSDP communication.
+  Supporting evidence: The earlier 4096-token embedding source had one best measured run only when endpoint prefetch was included, while the seq128 no-endpoint run saved memory but slowed to 9,285 tps. This is the minimal follow-up before abandoning the embedding branch.
+  Planned source/config changes: Add `fully_shard(model.tok_embeddings, **fsdp_config)`, set `model.tok_embeddings` to forward-prefetch the first layer, and set the first layer to backward-prefetch `model.tok_embeddings`; keep all other prefetch edges unchanged.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and lower peak memory than the robust batch-160 baseline. Risk is the same instability seen in earlier endpoint-prefetch reruns or extra scheduling overhead.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
