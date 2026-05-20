@@ -2304,3 +2304,21 @@ Interpretation:
 
 - The constant-token shorter-sequence sweep still improves at seq128, and the gain increased again versus the seq512->seq256 step.
 - The next neighbor is seq_len 64 with local batch 320. At that point, batch/sample overhead and very small attention tiles are likely to dominate, but the measured trend still justifies one test.
+
+## Experiment 85: Constant-Token Seq64 Local Batch 320 Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=64 --training.local_batch_size=320 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run85-flex-prefetch-seq64-lbs320-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid.
+- The run OOMed before step metrics while external VLLM workers were active on GPUs 2-5, holding about 98 GiB each.
+- This violates the external-allocation rule, so do not count the OOM against the seq64/batch320 shape.
+
+Interpretation:
+
+- Retry the exact same command after the VLLM workers clear and the node remains clear for a stable window.

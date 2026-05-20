@@ -732,6 +732,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=64 --training.local_batch_size=320`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no external-allocation contamination. Risks are worse attention kernel efficiency, Python/dataloader overhead from large batch count, or invalid short-sequence loss behavior.
+  Attempt: run85 at source state `4a37041` was invalid; VLLM workers appeared during the run and held about 98 GiB on GPUs 2-5 at OOM time.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
