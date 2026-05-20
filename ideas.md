@@ -1041,3 +1041,12 @@
   Success criteria and expected risk: Success is tps above 8,391 with finite decreasing loss. Risk is no speedup or a small slowdown if optimizer state dtype conversion overhead outweighs memory savings.
   Result: invalid at source state `99a75e3`; OOM was contaminated by external VLLM processes occupying GPUs 4-7. Retry after the node is free.
   Result: discarded on valid retry at source state `51434eb`; 8,029 tps, 33.55% MFU, 168.7 GiB. Optimizer and fwd/bwd timings regressed, so do not keep this knob.
+
+- Idea: SDPA seq128 local batch 160 with model-only compile
+  Current best source commit: 846907b
+  Source: compile-scope follow-up after SDPA made attention cheap
+  Expected mechanism: At the short seq128/batch160 optimum, attention and loss are a much smaller fraction of the profiled step than GEMM and NCCL. Compiling only the model may reduce compile/runtime overhead from compiling the loss path while preserving fused model kernels.
+  Supporting evidence: Run102's SDPA profile showed attention at about 0.10s of rank0 GPU kernel time, with GEMM and NCCL dominating. The current best already uses the same source and shape, so this command-only test isolates compile component scope.
+  Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
+  Planned command or config overrides: Current best command plus `--compile.components '["model"]'`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is model-only compile OOM or slowdown; an earlier long-sequence model-only compile attempt failed under a different source/shape, so use the stable-clear check before running.
