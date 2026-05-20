@@ -620,6 +620,15 @@
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risks are no improvement if root communication is not material, or extra all-gather scheduling overhead from an additional FSDP unit.
   Result: kept at source state `b6ccf9c`; 8,847 tps, 36.96% MFU, 167.77 GiB, and loss decreased from 12.45754 to 8.00693.
 
+- Idea: rerun exact embedding-prefetch best
+  Current best source commit: b6ccf9c
+  Source: variance check after new run70 best
+  Expected mechanism: Repeating the exact new best command measures whether the 12 tps improvement over run59 is stable or just measurement variance.
+  Supporting evidence: The prior prefetch best reran within 6 tps, and run70 improves by only 12 tps while also reducing peak memory slightly. A direct rerun is the fastest way to validate this as the current best source before profiling or adding more changes.
+  Planned source/config changes: None; use the current embedding-prefetch source.
+  Planned command or config overrides: Exact run70 command with a new dump folder.
+  Success criteria and expected risk: Keep if it beats 8,847 with finite decreasing loss; otherwise record as diagnostic variance while preserving the best measured source if it remains close.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
