@@ -2391,3 +2391,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `TORCH_NCCL_ENABLE_MONITORING=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no process-group warnings. Risk is no effect, ignored environment variable, or weaker failure monitoring without speed benefit.
+  Result: discarded at source state `0c3762a`; 10,530 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling Torch NCCL monitoring is clean but does not beat the current-best calibration band, so keep default monitoring behavior.
