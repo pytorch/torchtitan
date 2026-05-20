@@ -1402,3 +1402,12 @@
   Planned command or config overrides: Current durable command plus profiler flags `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: This is diagnostic; success is a completed 10-step run with finite decreasing loss and usable profile artifacts/logs. Profile overhead means tps is not compared to the best.
   Result: diagnostic complete at source state `e12f3b3`; profiled run completed with finite decreasing loss, 9,185 tps under profiler overhead, and 169.10 GiB peak memory. Rank0 kernel buckets were about 2.14s GEMM, 1.45s NCCL, 0.17s copy/split, 0.09s attention, 0.09s RMSNorm, 0.075s SiLU, 0.015s optimizer, and 0.013s loss.
+
+- Idea: SDPA zero-CTA loss chunks 6 with FP8 rowwise auto-filter converter
+  Current best source commit: 3a1ed15
+  Source: GEMM-side follow-up after current durable profile
+  Expected mechanism: FP8 rowwise linear conversion can reduce GEMM bandwidth/compute cost for supported linear layers. The auto-filter avoids small-K/N layers where FP8 overhead dominates.
+  Supporting evidence: The current profile is GEMM-dominated, and the prior FP8 rowwise auto-filter run nearly matched the older SDPA best before zero-CTA and chunks=6 were added.
+  Planned source/config changes: Edit `qwen3_14b()` in `torchtitan/models/qwen3/config_registry.py` to import `Float8LinearConverter` and pass the prior `converters=[Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is FP8 conversion overhead still dominating or loss sanity degradation.
