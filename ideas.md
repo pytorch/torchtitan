@@ -1772,3 +1772,13 @@
   Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Diagnostic run only; must still run 10 steps and maintain finite decreasing loss. Commit the run log but not generated profile traces.
   Result: diagnostic discard at source state `b130c481`; 9,566 tps under profiler overhead with finite decreasing loss and unchanged 169.10 GiB peak memory. Rank0 trace shows the current best remains dominated by compiled GEMM work and FSDP collectives: kernel totals were ~2.16s nvjet, ~1.43s NCCL, ~0.21s Triton, and ~0.09s flash attention. The top NCCL kernels were reduce-scatter (~1.01s) and all-gather (~0.42s). Host input is no longer the obvious primary bottleneck after the two-worker DataLoader setting.
+
+- Idea: SDPA zero-CTA loss chunks 6 with model-only compile
+  Current best source commit: 5bc61e74
+  Source: loss-path isolation after the refreshed profile showed a small but nonzero Triton bucket
+  Expected mechanism: Keep torch.compile on the transformer blocks but remove loss-function compilation with `--compile.components '["model"]'`. Eager chunked cross entropy may avoid some compiled-loss Triton overhead or graph bookkeeping while preserving the dominant compiled GEMM path.
+  Supporting evidence: The rank0 profile is dominated by GEMM and NCCL, but Triton/loss-related kernels are still measurable. This is an isolated command-only knob and does not change model math, FSDP layout, DataLoader workers, NCCL policy, or loss chunk count.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command with `--compile.components '["model"]'` in addition to `--compile.enable`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no Dynamo/loss warnings. Risk is slower eager loss execution because compiled CE was already efficient.
+  Result: crash at source state `5bc61e7`; eager loss OOMed before step 1. Each rank held about 177.06 GiB and then failed trying to allocate 1.99 GiB in `torch.nn.functional.cross_entropy`. Compiled loss is required for the current memory-edged batch160/chunks6 command.

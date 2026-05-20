@@ -4501,3 +4501,25 @@ Interpretation:
 - The two-worker DataLoader improvement did not change the core bottleneck: remaining time is still mostly transformer GEMMs and FSDP reduce-scatter/all-gather.
 - Attention is too small at seq128 to be a promising near-term target.
 - Further search should focus on reducing collective cost, changing FSDP scheduling, or removing avoidable synchronization/metric work if a legal CLI/config knob exists.
+
+## Experiment 185: Model-Only Compile
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components '["model"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run185-sdpa-prefetch-seq128-lbs160-compile-model-only-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- No training step completed.
+- Failure occurred in `torch.nn.functional.cross_entropy` inside the chunked loss path.
+- Each rank reported about 177.06 GiB process memory in use, 175.17 GiB allocated by PyTorch, and then failed trying to allocate 1.99 GiB.
+- Stable-clear preflight showed no external >=5 GiB GPU allocations, so this is a real candidate memory failure, not environmental contamination.
+
+Interpretation:
+
+- Removing loss compilation is not viable at the current batch160/chunks6 memory edge.
+- Compiled chunked CE is not just a speed path here; it materially lowers memory enough for the validated command to fit.
+- Do not retry model-only compile unless a later source change creates multiple GiB of spare memory.
