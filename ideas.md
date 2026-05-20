@@ -1601,3 +1601,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Exact run166 command with a new dump folder.
   Success criteria and expected risk: Keep only if the rerun remains above 10,258 tps with finite decreasing loss and no warnings; otherwise discard the fused Adam change.
+  Result: discarded at source state `2201f17`; 9,999 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Fused Adam with zero weight decay does not validate.
+
+- Idea: SDPA zero-CTA loss chunks 6 with NCCL_MIN_NCHANNELS=16
+  Current best source commit: 3a1ed15
+  Source: communication channel-count follow-up after protocol/algorithm/custom allocation paths failed
+  Expected mechanism: `NCCL_MIN_NCHANNELS=16` asks NCCL to use at least 16 channels for collectives. If default channel selection underutilizes B200/NVLink bandwidth for the FSDP all-gather/reduce-scatter sizes, more channels may reduce NCCL time without forcing an incompatible algorithm or protocol.
+  Supporting evidence: The durable profile still spends about 1.45s in NCCL. `NCCL_MAX_NCHANNELS=16` was slower, but that restricted the upper bound; this tests the opposite direction by raising the lower bound.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2 NCCL_MIN_NCHANNELS=16` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/runtime warnings. Risk is higher channel overhead or no effect.

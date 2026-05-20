@@ -4102,3 +4102,24 @@ Interpretation:
 
 - Fused Adam with no weight decay is the first optimizer variant to match the current measured best.
 - Validate exactly before promoting because optimizer time is small and nearby optimizer changes have shown variance.
+
+## Experiment 167: Exact Rerun Of SDPA Zero-CTA Loss Chunks 6 With Fused Adam And Weight Decay 0
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --optimizer.name=Adam --optimizer.weight_decay=0.0 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run167-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-adam-weight-decay0-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,999, below the durable chunks=6 command.
+- Step 10 MFU: 37.44%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41537 at step 1 to 8.46312 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Fused Adam with no weight decay does not validate; run166 was timing variance.
+- Keep the default fused AdamW optimizer.
