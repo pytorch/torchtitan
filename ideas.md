@@ -1902,3 +1902,12 @@
   Planned command or config overrides: Current best command with `--training.local_batch_size=162` instead of 160.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator warnings. If peak memory is above roughly 95% without a clear throughput win, discard as memory-risky. Risk is OOM or allocator pressure because the current command is already close to full memory.
   Result: discarded at source state `3cdc4e9`; 10,311 tps with finite decreasing loss, but below the 10,328 best and with 170.88 GiB peak memory, 95.81%. The extra batch size consumes the remaining memory headroom without improving throughput enough to justify the risk.
+
+- Idea: Qwen3 14B Float8 linear converter
+  Current best source commit: de619254
+  Source: profile-backed compute-kernel hypothesis after batch and host-input axes were bracketed
+  Expected mechanism: The current-best profile is dominated by transformer GEMMs plus collectives. B200 supports hardware FP8, and TorchTitan's `Float8LinearConverter` can swap eligible dense linear layers to dynamic rowwise float8 training under torch.compile. If GEMMs are the limiting kernel family, lower-precision linear kernels may improve reported tps and may reduce memory pressure.
+  Supporting evidence: Run184 showed nvjet GEMMs as the largest rank0 kernel bucket, while the current command remains near 38.6% MFU, leaving compute-kernel headroom. The converter is an allowed `model_registry(...)` kwarg for `qwen3_14b()`.
+  Planned source/config changes: Edit only `qwen3_14b()` to pass `converters=[Float8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
+  Planned command or config overrides: Current best two-worker command unchanged.
+  Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no float8/Dynamo/runtime warnings that invalidate the run. Risk is slower conversion, compile incompatibility, FP8 numerical degradation, or lower MFU accounting if quantized kernels are not reflected the same way.
