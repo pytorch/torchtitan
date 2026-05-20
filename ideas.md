@@ -2021,3 +2021,4 @@
   Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
   Planned command or config overrides: Current best command plus `--training.global_batch_size=2560`.
   Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss, no dataset re-loop warning, and no allocator/NCCL warnings. Risk is lower kernel occupancy/overlap from longer accumulation cadence, changed loss trajectory over only 10 optimizer steps, or dataset exhaustion warnings.
+  Result: discarded at source state `404343c`; 10,110 tps with finite decreasing loss and 169.74 GiB peak memory. Gradient accumulation 2 correctly initialized but did not amortize fixed step work enough to offset the longer accumulation cadence, and the run moved just over the 95% memory-risk guideline.

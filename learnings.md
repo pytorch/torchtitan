@@ -5079,3 +5079,27 @@ Interpretation:
 
 - Reducing the NCCL buffer size to 2 MiB does not improve overlap; it is slower than both the default and the 8 MiB test.
 - Close the NCCL buffer-size axis and keep the default buffer size with only `NCCL_CTA_POLICY=2`.
+
+## Experiment 209: Gradient Accumulation 2 on Current Best
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --training.global_batch_size=2560 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run209-sdpa-prefetch-seq128-lbs160-gbs2560-gradacc2-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,110, below the validated current-best command and below recent exact reruns.
+- Step 10 MFU: 37.86%.
+- Step 10 peak memory: 169.74 GiB, 95.17%.
+- The trainer initialized with local batch size 160, global batch size 2560, and gradient accumulation steps 2.
+- Loss moved from 12.32859 at step 1 to 5.53659 at step 10; finite and decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Doubling gradient accumulation does not improve the reported 10-step interval even though step-end metric collection is a visible fixed cost.
+- The extra accumulation cadence likely reduces the overlap/optimizer cadence benefits enough that fixed-cost amortization is not the limiting path at the current command.
+- The memory peak also moves just above the 95% guideline, so this is both slower and riskier than local batch size 160 with global batch size 1280.
