@@ -3062,3 +3062,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=NVLSTree,Ring` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL rejecting the algorithm list, selecting a slower algorithm, or no effect if NVLSTree is not used for the dominant collectives.
   Result: discarded at source state `b57e3c1`; 10,529 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. `NVLSTree,Ring` is valid but below peak, so close the explicit NVLS-family algorithm preference tests and keep NCCL automatic selection.
+
+- Idea: metrics log frequency 1 with NCCL_ALGO=PAT,Ring
+  Current best source commit: c024dcd
+  Source: final distinct algorithm-selection probe after explicit Ring, NVLS, and NVLSTree preferences failed to beat automatic selection
+  Expected mechanism: Prefer NCCL's PAT algorithm where supported while keeping Ring fallback for initialization broadcasts and unsupported collectives. If the dominant FSDP all-gather/reduce-scatter operations benefit from PAT's communication schedule on this single-node B200 topology, it may reduce exposed collective time versus the profiled ring LL kernels. If PAT is unsupported for those collectives or overlaps worse with compute, it should regress or fall back.
+  Supporting evidence: Local NCCL benchmark references list `PAT` as a valid `NCCL_ALGO` value distinct from Ring, Tree, NVLS, and NVLSTree. Run289 still showed substantial collective time, and run312/run313 ruled out the explicit NVLS-family preference path.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=PAT,Ring` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL rejecting PAT, selecting a slower collective schedule, or simply falling back to Ring without benefit.
