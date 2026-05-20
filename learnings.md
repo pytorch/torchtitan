@@ -6801,3 +6801,25 @@ Interpretation:
 
 - The exact durable command returned to a stronger recent band after the registration and cuMem probes.
 - The run still does not exceed the measured peak, so keep run242 as the durable reported-tps high-water mark and continue searching for a real improvement rather than adopting any recent NCCL micro-knob.
+
+## Experiment 285: Metrics Log Frequency 1 With NCCL_P2P_USE_CUDA_MEMCPY=1
+
+Command:
+
+```bash
+NCCL_P2P_USE_CUDA_MEMCPY=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run285-nccl-p2p-cuda-memcpy-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- No training step completed.
+- The job hung after `Training starts at step 1` and timed out in the first FSDP unshard all-gather.
+- Error: `Watchdog caught collective operation timeout: WorkNCCL(SeqNum=3, OpType=_ALLGATHER_BASE, NumelIn=97239680, NumelOut=777917440, Timeout(ms)=300000)`.
+- The stack was in `foreach_all_gather_copy_out` / `FSDPParamGroup.wait_for_unshard`.
+- GPU cleanup required terminating an orphaned local rank process; no unrelated external large allocations were present.
+
+Interpretation:
+
+- `NCCL_P2P_USE_CUDA_MEMCPY=1` is invalid for this workload on this stack. It does not merely slow the run; it prevents the first large FSDP all-gather from completing.
+- Keep NCCL's default direct P2P path. The P2P path is required, and copy-engine P2P is not a viable overlap strategy here.

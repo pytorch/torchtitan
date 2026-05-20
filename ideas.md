@@ -2781,3 +2781,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_USE_CUDA_MEMCPY=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is much slower communication if copy-engine P2P cannot match NCCL's default direct path.
+  Result: crashed at source state `10a3561`; no training step completed. The first FSDP `_ALLGATHER_BASE` timed out after 300 seconds with `NCCL_P2P_USE_CUDA_MEMCPY=1`, so do not use the CUDA memcpy P2P path.
