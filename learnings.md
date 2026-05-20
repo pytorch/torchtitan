@@ -6004,3 +6004,25 @@ Interpretation:
 
 - Disabling PXN is clean but does not improve throughput.
 - Keep NCCL default transport behavior with `NCCL_CTA_POLICY=2`.
+
+## Experiment 249: Metrics Log Frequency 1 With NCCL_NTHREADS=512
+
+Command:
+
+```bash
+NCCL_NTHREADS=512 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run249-nccl-nthreads512-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,453, below the run242 10,650 measured peak and below the stronger current-best calibration samples.
+- Step 10 MFU: 39.15%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.54421 at step 1 to 5.18840 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Raising NCCL worker threads to 512 is clean but slower than default thread-block sizing.
+- The low-side `NCCL_NTHREADS=128` and high-side `NCCL_NTHREADS=512` brackets both underperform, so keep default NCCL thread-block sizing with only `NCCL_CTA_POLICY=2`.
