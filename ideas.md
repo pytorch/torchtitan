@@ -803,6 +803,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=161`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory at or below the 95% risk line. Risk is that the small batch increase only adds memory pressure without a throughput gain.
+  Result: discarded at source state `63b76a9`; 9,685 tps with finite decreasing loss and 169.86 GiB / 95.24% peak memory, below the seq128/local-batch-160 best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

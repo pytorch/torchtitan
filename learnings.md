@@ -2469,3 +2469,24 @@ Interpretation:
 
 - Batch 162 is the closest headroom probe so far, but it does not beat run84 and is already above the 95% memory-risk line.
 - Keep seq128/local-batch-160 as the practical best. Batch increases above 160 are not worth continuing without a separate memory-saving change.
+
+## Experiment 93: Seq128 Local Batch 161 Headroom Test
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=161 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run93-flex-prefetch-seq128-lbs161-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,685, below run84's 9,709.
+- Step 10 MFU: 36.27%.
+- Step 10 peak memory: 169.86 GiB, 95.24%.
+- Loss moved from 12.39469 at step 1 to 6.17551 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Even the one-batch increase over local batch 160 crosses the memory-risk line and does not improve throughput.
+- Close the seq128 batch-headroom branch. Batch 160 remains the practical best until a separate source change reduces memory pressure.
