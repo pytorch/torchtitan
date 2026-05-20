@@ -2632,3 +2632,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `a6e0537`; 10,507 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The node recovered normally after the invalid IB-disable crash.
+
+- Idea: metrics log frequency 1 with NCCL_IGNORE_CPU_AFFINITY=1
+  Current best source commit: f4eeb73
+  Source: NCCL helper-thread scheduling probe after host OMP and CUDA queue knobs plateaued
+  Expected mechanism: Let NCCL ignore inherited CPU affinity when placing helper/proxy threads. If torchrun or the environment constrains rank CPU affinity in a way that hurts NCCL progress, this may reduce communication jitter; if affinity is already appropriate, it should be neutral or slower.
+  Supporting evidence: OMP thread-count and CUDA connection-count brackets did not improve the durable command. NCCL helper thread placement is a distinct host-side scheduling dimension and has not been isolated in the logs.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_IGNORE_CPU_AFFINITY=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or worse CPU locality for NCCL helper threads.
