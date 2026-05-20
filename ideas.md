@@ -1191,3 +1191,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact run125 command with a new dump folder.
   Success criteria and expected risk: Keep only if it remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings. If it falls below, keep default 8 chunks as the durable loss setting.
+  Result: discarded at source state `795501a`; 9,681 tps with finite decreasing loss and 171.48 GiB peak memory. The run125 gain did not validate, so keep default 8 loss chunks.
