@@ -795,6 +795,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no allocator retries. Main risk is peak memory crossing the 95% risk line and slowing the run even if it completes.
   Result: discarded at source state `c232773`; 9,707 tps with finite decreasing loss, 2 tps below run84, and 170.66 GiB / 95.69% peak memory.
 
+- Idea: seq128 shape with local batch 161
+  Current best source commit: 03d00df
+  Source: final fine-grained batch-headroom test between the robust batch-160 point and the above-risk batch-162 point
+  Expected mechanism: Local batch 161 adds 0.625% more tokens per step than batch 160 and may stay closer to the safe memory envelope than batch 162 while still improving reported tps.
+  Supporting evidence: Batch 162 reached 9,707 tps but crossed 95% memory, while batch 160 is the best measured and reruns close to the peak. The only untested integer batch size in the gap is 161.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=161`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory at or below the 95% risk line. Risk is that the small batch increase only adds memory pressure without a throughput gain.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
