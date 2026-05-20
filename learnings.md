@@ -5012,3 +5012,26 @@ Interpretation:
 
 - Larger batch partially uses the Float8 memory headroom, but not enough to overcome Float8 overhead or beat the BF16 path.
 - The current command now has both Float8 batch160 and Float8 batch200 negative results, and older broad-FP8 batch220/batch240 also regressed or crashed. Close Float8 batch-scaling unless a future converter path removes the FSDP view warning or materially changes kernel behavior.
+
+## Experiment 206: Exact Current-Best Rerun After Float8 Restore
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run206-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration, not a new command.
+- Step 10 `tps`: 10,281, below the 10,328 peak but in the expected current-best band.
+- Step 10 MFU: 38.50%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.37296 at step 1 to 6.36459 at step 10; finite and decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The restored plain SDPA source is healthy after the HSDP and Float8 candidate restores.
+- Recent clean candidates around 10,254-10,256 tps are within the normal short-run variance band and do not indicate a new hidden regression.
+- Keep the validated best command unchanged: SDPA, DP-only FSDP, bidirectional one-module prefetch through `lm_head`, `NCCL_CTA_POLICY=2`, loss chunks 6, and two persistent DataLoader workers with prefetch factor 2.

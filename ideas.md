@@ -1991,3 +1991,4 @@
   Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
   Planned command or config overrides: Exact current-best two-worker command.
   Success criteria and expected risk: Keep as the calibration row if it completes with finite decreasing loss and no warnings. If it exceeds 10,328, treat it as a new measured peak that still needs judgment against variance; otherwise keep the existing best.
+  Result: kept as calibration at source state `82f5bef`; 10,281 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This does not beat the 10,328 peak, but confirms the restored source remains in the expected current-best variance band.
