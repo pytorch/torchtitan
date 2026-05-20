@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import math
 from dataclasses import dataclass, field
 
@@ -197,19 +196,15 @@ class DeepSeekV3Model(Decoder):
                 self, trainer_config=trainer_config, **kwargs
             )
             parallelism = trainer_config.parallelism
-            training = getattr(trainer_config, "training", None)
-            debug = getattr(trainer_config, "debug", None)
+            training = trainer_config.training
 
             # Sync rope fields to attention for all layers.
-            if training is not None:
-                seq_len = training.seq_len
-                for layer_cfg in self.layers:
-                    assert isinstance(layer_cfg.attention, Attention.Config)
-                    layer_cfg.attention.rope_max_seq_len = seq_len
-                    layer_cfg.attention.rope_factor = self.rope.rope_factor
-                    layer_cfg.attention.rope_original_seq_len = (
-                        self.rope.original_seq_len
-                    )
+            seq_len = training.seq_len
+            for layer_cfg in self.layers:
+                assert isinstance(layer_cfg.attention, Attention.Config)
+                layer_cfg.attention.rope_max_seq_len = seq_len
+                layer_cfg.attention.rope_factor = self.rope.rope_factor
+                layer_cfg.attention.rope_original_seq_len = self.rope.original_seq_len
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:

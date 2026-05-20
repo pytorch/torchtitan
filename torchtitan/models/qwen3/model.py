@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -94,14 +93,6 @@ class Qwen3Model(Decoder):
                 self, trainer_config=trainer_config, **kwargs
             )
             parallelism = trainer_config.parallelism
-            debug = getattr(trainer_config, "debug", None)
-
-            if debug is not None:
-                for layer_cfg in self.layers:
-                    if layer_cfg.moe is not None:
-                        layer_cfg.moe.router._debug_force_load_balance = (
-                            debug.moe_force_load_balance
-                        )
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config

@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import dataclasses
 from dataclasses import dataclass, field
 
 import torch
@@ -68,14 +67,6 @@ class Qwen3VLModel(Qwen3Model):
                 self, trainer_config=trainer_config, **kwargs
             )
             parallelism = trainer_config.parallelism
-            debug = getattr(trainer_config, "debug", None)
-
-            if debug is not None:
-                for layer_cfg in self.layers:
-                    if layer_cfg.moe is not None:
-                        layer_cfg.moe.router._debug_force_load_balance = (
-                            debug.moe_force_load_balance
-                        )
 
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
 

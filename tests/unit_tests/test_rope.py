@@ -180,21 +180,15 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         cfg.update_from_config(trainer_config=self._make_trainer_config(rope_max))
         self.assertEqual(cfg.rope.max_seq_len, rope_max)
 
-    def test_training_omitted_preserves_intrinsic_max(self):
-        """When training is omitted, rope.max_seq_len stays at the model default.
+    def test_vllm_max_model_len_as_seq_len(self):
+        """vLLM wrapper translates max_model_len to TrainingConfig.seq_len.
 
-        This is the pattern used by the vLLM wrapper: it only passes
-        parallelism, so the model's intrinsic rope.max_seq_len is preserved.
+        When seq_len equals rope.max_seq_len, the RoPE cache stays at
+        the model's intrinsic maximum.
         """
-        from types import SimpleNamespace
-
-        from torchtitan.config import ParallelismConfig
-
         cfg = self._make_config()
         original_max = cfg.rope.max_seq_len
-        cfg.update_from_config(
-            trainer_config=SimpleNamespace(parallelism=ParallelismConfig())
-        )
+        cfg.update_from_config(trainer_config=self._make_trainer_config(original_max))
         self.assertEqual(cfg.rope.max_seq_len, original_max)
 
 

@@ -183,26 +183,19 @@ class VLLMModelWrapper(Module):
         # Fill sharding configs on the config BEFORE build so every sub-module
         # is constructed with its ShardingConfig attached (required by the
         # declarative model.parallelize() API).
-        # Only ``parallelism`` is passed; ``training`` is omitted so the
-        # model's intrinsic ``rope.max_seq_len`` is preserved (the inference
-        # path must not shrink the RoPE cache to a training seq_len).
+        # Translate vLLM's max_model_len to TrainingConfig.seq_len so the
+        # RoPE cache is sized to exactly what vLLM needs. The seq_len >
+        # rope.max_seq_len check in update_from_config will catch invalid
+        # configs (max_model_len exceeding the model's intrinsic maximum).
         from types import SimpleNamespace
 
-        self.config.update_from_config(
-            trainer_config=SimpleNamespace(parallelism=parallelism)
-        )
-
-        # Enforce that vLLM's max_model_len does not exceed the model's
-        # intrinsic max_seq_len -- positions beyond this are invalid.
         max_model_len = vllm_config.model_config.max_model_len
-        rope_max_seq_len = self.config.rope.max_seq_len
-        if max_model_len > rope_max_seq_len:
-            raise ValueError(
-                f"vLLM max_model_len ({max_model_len}) exceeds the model's "
-                f"maximum supported sequence length ({rope_max_seq_len}). "
-                f"Set max_model_len <= {rope_max_seq_len} in EngineArgs or "
-                f"use a model with a larger rope.max_seq_len."
+        self.config.update_from_config(
+            trainer_config=SimpleNamespace(
+                training=TrainingConfig(seq_len=max_model_len),
+                parallelism=parallelism,
             )
+        )
 
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()

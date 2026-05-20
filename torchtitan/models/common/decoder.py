@@ -89,23 +89,29 @@ class Decoder(BaseModel):
         ) -> None:
             """Apply trainer config to model config.
 
-            ``training`` is optional: callers that only need parallelism
-            setup (e.g. the vLLM inference wrapper) may omit it.  When
-            present, ``training.seq_len`` is validated against the model's
-            intrinsic ``rope.max_seq_len`` and the RoPE cache is resized.
+            Validates ``training.seq_len`` against the model's intrinsic
+            ``rope.max_seq_len`` and resizes the RoPE cache.
+
+            ``debug`` is optional: callers that only need parallelism and
+            training setup (e.g. the vLLM inference wrapper) may omit it.
             """
-            training = getattr(trainer_config, "training", None)
-            if training is not None:
-                seq_len = training.seq_len
-                if seq_len > self.rope.max_seq_len:
-                    raise ValueError(
-                        f"Training sequence length {seq_len} exceeds "
-                        f"model's maximum supported sequence length "
-                        f"{self.rope.max_seq_len}."
-                    )
-                self.rope = dataclasses.replace(
-                    self.rope, max_seq_len=seq_len
+            training = trainer_config.training
+            seq_len = training.seq_len
+            if seq_len > self.rope.max_seq_len:
+                raise ValueError(
+                    f"Training sequence length {seq_len} exceeds "
+                    f"model's maximum supported sequence length "
+                    f"{self.rope.max_seq_len}."
                 )
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+
+            debug = getattr(trainer_config, "debug", None)
+            if debug is not None:
+                for layer_cfg in self.layers:
+                    if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -129,7 +128,6 @@ class Llama4Model(Decoder):
                 self, trainer_config=trainer_config, **kwargs
             )
             parallelism = trainer_config.parallelism
-            debug = getattr(trainer_config, "debug", None)
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
