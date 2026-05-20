@@ -4424,3 +4424,25 @@ Interpretation:
 
 - Increasing prefetch depth to four batches does not help.
 - Keep two workers with prefetch factor 2; test pinned memory once before closing input-pipeline tuning.
+
+## Experiment 182: Two DataLoader Workers With Pinned Host Memory
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --dataloader.pin_memory --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run182-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-pin-memory-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,301, below the two-worker unpinned command.
+- Step 10 MFU: 38.58%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.50779 at step 1 to 7.16525 at step 10; finite and decreasing.
+- No dataset re-loop or DataLoader worker warning appeared.
+
+Interpretation:
+
+- Pinned memory is clean but does not beat the validated two-worker command.
+- Keep unpinned host tensors for this workload; test three workers once to close the worker-count bracket.

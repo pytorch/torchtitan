@@ -1751,3 +1751,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current best command with `--dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --dataloader.pin_memory`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no DataLoader warnings. Risk is pinning overhead or no benefit because tensor copy time is not material.
+  Result: discarded at source state `a4cd80f`; 10,301 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Pinned memory is clean but below the validated two-worker command.
+
+- Idea: SDPA zero-CTA loss chunks 6 with three DataLoader workers and persistent prefetch
+  Current best source commit: 40032d1
+  Source: worker-count bracket after two workers validated and four workers regressed
+  Expected mechanism: Three workers may be a middle point that keeps more host input overlap than two workers without the contention observed at four workers.
+  Supporting evidence: Worker count is the only DataLoader setting that produced a validated gain; two workers beat one, four workers regressed, so three workers is the remaining local bracket.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--dataloader.num_workers=3 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is CPU contention between the 24 DataLoader workers and training ranks.
