@@ -6159,3 +6159,26 @@ Interpretation:
 
 - Increasing CUDA max connections to 16 is clean but does not improve throughput.
 - The tested connection-count direction now shows both restrictive caps and a higher-side setting are below the durable default behavior.
+
+## Experiment 256: Exact Current-Best Rerun After Host And CUDA Scheduling Probes
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run256-rerun-after-host-cuda-scheduling-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,493, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.29%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.48674 at step 1 to 6.25960 at step 10; finite and overall decreasing.
+- Step 2 had a transient low-throughput sample at 8,093 tps, but the run recovered by step 4 and logged no corresponding warning.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The durable command remains healthy after the host-thread and CUDA connection-count probes.
+- The lower exact sample again places normal current-command variance around the 10.4k-10.5k band; run242 remains the high-variance measured peak.
