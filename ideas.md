@@ -2131,3 +2131,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current best command with `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss, unchanged-safe memory, and no Inductor/runtime warnings. Risk is longer compile, no effect, or a repeat of the earlier allocator/performance regression if coordinate descent changes memory behavior.
+  Result: discarded at source state `9b04a30`; 10,482 tps with finite overall-decreasing loss but 171.42 GiB peak memory, 96.12%. Coordinate descent alone is slower than the best and pushes memory above the risk line.
