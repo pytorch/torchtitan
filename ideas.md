@@ -825,6 +825,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and lower peak memory than the robust batch-160 baseline. Risk is the same instability seen in earlier endpoint-prefetch reruns or extra scheduling overhead.
   Result: discarded at source state `81c7ebc`; 9,625 tps and 167.75 GiB peak memory, but loss increased from 12.39433 to 13.89295.
 
+- Idea: profile seq128 local batch 160 best
+  Current best source commit: 03d00df
+  Source: bottleneck refresh after the workload shape changed from 4096-token batches to seq128/local-batch-160
+  Expected mechanism: Profiling the current best should show whether the seq128 shape is now limited by FSDP collectives, dense GEMMs, flex attention, loss/lm_head, optimizer, or launch overhead. This should guide the next source-level idea rather than guessing from the older 4096-token profile.
+  Supporting evidence: The seq128 shape raises measured tps from the robust 4096-token baseline while preserving similar peak memory, so its bottleneck mix is likely different. The last profile predates the constant-token shape sweep.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run84 command shape plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is generating traces and extracting a rank0 bottleneck summary. Profiled tps is diagnostic only and should not replace unprofiled ranking.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
