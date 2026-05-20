@@ -2442,3 +2442,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `994c44b`; 10,382 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is another lower exact sample, so run242's 10,650 remains the measured peak for the unchanged durable command.
+
+- Idea: metrics log frequency 1 with NCCL_DMABUF_ENABLE=0
+  Current best source commit: b94680ea
+  Source: NCCL buffer-registration path probe after transport, occupancy, and launch knobs plateaued
+  Expected mechanism: Disable NCCL's DMA-BUF path. On a single-node NVLink/NVSwitch system this can change GPU IPC/buffer registration behavior for collectives; if the default DMA-BUF path has registration or synchronization overhead on this stack, disabling it may improve FSDP all-gather/reduce-scatter latency.
+  Supporting evidence: Recent P2P/PXN transport choices, channel counts, CTA counts, launch mode, stream priority, and NCCL thread-block brackets all failed to beat the durable command. PyTorch's tensor-register allocator hook is not a useful candidate because expandable segments disable it, so DMA-BUF is the remaining distinct registration-path knob.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_DMABUF_ENABLE=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if NCCL was not using DMA-BUF, or slower IPC/collective setup if DMA-BUF is beneficial.
