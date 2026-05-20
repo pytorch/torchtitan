@@ -2922,3 +2922,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_L1_SHARED_MEMORY_CARVEOUT=100` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives if the setting reduces useful L1 cache or worsens occupancy.
   Result: discarded at source state `7e219ab`; 10,424 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing maximum shared-memory carveout is slower, so keep NCCL's default kernel resource preference.
+
+- Idea: metrics log frequency 1 with NCCL_PROGRESS_APPENDOP_FREQ=16
+  Current best source commit: 5dcf0507
+  Source: NCCL proxy-progress scheduling probe after kernel-resource, P2P scheduling, and LL buffer probes did not improve peak throughput
+  Expected mechanism: Increase the proxy progress append-op frequency from the default 8 to 16, making the progress thread call `ncclProxyGetPostedOps()` less often while active. If append-op polling overhead is stealing host-side scheduling capacity or creating small synchronization overhead around the frequent FSDP collectives, a less frequent check may improve overlap. If prompt pickup of posted ops matters more, it should regress.
+  Supporting evidence: The active NCCL build exposes `NCCL_PROGRESS_APPENDOP_FREQ`, and `proxy.cc` documents that too-frequent `ncclProxyGetPostedOps()` calls can regress small-message communication. The workload issues many repeated FSDP collectives, so this is a narrow scheduler axis distinct from transport and kernel resource preferences.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROGRESS_APPENDOP_FREQ=16` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is delayed pickup of newly posted proxy ops or no effect if this workload is not proxy-progress limited.
