@@ -2812,3 +2812,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_SINGLE_PROC_MEM_REG_ENABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect, slower registration bookkeeping, or an unsupported path warning.
   Result: discarded at source state `270d4a8`; 10,508 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The single-process memory-registration toggle is clean but below the durable peak, so keep the default behavior.
+
+- Idea: profiled exact current best after registration-path closure
+  Current best source commit: 952587f2
+  Source: program guidance to refresh profile and roofline evidence when blind knob sweeps stop finding improvements
+  Expected mechanism: Run the exact durable command with a one-step Kineto trace window after warmup. The profiled run is not a primary throughput comparison; it should expose whether the current 10.5k-10.65k band is limited by GEMM/attention compute, NCCL collectives, launch gaps, data loading, or memory pressure.
+  Supporting evidence: Runs 274-288 closed many NCCL registration, P2P, transport, and runtime toggles without improving the measured peak. The durable command has high memory use and about 39.6% MFU, but the next useful source or CLI idea should be driven by trace evidence rather than another unsupported-adjacent NCCL environment variable.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is a completed 10-step run with finite overall-decreasing loss and a trace under the dump folder. Risk is profiler overhead; do not compare profiled tps directly against unprofiled candidates.
