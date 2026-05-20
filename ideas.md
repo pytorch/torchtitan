@@ -1152,3 +1152,12 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no measurable effect or a run-variance regression.
   Result: first attempt invalid at source state `a76ddfd` because the parser rejected `--debug.enable_structured_logging=false`; the accepted negation form is `--debug.no-enable-structured-logging`.
   Result: discarded on valid retry at source state `a76ddfd`; 9,582 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Disabling structured logging regresses under the current SDPA best.
+
+- Idea: SDPA seq128 local batch 160 with backward-only FSDP prefetch
+  Current best source commit: 846907b
+  Source: prefetch direction follow-up after wider and endpoint variants regressed
+  Expected mechanism: Removing forward prefetch may reduce early all-gather memory pressure while retaining backward prefetch, which should still help overlap reduce-scatter/all-gather work during the backward-heavy part of the step.
+  Supporting evidence: Two-module prefetch increased memory, and removing only the `lm_head` endpoint did not help. Forward-only prefetch regressed under the older flex source, but backward-only has not been tested under the current SDPA/NCCL-heavy profile.
+  Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to omit all `set_modules_to_forward_prefetch` calls while keeping one-module backward prefetch from `lm_head` and each layer to its previous layer.
+  Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower forward all-gathers because forward prefetch was necessary for overlap.
