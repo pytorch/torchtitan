@@ -468,45 +468,46 @@ def _try_compile(fn: Callable) -> Callable | None:
 
 def _select_best_backend(
     region_dir: Path,
-    eager_fn: Callable,
-) -> tuple[Callable, str]:
+    eager_fn: Callable | None = None,
+) -> tuple[Callable | None, str]:
     """Select the fastest backend from offline benchmark results.
 
     Reads benchmark.json (produced by benchmark.py) and picks the
-    winner. If no benchmark data exists, falls back to: triton if
-    kernel.py exists, otherwise eager. No benchmarking or compilation
-    happens at training time.
+    winner. Only returns a non-eager backend if it's proven faster
+    by the offline benchmark. Returns (None, "eager") when eager wins
+    or no benchmark data exists.
 
-    Returns (best_fn, backend_name).
+    Returns (best_fn_or_None, backend_name).
     """
     import json
 
     triton_fn = _load_kernel_fn(region_dir)
 
-    # Read offline benchmark results
     bench_path = region_dir / "benchmark.json"
-    if bench_path.exists():
-        try:
-            bench_data = json.loads(bench_path.read_text())
-        except Exception:
-            bench_data = {}
+    if not bench_path.exists():
+        return None, "eager"
 
-        # Pick the fastest available backend
-        candidates: dict[str, tuple[float, Callable]] = {}
-        candidates["eager"] = (bench_data.get("eager_ms", float("inf")), eager_fn)
-        if "compile_ms" in bench_data:
+    try:
+        bench_data = json.loads(bench_path.read_text())
+    except Exception:
+        return None, "eager"
+
+    eager_ms = bench_data.get("eager_ms", float("inf"))
+
+    # Check triton
+    triton_ms = bench_data.get("triton_ms", float("inf"))
+    if triton_fn is not None and triton_ms < eager_ms:
+        return triton_fn, "triton"
+
+    # Check compile (only if it beats eager AND triton)
+    compile_ms = bench_data.get("compile_ms", float("inf"))
+    if compile_ms < eager_ms and compile_ms < triton_ms:
+        if eager_fn is not None:
             compiled_fn = _try_compile(eager_fn)
             if compiled_fn is not None:
-                candidates["compile"] = (bench_data["compile_ms"], compiled_fn)
-        if triton_fn is not None:
-            candidates["triton"] = (bench_data.get("triton_ms", float("inf")), triton_fn)
+                return compiled_fn, "compile"
 
-        best_name = min(candidates, key=lambda k: candidates[k][0])
-        return candidates[best_name][1], best_name
-
-    # No benchmark data — always use eager. A kernel that hasn't been
-    # benchmarked shouldn't be trusted (it could be orders of magnitude slower).
-    return eager_fn, "eager"
+    return None, "eager"
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +636,47 @@ def get_init_inputs():
 # Graph replacement
 # ---------------------------------------------------------------------------
 
+def _rewrite_subgraph_to_kernel_call(
+    subgraph_module: torch.fx.GraphModule,
+    kernel_fn: Callable,
+) -> None:
+    """Rewrite a subgraph module's FX graph to a single kernel_fn call.
+
+    Replaces the multi-node subgraph with:
+        def forward(self, input_0, input_1, ...):
+            return kernel_fn(input_0, input_1, ...)
+
+    This way custom_codegen inlines the kernel call directly instead of
+    the original ops. The kernel_fn is stored as a module attribute.
+    """
+    old_graph = subgraph_module.graph
+    placeholders = [n for n in old_graph.nodes if n.op == "placeholder"]
+
+    new_graph = torch.fx.Graph()
+    new_phs = []
+    for ph in placeholders:
+        new_ph = new_graph.placeholder(ph.name)
+        new_ph.meta = ph.meta.copy()
+        new_phs.append(new_ph)
+
+    # Store kernel_fn as a module attribute so the codegen can reference it
+    subgraph_module._kernel_fn = kernel_fn  # type: ignore[attr-defined]
+
+    # call_function with the kernel_fn
+    call_node = new_graph.call_function(kernel_fn, args=tuple(new_phs))
+    # Copy output meta from the original graph's output
+    for n in old_graph.nodes:
+        if n.op == "output":
+            call_node.meta = {}
+            break
+
+    new_graph.output(call_node)
+    new_graph.lint()
+
+    subgraph_module.graph = new_graph
+    subgraph_module.recompile()
+
+
 def _replace_region(
     gm: torch.fx.GraphModule,
     region: Region,
@@ -749,38 +791,47 @@ def fused_kernel_pass(
     # so earlier node references remain valid
     instances.sort(key=lambda x: x[0], reverse=True)
 
-    replaced = 0
-    kernels_loaded = 0
     problems_written = 0
 
-    # Per-hash: write problem, select best backend from offline benchmarks
-    hash_best: dict[str, tuple[Callable | None, str]] = {}
-    backend_counts: Counter[str] = Counter()
-
+    # Phase 1: Write problem.py for every unique region (no graph modification)
+    seen_hashes: set[str] = set()
     for _, h, r in instances:
-        if h in hash_best:
+        if h in seen_hashes:
             continue
+        seen_hashes.add(h)
         region_dir = kdir / h
-
-        # Write problem.py once per hash
         if not (region_dir / "problem.py").exists():
             count = hash_counts.get(h, 1)
             _write_problem(r, region_dir, count)
             problems_written += 1
 
-        # Build eager baseline from the subgraph
-        eager_module = _create_subgraph_module(r)
+    # Phase 2: Only replace regions where a non-eager backend wins.
+    # Regions without kernels or where eager is fastest stay untouched.
+    hash_best: dict[str, tuple[Callable, str]] = {}
+    backend_counts: Counter[str] = Counter()
 
-        # Select best from offline benchmark results (no benchmarking at training time)
-        best_fn, backend_name = _select_best_backend(region_dir, eager_module.forward)
-        hash_best[h] = (best_fn if backend_name != "eager" else None, backend_name)
-        backend_counts[backend_name] += 1
+    for h in seen_hashes:
+        region_dir = kdir / h
+        eager_fn = None  # placeholder, not needed if we skip eager
+        best_fn, backend_name = _select_best_backend(region_dir, eager_fn)
+        if backend_name != "eager" and best_fn is not None:
+            hash_best[h] = (best_fn, backend_name)
+            backend_counts[backend_name] += 1
+        else:
+            backend_counts["eager"] += 1
 
+    # Only replace instances whose hash has a non-eager winner
+    replaced = 0
     for pos, h, r in instances:
+        if h not in hash_best:
+            continue  # leave original FX nodes untouched
+        best_fn, backend_name = hash_best[h]
+
+        # Build subgraph module and rewrite its FX graph to a single
+        # call_function node calling the kernel — this way custom_codegen
+        # inlines the kernel call, not the original ops.
         subgraph_module = _create_subgraph_module(r)
-        best_fn, backend_name = hash_best.get(h, (None, "eager"))
-        if best_fn is not None:
-            subgraph_module.forward = best_fn  # type: ignore[assignment]
+        _rewrite_subgraph_to_kernel_call(subgraph_module, best_fn)
 
         module_name = f"_fused_{h}_{replaced}"
         _replace_region(gm, r, module_name, subgraph_module)
@@ -792,8 +843,9 @@ def fused_kernel_pass(
 
     backend_summary = ", ".join(f"{k}={v}" for k, v in sorted(backend_counts.items()))
     logger.info(
-        f"Fused kernel pass: {replaced} replacements across "
-        f"{len(hash_best)} unique patterns, "
+        f"Fused kernel pass: {replaced} replacements "
+        f"({len(hash_best)} patterns with kernels, "
+        f"{len(seen_hashes) - len(hash_best)} eager-only skipped), "
         f"backends: [{backend_summary}], "
         f"{problems_written} new problems written to {kdir}"
     )
