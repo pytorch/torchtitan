@@ -3778,3 +3778,26 @@ Interpretation:
 
 - Symmetric-memory FSDP communication can improve throughput, but the all-module application is unsafe due to NCCL teardown warnings and higher memory.
 - Test a narrower layer-only application before deciding whether this path is viable.
+
+## Experiment 152: SDPA Zero-CTA Loss Chunks 6 With Layer-Only FSDP Symmetric-Memory Communication
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run152-sdpa-layer-symm-mem-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: unsafe discard.
+- Step 10 `tps`: 10,392, above the current best.
+- Step 10 MFU: 38.92%.
+- Step 10 peak memory: 169.73 GiB, 95.17%.
+- Loss moved from 12.49507 at step 1 to 7.74703 at step 10; finite and decreasing.
+- After training completed, NCCL still emitted repeated `corrupted comm object detected` warnings and `ncclCommWindowDeregister failed` warnings.
+
+Interpretation:
+
+- Layer-only symmetric-memory communication preserves and slightly increases the throughput benefit, but it does not fix the unsafe teardown behavior.
+- Treat FSDP symmetric-memory communication as unusable for this search unless the underlying NCCL window deregistration problem is addressed outside the allowed TorchTitan scope.
+- The current durable source should be restored to the no-symmetric-memory path; the validated command remains SDPA, zero-CTA, loss chunks 6.

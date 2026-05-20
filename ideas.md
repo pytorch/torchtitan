@@ -1451,3 +1451,13 @@
   Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to call `set_symm_mem_for_comm("NCCL")` only on `layers`, not `model.lm_head` or root `model`.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, finite decreasing loss, no NCCL corrupted-comm warnings, and memory not materially above chunks=6 baseline. Risk is losing the speedup or retaining symmetric-memory warnings.
+  Result: unsafe discard at source state `4a6812d`; 10,392 tps with finite decreasing loss but 169.73 GiB peak memory and repeated NCCL `corrupted comm object detected` plus `ncclCommWindowDeregister failed` warnings after training. Narrowing symmetric-memory communication to layers is still unsafe, so restore the no-symmetric-memory durable source.
+
+- Idea: SDPA zero-CTA loss chunks 6 with ProcessGroup-allocated FSDP comm buffers
+  Current best source commit: 3a1ed15
+  Source: communication-buffer follow-up after symmetric memory was fast but unsafe
+  Expected mechanism: `set_allocate_memory_from_process_group_for_comm(True)` lets ProcessGroupNCCL allocate FSDP temporary communication staging buffers. PyTorch documents this as enabling optimized ProcessGroup allocation such as zero-copy transfers over SHARP for NVLink and/or InfiniBand, without registering symmetric-memory windows.
+  Supporting evidence: The current durable profile still spends about 1.45s in NCCL. Symmetric-memory allocation improved tps but failed at teardown, so a different FSDP buffer allocation path may capture some communication benefit without the NCCL window deregistration failure.
+  Planned source/config changes: Restore no symmetric-memory calls, then call `set_allocate_memory_from_process_group_for_comm(True)` on the FSDP-wrapped transformer layers, `lm_head`, and root model after `fully_shard`.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss, no allocator/OOM warnings, and no NCCL teardown warnings. Risk is no backend support or slower allocation behavior.
