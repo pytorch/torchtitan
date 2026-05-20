@@ -1162,3 +1162,12 @@
   Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower forward all-gathers because forward prefetch was necessary for overlap.
   Result: tentative keep at source state `efe8510`; 10,021 tps, 37.53% MFU, 168.57 GiB peak memory, and loss decreased from 12.57584 to 7.02875. Validate with an exact rerun before promoting over the one-module bidirectional best.
+
+- Idea: exact rerun of SDPA backward-only FSDP prefetch
+  Current best source commit: efe8510
+  Source: validation follow-up after run123 produced a new measured best
+  Expected mechanism: Repeating the exact backward-only prefetch command checks whether removing forward prefetch is a durable improvement or another run-variance win.
+  Supporting evidence: Gradient accumulation produced apparent wins that did not validate; run123 beats run99 by 16 tps, which is promising but still within the observed spread of repeated short runs.
+  Planned source/config changes: None; keep backward-only prefetch source for this validation run.
+  Planned command or config overrides: Exact run123 command with a new dump folder.
+  Success criteria and expected risk: Keep backward-only source if the rerun remains above 10,005 tps with finite decreasing loss. If it falls below, restore bidirectional prefetch as the durable source.
