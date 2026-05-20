@@ -265,6 +265,7 @@ def data_parallel(
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
     full_dtensor: bool = False,
+    ignored_modules: set[nn.Parameter] | None = None,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
@@ -289,6 +290,14 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
+        # Skip parameters that are explicitly ignored (e.g., shared or frozen weights).
+        if ignored_modules is not None:
+            params_dict = {
+                p_name: p for p_name, p in params_dict.items() if p not in ignored_modules
+            }
+            if not params_dict:
+                continue
+
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
                 distribute_tensor_func = (
@@ -297,7 +306,9 @@ def data_parallel(
                 mod.register_parameter(
                     p_name,
                     nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
+                        distribute_tensor_func(p, device_mesh, param_sharding),
+                        # Preserve the requires_grad flag of the original parameter.
+                        requires_grad=p.requires_grad,
                     ),
                 )
 
