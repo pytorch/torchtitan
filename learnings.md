@@ -5417,3 +5417,26 @@ Interpretation:
 
 - Keeping `lm_head` unresharded does not produce a visible final-step throughput gain, and memory did not visibly change at the rounded console precision.
 - The all-gather bottleneck is not solved by this narrow endpoint residency change. Restore the prior FSDP wrapping.
+
+## Experiment 223: Exact Current-Best Rerun After `lm_head` Restore
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run223-rerun-post-restore-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as source-restore calibration.
+- Step 10 `tps`: 10,456, below the run215 10,625 measured peak.
+- Step 10 MFU: 39.15%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- The log printed `Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True`, confirming the restore.
+- Loss moved from 12.31551 at step 1 to 5.98895 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The source restore is healthy, but this run is a lower sample in the `metrics.log_freq=1` variance band.
+- Keep run215 as the measured peak and use exact reruns only when a candidate exceeds it or after future source restore cycles.

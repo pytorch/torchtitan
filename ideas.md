@@ -2161,3 +2161,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite, clean, and in the expected current-best band. If it exceeds 10,625, treat it as a new measured peak for the same command.
+  Result: kept as calibration at source state `c789129`; 10,456 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Source restore is healthy, but this lower sample confirms the one-step final interval has high variance; keep run215 as the measured peak.
