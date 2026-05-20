@@ -1842,3 +1842,12 @@
   Planned command or config overrides: Current best two-worker DataLoader command.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no allocator/NCCL warnings. Risk is OOM or slower scheduling from extra parameter residency.
   Result: discarded at source state `4c85a38`; 9,742 tps with finite decreasing loss but 175.80 GiB peak memory, above the memory-risk line. Partial layer resharding adds too much parameter residency and slows the current command; restore bool resharding.
+
+- Idea: transformer-layer FSDP partial reshard_after_forward=2
+  Current best source commit: 96a7f969
+  Source: smaller integer-reshard follow-up after `reshard_after_forward=4` fit but was too memory-heavy
+  Expected mechanism: `reshard_after_forward=2` should retain less parameter residency than the `4` setting while still reducing some backward all-gather exposure versus full bool resharding.
+  Supporting evidence: The `4` setting raised peak memory to 175.80 GiB and slowed to 9,742 tps. A smaller subgroup is the remaining middle point before closing integer FSDP resharding.
+  Planned source/config changes: Edit `parallelize.py` so transformer layers use `reshard_after_forward=2` when the resolved policy is `True` on the 8-rank FSDP mesh; keep root and `lm_head` on the existing bool policy.
+  Planned command or config overrides: Current best two-worker DataLoader command.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no allocator/NCCL warnings. Risk is still increasing memory and slowing scheduling without enough all-gather savings.
