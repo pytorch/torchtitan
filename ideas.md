@@ -2432,3 +2432,12 @@
   Planned command or config overrides: Use the exact current-best command with `--loss.num_chunks=8` instead of 6.
   Success criteria and expected risk: Success is step-10 tps above 10,650, or comparable tps with a meaningful memory drop that can be converted into a follow-up batch-size test. Risk is lower throughput from extra loss chunk overhead with no memory benefit.
   Result: discarded at source state `7b0ccbf`; 10,195 tps with finite overall-decreasing loss and 168.57 GiB peak memory. The 0.53 GiB memory reduction is too small to offset the loss-path overhead or justify a larger-batch follow-up.
+
+- Idea: exact current best rerun after loss and NCCL occupancy probes
+  Current best source commit: 7edbd76c
+  Source: variance calibration after run249 and run250 both discarded
+  Expected mechanism: Repeat the exact durable best command without adding a new knob. The final-step `metrics.log_freq=1` objective is high variance, so a clean exact sample can either raise the measured peak or confirm the durable command remains in the expected band after recent command probes.
+  Supporting evidence: Run242's 10,650 tps measured peak came from an exact rerun, while the last two new knobs were clearly slower. Recalibrating avoids confusing environment drift with candidate regressions before the next source or runtime branch.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
