@@ -2172,3 +2172,12 @@
   Planned command or config overrides: Prefix current best command with `NCCL_MAX_NCHANNELS=8` in addition to `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is lower collective bandwidth or no effect if default NCCL channel selection is already optimal.
   Result: discarded at source state `efc19b4`; 10,313 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Lowering NCCL's channel cap to 8 hurts throughput, so keep default channel selection.
+
+- Idea: metrics log frequency 1 without NCCL_CTA_POLICY=2
+  Current best source commit: 8960844b
+  Source: command-minimization validation after the reporting-window objective changed
+  Expected mechanism: Remove `NCCL_CTA_POLICY=2` from the current best command. If the zero-CTA policy mainly helped the older multi-step reporting window or interacts poorly with the final single-step measurement, the default CTA policy could match or beat the current best.
+  Supporting evidence: Zero-CTA was validated before `metrics.log_freq=1`, and most nearby NCCL knobs have regressed. A single ablation confirms whether it remains part of the durable best under the new objective.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current best command without `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Expected risk is regression if zero-CTA still improves compute/communication overlap.
