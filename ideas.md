@@ -2642,3 +2642,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_IGNORE_CPU_AFFINITY=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or worse CPU locality for NCCL helper threads.
   Result: discarded at source state `e660a4d`; 10,528 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Ignoring CPU affinity is clean but below the durable peak, so keep NCCL default CPU-affinity handling.
+
+- Idea: metrics log frequency 1 with NCCL_COMM_BLOCKING=1
+  Current best source commit: 0ad3ae2
+  Source: NCCL communicator progress-semantics probe distinct from PyTorch blocking wait
+  Expected mechanism: Enable NCCL-level blocking communicator behavior. This may reduce host polling or progress jitter in NCCL itself, but it can also reduce asynchronous overlap with compiled GEMMs and FSDP prefetch.
+  Supporting evidence: `TORCH_NCCL_BLOCKING_WAIT=1` was valid but slower. `NCCL_COMM_BLOCKING=1` is a lower-level NCCL knob and has not been tested; if supported by NCCL 2.29.7, it isolates NCCL communicator behavior from PyTorch work-handle waiting.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_COMM_BLOCKING=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower execution from reduced overlap or a no-op if NCCL ignores the variable.
