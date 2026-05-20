@@ -2150,3 +2150,24 @@ Interpretation:
 
 - MXFP8 is not currently a runnable compile-enabled path for this Qwen3 14B source on the installed PyTorch/torchao stack.
 - Restore the no-converter robust prefetch source. Further MXFP8 testing would require either a non-compile diagnostic that is unlikely to beat the current best, or broader stack/source changes outside the current high-probability search path.
+
+## Experiment 77: OMP_NUM_THREADS=2 On Robust Prefetch Baseline
+
+Command:
+
+```bash
+OMP_NUM_THREADS=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run77-flex-prefetch-omp2-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,322, below run70's 8,847 and the robust run59/run62 band of 8,835/8,829.
+- Step 10 MFU: 34.77%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.24839 at step 1 to 6.45117 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Increasing per-rank OpenMP threads from the torchrun default effectively hurts this workload. Keep the default one thread per rank.
+- The next runtime-overhead tests, if any, should not use higher OMP thread counts.

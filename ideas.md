@@ -670,6 +670,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Prefix the exact robust prefetch command with `OMP_NUM_THREADS=2`, keeping `--training.steps=10`, compile, BF16 dtype, local batch size 5, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risk is CPU oversubscription or no measurable effect.
+  Result: discarded at source state `8e03eab`; 8,322 tps with finite decreasing loss, well below the robust prefetch baseline.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
