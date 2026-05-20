@@ -3933,3 +3933,24 @@ Interpretation:
 
 - Disabling FSDP forward-input casts is safe for this BF16 command but does not improve throughput enough to keep.
 - Restore the default FSDP mixed-precision cast policy.
+
+## Experiment 159: SDPA Zero-CTA Loss Chunks 6 With Metrics Color Printing Disabled
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --metrics.disable_color_printing --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run159-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-color-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,921, below the durable chunks=6 command.
+- Step 10 MFU: 37.15%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41445 at step 1 to 6.26338 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Removing ANSI color formatting does not improve the reported throughput.
+- Keep the default metrics formatting unless a human wants cleaner logs; it is not an optimization.

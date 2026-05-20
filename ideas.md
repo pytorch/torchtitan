@@ -1521,3 +1521,13 @@
   Planned source/config changes: Restore default FSDP cast policy.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, and `--metrics.disable_color_printing`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and unchanged memory. Risk is no measurable effect or timing noise.
+  Result: discarded at source state `2f333af`; 9,921 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Removing ANSI color formatting does not help reported throughput.
+
+- Idea: SDPA zero-CTA loss chunks 6 with compiled lm_head
+  Current best source commit: 3a1ed15
+  Source: loss/output projection follow-up after command-level overhead knobs failed
+  Expected mechanism: `ChunkedCELoss` invokes `lm_head` once per loss chunk, and the shared `apply_compile()` helper only compiles transformer blocks, not `lm_head`. Compiling `lm_head` may reduce Python/dispatcher overhead or select a better lowering for the repeated output projection calls.
+  Supporting evidence: The current durable command uses `--loss.num_chunks=6`, so `lm_head` is called repeatedly after the decoder forward. The latest profile shows loss kernels are negligible but GEMM remains dominant; the output projection is part of that GEMM work and is not currently compiled.
+  Planned source/config changes: When model compilation is enabled, call `model.lm_head.compile(backend=compile_config.backend, fullgraph=True)` before FSDP wrapping.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no compile/OOM warnings. Risk is extra compile overhead, an unfavorable Inductor lowering, or FSDP interaction with the compiled linear.
