@@ -2902,3 +2902,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_SCHEDULE_GROUP_SIZE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives from excessive scheduling overhead or no effect if collectives do not use this path.
   Result: discarded at source state `41bbc80`; 10,493 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Finer P2P schedule grouping adds overhead or does not affect the collective path beneficially, so keep the default schedule group size.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_SCHEDULE_GROUP_SIZE=8
+  Current best source commit: df14d9ae
+  Source: high-side bracket after `NCCL_P2P_SCHEDULE_GROUP_SIZE=1` was valid but slower
+  Expected mechanism: Use coarser P2P scheduling groups to reduce per-group scheduling overhead in ring collective work. If the default grouping is too fine for the large FSDP all-gather and reduce-scatter rings, a larger group size may improve throughput; if the default is already optimal or this knob does not affect collectives, it should regress or no-op.
+  Supporting evidence: Run297 showed group size 1 caused a very slow step 2 and only 10,493 tps. A high-side bracket checks whether the useful direction is coarser scheduling rather than finer scheduling.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_SCHEDULE_GROUP_SIZE=8` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap if coarser groups reduce communication/compute interleaving.
