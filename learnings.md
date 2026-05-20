@@ -4633,3 +4633,32 @@ Interpretation:
 
 - The two-worker DataLoader command remains durable but not always at the 10,328 peak.
 - Use 10,301 as the latest stability sample and 10,328 as the measured best for future rerun decisions.
+
+## Experiment 191: Transformer-Layer Partial FSDP Reshard After Forward
+
+Source change:
+
+- Candidate commit: `4c85a38a`.
+- In `parallelize.py`, transformer layers used `reshard_after_forward=4` on the 8-rank FSDP mesh.
+- Root and `lm_head` stayed on the existing bool `reshard_after_forward=True` policy.
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run191-partial-reshard4-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard; source restored to bool resharding after the run.
+- Step 10 `tps`: 9,742, below the validated two-worker command.
+- Step 10 MFU: 36.48%.
+- Step 10 peak memory: 175.80 GiB, 98.57%, above the memory-risk line.
+- Loss moved from 12.35052 at step 1 to 6.09772 at step 10; finite and decreasing.
+- No dataset re-loop, DataLoader worker warning, OOM, traceback, or NCCL warning appeared.
+
+Interpretation:
+
+- Partial layer resharding fits but consumes too much memory and slows the step.
+- The middle ground between bool resharding and no-reshard is not useful at batch160.
+- Keep normal bool `reshard_after_forward=True` for transformer layers.
