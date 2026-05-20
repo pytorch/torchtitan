@@ -2200,3 +2200,18 @@ Retry result:
 Retry interpretation:
 
 - Two invalid attempts show the node is being preempted by short-lived large jobs during launch/compile. For any further retry, require a stable clear window rather than a single clear sample.
+
+Stable-clear retry result:
+
+- Status: keep; new best measured reported `tps`.
+- Step 10 `tps`: 9,198, above run70's 8,847 and above the robust 4096-token run59/run62 band.
+- Step 10 MFU: 36.37%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.33943 at step 1 to 7.96733 at step 10; finite and decreasing.
+- The command kept the same total tokens per step as the 4096x5 baseline: 8 ranks * local batch 10 * seq_len 2048 = 163,840 tokens/step.
+
+Stable-clear retry interpretation:
+
+- The shorter-sequence, larger-batch shape improves reported tokens/sec materially while staying under the 95% memory-risk line.
+- This is a valid kept result under the program's configurable training settings, but it is a workload-shape change and should be tracked separately from the original 4096-token-context source/layout comparisons.
+- Next useful follow-up is a neighboring constant-token shape, such as seq_len 1024 and local batch 20, if the goal is purely reported tps under allowed training-shape tuning.

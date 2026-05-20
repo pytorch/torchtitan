@@ -682,6 +682,7 @@
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss. Risks are OOM from doubled batch metadata/logits, reduced GPU efficiency from shorter sequence, or a non-comparable workload shape that should be logged separately from 4096-token context results.
   Attempt: run78 at source state `4d6dfd5` was invalid; external large GPU processes appeared during the run and the OOM log reported separate 85-93 GiB allocations on the failing GPUs.
   Retry attempt: run79 at source state `8191d88` was also invalid; the OOM log again reported separate ~96 GiB processes on the failing GPUs despite a clear pre-launch check.
+  Result: kept on stable-clear retry run80 at source state `e102690`; 9,198 tps with finite decreasing loss, but classify separately from 4096-token context results because this changes sequence shape.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
