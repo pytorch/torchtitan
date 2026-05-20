@@ -93,19 +93,12 @@ def parallelize_qwen3(
     fully_shard(model, **fsdp_config)
 
     if layers:
-        if model.tok_embeddings is not None:
-            model.tok_embeddings.set_modules_to_forward_prefetch([layers[0]])
         for layer, next_layer in zip(layers, layers[1:]):
             layer.set_modules_to_forward_prefetch([next_layer])
         layers[-1].set_modules_to_forward_prefetch([model.lm_head])
         model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
-        prev_modules = (
-            [model.tok_embeddings, *layers[:-1]]
-            if model.tok_embeddings is not None
-            else layers[:-1]
-        )
-        for layer, prev_module in zip(reversed(layers), reversed(prev_modules)):
-            layer.set_modules_to_backward_prefetch([prev_module])
+        for layer, prev_layer in zip(reversed(layers[1:]), reversed(layers[:-1])):
+            layer.set_modules_to_backward_prefetch([prev_layer])
 
     disable_fsdp_gradient_division(model)
     logger.info(

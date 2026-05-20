@@ -631,6 +631,15 @@
   Result: discarded at source state `d876c83`; 4,790 tps and loss increased from 12.23535 to 15.69855.
   Second result: discarded at source state `d876c83`; 8,524 tps with finite decreasing loss, below both run70 and the older run59/run62 one-module prefetch results.
 
+- Idea: separate tok_embeddings FSDP wrap without embedding prefetch
+  Current best source commit: b6ccf9c
+  Source: variance follow-up after run70-run72
+  Expected mechanism: Separately sharding `tok_embeddings` may reduce root-wrapper communication or residency, while the extra embedding-specific prefetch edges may add scheduling noise. Keeping the separate wrap but reverting to the proven transformer-block/lm_head prefetch chain isolates these effects.
+  Supporting evidence: Run70 was a best measured run, but exact reruns were unstable. The stable run59/run62 source used only transformer-block/lm_head prefetch. This candidate tests whether the small memory reduction from separately wrapping embeddings is useful without changing the prefetch graph at the model ends.
+  Planned source/config changes: Keep `fully_shard(model.tok_embeddings, **fsdp_config)`, remove `model.tok_embeddings.set_modules_to_forward_prefetch([layers[0]])`, and make the first transformer block have no backward prefetch target. Keep all other run59 prefetch edges unchanged.
+  Planned command or config overrides: Exact current best command with a new dump folder.
+  Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or a stable result above the 8,835 simpler prefetch best. Risk is no benefit if embedding prefetch was necessary for run70's best measurement.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
