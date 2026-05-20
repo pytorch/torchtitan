@@ -195,7 +195,6 @@ def qwen3_14b() -> Trainer.Config:
             converters=[
                 Float8LinearConverter.Config(
                     recipe_name="rowwise",
-                    filter_fqns=["auto_filter_small_kn"],
                     model_compile_enabled=True,
                 )
             ],

@@ -905,6 +905,15 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no memory regression. Risks are quantized logits/layers harming short-run loss or FP8 overhead exceeding GEMM savings at seq128.
   Result: discarded at source state `04c966d`; 9,995 tps with finite decreasing loss and 168.57 GiB peak memory, just below the plain SDPA best.
 
+- Idea: FP8 rowwise without auto-filter on SDPA seq128 best
+  Current best source commit: 846907b
+  Source: coverage follow-up after auto-filtered FP8 was close but below plain SDPA
+  Expected mechanism: Removing `auto_filter_small_kn` converts more dimension-compatible linear layers to FP8. On B200 and the seq128 shape, broader coverage may reduce enough GEMM time to overcome quantization overhead.
+  Supporting evidence: Auto-filtered FP8 reached 9,995 tps, only 10 tps below the measured plain SDPA peak. The SDPA profile still has about 2.22 s GEMM kernel time, so one broader coverage test is justified.
+  Planned source/config changes: In `qwen3_14b()`, keep `Float8LinearConverter.Config(recipe_name="rowwise", model_compile_enabled=True)` but remove `filter_fqns=["auto_filter_small_kn"]`.
+  Planned command or config overrides: Run99 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no memory regression. Risks are slower small-linear conversion overhead or loss instability from broader FP8 coverage.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
