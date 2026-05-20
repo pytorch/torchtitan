@@ -3072,3 +3072,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=PAT,Ring` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL rejecting PAT, selecting a slower collective schedule, or simply falling back to Ring without benefit.
   Result: discarded at source state `8acea97`; 10,266 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. PAT is valid but substantially below peak, so close explicit algorithm preference and keep NCCL automatic selection.
+
+- Idea: exact current best rerun after algorithm preference closure
+  Current best source commit: 7f115db
+  Source: calibration after explicit `NCCL_ALGO` preferences for NVLS, NVLSTree, and PAT all underperformed automatic selection
+  Expected mechanism: Repeat the exact durable command to measure current variance after closing the algorithm-list axis. Exact reruns have periodically sampled the highest measured throughput in this experiment, and a clean calibration gives a comparator before changing source or another config knob.
+  Supporting evidence: Runs 312-314 were all valid but below peak. Prior exact reruns such as run242 and run302 sampled materially higher than nearby runtime knobs, so a calibration run can distinguish environment variance from real knob regressions.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
