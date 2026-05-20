@@ -3191,6 +3191,7 @@
   Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, replace per-layer `fully_shard(layer, **fsdp_config)` with pairwise grouped `fully_shard(layers[i : i + 2], **fsdp_config)`, leaving `lm_head`, root FSDP, and the existing one-module prefetch chain unchanged.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator retry/OOM. Risk is higher memory or worse overlap if two-layer all-gathers become too coarse.
+  Result: discarded at source state `e0b48db`; 10,561 tps with finite overall-decreasing loss and 169.86 GiB peak memory. Pairwise FSDP grouping fits but does not beat per-layer grouping, so restore one FSDP group per transformer layer.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b

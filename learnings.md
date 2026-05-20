@@ -7850,3 +7850,30 @@ Interpretation:
 
 - SDPA Flash attention is valid for this shape, but forcing it does not improve throughput.
 - The durable SDPA backend priority remains better; restore the default backend list.
+
+## Experiment 330: Two-Layer FSDP Parameter Groups
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run330-two-layer-fsdp-groups-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Replaced per-layer `fully_shard(layer, **fsdp_config)` with pairwise grouped `fully_shard(layers[i : i + 2], **fsdp_config)`.
+- Left `lm_head`, root FSDP, block compile, and the one-module prefetch chain unchanged.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,561, below the run318 10,658 measured peak.
+- Step 10 MFU: 39.55%.
+- Step 10 peak memory: 169.86 GiB, 95.24%.
+- Loss moved from 12.63408 at step 1 to 4.60494 at step 10; finite and overall decreasing, although step 3 and step 10 rose locally.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Grouping two transformer layers per FSDP parameter group is valid and fits, but it increases memory and remains below the durable per-layer FSDP grouping.
+- The reduction in collective count does not compensate for coarser all-gather granularity or weaker overlap. Restore one FSDP group per transformer layer.
