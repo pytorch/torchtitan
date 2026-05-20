@@ -1671,3 +1671,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Exact run173 command with a new dump folder.
   Success criteria and expected risk: Promote only if the rerun stays above 10,258 tps with finite decreasing loss and no warnings; otherwise discard the BF16 optimizer-state change.
+  Result: discarded at source state `f7e3b40`; 9,833 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. BF16 fused optimizer states do not validate.
+
+- Idea: SDPA zero-CTA loss chunks 6 with NCCL_MAX_CTAS=16
+  Current best source commit: 3a1ed15
+  Source: communication occupancy follow-up after channel, protocol, and stream variants failed
+  Expected mechanism: `NCCL_MAX_CTAS=16` caps the number of CTAs NCCL kernels may use. With `NCCL_CTA_POLICY=2`, this may leave more SM capacity for overlapping compiled transformer compute while still allowing NCCL to make progress.
+  Supporting evidence: The durable profile still has substantial NCCL time. Prior `NCCL_NTHREADS=128`, channel caps, protocol overrides, and stream ordering did not help, but none directly tested a CTA-count cap.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2 NCCL_MAX_CTAS=16` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL warnings. Risk is slower collectives if the cap underfeeds NCCL.

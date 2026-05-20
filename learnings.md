@@ -4250,3 +4250,24 @@ Interpretation:
 
 - BF16 fused optimizer states may be a small optimizer-side improvement on the current command.
 - Because the gain is small, run an exact rerun before treating it as durable.
+
+## Experiment 174: Exact Rerun of BF16 Fused Optimizer States
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --optimizer.implementation=fused_opt_states_bf16 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run174-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-bf16-optimizer-states-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,833, below the durable chunks=6 command.
+- Step 10 MFU: 36.82%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.33712 at step 1 to 5.90804 at step 10; finite and decreasing.
+
+Interpretation:
+
+- BF16 fused optimizer states do not validate; run173 was timing variance.
+- Keep the default fused AdamW optimizer state path.
