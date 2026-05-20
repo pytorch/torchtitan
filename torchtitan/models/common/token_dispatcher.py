@@ -610,10 +610,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         When sp_size > 1, there is no overlap: sync is forced here because
         the SP expansion must read the combine result before returning.
         """
-        from torchtitan.distributed.deepep.deepep import (
-            combine_tokens,
-            sync_combine,
-        )
+        from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
         # pyrefly: ignore [bad-argument-type]
         routed_output = combine_tokens(routed_output, metadata.state)
