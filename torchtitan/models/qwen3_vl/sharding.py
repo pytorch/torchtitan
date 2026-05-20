@@ -8,16 +8,11 @@ from typing import TYPE_CHECKING
 
 from torch.distributed.tensor import Replicate, Shard
 
-from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
-    norm_config,
-    set_decoder_sharding_config,
-    set_dense_ffn_sharding,
-    set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
 )
+from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
@@ -28,64 +23,29 @@ def set_qwen3_vl_sharding_config(
     config: "Qwen3VLModel.Config",
     *,
     loss_parallel: bool,
-    tp_enabled: bool,
+    enable_ep: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3-VL sub-configs.
 
-    Qwen3-VL runs WITHOUT SequenceParallel (``enable_sp=False``): the VLM
-    needs full-sequence access in the decoder for vision scatter and
-    DeepStack. Hidden states flow as DTensor(Replicate) on TP between
-    blocks; only the per-block linears shard on TP and immediately
-    redistribute back to Replicate.
+    Delegates to ``set_qwen3_sharding_config`` with ``enable_sp=False``
+    because Qwen3-VL keeps hidden states as ``Replicate`` (not
+    ``Shard(1)``) -- no SequenceParallel due to vision scatter and
+    DeepStack needing full-sequence access.
 
-    Vision encoder is sharded with the same Replicate-output discipline.
+    Vision encoder is sharded with the same Replicate-output discipline:
+    linears shard on TP for memory but immediately redistribute back to
+    Replicate on output (matching the legacy ``_apply_tp_to_vision_encoder``
+    pattern with ``use_local_output=False``).
     """
-    # Decoder dense (top-level: tok_embeddings, norm, lm_head).
-    set_decoder_sharding_config(config, loss_parallel=loss_parallel, enable_sp=False)
-    for layer_cfg in config.layers:
-        _set_qwen3_vl_layer_sharding(layer_cfg, tp_enabled=tp_enabled)
+    set_qwen3_sharding_config(
+        config,
+        loss_parallel=loss_parallel,
+        enable_sp=False,
+        enable_ep=enable_ep,
+    )
 
-    # Vision encoder.
     if config.vision_encoder is not None:
         _set_vision_encoder_sharding(config.vision_encoder)
-
-
-def _set_qwen3_vl_layer_sharding(
-    layer_cfg,
-    *,
-    tp_enabled: bool,
-) -> None:
-    """Set sharding on one Qwen3-VL decoder layer.
-
-    Mirrors qwen3 with enable_sp=False. MoE sharding is handled
-    separately by the MoE config-based sharding PR.
-    """
-    attention = layer_cfg.attention
-    assert isinstance(attention, GQAttention.Config)
-
-    norm = norm_config(enable_sp=False)
-    layer_cfg.attention_norm.sharding_config = norm
-    layer_cfg.ffn_norm.sharding_config = norm
-
-    set_gqa_attention_sharding(attention, enable_sp=False)
-    set_gqa_inner_attention_local_map(attention.inner_attention)
-
-    # QK norms: shard on head dim (dim=2) -- independent of SP.
-    if attention.qk_norm is not None:
-        attention.qk_norm.sharding_config = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=Replicate())},
-            in_src_shardings={"input": dense_activation_placement(tp=Shard(2))},
-            in_dst_shardings={"input": dense_activation_placement(tp=Shard(2))},
-            out_dst_shardings=dense_activation_placement(tp=Shard(2)),
-        )
-
-    # Dense FFN (non-MoE layers only).
-    if layer_cfg.feed_forward is not None:
-        set_dense_ffn_sharding(
-            layer_cfg.feed_forward,
-            attn_x_placement=Replicate(),
-            enable_sp=False,
-        )
 
 
 def _set_vision_encoder_sharding(ve_cfg) -> None:

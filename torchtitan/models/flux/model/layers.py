@@ -206,32 +206,32 @@ class DoubleStreamBlock(Module):
 
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        ln = LayerNorm.Config(
+        ln_cfg = LayerNorm.Config(
             normalized_shape=config.hidden_size,
             elementwise_affine=False,
             eps=1e-6,
         )
-        gelu = GELU.Config(approximate="tanh")
+        gelu_cfg = GELU.Config(approximate="tanh")
 
         self.img_mod = config.img_mod.build()
-        self.img_norm1 = ln.build()
+        self.img_norm1 = ln_cfg.build()
         self.img_attn = config.img_attn.build()
 
-        self.img_norm2 = ln.build()
+        self.img_norm2 = ln_cfg.build()
         self.img_mlp = Sequential(
             config.img_mlp_in.build(),
-            gelu.build(),
+            gelu_cfg.build(),
             config.img_mlp_out.build(),
         )
 
         self.txt_mod = config.txt_mod.build()
-        self.txt_norm1 = ln.build()
+        self.txt_norm1 = ln_cfg.build()
         self.txt_attn = config.txt_attn.build()
 
-        self.txt_norm2 = ln.build()
+        self.txt_norm2 = ln_cfg.build()
         self.txt_mlp = Sequential(
             config.txt_mlp_in.build(),
-            gelu.build(),
+            gelu_cfg.build(),
             config.txt_mlp_out.build(),
         )
 
