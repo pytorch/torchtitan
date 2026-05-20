@@ -2482,3 +2482,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=16` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is no effect if the runtime caps/ignores the value, or more launch jitter from excess queues.
   Result: discarded at source state `d1ce813`; 10,476 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A high-side connection count is clean but does not improve the current command.
+
+- Idea: exact current best rerun after host and CUDA scheduling probes
+  Current best source commit: a3d25993
+  Source: variance calibration after OMP and CUDA connection brackets closed
+  Expected mechanism: Repeat the exact durable command. Since OMP=2/4 and CUDA max connections 16 all underperformed, an unchanged rerun checks whether the environment still samples in the current-best band and may produce a new measured peak under the high-variance final-step objective.
+  Supporting evidence: Exact reruns have produced the best measured `tps` sample in this experiment, while recent command-only knobs mostly fall into a 10.4k-10.5k band. Calibration is useful before spending runs on lower-confidence transport or allocator toggles.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
