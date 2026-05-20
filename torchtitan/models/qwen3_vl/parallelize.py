@@ -12,7 +12,6 @@ This module applies PT-D parallelisms and various training techniques
 """
 
 import torch
-import torch._inductor.config
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
@@ -25,11 +24,14 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
+
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama4.parallelize import apply_fsdp
+from torchtitan.models.qwen3_vl.model import Qwen3VLModel
 from torchtitan.tools.logging import logger
 
 
@@ -67,7 +69,7 @@ def _apply_fsdp_to_vision_encoder(
 
 
 def parallelize_qwen3_vl(
-    model: nn.Module,
+    model: Qwen3VLModel,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -83,22 +85,23 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallel_dims.cp_enabled:
-        raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
+    if parallelism.full_dtensor:
+        raise NotImplementedError("full_dtensor is not supported yet.")
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
 
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
+
     # model.parallelize walks every Module and applies its sharding_config
     # (decoder dense + MoE + vision encoder).
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
-            raise RuntimeError("Async TP requires torch.compile")
-        # pyrefly: ignore [not-callable]
         model.parallelize(parallel_dims)
-        if parallelism.enable_async_tensor_parallel:
-            torch._inductor.config._micro_pipeline_tp = True
+
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Apply activation checkpointing
     if ac_config.mode != "none":
@@ -110,7 +113,6 @@ def parallelize_qwen3_vl(
         )
         if model.vision_encoder is not None:
             apply_ac(
-                # pyrefly: ignore [bad-argument-type]
                 model.vision_encoder,
                 ac_config,
                 model_compile_enabled=model_compile_enabled,
@@ -121,15 +123,15 @@ def parallelize_qwen3_vl(
     if model_compile_enabled:
         apply_compile(model, compile_config)
         if model.vision_encoder is not None:
-            # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_encoder, compile_config)
 
-    # FSDP mesh setup
+    # Apply FSDP / HSDP unconditionally (fully_shard handles dp_shard=1)
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
     )
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
+    # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
     edp_mesh = None
     if parallel_dims.ep_enabled:
         edp_mesh_names = (
@@ -139,10 +141,9 @@ def parallelize_qwen3_vl(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    # FSDP the vision encoder as a single unit
+    # FSDP the vision encoder as a single unit (see _apply_fsdp_to_vision_encoder)
     if model.vision_encoder is not None:
         _apply_fsdp_to_vision_encoder(
-            # pyrefly: ignore [bad-argument-type]
             model.vision_encoder,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],

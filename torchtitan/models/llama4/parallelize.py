@@ -78,6 +78,7 @@ def parallelize_llama(
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
+    # Set SP size/rank on EP dispatchers for sequence-parallel token splitting.
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )

@@ -17,7 +17,9 @@ This is the same pattern used by ``Linear``, ``RMSNorm``, and
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
+import torch
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
@@ -30,13 +32,15 @@ class Conv2d(nn.Conv2d, Module):
     class Config(Module.Config):
         in_channels: int
         out_channels: int
-        kernel_size: int
-        stride: int = 1
-        padding: int = 0
-        dilation: int = 1
+        kernel_size: int | tuple[int, int]
+        stride: int | tuple[int, int] = 1
+        padding: int | tuple[int, int] | str = 0
+        dilation: int | tuple[int, int] = 1
         groups: int = 1
+        # Diverges from ``Linear.Config.bias`` (which defaults to False) to
+        # match nn.Conv2d's default. The common autoencoder case uses bias.
         bias: bool = True
-        padding_mode: str = "zeros"
+        padding_mode: Literal["zeros", "reflect", "replicate", "circular"] = "zeros"
 
     def __init__(self, config: Config):
         super().__init__(
@@ -48,7 +52,6 @@ class Conv2d(nn.Conv2d, Module):
             dilation=config.dilation,
             groups=config.groups,
             bias=config.bias,
-            # pyrefly: ignore[bad-argument-type]
             padding_mode=config.padding_mode,
         )
 
@@ -102,7 +105,7 @@ class Identity(nn.Identity, Module):
     class Config(Module.Config):
         pass
 
-    def __init__(self, config: Config | None = None):
+    def __init__(self, config: Config):
         super().__init__()
 
 
@@ -111,7 +114,7 @@ class LayerNorm(nn.LayerNorm, Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        normalized_shape: int
+        normalized_shape: int | list[int] | torch.Size
         eps: float = 1e-5
         elementwise_affine: bool = True
         bias: bool = True
@@ -138,7 +141,7 @@ class SiLU(nn.SiLU, Module):
     class Config(Module.Config):
         pass
 
-    def __init__(self, config: Config | None = None):
+    def __init__(self, config: Config):
         super().__init__()
 
 

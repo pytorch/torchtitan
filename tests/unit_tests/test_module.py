@@ -161,6 +161,32 @@ class TestNnModuleWrappers(unittest.TestCase):
         self.assertIsInstance(m, nn.Conv2d)
         self.assertIsInstance(m, Module)
 
+    def test_init_states_calls_reset_parameters(self):
+        """init_states delegates to reset_parameters when no param_init."""
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        m = LayerNorm.Config(normalized_shape=32).build()
+        nn.init.zeros_(m.weight)
+        m.init_states()
+        self.assertTrue(torch.allclose(m.weight, torch.ones(32)))
+
+    def test_init_states_uses_custom_param_init(self):
+        """Custom param_init runs instead of reset_parameters fallback.
+
+        Guards against the old ``from_nn_module`` regression where the
+        injected ``_init_self_parameters`` unconditionally called
+        ``reset_parameters`` and silently dropped ``param_init``.
+        """
+        from torchtitan.models.common.nn_modules import LayerNorm
+
+        m = LayerNorm.Config(
+            normalized_shape=8,
+            param_init={"weight": nn.init.zeros_, "bias": nn.init.zeros_},
+        ).build()
+        m.init_states()
+        self.assertTrue(torch.all(m.weight == 0))
+        self.assertTrue(torch.all(m.bias == 0))
+
     def test_init_states_noop_for_parameterless(self):
         """Parameterless modules handle init_states without error."""
         from torchtitan.models.common.nn_modules import GELU

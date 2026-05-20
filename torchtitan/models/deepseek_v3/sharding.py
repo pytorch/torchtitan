@@ -42,13 +42,17 @@ def set_deepseek_v3_sharding_config(
     *,
     loss_parallel: bool,
     enable_sp: bool,
-    tp_enabled: bool,
-    ep_enabled: bool,
+    enable_ep: bool,
 ) -> None:
     """Fill ``sharding_config`` on all DeepSeek V3 sub-configs.
 
-    Dense sub-configs are populated unconditionally. MoE sub-configs are
-    populated when ``tp_enabled or ep_enabled``.
+    Dense sub-configs (attention, norms, dense FFN) are populated
+    unconditionally — ``Module.parallelize`` filters disabled axes
+    at runtime.
+
+    MoE sub-configs (router, shared experts, routed experts) are
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
     """
 
     set_decoder_sharding_config(
@@ -56,10 +60,7 @@ def set_deepseek_v3_sharding_config(
     )
     for layer_cfg in config.layers:
         _set_deepseek_v3_layer_sharding(
-            layer_cfg,
-            enable_sp=enable_sp,
-            tp_enabled=tp_enabled,
-            ep_enabled=ep_enabled,
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
         )
 
 
@@ -67,13 +68,13 @@ def _set_deepseek_v3_layer_sharding(
     layer_cfg: "DeepSeekV3TransformerBlock.Config",
     *,
     enable_sp: bool,
-    tp_enabled: bool,
-    ep_enabled: bool,
+    enable_ep: bool,
 ) -> None:
     """Set sharding on one DeepSeek V3 transformer layer.
 
     MLA attention: low-rank projections (wkv_a, wq_a, kv_norm, q_norm)
     stay replicated. Up-projections (wkv_b, wq_b, wq) are colwise.
+    MoE FFN is routed through ``set_moe_sharding_config``.
     """
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)
@@ -128,12 +129,11 @@ def _set_deepseek_v3_layer_sharding(
             enable_sp=enable_sp,
         )
 
-    # MoE FFN.
-    if layer_cfg.moe is not None and (tp_enabled or ep_enabled):
+    # MoE FFN (MoE-enabled layers only).
+    if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
-            tp_enabled=tp_enabled,
-            ep_enabled=ep_enabled,
+            enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
