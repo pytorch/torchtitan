@@ -1921,3 +1921,4 @@
   Planned source/config changes: Edit only `qwen3_14b()` to use `model_registry("14B", attn_backend="flex_flash")`.
   Planned command or config overrides: Current best two-worker command unchanged.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no FlexAttention compile/runtime warnings. Risk is extra block-mask and FlexAttention compile overhead outweighing any attention-kernel win at seq_len=128.
+  Result: crash at source state `a8d8ed2`; failed before step 1 in FlexAttention lowering because `BACKEND='FLASH'` requires the CUTE flash attention library, which is not available in this environment. Restore SDPA and do not retest `flex_flash` unless the library becomes available.

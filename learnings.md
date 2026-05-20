@@ -4827,3 +4827,27 @@ Interpretation:
 
 - Float8 conversion saves substantial memory but slows the current batch160 short-sequence command.
 - The warning makes this unattractive as a correctness-sensitive default even before considering throughput. The memory savings could only matter in a separate coupled idea that increases batch size or changes layout, but the converter alone is not a keeper.
+
+## Experiment 199: flex_flash Attention Backend
+
+Source change:
+
+- Changed Qwen3 14B `attn_backend` from `sdpa` to `flex_flash`.
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run199-flex-flash-sdpa-replacement-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash; source should be restored to SDPA.
+- No training step completed, so no tps, MFU, memory, or loss trend is available.
+- The root cause was `torch._inductor.exc.InductorError: LoweringException: RuntimeError: BACKEND='FLASH' but flash attention cannot be used: CUTE flash attention library is not available`.
+- The failure happened during FlexAttention lowering before step 1, after model build and FSDP setup.
+
+Interpretation:
+
+- `flex_flash` is not runnable in this environment despite B200 hardware capability because the required CUTE flash attention library is missing.
+- Keep SDPA as the attention backend for the durable command. A non-FLASH `flex` backend remains a separate possible test, but `flex_flash` is closed unless the environment changes.
