@@ -3101,6 +3101,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_DIRECT_DISABLE=1` and keep `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no NCCL warnings. Risk is slower P2P collectives or initialization failure if direct P2P is required for this topology.
+  Result: discarded at source state `becb1a1`; 10,618 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling NCCL direct P2P is valid but below peak, so keep the default direct P2P path.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
