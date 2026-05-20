@@ -21,6 +21,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
@@ -65,6 +66,9 @@ def parallelize_qwen3(
         raise NotImplementedError(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
+
+    if ac_config.mode != "none":
+        apply_ac(model, ac_config)
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
