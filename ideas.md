@@ -3121,6 +3121,7 @@
   Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, call `fully_shard(model, **root_fsdp_config)` with `root_fsdp_config["reshard_after_forward"] = False`, leaving layer and `lm_head` FSDP configs unchanged.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is memory rising above the preferred envelope or slower execution if root all-gather is not a meaningful bottleneck.
+  Result: discarded at source state `9f2db1d`; 10,513 tps with finite overall-decreasing loss and lower 167.07 GiB peak memory. Root no-reshard reduces reported memory but slows throughput, so restore the durable root FSDP policy.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b

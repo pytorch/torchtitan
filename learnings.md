@@ -7674,3 +7674,30 @@ Interpretation:
 
 - The exact durable command remains healthy after the recent runtime probes, but this sample is low.
 - The current measured peak stays run318 at 10,658 tps. Continue with new probes rather than treating run322 as a source or command regression.
+
+## Experiment 323: Root FSDP Wrapper With Reshard After Forward Disabled
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run323-root-fsdp-no-reshard-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Left transformer-layer and `lm_head` FSDP configs unchanged.
+- Wrapped the root model with `reshard_after_forward=False` to keep root-owned parameters unsharded through backward.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,513, below the run318 10,658 measured peak.
+- Step 10 MFU: 39.37%.
+- Step 10 peak memory: 167.07 GiB, 93.67%.
+- Loss moved from 12.33516 at step 1 to 7.18008 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Root no-reshard unexpectedly lowers reported peak memory by about 2 GiB, but it does not improve throughput.
+- The root wrapper's default reshard policy remains faster for the current command. Restore durable source before continuing; the memory savings are not useful unless a follow-up spends them on a larger batch or different layout.
