@@ -3954,3 +3954,22 @@ Interpretation:
 
 - Removing ANSI color formatting does not improve the reported throughput.
 - Keep the default metrics formatting unless a human wants cleaner logs; it is not an optimization.
+
+## Experiment 160: SDPA Zero-CTA Loss Chunks 6 With Compiled lm_head
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run160-sdpa-compiled-lm-head-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- No step metrics were emitted.
+- `torch.compile` failed before step 1 with `fullgraph=True found no compiled frames`; `nn.Linear.forward` was in the Dynamo skipfiles list.
+
+Interpretation:
+
+- Compiling `lm_head` as a plain `nn.Linear` module with `fullgraph=True` is not viable.
+- Restore the uncompiled `lm_head`. Any future output-projection compilation would need a different wrapper or functional path, which is outside the narrow source change for this attempt.

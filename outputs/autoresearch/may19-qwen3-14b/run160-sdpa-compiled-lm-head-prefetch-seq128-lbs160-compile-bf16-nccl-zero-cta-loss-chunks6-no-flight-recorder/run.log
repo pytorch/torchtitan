@@ -1,0 +1,369 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run160-sdpa-compiled-lm-head-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder
+W0519 23:05:55.316000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 23:05:55.316000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 23:05:55.316000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 23:05:55.316000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 23:06:01.220000 3265577 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 23:06:01,993 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 23:06:02,049 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run160-sdpa-compiled-lm-head-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder/structured_logs/training.global_rank_0.20260519-230602-ONFRYP.jsonl
+[rank0]:[titan] 2026-05-19 23:06:02,254 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 23:06:02,257 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 23:06:02,264 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 23:06:02,264 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 23:06:06,621 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 23:06:06,627 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-19 23:06:06,650 - root - INFO - Building qwen3 14B
+[rank0]:[titan] 2026-05-19 23:06:06,732 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-19 23:06:06,885 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-19 23:06:06,885 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-19 23:06:06,885 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-19 23:06:06,901 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-19 23:06:06,980 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-19 23:06:07,464 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-19 23:06:07,465 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-19 23:06:07,467 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-19 23:06:07,467 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-19 23:06:07,483 - root - INFO - Trainer is initialized with local batch size 160, global batch size 1280, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-19 23:06:07,483 - root - INFO - Training starts at step 1
+[rank0]:[rank0]: Traceback (most recent call last):
+[rank0]:[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:[rank0]:     main()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 65, in main
+[rank0]:[rank0]:     trainer.train()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+[rank0]:[rank0]:     return f(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+[rank0]:[rank0]:     self.train_step(data_iterator)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+[rank0]:[rank0]:     loss = self.forward_backward_step(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+[rank0]:[rank0]:     return func(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+[rank0]:[rank0]:     loss = self.loss_fn(pred, labels, global_valid_tokens)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+[rank0]:[rank0]:     logits = lm_head(h_chunk)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:[rank0]:     return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+[rank0]:[rank0]:     raise RuntimeError(msg)
+[rank0]:[rank0]: RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+[rank0]:[rank0]:   - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+[rank0]:[rank0]:   - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+W0519 23:06:23.948000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3265577 closing signal SIGTERM
+W0519 23:06:23.949000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3265578 closing signal SIGTERM
+W0519 23:06:23.949000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3265580 closing signal SIGTERM
+W0519 23:06:23.949000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3265581 closing signal SIGTERM
+W0519 23:06:23.949000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3265582 closing signal SIGTERM
+W0519 23:06:23.949000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3265583 closing signal SIGTERM
+W0519 23:06:23.949000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 3265584 closing signal SIGTERM
+E0519 23:06:27.525000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 2 (pid: 3265579) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0519 23:06:27.529000 3265417 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/2/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-19_23:06:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 3265577) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/0/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+[2]:
+  time      : 2026-05-19_23:06:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 3265578) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/1/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+[3]:
+  time      : 2026-05-19_23:06:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 3265580) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/3/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+[4]:
+  time      : 2026-05-19_23:06:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : 1 (pid: 3265581) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+[5]:
+  time      : 2026-05-19_23:06:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : 1 (pid: 3265582) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+[6]:
+  time      : 2026-05-19_23:06:20
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : 1 (pid: 3265583) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+[7]:
+  time      : 2026-05-19_23:06:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 3265584) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-19_23:06:19
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 3265579) 
+  error_file: /tmp/torchelastic_21cgxvz3/none_8_jxr0fu/attempt_0/2/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 325, in __call__
+      logits = lm_head(h_chunk)
+               ^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/linear.py:130): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+  
+============================================================

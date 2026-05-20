@@ -1531,3 +1531,13 @@
   Planned source/config changes: When model compilation is enabled, call `model.lm_head.compile(backend=compile_config.backend, fullgraph=True)` before FSDP wrapping.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no compile/OOM warnings. Risk is extra compile overhead, an unfavorable Inductor lowering, or FSDP interaction with the compiled linear.
+  Result: crash at source state `019abea`; Dynamo raised `torch.compile with fullgraph=True found no compiled frames` because `nn.Linear.forward` is in the skipfiles list. Restore the uncompiled `lm_head`.
+
+- Idea: SDPA zero-CTA loss chunks 6 with root FSDP endpoint prefetch
+  Current best source commit: 3a1ed15
+  Source: prefetch endpoint follow-up after lm_head endpoint prefetch validated but embedding-specific wrapping regressed
+  Expected mechanism: The root FSDP wrapper owns parameters not covered by child layer and `lm_head` FSDP groups, such as embeddings/final norm. Adding a root-to-first-layer forward prefetch and first-layer-to-root backward prefetch may overlap the first/last FSDP communications without separately wrapping `tok_embeddings`.
+  Supporting evidence: Separate `tok_embeddings` wrapping plus endpoint prefetch regressed, but the current root wrapper has no endpoint prefetch at either side of the layer chain. The validated schedule already benefits from the layer-to-`lm_head` endpoint; this tests the symmetric root endpoint without changing wrap granularity.
+  Planned source/config changes: Restore uncompiled `lm_head`, then set `model.set_modules_to_forward_prefetch([layers[0]])` and `layers[0].set_modules_to_backward_prefetch([model])` when layers exist.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no FSDP/runtime warnings. Risk is prefetching a parent wrapper being ineffective or harmful.
