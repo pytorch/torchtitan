@@ -1321,3 +1321,13 @@
   Planned source/config changes: None; keep durable bidirectional one-module prefetch.
   Planned command or config overrides: Exact run138 command with a new dump folder.
   Success criteria and expected risk: Keep explicit NVLS only if the rerun remains above 10,023 tps with finite decreasing loss and no allocator/OOM warnings.
+  Result: discarded at source state `21a42ea`; 10,013 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Explicit NVLS does not validate over zero-CTA alone.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with NCCL NVLS disabled
+  Current best source commit: 3d045b1
+  Source: topology follow-up after explicit NVLS failed to validate
+  Expected mechanism: `NCCL_NVLS_ENABLE=0` disables NVLS. If NCCL's default/auto algorithm is using NVLS in a way that is not optimal for short-sequence FSDP reduce-scatter/all-gather, disabling it may improve latency or overlap.
+  Supporting evidence: Explicitly enabling NVLS produced only a tiny non-validating win; deterministic TorchTitan code treats NVLS as a meaningful ordering/algorithm lever. Testing the opposite direction isolates whether NVLS itself is harmful at this shape.
+  Planned source/config changes: None; keep durable bidirectional one-module prefetch.
+  Planned command or config overrides: Current durable zero-CTA command plus `NCCL_NVLS_ENABLE=0`.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication if NVLS is beneficial by default.

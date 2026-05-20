@@ -3491,3 +3491,24 @@ Interpretation:
 
 - Explicit `NCCL_NVLS_ENABLE=1` is memory-neutral and may slightly help, but the margin is tiny.
 - Validate before adding NVLS to the durable command.
+
+## Experiment 139: Exact Rerun Of SDPA Zero-CTA Explicit NCCL NVLS
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_NVLS_ENABLE=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run139-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-nvls-enable-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,013, below run132's validated 10,023.
+- Step 10 MFU: 37.49%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.29644 at step 1 to 7.50432 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Explicit `NCCL_NVLS_ENABLE=1` does not validate over zero-CTA alone.
+- Keep only `NCCL_CTA_POLICY=2` as the durable communication env setting for now.
