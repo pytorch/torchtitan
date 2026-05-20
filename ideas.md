@@ -1202,3 +1202,12 @@
   Planned command or config overrides: Prefix the current durable best command with `TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risks are longer compile time, a slower autotuned choice, or no effect if cuBLAS/ATen remains best.
   Result: discarded at source state `a05a979`; 6,995 tps, 174.02 GiB peak memory, 9 CUDA allocation retries, and loss increased from 12.62944 to 14.30904. Inductor max autotune chooses expensive/high-memory behavior and should not be retried.
+
+- Idea: SDPA seq128 local batch 160 with Inductor cudagraphs
+  Current best source commit: 846907b
+  Source: compiler launch-overhead follow-up after max autotune failed
+  Expected mechanism: `TORCHINDUCTOR_CUDAGRAPHS=1` enables Inductor cudagraphs without changing autotune choices. If repeated compiled transformer blocks have meaningful launch overhead at seq128, cudagraphs may improve tps while keeping the current cuBLAS/ATen matmul choices.
+  Supporting evidence: The env var maps to `torch._inductor.config.triton.cudagraphs=True`. Max autotune was bad because it changed memory/autotune behavior; this test isolates cudagraph launch capture.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current durable best command with `TORCHINDUCTOR_CUDAGRAPHS=1`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is incompatibility with FSDP/NCCL or slower execution from capture overhead.
