@@ -2241,3 +2241,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite, clean, and source logs show `dp_shard=8` with TP disabled. If it exceeds 10,625 tps, record the new measured peak for the same durable command. Risk is only short-window variance.
+  Result: kept as calibration at source state `e12ce86`; 10,446 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The log confirmed `dp_shard=8`, `tp=1`, and the baseline Qwen3 FSDP path, so the TP2 restore is healthy; run215 remains the measured peak.
