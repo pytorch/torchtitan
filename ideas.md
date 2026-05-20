@@ -2212,3 +2212,12 @@
   Planned command or config overrides: Prefix current best command with `NCCL_MAX_CTAS=32` in addition to `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or reduced collective bandwidth if the default CTA count is already optimal.
   Result: discarded at source state `2c400d5`; 10,408 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A 32-CTA cap is still slower, so keep no explicit `NCCL_MAX_CTAS`.
+
+- Idea: exact current best rerun after NCCL/DataLoader brackets
+  Current best source commit: 68f2baa0
+  Source: variance calibration after several low-signal command probes lost to the validated best
+  Expected mechanism: This is an exploit/calibration run, not a new optimization. Repeat the exact current-best command to sample the high-variance final-step `metrics.log_freq=1` measurement after the recent NCCL and DataLoader brackets.
+  Supporting evidence: Run215 measured 10,625 tps, while exact reruns have ranged lower. A fresh exact sample can reveal whether the same durable command can produce a higher measured peak without adding a losing knob.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command from run215.
+  Success criteria and expected risk: Keep as calibration if finite and clean. If it exceeds 10,625, record it as the new measured peak for the same durable command.
