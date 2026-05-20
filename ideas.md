@@ -1332,3 +1332,12 @@
   Planned command or config overrides: Current durable zero-CTA command plus `NCCL_NVLS_ENABLE=0`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication if NVLS is beneficial by default.
   Result: discarded at source state `512398a`; 10,008 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Disabling NVLS does not beat zero-CTA alone.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with configured full activation checkpointing applied
+  Current best source commit: 3d045b1
+  Source: memory-for-batch exploration after command-level NCCL pressure knobs plateaued
+  Expected mechanism: `qwen3_14b()` config requests full activation checkpointing, but the generated Qwen3 parallelize path currently does not apply it. Applying AC before per-block compile and FSDP may reduce activation memory enough to enable later larger batches, at the cost of recomputation.
+  Supporting evidence: The transformers backend applies `apply_ac()` before per-block compile. The durable run uses 168.57 GiB, so a large memory reduction could create meaningful batch-size headroom if the speed cost is not prohibitive.
+  Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to import `apply_ac` and call it when `ac_config.mode != "none"` before `apply_compile`.
+  Planned command or config overrides: Current durable zero-CTA command with seq128/local_batch160.
+  Success criteria and expected risk: The same batch run is expected to be slower; success is enough memory reduction with finite decreasing loss to justify a follow-up larger batch. Risk is large recomputation slowdown, compile/checkpoint incompatibility, or no usable memory headroom.
