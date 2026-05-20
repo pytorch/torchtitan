@@ -813,6 +813,7 @@
   Planned source/config changes: In `parallelize_qwen3()`, call `fully_shard(model.tok_embeddings, **fsdp_config)` before sharding transformer blocks. Do not add endpoint prefetch edges; keep the existing transformer-block/lm_head prefetch chain unchanged.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory below the robust batch-160 baseline. Risks are the instability seen in earlier embedding-wrap reruns or slower root/loss scheduling.
+  Result: discarded at source state `d9c1bc6`; 9,285 tps with finite decreasing loss and 167.75 GiB peak memory. The memory reduction is real but the throughput cost is too high.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

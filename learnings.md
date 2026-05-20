@@ -2490,3 +2490,29 @@ Interpretation:
 
 - Even the one-batch increase over local batch 160 crosses the memory-risk line and does not improve throughput.
 - Close the seq128 batch-headroom branch. Batch 160 remains the practical best until a separate source change reduces memory pressure.
+
+## Experiment 94: Separate `tok_embeddings` FSDP Wrap At Seq128 Batch160
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run94-flex-prefetch-separate-tok-embeddings-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Added `fully_shard(model.tok_embeddings, **fsdp_config)` before sharding transformer blocks.
+- Kept the existing transformer-block/lm_head prefetch chain unchanged.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,285, well below run84's 9,709.
+- Step 10 MFU: 34.77%.
+- Step 10 peak memory: 167.75 GiB, 94.06%.
+- Loss moved from 12.67847 at step 1 to 11.35833 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Separately wrapping `tok_embeddings` does reduce peak memory by roughly 1.2 GiB versus the robust seq128/batch160 best, but the throughput cost is too large.
+- Restore the simpler robust prefetch source. Small memory savings are not useful unless they preserve the transformer/loss scheduling performance.
