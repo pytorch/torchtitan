@@ -2001,3 +2001,4 @@
   Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
   Planned command or config overrides: Current best command with `NCCL_MIN_CTAS=16` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss and no NCCL warnings. Risk is worse compute/communication overlap if more NCCL CTAs contend with transformer GEMMs.
+  Result: discarded at source state `9164c0e`; 10,259 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Forcing a minimum of 16 NCCL CTAs does not improve the current command.
