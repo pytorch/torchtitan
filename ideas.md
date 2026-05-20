@@ -3063,6 +3063,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss, or a clean high-band sample with a plausible memory/scheduling improvement. Risk is extra FSDP wrapper overhead or worse final all-gather ordering; if discarded, restore the durable source.
   Result: discarded at source state `4680f65`; 10,515 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Isolating the final norm endpoint did not beat the durable direct last-layer-to-lm_head prefetch schedule, so restore the durable source.
 
+- Idea: exact current best rerun after final norm source restore
+  Current best source commit: 18fa16d
+  Source: calibration after restoring the durable Qwen3 FSDP source from the discarded final-norm endpoint candidate
+  Expected mechanism: Repeat the exact durable command to verify the source restore recovered the known behavior and to measure current variance before another source/config branch. Exact reruns remain the only samples that have reached the 10.6k tps band.
+  Supporting evidence: Run317 was valid but below peak and changed source scheduling. Earlier source candidate restores were followed by exact calibrations to distinguish a bad idea from accidental source drift.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
