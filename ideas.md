@@ -1331,3 +1331,4 @@
   Planned source/config changes: None; keep durable bidirectional one-module prefetch.
   Planned command or config overrides: Current durable zero-CTA command plus `NCCL_NVLS_ENABLE=0`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication if NVLS is beneficial by default.
+  Result: discarded at source state `512398a`; 10,008 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Disabling NVLS does not beat zero-CTA alone.
