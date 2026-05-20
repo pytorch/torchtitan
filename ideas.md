@@ -3123,6 +3123,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is memory rising above the preferred envelope or slower execution if root all-gather is not a meaningful bottleneck.
   Result: discarded at source state `9f2db1d`; 10,513 tps with finite overall-decreasing loss and lower 167.07 GiB peak memory. Root no-reshard reduces reported memory but slows throughput, so restore the durable root FSDP policy.
 
+- Idea: root FSDP no-reshard with local_batch_size=162
+  Current best source commit: 7fcd2a8
+  Source: follow-up to spend the run323 root no-reshard memory reduction on a larger local batch
+  Expected mechanism: Reapply root-only `reshard_after_forward=False` and increase local batch from 160 to 162. If run323's 2 GiB memory reduction can be converted into more useful tokens per step, the larger batch may recover the source-only throughput loss and improve tps without the high memory seen in durable-source batch162.
+  Supporting evidence: Run323 reduced peak memory from 169.10 GiB to 167.07 GiB but slowed at batch160. Earlier durable-source batch162 and suffix-no-reshard batch162 were slower and memory-risky; this root-only memory profile is different enough to justify one conversion test.
+  Planned source/config changes: Reapply root FSDP `reshard_after_forward=False` in `torchtitan/models/qwen3/parallelize.py`; leave transformer layers and `lm_head` unchanged.
+  Planned command or config overrides: Exact current-best command but set `--training.local_batch_size=162`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and peak memory not materially above the durable command. Risk is slower execution if batch162 does not improve utilization or memory returns above the preferred envelope.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
