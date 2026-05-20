@@ -1912,3 +1912,12 @@
   Planned command or config overrides: Current best two-worker command unchanged.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no float8/Dynamo/runtime warnings that invalidate the run. Risk is slower conversion, compile incompatibility, FP8 numerical degradation, or lower MFU accounting if quantized kernels are not reflected the same way.
   Result: discarded at source state `4614050`; 9,940 tps with finite decreasing loss and 129.86 GiB peak memory, but below the durable best. MFU was reported as N/A and the run logged an FSDPFloat8Linear view warning, so the memory reduction is not worth keeping for the current throughput objective.
+
+- Idea: Qwen3 14B flex_flash attention backend
+  Current best source commit: 591cc794
+  Source: attention-kernel backend probe after compute and memory probes
+  Expected mechanism: `flex_flash` uses FlexAttention with the FLASH backend on Hopper/Blackwell. For short sequence length 128, it may provide a better fused attention kernel or mask path than SDPA while preserving the rest of the current-best FSDP/DataLoader/loss setup.
+  Supporting evidence: Attention kernels were smaller than GEMMs in run184 but still measurable, and `attn_backend` is an explicitly allowed `model_registry(...)` kwarg for `qwen3_14b()`. B200 satisfies the capability check for `flex_flash`.
+  Planned source/config changes: Edit only `qwen3_14b()` to use `model_registry("14B", attn_backend="flex_flash")`.
+  Planned command or config overrides: Current best two-worker command unchanged.
+  Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no FlexAttention compile/runtime warnings. Risk is extra block-mask and FlexAttention compile overhead outweighing any attention-kernel win at seq_len=128.
