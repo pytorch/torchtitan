@@ -2662,3 +2662,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `58dbe97`; 10,532 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The durable command remains healthy but did not resample the measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_LOCAL_REGISTER=0
+  Current best source commit: f75c0714
+  Source: local NCCL source check after transport, protocol, CTA, buffer-size, and runtime progress knobs plateaued
+  Expected mechanism: Disable NCCL local user-buffer registration for collectives. The default registration path may help direct P2P/NVLS access, but this workload has many FSDP all-gather and reduce-scatter buffers around compiled transformer blocks; if registration bookkeeping or cache churn is contributing to tail jitter, disabling it may improve the 10-step reported tps.
+  Supporting evidence: Local NCCL 2.29.7 source defines `NCCL_PARAM(LocalRegister, "LOCAL_REGISTER", 1)` and uses it in collective registration paths. This is distinct from `NCCL_GRAPH_REGISTER`, and does not require CUDA graph capture.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_LOCAL_REGISTER=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower collectives if local registration is important for direct GPU P2P/NVLink or NVLS paths.
