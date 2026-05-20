@@ -694,6 +694,15 @@
   Success criteria and expected risk: Success is tps above 9,198 with finite decreasing loss and no external-allocation contamination. Risks are worse GPU efficiency from smaller attention tiles, dataloader/collation overhead from larger batch count, or memory pressure in logits/loss despite constant token count.
   Result: kept at source state `218caa7`; 9,394 tps with finite decreasing loss, improving on run80 while preserving the same per-step token count.
 
+- Idea: constant-token shorter sequence shape, seq_len 512 and local batch 40
+  Current best source commit: 218caa7
+  Source: follow-up to run81 sequence-shape win
+  Expected mechanism: Lowering sequence length to 512 at local batch 40 keeps the dense token count constant while reducing attention context work again. If the larger batch dimension does not hurt kernels or input overhead, reported tokens/sec may improve beyond 9,394.
+  Supporting evidence: Seq2048/batch10 and seq1024/batch20 both kept the same 163,840 tokens per step and improved throughput, with peak memory unchanged at 168.96 GiB. That suggests another shorter-sequence step is worth testing.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run81 command shape with `--training.seq_len=512 --training.local_batch_size=40`.
+  Success criteria and expected risk: Success is tps above 9,394 with finite decreasing loss and no external-allocation contamination. Risks are lower kernel efficiency for small sequence tiles, higher batch overhead, or a loss sanity failure from the changed sample shape.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
