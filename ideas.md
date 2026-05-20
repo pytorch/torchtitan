@@ -3002,3 +3002,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_CHUNKSIZE=262144` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower overlap from coarser NVLS chunks or no effect if NVLS is not selected.
   Result: discarded at source state `85a2d4e`; 10,512 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Larger NVLS chunks do not beat the durable command, so keep the default chunk size.
+
+- Idea: metrics log frequency 1 with NCCL_NVLS_CHUNKSIZE=65536
+  Current best source commit: d97d7ca2
+  Source: low-side bracket after `NCCL_NVLS_CHUNKSIZE=262144` was valid but below peak
+  Expected mechanism: Lower the NVLS chunk size from 128 KiB to 64 KiB. Smaller chunks may improve compute/communication interleaving for the overlapped FSDP all-gather and reduce-scatter kernels if default chunks are too coarse. If smaller chunks add scheduling overhead or NVLS is not active, it should regress or no-op.
+  Supporting evidence: Run307 showed the 256 KiB high-side NVLS chunk was below peak. A 64 KiB low-side bracket closes whether the default is too coarse or already balanced.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_CHUNKSIZE=65536` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower throughput from extra NVLS chunk overhead or no effect if NVLS is not selected.
