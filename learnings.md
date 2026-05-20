@@ -4900,3 +4900,37 @@ Interpretation:
 
 - Structured JSONL logging is not the bottleneck for the durable command.
 - Keep structured logging enabled by default for better observability.
+
+## Experiment 202: Refreshed Current-Best Profile
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run202-profile-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic profile; profiled tps is not comparable to unprofiled candidates.
+- Step 10 `tps`: 9,756 under profiler.
+- Step 10 MFU: 36.54%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.58333 at step 1 to 5.55688 at step 10; finite and decreasing.
+- Trace files were generated under `profiling/traces/iteration_10`; only `run.log` should be committed.
+
+Rank0 trace summary:
+
+- Total kernel time: 4,266.97 ms across 3,577 kernel events.
+- nvjet GEMMs: 2,162.25 ms across 1,179 events.
+- NCCL kernels: 1,585.51 ms across 183 events.
+- NCCL reduce-scatter: 1,037.15 ms across 66 events.
+- NCCL all-gather: 546.22 ms across 111 events.
+- Triton kernels: 204.31 ms across 1,014 events.
+- Flash attention kernels: 94.24 ms across 229 events.
+- Chunk/split copy kernels: 119.65 ms across 171 events.
+
+Interpretation:
+
+- The refreshed profile agrees with run184: the durable command is dominated by compiled dense GEMMs plus FSDP reduce-scatter/all-gather.
+- Recent negative tests line up with this: DataLoader, structured logging, and attention backend are not the active bottleneck.
+- The next high-leverage ideas should reduce exposed FSDP collective time or materially change GEMM execution. Prior partial resharding, no-reshard, Float8, and TP attempts have regressed, so further source ideas need a narrow mechanism and should avoid memory-risky parameter residency.

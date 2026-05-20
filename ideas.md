@@ -1951,3 +1951,4 @@
   Planned source/config changes: None; keep durable SDPA source.
   Planned command or config overrides: Current best two-worker command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a complete 10-step profile with finite decreasing loss and a usable trace. The profiled tps is diagnostic only and should not be compared directly to unprofiled candidates.
+  Result: diagnostic profile completed at source state `2a15e78`; profiled step 10 reported 9,756 tps with finite decreasing loss and 169.10 GiB peak memory. Rank0 trace showed total kernel time 4,266.97 ms, with nvjet GEMMs 2,162.25 ms, NCCL 1,585.51 ms, Triton 204.31 ms, flash attention 94.24 ms, and chunk/split copy kernels 119.65 ms. Continue targeting GEMM/FSDP collective exposure rather than data loading, attention backend, or logging.
