@@ -2881,3 +2881,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_MEM_SYNC_DOMAIN=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap if NCCL's default remote sync domain is better isolated for communication.
+  Result: discarded at source state `4403dd9`; 10,476 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing NCCL into the default memory sync domain is slower, so keep NCCL's default sync-domain choice.
