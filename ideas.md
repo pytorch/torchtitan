@@ -2921,3 +2921,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_L1_SHARED_MEMORY_CARVEOUT=100` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives if the setting reduces useful L1 cache or worsens occupancy.
+  Result: discarded at source state `7e219ab`; 10,424 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing maximum shared-memory carveout is slower, so keep NCCL's default kernel resource preference.
