@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import ChunkedCELoss
+from torchtitan.components.loss import ChunkedCELoss, MTPLoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -27,7 +27,7 @@ from . import model_registry
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        loss=ChunkedCELoss.Config(),
+        loss=MTPLoss.Config(num_mtp_modules=1, mtp_loss_weight=0.3),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
@@ -43,6 +43,8 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             local_batch_size=8,
             seq_len=2048,
             steps=10,
+            num_mtp_modules=1,
+            mtp_loss_weight=0.3,
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,

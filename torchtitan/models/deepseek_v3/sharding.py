@@ -18,13 +18,14 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_map,
 )
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.deepseek_v3.model import Attention, MTPTransformerBlock
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
         DeepSeekV3Model,
         DeepSeekV3TransformerBlock,
+        MTPTransformerBlock,
     )
 
 
@@ -47,7 +48,9 @@ def set_deepseek_v3_sharding_config(
 
 
 def _set_deepseek_v3_layer_sharding(
-    layer_cfg: "DeepSeekV3TransformerBlock.Config", *, enable_sp: bool
+    layer_cfg: "DeepSeekV3TransformerBlock.Config | MTPTransformerBlock.Config", 
+    *, 
+    enable_sp: bool
 ) -> None:
     """Set sharding on one DeepSeek V3 transformer layer.
 
@@ -106,3 +109,9 @@ def _set_deepseek_v3_layer_sharding(
             attn_x_placement=attn_x_placement,
             enable_sp=enable_sp,
         )
+
+    # MTP-specific sharding
+    if isinstance(layer_cfg, MTPTransformerBlock.Config):
+        layer_cfg.enorm.sharding_config = norm
+        layer_cfg.hnorm.sharding_config = norm
+        layer_cfg.eh_proj.sharding_config = norm
