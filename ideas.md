@@ -953,6 +953,7 @@
   Planned source/config changes: None; use plain SDPA, no converters, bidirectional prefetch.
   Planned command or config overrides: Run99 command shape with `--training.seq_len=256 --training.local_batch_size=80`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and peak memory below the 95% risk line. Risk is repeating the flex result where seq256 was slower.
+  Result: discarded at source state `8512bac`; 9,925 tps with finite decreasing loss and 168.57 GiB peak memory, below the SDPA seq128 best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

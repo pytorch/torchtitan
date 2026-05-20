@@ -2840,3 +2840,24 @@ Interpretation:
 
 - Broad FP8 batch scaling is not viable: batch200 improves over batch160 but remains below plain SDPA, batch220 regresses sharply, and batch240 crashes.
 - Restore the no-converter SDPA source as the current best.
+
+## Experiment 108: SDPA Seq256 Local Batch 80 Constant-Token Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=256 --training.local_batch_size=80 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run108-sdpa-prefetch-seq256-lbs80-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,925, below run99's 10,005.
+- Step 10 MFU: 37.30%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.40858 at step 1 to 6.71122 at step 10; finite and decreasing.
+
+Interpretation:
+
+- SDPA does not shift the constant-token shape optimum upward to seq256.
+- Keep seq128/local-batch-160 as the current best shape; if retesting shapes under SDPA, check the lower-sequence side or exact nearby points rather than larger sequences.
