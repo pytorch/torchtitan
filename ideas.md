@@ -2171,3 +2171,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix current best command with `NCCL_MAX_NCHANNELS=8` in addition to `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is lower collective bandwidth or no effect if default NCCL channel selection is already optimal.
+  Result: discarded at source state `efc19b4`; 10,313 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Lowering NCCL's channel cap to 8 hurts throughput, so keep default channel selection.
