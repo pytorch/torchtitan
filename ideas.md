@@ -1232,3 +1232,12 @@
   Planned command or config overrides: Exact run129 command with a new dump folder.
   Success criteria and expected risk: Keep the high-priority NCCL env knob only if the rerun remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings.
   Result: discarded at source state `e487191`; 9,705 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. The high-priority NCCL stream result was variance, so keep the default ProcessGroupNCCL stream priority.
+
+- Idea: SDPA seq128 local batch 160 with NCCL zero-CTA policy
+  Current best source commit: 846907b
+  Source: communication/compute overlap follow-up after NCCL high-priority stream failed to validate
+  Expected mechanism: `NCCL_CTA_POLICY=2` selects NCCL's zero-CTA policy. On NCCL versions with CTA policy support, this can reduce SM contention from collectives and may improve overlap between FSDP all-gather/reduce-scatter and compiled transformer compute.
+  Supporting evidence: The local PyTorch FSDP documentation for symmetric-memory communication states that zero-CTA ProcessGroupNCCL can also be enabled through `NCCL_CTA_POLICY=2`; `ProcessGroupNCCL.NCCLConfig` exposes `cta_policy`, and the current profile is NCCL-heavy.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Prefix the current durable best command with `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is no effect if the default is already optimal, or slower collectives from under-occupying NCCL kernels.
