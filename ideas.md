@@ -823,6 +823,7 @@
   Planned source/config changes: Add `fully_shard(model.tok_embeddings, **fsdp_config)`, set `model.tok_embeddings` to forward-prefetch the first layer, and set the first layer to backward-prefetch `model.tok_embeddings`; keep all other prefetch edges unchanged.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and lower peak memory than the robust batch-160 baseline. Risk is the same instability seen in earlier endpoint-prefetch reruns or extra scheduling overhead.
+  Result: discarded at source state `81c7ebc`; 9,625 tps and 167.75 GiB peak memory, but loss increased from 12.39433 to 13.89295.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

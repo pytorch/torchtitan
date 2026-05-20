@@ -2516,3 +2516,29 @@ Interpretation:
 
 - Separately wrapping `tok_embeddings` does reduce peak memory by roughly 1.2 GiB versus the robust seq128/batch160 best, but the throughput cost is too large.
 - Restore the simpler robust prefetch source. Small memory savings are not useful unless they preserve the transformer/loss scheduling performance.
+
+## Experiment 95: Separate `tok_embeddings` FSDP Wrap With Endpoint Prefetch At Seq128 Batch160
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run95-flex-prefetch-separate-tok-embeddings-endpoint-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Added separate `tok_embeddings` FSDP wrapping.
+- Added endpoint prefetch edges: embeddings forward-prefetch the first layer, and the first layer backward-prefetches embeddings.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,625, below run84's 9,709.
+- Step 10 MFU: 36.04%.
+- Step 10 peak memory: 167.75 GiB, 94.06%.
+- Loss increased from 12.39433 at step 1 to 13.89295 at step 10.
+
+Interpretation:
+
+- Endpoint prefetch recovers much of the no-endpoint embedding-wrap throughput, but it fails the finite decreasing loss criterion.
+- Abandon the separate-embedding branch for the seq128 best shape and restore the simpler robust prefetch source.
