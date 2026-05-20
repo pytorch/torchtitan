@@ -2461,3 +2461,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `OMP_NUM_THREADS=2` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is CPU oversubscription or another variance-only result.
+  Result: discarded at source state `60155ea`; 10,505 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. OMP=2 is a healthy run but remains below the measured peak, so keep torchrun's default one OpenMP thread per rank.
