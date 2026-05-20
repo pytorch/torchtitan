@@ -9,7 +9,6 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import (
-    distribute_module,
     distribute_tensor,
     DTensor,
     Partial,
@@ -19,7 +18,6 @@ from torch.distributed.tensor import (
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
-    ParallelStyle,
     PrepareModuleInput,
     PrepareModuleInputOutput,
     RowwiseParallel,
@@ -48,58 +46,43 @@ from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.tools.logging import logger
 
 # ---------------------------------------------------------------------------
-# ParallelStyle classes for HF MoE
+# Expert parallelism helpers for HF MoE
 # ---------------------------------------------------------------------------
 
 
-class HFExpertParallel(ParallelStyle):
-    """Expert Parallelism for HF Transformers MoE models.
+def _shard_experts_ep(experts: nn.Module, ep_mesh: DeviceMesh) -> None:
+    """Shard expert params on dim 0 and set up dispatch/combine hooks.
 
-    Thin ParallelStyle: shards expert params on dim 0 and plumbs an
-    ``HFTokenDispatcher`` into ``distribute_module`` input/output hooks.
-    All dispatch/combine logic lives in ``HFTokenDispatcher``.
+    Replaces the former ``HFExpertParallel`` ParallelStyle with explicit
+    param sharding + hooks, matching the config-based approach used by
+    native titan after the ``ExpertParallel`` removal (#3386).
 
-    Mirrors native ``ExpertParallel`` in ``torchtitan/distributed/
-    expert_parallel.py``: the ParallelStyle only shards weights and sets
-    ``ep_group`` on the dispatcher attached to the experts module.
-
-    The dispatcher must be attached to the experts module *before*
-    ``parallelize_module(experts, ep_mesh, HFExpertParallel())`` is
-    called — done in ``apply_moe_ep_tp``. Native models attach it during
-    ``GroupedExperts.__init__``; we can't modify HF's experts module, so
-    we attach externally.
+    The dispatcher must be attached to ``experts.token_dispatcher`` before
+    calling this function.
     """
-
-    def _partition_fn(self, name, mod, device_mesh):
+    # Shard all expert params on dim 0 (the expert dimension)
+    for mod in [experts, *experts.children()]:
         for param_name, param in list(mod.named_parameters(recurse=False)):
             mod.register_parameter(
                 param_name,
-                nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])),
+                nn.Parameter(distribute_tensor(param, ep_mesh, [Shard(0)])),
             )
-        # Only set EP metadata on the top-level experts module
-        # (distribute_module calls _partition_fn on children too).
-        if hasattr(mod, "num_experts"):
-            assert hasattr(mod, "token_dispatcher"), (
-                f"{type(mod).__name__} missing token_dispatcher attribute. "
-                "apply_moe_ep_tp() must attach an HFTokenDispatcher before "
-                "parallelize_module(experts, ep_mesh, HFExpertParallel())."
-            )
-            assert isinstance(
-                mod.token_dispatcher, HFTokenDispatcher
-            ), f"Expected HFTokenDispatcher, got {type(mod.token_dispatcher)}"
-            ep_size = device_mesh.size()
-            mod.token_dispatcher.ep_group = device_mesh.get_group()
-            mod.token_dispatcher.ep_size = ep_size
-            mod.token_dispatcher.num_local_experts = mod.num_experts // ep_size
 
-    def _apply(self, module, device_mesh):
-        return distribute_module(
-            module,
-            device_mesh,
-            partition_fn=self._partition_fn,
-            input_fn=lambda m, inp, _mesh: m.token_dispatcher.dispatch(*inp),
-            output_fn=lambda m, out, _mesh: m.token_dispatcher.combine(out),
-        )
+    assert isinstance(experts.token_dispatcher, HFTokenDispatcher), (
+        f"Expected HFTokenDispatcher, got {type(experts.token_dispatcher)}"
+    )
+    ep_size = ep_mesh.size()
+    experts.token_dispatcher.ep_group = ep_mesh.get_group()
+    experts.token_dispatcher.ep_size = ep_size
+    experts.token_dispatcher.num_local_experts = experts.num_experts // ep_size
+
+    # Dispatch/combine hooks (equivalent to distribute_module input/output fns)
+    experts.register_forward_pre_hook(
+        lambda mod, args: mod.token_dispatcher.dispatch(*args)
+    )
+    experts.register_forward_hook(
+        lambda mod, args, output: mod.token_dispatcher.combine(output)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +470,7 @@ def apply_moe_ep_tp(
                 num_experts=experts.num_experts,
                 top_k=top_k,
             ).build()
-            parallelize_module(experts, ep_mesh, HFExpertParallel())
+            _shard_experts_ep(experts, ep_mesh)
 
         # --- TP: shard expert weights (TP-only), replicate gate, hooks ---
         if tp_mesh is not None:
