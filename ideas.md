@@ -2312,3 +2312,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_CGA_CLUSTER_SIZE=4` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse collective occupancy, less GEMM overlap, or NCCL ignoring the variable on this build.
   Result: discarded at source state `d7564fc`; 10,428 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing CGA cluster size 4 slows the current command, including an early step-2 throughput dip, so keep NCCL's default cluster selection.
+
+- Idea: metrics log frequency 1 with NCCL_MIN_NCHANNELS=32
+  Current best source commit: 6188b5c6
+  Source: NCCL channel-count follow-up after `NCCL_MAX_NCHANNELS=8/16` and `NCCL_MIN_NCHANNELS=16` did not beat the current best
+  Expected mechanism: Force NCCL to use at least 32 channels for collectives. If reduce-scatter/all-gather latency is limited by insufficient channel parallelism on the B200/NVLink topology, a higher floor may reduce exposed FSDP communication time and improve the final step.
+  Supporting evidence: Run219's current-best profile still put NCCL behind only GEMMs. Lowering channel caps hurt, but the higher-channel direction has only been tested to 16 and may not have been enough to materially alter the chosen kernels.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_MIN_NCHANNELS=32` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse GEMM overlap, extra launch overhead, or NCCL ignoring/capping the request.
