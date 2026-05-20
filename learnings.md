@@ -5369,3 +5369,25 @@ Interpretation:
 
 - Coordinate descent without max autotune still increases memory residency materially and does not improve final-step throughput.
 - Close the nearby Inductor tuning axis for this source shape: max autotune, cudagraphs, and coordinate descent have all failed or regressed.
+
+## Experiment 221: Exact Current-Best Rerun After Logfreq1 Follow-Ups
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run221-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration, not a new command.
+- Step 10 `tps`: 10,594, below the run215 10,625 peak but in the validated current-best band.
+- Step 10 MFU: 39.67%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.38243 at step 1 to 6.44687 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The `metrics.log_freq=1` current-best command remains healthy after the logging, batch-shape, profile, and compiler probes.
+- Keep run215's 10,625 tps as the measured peak; this calibration confirms normal short-window variance rather than a hidden source/config regression.
