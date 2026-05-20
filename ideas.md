@@ -2712,3 +2712,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `413c905`; 10,399 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The durable command remains healthy but sampled low after the P2P transport probes.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_NVL_CHUNKSIZE=1048576
+  Current best source commit: 3ec7cf75
+  Source: local NCCL P2P transport chunk-size knob after P2P direction bracket closed
+  Expected mechanism: Increase the NVLink P2P chunk size from the NCCL default 512 KiB to 1 MiB. Larger chunks may reduce per-chunk bookkeeping and improve bandwidth for the large FSDP all-gather/reduce-scatter ring traffic, though they can reduce overlap granularity.
+  Supporting evidence: Local NCCL source defines `NCCL_PARAM(P2pNvlChunkSize, "P2P_NVL_CHUNKSIZE", (1 << 19))`. Global `NCCL_BUFFSIZE` did not help, but this knob is specific to NVLink P2P transport chunking and has not been isolated.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_NVL_CHUNKSIZE=1048576` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap from coarser P2P chunks.
