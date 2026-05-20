@@ -2481,3 +2481,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=16` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is no effect if the runtime caps/ignores the value, or more launch jitter from excess queues.
+  Result: discarded at source state `d1ce813`; 10,476 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A high-side connection count is clean but does not improve the current command.
