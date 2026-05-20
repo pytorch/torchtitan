@@ -2422,3 +2422,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_NTHREADS=512` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower overlap if larger NCCL blocks steal too many SM resources from GEMMs, or NCCL ignoring/capping the setting.
   Result: discarded at source state `92120cd`; 10,453 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The high-side NCCL thread-block bracket is slower, so keep the default NCCL thread-block size with `NCCL_CTA_POLICY=2`.
+
+- Idea: metrics log frequency 1 with loss chunks 8
+  Current best source commit: 0e0f9acb
+  Source: memory/loss-path bracket after NCCL occupancy and transport knobs plateaued
+  Expected mechanism: Increase `loss.num_chunks` from 6 to 8. More loss chunks can reduce peak logits/loss-path activation residency at the cost of more chunked `lm_head` calls; if memory drops without much throughput loss, it may create enough headroom for a later local-batch increase.
+  Supporting evidence: The current durable command remains near the memory risk line at 169.10 GiB, and `ChunkedCELoss`/`lm_head` has been a repeated OOM site in larger-batch candidates. Existing history records chunks 6 as best among nearby tested values, but chunks 8 has not been isolated in the checked-in final SDPA/log-frequency stack.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the exact current-best command with `--loss.num_chunks=8` instead of 6.
+  Success criteria and expected risk: Success is step-10 tps above 10,650, or comparable tps with a meaningful memory drop that can be converted into a follow-up batch-size test. Risk is lower throughput from extra loss chunk overhead with no memory benefit.
