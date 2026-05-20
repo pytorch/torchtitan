@@ -85,12 +85,16 @@ class Llama3Model(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layers[0].attention.inner_attention, VarlenAttention.Config
+            if (
+                parallelism.context_parallel_degree > 1
+                and isinstance(
+                    self.layers[0].attention.inner_attention, VarlenAttention.Config
+                )
+                and not parallelism.full_dtensor
             ):
                 raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
+                    "Varlen attention with CP requires parallelism.full_dtensor=True; "
+                    "the legacy CP path does not all-gather K/V."
                 )
 
             tp = parallelism.tensor_parallel_degree

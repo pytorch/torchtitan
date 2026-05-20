@@ -55,17 +55,19 @@ def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
     All features.py tests run under full_dtensor except PP-only variants
     (see ``_is_pp_only``) and CP + compile variants (upstream symint
     limitation); legacy non-full_dtensor coverage lives in models.py.
-    CP variants also switch to FlexAttention config because
-    full_dtensor + CP is not supported with SDPA / Varlen.
+    CP variants default to FlexAttention (full_dtensor + CP under SDPA is
+    not supported), but variants that already pick their own ``--module``
+    or ``--config`` (e.g. the varlen+CP tests) keep that selection.
     """
     new_args = []
     for variant in t.override_args:
         prefix: list[str] = []
         has_cp = any("context_parallel_degree" in arg for arg in variant)
         has_compile = any("compile.enable" in arg for arg in variant)
+        has_module = any("--module" in arg or "--config" in arg for arg in variant)
         if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
             prefix.append("--parallelism.full_dtensor")
-        if has_cp:
+        if has_cp and not has_module:
             prefix.append("--module llama3 --config llama3_debugmodel_flex_attn")
         new_args.append(tuple(prefix) + tuple(variant))
     return dataclasses.replace(t, override_args=tuple(new_args))
@@ -407,6 +409,45 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "HSDP",
             "hsdp",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "Full DTensor CP (Varlen)",
+            "full_dtensor_cp_varlen",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor CP + FSDP (Varlen)",
+            "full_dtensor_cp_fsdp_varlen",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.data_parallel_shard_degree=2",
+                ]
+            ],
+            "Full DTensor TP + CP + FSDP (Varlen)",
+            "full_dtensor_tp_cp_fsdp_varlen",
+            ngpu=8,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
