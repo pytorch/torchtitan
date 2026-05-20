@@ -588,6 +588,7 @@
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is lower tps if forward prefetch was hiding important forward all-gathers.
   Attempt: run66 at source state `579e621` was invalid; external VLLM workers appeared on GPUs 4-7 and caused a contaminated OOM before any step metrics.
+  Result: discarded on valid retry at source state `579e621`; 8,387 tps with finite decreasing loss, below the 8,835 bidirectional prefetch best.
 
 - Idea: BF16 FSDP reduce dtype on prefetch flex best
   Current best source commit: 7c1c351

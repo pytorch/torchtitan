@@ -1944,3 +1944,22 @@ Result:
 Interpretation:
 
 - This is a contaminated OOM, not evidence against backward-only prefetch. Retry the same source when GPUs are clear.
+
+Retry command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run67-flex-backward-only-prefetch-compile-bf16-lbs5-no-flight-recorder-retry > run.log 2>&1
+```
+
+Retry result:
+
+- Status: discard.
+- Step 10 `tps`: 8,387, below the 8,835 current best.
+- Step 10 MFU: 35.04%.
+- Step 10 peak memory: 168.10 GiB, 94.25%.
+- Loss moved from 12.47595 at step 1 to 7.55834 at step 10; finite and decreasing.
+
+Retry interpretation:
+
+- Forward prefetch is also necessary. Both asymmetric variants lose to the one-module bidirectional prefetch policy.
+- Restore the bidirectional prefetch schedule and stop pursuing narrower prefetch removals for now.
