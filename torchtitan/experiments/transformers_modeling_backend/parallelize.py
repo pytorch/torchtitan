@@ -32,6 +32,10 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.sharding import NamedPlacement, resolve_placements
+from torchtitan.protocols.types import MeshAxisName
+
+EP = MeshAxisName.EP
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -46,27 +50,62 @@ from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.tools.logging import logger
 
 # ---------------------------------------------------------------------------
-# Expert parallelism helpers for HF MoE
+# Config-based sharding for HF modules
 # ---------------------------------------------------------------------------
 
 
-def _shard_experts_ep(experts: nn.Module, ep_mesh: DeviceMesh) -> None:
+def shard_module_states(
+    module: nn.Module,
+    state_shardings: dict[str, NamedPlacement],
+    parallel_dims: ParallelDims,
+) -> None:
+    """Apply declarative state shardings to any ``nn.Module``.
+
+    Mirrors ``Module._shard_states`` from the titan protocol but works on
+    plain ``nn.Module`` subclasses (e.g. HF transformers modules) that
+    don't implement the ``Module`` protocol.
+
+    Unlike ``Module._shard_states``, undeclared params are left unsharded
+    rather than raising — HF modules may carry params we don't need to
+    distribute.
+    """
+    for mod in [module, *module.children()]:
+        for name, param in list(mod.named_parameters(recurse=False)):
+            named_placements = state_shardings.get(name)
+            if named_placements is None:
+                continue
+            mesh = parallel_dims.resolve_mesh(named_placements.keys())
+            if mesh is None:
+                continue
+            placements = resolve_placements(named_placements, mesh)
+            if isinstance(param, DTensor):
+                continue
+            mod.register_parameter(
+                name,
+                nn.Parameter(
+                    distribute_tensor(param, mesh, list(placements)),
+                    requires_grad=param.requires_grad,
+                ),
+            )
+
+
+def _shard_experts_ep(
+    experts: nn.Module, ep_mesh: DeviceMesh, parallel_dims: ParallelDims
+) -> None:
     """Shard expert params on dim 0 and set up dispatch/combine hooks.
 
-    Replaces the former ``HFExpertParallel`` ParallelStyle with explicit
-    param sharding + hooks, matching the config-based approach used by
-    native titan after the ``ExpertParallel`` removal (#3386).
+    Uses ``shard_module_states`` for param distribution, matching the
+    config-based approach used by native titan (#3386).
 
     The dispatcher must be attached to ``experts.token_dispatcher`` before
     calling this function.
     """
-    # Shard all expert params on dim 0 (the expert dimension)
-    for mod in [experts, *experts.children()]:
-        for param_name, param in list(mod.named_parameters(recurse=False)):
-            mod.register_parameter(
-                param_name,
-                nn.Parameter(distribute_tensor(param, ep_mesh, [Shard(0)])),
-            )
+    ep_state_shardings: dict[str, NamedPlacement] = {
+        name: {EP: Shard(0)}
+        for mod in [experts, *experts.children()]
+        for name in mod._parameters
+    }
+    shard_module_states(experts, ep_state_shardings, parallel_dims)
 
     assert isinstance(experts.token_dispatcher, HFTokenDispatcher), (
         f"Expected HFTokenDispatcher, got {type(experts.token_dispatcher)}"
@@ -76,7 +115,6 @@ def _shard_experts_ep(experts: nn.Module, ep_mesh: DeviceMesh) -> None:
     experts.token_dispatcher.ep_size = ep_size
     experts.token_dispatcher.num_local_experts = experts.num_experts // ep_size
 
-    # Dispatch/combine hooks (equivalent to distribute_module input/output fns)
     experts.register_forward_pre_hook(
         lambda mod, args: mod.token_dispatcher.dispatch(*args)
     )
@@ -187,6 +225,7 @@ def parallelize_hf_transformers(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
+            parallel_dims=parallel_dims,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
         )
@@ -417,6 +456,7 @@ def apply_non_moe_tp(
 
 def apply_moe_ep_tp(
     model: nn.Module,
+    parallel_dims: ParallelDims,
     tp_mesh: DeviceMesh | None = None,
     ep_mesh: DeviceMesh | None = None,
 ):
@@ -470,7 +510,7 @@ def apply_moe_ep_tp(
                 num_experts=experts.num_experts,
                 top_k=top_k,
             ).build()
-            _shard_experts_ep(experts, ep_mesh)
+            _shard_experts_ep(experts, ep_mesh, parallel_dims)
 
         # --- TP: shard expert weights (TP-only), replicate gate, hooks ---
         if tp_mesh is not None:
