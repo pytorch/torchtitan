@@ -2682,3 +2682,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LAUNCH_ORDER_IMPLICIT=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect or slower execution if the default ordering is already optimal for the non-captured TorchTitan launch sequence.
   Result: discarded at source state `c24af37`; 10,468 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Implicit launch ordering is valid but slower, so keep NCCL's default launch-ordering behavior.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_READ_ENABLE=0
+  Current best source commit: ff8671e8
+  Source: local NCCL P2P source check after launch-order and registration knobs regressed
+  Expected mechanism: Force NCCL P2P transports to use writes instead of topology-selected reads. NCCL auto-enables P2P reads on NVLink-class topologies, but this FSDP workload's many all-gather/reduce-scatter transfers may favor write direction or avoid read-side pressure on the B200/NVSwitch path.
+  Supporting evidence: Local NCCL source defines `NCCL_PARAM(P2pReadEnable, "P2P_READ_ENABLE", -2)` and lets the topology choose the default. Full `NCCL_P2P_DISABLE=1` was severely slower, so this keeps P2P enabled while isolating read/write direction.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_READ_ENABLE=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower P2P if NCCL's topology-selected read path is already optimal.
