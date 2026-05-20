@@ -2582,3 +2582,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `2eb0805`; 10,588 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is the strongest recent exact rerun but still below run242's 10,650 tps measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_PROTO=LL
+  Current best source commit: d4189d7
+  Source: narrow protocol pin after Simple and LL128 protocols underperformed but profiling showed the default path using LL
+  Expected mechanism: Pin NCCL protocol selection to LL without forcing the algorithm. If default selection sometimes considers or mixes other protocols for FSDP collectives, explicit LL may reduce protocol variance while preserving automatic algorithm choice.
+  Supporting evidence: Previous `NCCL_PROTO=Simple` and `NCCL_PROTO=LL128` were slower. A profile indicated Ring LL on the durable command, but explicit `NCCL_ALGO=Ring` underperformed. This isolates protocol pinning from algorithm pinning.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROTO=LL` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if LL is already selected, or slower collectives if some operations benefited from another protocol.
