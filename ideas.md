@@ -2321,3 +2321,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `NCCL_MIN_NCHANNELS=32` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse GEMM overlap, extra launch overhead, or NCCL ignoring/capping the request.
+  Result: discarded at source state `e8d2173`; 10,497 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Raising the minimum channel count to 32 does not beat NCCL's default channel selection, so close the forced channel-count direction for now.
