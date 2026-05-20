@@ -31,11 +31,10 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.actors.utils import (
     compute_logprobs,
-    extract_response_logprobs,
     PartialLogprobDrift,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
+from torchtitan.experiments.rl.types import OptimStepOutput, TrainBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -302,14 +301,13 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        train_data: list[TrainingBatch],
-        *,
+        train_data: list[TrainBatch],
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            train_data: List of TrainingBatch, one per DP rank. Local rank
+            train_data: List of TrainBatch, one per DP rank. Local rank
                 picks train_data[self.dp_rank].
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
@@ -337,16 +335,16 @@ class PolicyTrainer(Actor, Configurable):
         device = self.device
 
         token_ids = local_batch.token_ids.to(device)
-        seq_lens = local_batch.seq_lens
-        prompt_lens = local_batch.prompt_lens
-        response_lens = local_batch.response_lens
+        positions = local_batch.positions.to(device)
+        response_mask = local_batch.response_mask.to(device)
+        ref_logprobs = local_batch.ref_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        max_seq_len = max(seq_lens)
+        seq_len = token_ids.shape[1]
         rope_cache_len = self.model.freqs_cis.shape[0]
-        if max_seq_len > rope_cache_len:
+        if seq_len > rope_cache_len:
             raise ValueError(
-                f"Episode length {max_seq_len} exceeds rope cache size "
+                f"Sequence length {seq_len} exceeds rope cache size "
                 f"{rope_cache_len}. Increase model max_seq_len or reduce "
                 f"generation max_tokens."
             )
@@ -357,25 +355,24 @@ class PolicyTrainer(Actor, Configurable):
             dtype=torch.float32,
         )
 
-        positions = torch.cat(
-            [torch.arange(l, device=device) for l in seq_lens]
-        ).unsqueeze(0)
         attention_masks = create_varlen_metadata_for_document(positions)
 
         with sl.log_trace_span("model_forward"):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        all_policy_logprobs = compute_logprobs(logits, token_ids)
-        policy_logprobs = extract_response_logprobs(
-            all_policy_logprobs, seq_lens, prompt_lens, response_lens
+        # compute_logprobs returns [B, L-1]; pad first token to be 0 to [B, L]
+        # to align with response_mask
+        policy_logprobs = torch.nn.functional.pad(
+            compute_logprobs(logits, token_ids), (1, 0), value=0.0
         )
 
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
                 policy_logprobs=policy_logprobs,
+                response_mask=response_mask,
                 advantages=advantages,
-                num_global_valid_tokens=num_global_valid_tokens,
+                global_valid_tokens=int(num_global_valid_tokens.item()),
             )
 
         self.optimizers.zero_grad()
@@ -384,10 +381,10 @@ class PolicyTrainer(Actor, Configurable):
 
         # Metrics for bitwise verification of policy logprobs.
         verification: PartialLogprobDrift = verify_logprob_identity(
-            generator_token_logprobs=local_batch.token_logprobs,
-            trainer_token_logprobs=policy_logprobs,
+            ref_logprobs=ref_logprobs,
+            policy_logprobs=policy_logprobs,
+            response_mask=response_mask,
             num_global_valid_tokens=num_global_valid_tokens,
-            device=device,
         )
 
         # Per-rank pre-normalized metrics, so SUM-reducing reconstructs the global.

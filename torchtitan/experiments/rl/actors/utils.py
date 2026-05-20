@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
+from torchtitan.observability import structured_logger as sl
 
 
-
+@sl.log_trace_span("compute_logprobs")
 def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
     """Compute per-token logprobs from logits.
 
@@ -32,42 +35,53 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
     return logprobs.gather(2, shift_targets.unsqueeze(-1)).squeeze(-1)
 
 
-def verify_logprob_identity(
-    policy_logprobs: torch.Tensor,
-    ref_logprobs: torch.Tensor,
-    response_mask: torch.Tensor,
-) -> dict:
-    """Compare trainer logprobs against generator ref_logprobs on response tokens.
+@dataclass(frozen=True, slots=True)
+class PartialLogprobDrift:
+    """Per-rank generator-vs-trainer logprob drift awaiting reduction across the loss-mesh.
 
-    All inputs are [B, L] tensors. Only positions where response_mask == 1
-    are compared.
+    Args:
+        logprob_diff_mean: Scalar tensor; To be sum-reduced.
+        logprob_diff_max: Scalar tensor; To be max-reduced.
+        ratio_tokens_different: Scalar tensor; To be sum-reduced.
+    """
+
+    logprob_diff_mean: torch.Tensor
+    logprob_diff_max: torch.Tensor
+    ratio_tokens_different: torch.Tensor
+
+
+@torch.no_grad()
+@sl.log_trace_span("verify_logprob_identity")
+def verify_logprob_identity(
+    ref_logprobs: torch.Tensor,
+    policy_logprobs: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    num_global_valid_tokens: torch.Tensor,
+) -> PartialLogprobDrift:
+    """Compute per-rank drift between generator and trainer logprobs.
+
+    Args:
+        ref_logprobs: [B, L] reference (generator) logprobs from TrainBatch.
+        policy_logprobs: [B, L] trainer-computed logprobs.
+        response_mask: [B, L] binary mask; 1.0 for response tokens.
+        num_global_valid_tokens: Scalar tensor holding global token count
+            across DP ranks. Used to normalize the output metrics.
 
     Returns:
-        Dict with bitwise_identical, max_delta, diff_mean, diff_max, tokens_checked.
+        PartialLogprobDrift.
     """
     mask = response_mask.bool()
-    num_tokens = mask.sum().item()
+    ref_flat = ref_logprobs[mask].float()
+    policy_flat = policy_logprobs[mask].float()
 
-    if num_tokens == 0:
-        return {
-            "logprob_bitwise_identical": True,
-            "logprob_max_delta": 0.0,
-            "logprob_diff_mean": 0.0,
-            "logprob_diff_max": 0.0,
-            "total_tokens_checked": 0,
-        }
+    if ref_flat.numel() == 0:
+        zero = torch.zeros((), dtype=torch.float32, device=ref_logprobs.device)
+        return PartialLogprobDrift(zero, zero, zero)
 
-    policy_response = policy_logprobs[mask]
-    ref_response = ref_logprobs[mask]
-
-    bitwise_identical = torch.equal(policy_response, ref_response)
-    deltas = (policy_response - ref_response).abs()
-    log_ratio = policy_response - ref_response
-
-    return {
-        "logprob_bitwise_identical": bitwise_identical,
-        "logprob_max_delta": deltas.max().item(),
-        "logprob_diff_mean": log_ratio.mean().item(),
-        "logprob_diff_max": log_ratio.abs().max().item(),
-        "total_tokens_checked": int(num_tokens),
-    }
+    diff = policy_flat - ref_flat
+    return PartialLogprobDrift(
+        logprob_diff_mean=diff.sum() / num_global_valid_tokens,
+        logprob_diff_max=diff.abs().max(),
+        ratio_tokens_different=(diff.abs() > 1e-6).sum() / num_global_valid_tokens,
+    )

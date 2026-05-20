@@ -94,33 +94,25 @@ class GRPOLoss(Configurable):
 
         for b in range(B):
             mask_row = response_mask[b]
-            # Find contiguous runs of 1s: each run is one sample's response.
-            # -1 means not inside a response region.
             response_start = -1
             for i in range(L):
                 if mask_row[i] == 1 and response_start < 0:
                     response_start = i
                 elif mask_row[i] == 0 and response_start >= 0:
-                    self._accumulate_sample(
-                        policy_logprobs[b],
-                        advantages[b],
-                        response_start,
-                        i,
-                        per_sample_ratios,
-                        per_sample_advantages,
-                        per_sample_response_lens,
+                    n = i - response_start
+                    per_sample_ratios.append(
+                        torch.exp(policy_logprobs[b, response_start:i].mean())
                     )
+                    per_sample_advantages.append(advantages[b, response_start:i].mean())
+                    per_sample_response_lens.append(n)
                     response_start = -1
             if response_start >= 0:
-                self._accumulate_sample(
-                    policy_logprobs[b],
-                    advantages[b],
-                    response_start,
-                    L,
-                    per_sample_ratios,
-                    per_sample_advantages,
-                    per_sample_response_lens,
+                n = L - response_start
+                per_sample_ratios.append(
+                    torch.exp(policy_logprobs[b, response_start:L].mean())
                 )
+                per_sample_advantages.append(advantages[b, response_start:L].mean())
+                per_sample_response_lens.append(n)
 
         if not per_sample_ratios:
             zero = policy_logprobs.new_zeros(())
@@ -157,22 +149,6 @@ class GRPOLoss(Configurable):
             }
 
         return pg_loss, metrics
-
-    @staticmethod
-    def _accumulate_sample(
-        logprobs_row: torch.Tensor,
-        advantages_row: torch.Tensor,
-        start: int,
-        end: int,
-        ratios: list[torch.Tensor],
-        advs: list[torch.Tensor],
-        lens: list[int],
-    ) -> None:
-        n = end - start
-        mean_logprob = logprobs_row[start:end].mean()
-        ratios.append(torch.exp(mean_logprob))
-        advs.append(advantages_row[start:end].mean())
-        lens.append(n)
 
 
 class Provisioner:
