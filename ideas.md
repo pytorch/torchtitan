@@ -3071,3 +3071,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=PAT,Ring` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL rejecting PAT, selecting a slower collective schedule, or simply falling back to Ring without benefit.
+  Result: discarded at source state `8acea97`; 10,266 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. PAT is valid but substantially below peak, so close explicit algorithm preference and keep NCCL automatic selection.
