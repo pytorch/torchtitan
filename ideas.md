@@ -2862,3 +2862,12 @@
   Planned command or config overrides: Use the current-best command with `--training.local_batch_size=162` instead of 160, keeping `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and no OOM. Risk is that the larger batch loses convergence stability, exceeds the safe memory envelope, or fails to offset the slower no-reshard scheduling.
   Result: discarded at source state `896b3ef`; 10,557 tps with finite overall-decreasing loss, but peak memory rose to 172.71 GiB (96.84%). The larger batch recovers some throughput versus run292 but remains below peak and above the preferred memory envelope, so restore durable source.
+
+- Idea: exact current best rerun after suffix no-reshard probes
+  Current best source commit: ea71c744
+  Source: calibration after two source candidates changed FSDP reshard scheduling and were restored
+  Expected mechanism: Repeat the exact durable command to confirm the source and node returned to the normal 10.5k-10.65k tps band. This also gives a fresh comparator after the profile-driven FSDP source attempts.
+  Supporting evidence: Runs 292 and 293 were valid but slower, and both required source restoration. Exact reruns have historically sampled the highest tps for the durable source, including 10,650 at run242 and recent high samples around 10,58x.
+  Planned source/config changes: None; durable all-layer FSDP resharding source is restored.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
