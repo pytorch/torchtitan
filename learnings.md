@@ -3911,3 +3911,25 @@ Interpretation:
 
 - `CUDA_DEVICE_MAX_CONNECTIONS=1` is memory-neutral but significantly slower, so the default CUDA connection scheduling is better for this command.
 - Communication progress is sensitive to scheduling, but this knob moves in the wrong direction.
+
+## Experiment 158: SDPA Zero-CTA Loss Chunks 6 With FSDP Forward Input Casts Disabled
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run158-sdpa-no-fsdp-input-casts-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,237, below the durable chunks=6 rerun.
+- Step 10 MFU: 38.33%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.52499 at step 1 to 7.82494 at step 10; finite and decreasing.
+- No dtype/runtime warnings appeared, but step-10 grad norm was higher than usual at 62.75.
+
+Interpretation:
+
+- Disabling FSDP forward-input casts is safe for this BF16 command but does not improve throughput enough to keep.
+- Restore the default FSDP mixed-precision cast policy.

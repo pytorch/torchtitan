@@ -1511,3 +1511,13 @@
   Planned source/config changes: Set `cast_forward_inputs=False` in the Qwen3 FSDP `MixedPrecisionPolicy` while keeping BF16 params and FP32 reductions.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no dtype/runtime warnings. Risk is a hidden FP32 input path requiring the cast.
+  Result: discarded at source state `df2d811`; 10,237 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The no-cast policy is safe for this BF16 command but does not beat the durable chunks=6 rerun, and the step-10 grad norm was higher than usual. Restore default FSDP input casts.
+
+- Idea: SDPA zero-CTA loss chunks 6 with metrics color printing disabled
+  Current best source commit: 3a1ed15
+  Source: reported-throughput overhead follow-up after larger execution-path changes failed
+  Expected mechanism: `--metrics.disable_color_printing` removes ANSI color formatting from the rank0 metric log. Since TorchTitan's step-10 tps window includes the earlier step-1 metric logging interval, reducing log formatting overhead may slightly improve the reported throughput without changing training math.
+  Supporting evidence: Metrics logging happens at step 1 and step 10 for this 10-step command. Structured logging disablement regressed, but color formatting is a narrower output-only knob that preserves structured logging and final metric visibility.
+  Planned source/config changes: Restore default FSDP cast policy.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, and `--metrics.disable_color_printing`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and unchanged memory. Risk is no measurable effect or timing noise.
