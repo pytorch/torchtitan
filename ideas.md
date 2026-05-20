@@ -2362,3 +2362,12 @@
   Planned command or config overrides: Exact current-best command from run242.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record the new measured peak for the same command. Risk is only high single-step variance.
   Result: kept as calibration at source state `524037f`; 10,439 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This does not validate 10,650 as repeatable, but the unchanged durable command remains healthy; keep run242 as the measured peak while treating it as a high-variance sample.
+
+- Idea: separately FSDP-wrap tok_embeddings with prefetch on current SDPA command
+  Current best source commit: 0e3cc231
+  Source: source-level follow-up after command-only NCCL and CUDA scheduling knobs plateaued
+  Expected mechanism: Wrap `tok_embeddings` as its own FSDP unit and connect it to the existing one-module prefetch chain. This separates the large embedding parameters from the root wrapper, may reduce root all-gather pressure, and may give FSDP an earlier first-layer prefetch opportunity.
+  Supporting evidence: An older flex-attention branch saw a small win from separately wrapping embeddings, but that was before the final SDPA/log_freq=1 command and the result was noisy. The current 14B config does not tie embedding and lm_head weights, so separate wrapping is structurally valid.
+  Planned source/config changes: Edit only `torchtitan/models/qwen3/parallelize.py` to `fully_shard(model.tok_embeddings, **fsdp_config)` before layer wrapping, set embedding forward prefetch to the first layer, and set the first layer backward prefetch to the embedding.
+  Planned command or config overrides: Exact current-best command.
+  Success criteria and expected risk: Success is step-10 tps above the 10,650 measured peak or clearly above the current-best calibration band with finite overall-decreasing loss and no FSDP warnings. Risk is extra all-gather overhead, changed prefetch ordering, or root/child FSDP interaction regressions.
