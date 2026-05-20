@@ -501,7 +501,7 @@ class CheckpointManager(Configurable):
         to_hf: bool = False,
     ) -> Future | AsyncSaveResponse | None:
         """
-        Execute the Distributed Checkpoint (DCP) saving process.
+        Execute the DCP saving process.
 
         This method orchestrates the state_dict transformation (e.g., to HuggingFace format),
         selects the appropriate storage writer, and dispatches the save
@@ -602,7 +602,7 @@ class CheckpointManager(Configurable):
         from_quantized: bool,
     ) -> None:
         """
-        Load a Distributed Checkpoint (DCP) into the provided state dictionary.
+        Load a DCP into the provided state dictionary.
 
         This method handles both standard DCP sharded checkpoints and HuggingFace
         safetensors. If loading from HF, it utilizes an adapter to map FQNs and
@@ -982,8 +982,7 @@ class CheckpointManager(Configurable):
 
         This method merges the internal state of the model object into the top-level
         dictionary while keeping auxiliary states (such as optimizers or lr_schedulers)
-        unflattened. This ensures a consistent format for the Distributed Checkpoint
-        (DCP) writer.
+        unflattened. This ensures a consistent format for the DCP writer.
 
         Args:
             state_dict (dict[str, Any], optional): A custom dictionary to flatten.
