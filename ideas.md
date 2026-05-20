@@ -2501,3 +2501,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_CHECKS_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if checks are not on the hot path, or unsafe reduced diagnostics if an error occurs.
+  Result: discarded at source state `9f6ef8f`; 10,446 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling NCCL checks is clean but slower, so keep the default checks behavior.
