@@ -39,5 +39,12 @@ COPY ./common/install_conda.sh install_conda.sh
 COPY ./common/utils.sh utils.sh
 RUN bash ./install_conda.sh && rm install_conda.sh utils.sh /opt/conda/requirements-dev.txt /opt/conda/requirements.txt /opt/conda/requirements-flux.txt /opt/conda/requirements-vlm.txt /opt/conda/conda-env-ci.txt
 
+# Install DeepEP for MoE expert parallelism tests (CUDA only).
+# DeepEP needs CUDA_HOME to JIT kernels at runtime.
+ARG INSTALL_DEEPEP=false
+ENV CUDA_HOME=/usr/local/cuda
+COPY ./common/install_deepep.sh install_deepep.sh
+RUN if [ "$INSTALL_DEEPEP" = "true" ]; then bash ./install_deepep.sh; fi && rm install_deepep.sh
+
 USER ci-user
 CMD ["bash"]

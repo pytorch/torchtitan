@@ -144,9 +144,6 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
 class MXFP8GroupedExpertsConverter(QuantizationConverter):
     """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
 
-    # MXFP8: scaling block size is (1 x 32), so contracting dim must be divisible by 32.
-    PAD_MULTIPLE = 32
-
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
         recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
@@ -154,6 +151,11 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
 
         - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
+        """
+        pad_multiple: int = 32
+        """
+        Pad per-expert token groups to this multiple for MXFP8 grouped GEMM alignment.
+        The CuTeDSL quantization kernel on sm_100 requires multiples of 128.
         """
 
     def __init__(self, config: Config):
@@ -176,7 +178,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
 
     def convert(self, model_config) -> None:
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(config, self.PAD_MULTIPLE)
+            swap_token_dispatcher(config, self.config.pad_multiple)
             base_module_cls = type(config)._owner
             quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]

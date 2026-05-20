@@ -19,12 +19,14 @@ OS=ubuntu
 CLANG_VERSION=""
 PYTHON_VERSION=3.12
 MINICONDA_VERSION=24.3.0-0
+INSTALL_DEEPEP=false
 
 case "${IMAGE_NAME}" in
   torchtitan-ubuntu-22.04-clang12)
     OS_VERSION=22.04
     CLANG_VERSION=12
     BASE_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu${OS_VERSION}
+    INSTALL_DEEPEP=true
     ;;
   torchtitan-rocm-ubuntu-22.04-clang12)
     OS_VERSION=22.04
@@ -44,6 +46,7 @@ docker build \
   --build-arg "CLANG_VERSION=${CLANG_VERSION}" \
   --build-arg "PYTHON_VERSION=${PYTHON_VERSION}" \
   --build-arg "MINICONDA_VERSION=${MINICONDA_VERSION}" \
+  --build-arg "INSTALL_DEEPEP=${INSTALL_DEEPEP}" \
   --shm-size=1g \
   -f "${OS}"/Dockerfile \
   "$@" \
