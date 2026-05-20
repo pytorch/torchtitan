@@ -1192,3 +1192,12 @@
   Planned command or config overrides: Exact run125 command with a new dump folder.
   Success criteria and expected risk: Keep only if it remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings. If it falls below, keep default 8 chunks as the durable loss setting.
   Result: discarded at source state `795501a`; 9,681 tps with finite decreasing loss and 171.48 GiB peak memory. The run125 gain did not validate, so keep default 8 loss chunks.
+
+- Idea: SDPA seq128 local batch 160 with Inductor max autotune
+  Current best source commit: 846907b
+  Source: compiler GEMM tuning follow-up after command/source knobs plateaued
+  Expected mechanism: Enabling `TORCHINDUCTOR_MAX_AUTOTUNE=1` and `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1` lets Inductor autotune GEMM/template choices for the compiled transformer blocks. Since the SDPA profile is GEMM-heavy, better compiled kernels may improve step tps without changing model semantics.
+  Supporting evidence: The local PyTorch config maps those environment variables to `torch._inductor.config.max_autotune=True` and `coordinate_descent_tuning=True`. Run102 showed GEMM as the largest rank0 kernel bucket.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current durable best command with `TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risks are longer compile time, a slower autotuned choice, or no effect if cuBLAS/ATen remains best.
