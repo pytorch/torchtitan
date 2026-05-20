@@ -2372,3 +2372,12 @@
   Planned command or config overrides: Exact current-best command.
   Success criteria and expected risk: Success is step-10 tps above the 10,650 measured peak or clearly above the current-best calibration band with finite overall-decreasing loss and no FSDP warnings. Risk is extra all-gather overhead, changed prefetch ordering, or root/child FSDP interaction regressions.
   Result: discarded at source state `b97a281`; 10,457 tps, 39.16% MFU, and 169.06 GiB peak memory with finite overall-decreasing loss. The separate embedding wrapper saves only about 0.04 GiB and does not improve throughput, so restore the DP-only source without separate embedding FSDP.
+
+- Idea: exact current best rerun after embedding source restore
+  Current best source commit: d6e5ac6e
+  Source: source-restore validation after discarding the separate embedding FSDP candidate
+  Expected mechanism: This is a calibration run, not a new optimization knob. Repeat the exact current-best command to verify the restored DP-only source path still reports `dp_shard=8`, no separate embedding wrapper behavior, and normal throughput/memory.
+  Supporting evidence: Run244 changed `parallelize.py` and was restored. Previous source candidates have required exact post-restore runs to prove the durable source is healthy.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record the new measured peak for the same durable command. Risk is only high single-step variance.
