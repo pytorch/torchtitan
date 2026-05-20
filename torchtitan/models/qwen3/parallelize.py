@@ -87,13 +87,21 @@ def parallelize_qwen3(
     layers = list(model.layers.values())
     for layer in layers:
         fully_shard(layer, **fsdp_config)
+    if model.norm is not None:
+        fully_shard(model.norm, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
     if layers:
         for layer, next_layer in zip(layers, layers[1:]):
             layer.set_modules_to_forward_prefetch([next_layer])
-        layers[-1].set_modules_to_forward_prefetch([model.lm_head])
-        model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
+        if model.norm is not None:
+            layers[-1].set_modules_to_forward_prefetch([model.norm])
+            model.norm.set_modules_to_forward_prefetch([model.lm_head])
+            model.lm_head.set_modules_to_backward_prefetch([model.norm])
+            model.norm.set_modules_to_backward_prefetch([layers[-1]])
+        else:
+            layers[-1].set_modules_to_forward_prefetch([model.lm_head])
+            model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
         for layer, prev_layer in zip(reversed(layers[1:]), reversed(layers[:-1])):
             layer.set_modules_to_backward_prefetch([prev_layer])
 

@@ -3053,6 +3053,15 @@
   Success criteria and expected risk: Success is a completed 10-step run with finite overall-decreasing loss, generated profiler traces, and enough kernel/step data to choose a next experiment. Risk is only profiler overhead; do not rank this run's tps against unprofiled results.
   Result: kept as diagnostic at source state `3dc1138`; profiler completed with 10,527 tps at step 10, 39.42% MFU, finite overall-decreasing loss, unchanged 169.10 GiB peak memory, and traces under `outputs/autoresearch/may19-qwen3-14b/run316-profile-after-nccl-algorithm-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/profiling/traces/iteration_10/`. The current bottleneck picture remains GEMM plus overlapped FSDP ring-LL reduce-scatter/all-gather rather than host or DataLoader idle.
 
+- Idea: final norm FSDP wrap with norm-to-lm_head prefetch chain
+  Current best source commit: dc2d6dc
+  Source: run316 profile after algorithm probes still shows GPU-busy GEMM plus overlapped FSDP all-gather/reduce-scatter, and the current source prefetches directly from the last transformer layer to `lm_head` even though `model.norm` runs between them.
+  Expected mechanism: Separately wrap only `model.norm` and make the terminal chain `last layer -> norm -> lm_head` in forward and `lm_head -> norm -> last layer` in backward. This may expose and order the final root-owned FSDP work without the larger overhead of separately wrapping both `tok_embeddings` and `norm`.
+  Supporting evidence: The full root endpoint source candidate was slower, but it bundled embedding and norm wrapping plus both endpoint chains. The transformer-modeling backend treats final norm plus lm_head as a special FSDP endpoint, and the durable Qwen3 source has no explicit prefetch for the norm between the last layer and chunked-loss `lm_head`.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, call `fully_shard(model.norm, **fsdp_config)` before `lm_head` when present, set the last layer's forward prefetch to `model.norm`, set `model.norm` forward prefetch to `model.lm_head`, set `model.lm_head` backward prefetch to `model.norm`, and set `model.norm` backward prefetch to the last layer. Leave `tok_embeddings` inside the root wrapper.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss, or a clean high-band sample with a plausible memory/scheduling improvement. Risk is extra FSDP wrapper overhead or worse final all-gather ordering; if discarded, restore the durable source.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
