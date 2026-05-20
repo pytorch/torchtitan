@@ -2962,3 +2962,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_LL_THRESHOLD=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect if collectives bypass this P2P threshold, or slower communication if the LL path is useful.
   Result: discarded at source state `f7bc808`; 10,460 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The zero P2P LL threshold is below the durable command, so keep the default threshold.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_LL_THRESHOLD=65536
+  Current best source commit: 0ded9cbc
+  Source: high-side bracket after `NCCL_P2P_LL_THRESHOLD=0` was valid but slower
+  Expected mechanism: Raise the P2P LL threshold from 16 KiB to 64 KiB so more small P2P tasks can use the low-latency path. If the scheduler is handling small P2P fragments around collective work, a larger LL window may reduce latency enough to improve overlap. If this path is irrelevant or adds LL overhead, it should no-op or regress.
+  Supporting evidence: Run303's zero threshold was below peak and had a slow step 2. A high-side bracket distinguishes whether avoiding P2P LL was the wrong direction or whether the threshold is simply irrelevant to the FSDP collective workload.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_LL_THRESHOLD=65536` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is additional low-latency protocol overhead or no effect if collectives bypass this threshold.
