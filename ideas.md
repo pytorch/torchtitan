@@ -2982,3 +2982,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss. Risk is extra FSDP wrappers increasing small all-gather overhead, memory movement, or exposing the root endpoint ordering as slower; if discarded, restore durable source.
   Result: discarded at source state `806ca70`; 10,500 tps with finite overall-decreasing loss and slightly lower 169.06 GiB peak memory. Explicit endpoint wrapping reduces memory by only 0.04 GiB and remains below the durable peak, so restore the durable root-wrapper source.
+
+- Idea: exact current best rerun after root endpoint source restore
+  Current best source commit: efcdd784
+  Source: calibration after restoring durable source from the discarded root endpoint FSDP candidate
+  Expected mechanism: Repeat the exact durable command to confirm source restoration returned to the usual 10.5k-10.65k tps band and that the endpoint wrapping discard did not leave accidental source state behind.
+  Supporting evidence: Source candidates can perturb FSDP wrapping order. Prior restores were followed by exact reruns to confirm the durable implementation was recovered before continuing search.
+  Planned source/config changes: None; durable all-layer FSDP source is restored.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
