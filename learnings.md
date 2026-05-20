@@ -7797,3 +7797,30 @@ Interpretation:
 - GEMM-only autotune is valid but substantially slower and much more memory-heavy on the final SDPA stack.
 - The autotune report mostly selected the existing `mm` extern path over Triton candidates, with only one sampled large shape selecting a Triton kernel. This explains why the flag adds compile/search and memory cost without improving steady-state throughput.
 - Close Inductor GEMM max autotune for this command unless the source shape changes materially.
+
+## Experiment 328: Block Compile With Fullgraph Disabled
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run328-block-compile-fullgraph-false-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Replaced shared Qwen3 `apply_compile()` with an equivalent Qwen-local block compile loop using `fullgraph=False`.
+- Preserved the Dynamo config settings from shared compile and left all FSDP/loss/DataLoader settings unchanged.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,535, below the run318 10,658 measured peak.
+- Step 10 MFU: 39.45%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.44252 at step 1 to 5.79938 at step 10; finite and overall decreasing, although step 3 spiked and step 10 rose slightly from step 9.
+- No graph-break warning, allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Disabling fullgraph is valid but does not improve throughput or memory versus the durable block-level `fullgraph=True` compile.
+- Restore the shared `apply_compile()` path; the current best remains block-level compile with `fullgraph=True`.

@@ -3171,6 +3171,7 @@
   Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, compile each transformer block directly with `fullgraph=False` instead of calling shared `apply_compile()`.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no compile graph-break warnings that imply eager execution. Risk is slower throughput if graph breaks remove fusion or if the generated regions are equivalent but less optimized.
+  Result: discarded at source state `ad640dd`; 10,535 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. `fullgraph=False` is valid but below the durable `fullgraph=True` block compile path, so restore shared `apply_compile()`.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
