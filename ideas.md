@@ -3091,6 +3091,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command but set `--loss.num_chunks=3` instead of 6.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator/OOM warnings. Risk is high memory or OOM because chunks 4 already reached about 171.5 GiB in earlier runs.
+  Result: discarded at source state `214a3df`; 10,287 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Fewer, larger loss chunks are slower; keep `--loss.num_chunks=6`.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
