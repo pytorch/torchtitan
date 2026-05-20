@@ -2751,3 +2751,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_GRAPH_REGISTER=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect or slower execution if graph registration is used beneficially by compiled kernels or NCCL persistent plans.
+  Result: discarded at source state `aabc7e9`; 10,526 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling graph registration is clean but below the durable peak, so keep NCCL's default graph-registration behavior.
