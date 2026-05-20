@@ -5506,3 +5506,25 @@ Interpretation:
 
 - CTA policy 1 is slower than policy 2 and the default/no-policy ablation.
 - Close the CTA-policy bracket and keep `NCCL_CTA_POLICY=2`.
+
+## Experiment 227: Metrics Log Frequency 1 With DataLoader Prefetch Factor 3
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=3 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run227-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch3-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,378, below the validated current best.
+- Step 10 MFU: 38.86%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.45602 at step 1 to 7.90272 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Prefetch factor 3 is slower than the validated prefetch factor 2 setting.
+- The DataLoader axis is closed for this command: two persistent workers with prefetch factor 2 remain best, and fetching is not a relevant bottleneck in the profile.

@@ -2201,3 +2201,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command with `--dataloader.prefetch_factor=3`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no DataLoader warnings. Risk is no measurable effect or slower host scheduling.
+  Result: discarded at source state `7f6c7aa`; 10,378 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Prefetch factor 3 is slower, so keep the validated prefetch factor 2.
