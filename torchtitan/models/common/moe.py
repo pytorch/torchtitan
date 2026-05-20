@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -17,7 +19,10 @@ from torchtitan.models.common.linear import Linear
 
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import AllToAllTokenDispatcher, LocalTokenDispatcher
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 class GroupedExperts(Module):
@@ -369,6 +374,18 @@ class MoE(Module):
         )
 
         return out.reshape(bs, slen, dim)
+
+    def parallelize(self, parallel_dims: ParallelDims) -> None:
+        super().parallelize(parallel_dims)
+        if parallel_dims.ep_enabled:
+            dispatcher = self.experts.token_dispatcher
+            dispatcher.ep_mesh = parallel_dims.get_mesh("ep")
+            if parallel_dims.tp_enabled and isinstance(
+                dispatcher, AllToAllTokenDispatcher
+            ):
+                tp_mesh = parallel_dims.get_mesh("tp")
+                dispatcher.sp_size = tp_mesh.size()
+                dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)

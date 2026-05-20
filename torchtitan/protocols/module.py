@@ -54,9 +54,13 @@ def preserve_buffer_spmd(model: nn.Module) -> Iterator[None]:
             spmd.assert_type(buf, saved[fqn])
 
 
-def named_placement_to_spmd(named: NamedPlacement) -> NamedPlacement:
+def named_placement_to_spmd(
+    named: NamedPlacement,
+    mesh_names: dict[str, object] | None = None,
+) -> NamedPlacement:
     """Drop axes that are not present in the active spmd_types mesh."""
-    mesh_names = spmd.current_mesh_names()
+    if mesh_names is None:
+        mesh_names = spmd.current_mesh_names()
     if mesh_names is None:
         return dict(named)
     resolved = dict(named)
@@ -338,7 +342,42 @@ class Module(nn.Module, Configurable):
             if sharding_config.local_spmd is not None:
                 fn = self.local_spmd(fn, sharding_config.local_spmd)
 
+        # Resolve mesh_reinterpret against the module's mesh (not current_mesh
+        # at call time, which may be a different region).
+        _mesh_reinterpret = sharding_config.mesh_reinterpret
+        _mesh_names = None
+        if mesh is not None and mesh.mesh_dim_names is not None:
+            _mesh_names = {}
+            for name in mesh.mesh_dim_names:
+                pg = mesh.get_group(name)
+                if dist.get_world_size(pg) > 1:
+                    _mesh_names[name] = spmd.MeshAxis.of(pg)
+        _resolved_reinterpret = (
+            named_placement_to_spmd(_mesh_reinterpret, mesh_names=_mesh_names)
+            if _mesh_reinterpret is not None
+            else None
+        )
+
+        def _apply_mesh_reinterpret(t: torch.Tensor) -> torch.Tensor:
+            if not isinstance(t, torch.Tensor) or not spmd.has_local_type(t):
+                return t
+            assert _resolved_reinterpret is not None
+            return spmd.reinterpret_mesh(t, _resolved_reinterpret, inplace=True)
+
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
+            if _mesh_reinterpret and spmd.is_type_checking():
+                with set_current_mesh(mesh):
+                    args = tuple(
+                        _apply_mesh_reinterpret(a) if isinstance(a, torch.Tensor) else a
+                        for a in args
+                    )
+                    kwargs = {
+                        k: _apply_mesh_reinterpret(v) if isinstance(v, torch.Tensor) else v
+                        for k, v in kwargs.items()
+                    }
+                    args, kwargs = self._shard_inputs(args, kwargs)
+                    outputs = fn(*args, **kwargs)
+                    return self._shard_outputs(outputs)
             args, kwargs = self._shard_inputs(args, kwargs)
             outputs = fn(*args, **kwargs)
             return self._shard_outputs(outputs)

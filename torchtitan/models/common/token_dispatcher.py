@@ -9,9 +9,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch import nn
+import spmd_types as spmd
 from torch.distributed._functional_collectives import (
     all_to_all_single,
-    all_to_all_single_autograd,
 )
 from torch.distributed.tensor import DeviceMesh
 
@@ -180,6 +180,26 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
+        assert self.ep_mesh is not None
+        ep_pg = self.ep_mesh.get_group()
+        ep_axis = spmd.MeshAxis.of(ep_pg)
+
+        def annotate_sp_shard(t: torch.Tensor) -> torch.Tensor:
+            if not spmd.is_type_checking():
+                return t
+            if spmd.has_local_type(t):
+                ep_type = spmd.get_local_type(t).get(ep_axis)
+                if ep_type is spmd.R:
+                    t = spmd.reinterpret(
+                        t,
+                        ep_pg,
+                        src=spmd.R,
+                        dst=spmd.V,
+                        expert_mode=True,
+                    )
+            spmd.assert_type(t, {ep_pg: spmd.S(0)})
+            return t
+
         sp_size = self.sp_size
         sp_rank = self.sp_rank
         results = []
@@ -193,7 +213,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 )
             local_num_tokens = num_tokens // sp_size
             offset = sp_rank * local_num_tokens
-            results.append(t[offset : offset + local_num_tokens])
+            results.append(annotate_sp_shard(t[offset : offset + local_num_tokens]))
         return results
 
     def dispatch(
@@ -309,11 +329,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             output_splits_list = output_splits.tolist()
 
         # All-to-all dispatch tokens to EP ranks
-        routed_input = all_to_all_single_autograd(
+        routed_input = spmd.all_to_all(
             routed_input,
-            output_splits_list,
-            input_splits_list,
-            self.ep_mesh,
+            self.ep_mesh.get_group(),
+            src=spmd.S(0),
+            dst=spmd.S(0),
+            output_split_sizes=output_splits_list,
+            input_split_sizes=input_splits_list,
         )
 
         # Reorder from rank-major to expert-major via _permute.
@@ -429,13 +451,14 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         routed_output = self._unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
         )
-        # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
-        # on the NCCL stream and won't block until the tensor is accessed.
-        routed_output = all_to_all_single_autograd(
+        # All-to-all combine
+        routed_output = spmd.all_to_all(
             routed_output,
-            metadata.input_splits,
-            metadata.output_splits,
-            self.ep_mesh,
+            self.ep_mesh.get_group(),
+            src=spmd.S(0),
+            dst=spmd.S(0),
+            output_split_sizes=metadata.input_splits,
+            input_split_sizes=metadata.output_splits,
         )
 
         # shared_experts overlaps with the async a2a (NCCL stream).

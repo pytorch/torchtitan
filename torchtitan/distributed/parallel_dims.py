@@ -90,6 +90,11 @@ class ParallelDims:
             # SPMD config-based model parallelism keeps dp_shard as its own
             # storage axis instead of folding it into fsdp.
             return True
+        if name == "dp_replicate":
+            # Keep dp_replicate unconditionally so SPMD annotations
+            # always include it — needed for dense→sparse mesh
+            # reinterpret (dp → dp_replicate).
+            return True
         if name == "efsdp":
             # We always keep the efsdp if EP is larger than 1 because we need
             # FSDP wrapping to help the MoE layers do mixed precision training.
