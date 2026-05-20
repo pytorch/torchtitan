@@ -6757,3 +6757,25 @@ Interpretation:
 
 - `NCCL_GRAPH_REGISTER=0` is clean but does not improve throughput.
 - Keep default graph registration. Local, multi-segment, and graph registration toggles have all failed to beat the durable command.
+
+## Experiment 283: Metrics Log Frequency 1 With NCCL_CUMEM_HOST_ENABLE=0
+
+Command:
+
+```bash
+NCCL_CUMEM_HOST_ENABLE=0 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run283-nccl-cumem-host-disable-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,415, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.00%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.51652 at step 1 to 5.63717 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, cuMem host warning, SHM warning, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_CUMEM_HOST_ENABLE=0` is valid but slower than the durable command.
+- Keep NCCL's default cuMem host allocation behavior. The broader `NCCL_CUMEM_ENABLE=0` and this narrower host-side toggle are both below the measured peak.

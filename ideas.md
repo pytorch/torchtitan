@@ -2761,3 +2761,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_CUMEM_HOST_ENABLE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower proxy/shm behavior or no effect if host cuMem buffers are not important for the steady-state collectives.
+  Result: discarded at source state `1123580`; 10,415 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling cuMem host allocations is slower, so keep NCCL's default cuMem host behavior.
