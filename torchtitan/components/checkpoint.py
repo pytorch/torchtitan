@@ -523,8 +523,6 @@ class CheckpointManager(Configurable):
         storage_writer: HuggingFaceStorageWriter | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
 
-        checkpoint_save_id = checkpoint_id
-
         # HF Format Conversion
         if to_hf:
             assert self.sd_adapter is not None, "sd_adapter is required for to_hf=True"
@@ -550,9 +548,11 @@ class CheckpointManager(Configurable):
             # The internal consolidation is disabled here and instead `consolidate_safetensors_files_on_every_rank`
             # is used later to manage the multi-file merging process.
 
-            checkpoint_save_id = None  # storage_writer handles the path
-
         # Execution Dispatch
+        checkpoint_save_id = (
+            None if to_hf else checkpoint_id
+        )  # for HF the storage_writer handles the path
+
         if async_mode == AsyncMode.DISABLED:
             ret = dcp.save(
                 state_dict,
