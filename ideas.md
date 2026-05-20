@@ -3151,6 +3151,7 @@
   Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, replace the `apply_compile(model, compile_config)` call with a Qwen-local loop that compiles `layer.attention` and `layer.feed_forward`/`layer.moe` using `backend=compile_config.backend, fullgraph=True`.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no new compiler/FSDP warnings. Risk is slower throughput from losing fusion across RMSNorm/residual boundaries or a compile failure if submodule fullgraph capture handles module boundaries worse than block capture.
+  Result: discarded at source state `4bb42b6`; 10,479 tps with finite overall-decreasing loss and 167.98 GiB peak memory. Finer attention/FFN compile granularity reduces memory versus the durable source but slows throughput, so restore block-level compile.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b

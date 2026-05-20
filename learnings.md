@@ -7747,3 +7747,30 @@ Interpretation:
 
 - This interrupted exact rerun has no performance signal.
 - Do not restart it; continue with new non-current-best probes.
+
+## Experiment 326: Attention And FFN Compile Granularity
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run326-attention-ffn-compile-granularity-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Replaced block-level Qwen3 compile with separate `layer.attention` and `layer.feed_forward`/`layer.moe` compile calls.
+- Left FSDP wrapping, prefetch, SDPA, loss chunking, and DataLoader settings unchanged.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,479, below the run318 10,658 measured peak.
+- Step 10 MFU: 39.24%.
+- Step 10 peak memory: 167.98 GiB, 94.19%.
+- Loss moved from 12.50578 at step 1 to 7.03954 at step 10; finite and overall decreasing, although step 3 spiked and step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Finer attention/FFN compile granularity is valid and lowers memory by about 1.1 GiB, but it is materially slower than block-level compile.
+- The lost fusion or increased compiled-region overhead outweighs the memory saving for the current command. Restore durable block-level compile before continuing.
