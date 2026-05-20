@@ -302,43 +302,73 @@ class FqnRegionExtractor(RegionExtractor):
 
 
 class InductorRegionExtractor(RegionExtractor):
-    """Uses inductor's ``is_fusible_node`` and ``CapabilityBasedPartitioner``
-    to discover fusible regions — matches inductor's actual fusion decisions."""
+    """Applies inductor decompositions, then classifies nodes with
+    ``is_fusible_node`` to discover regions that match inductor's
+    actual fusion decisions.
+
+    Steps:
+      1. Decompose the graph (aten.t → aten.permute, etc.) using
+         inductor's ``select_decomp_table``
+      2. Classify each node as fusible/non-fusible via ``is_fusible_node``
+      3. Group consecutive fusible nodes (split at non-fusible boundaries)
+      4. Split disconnected components via union-find
+    """
+
+    def __init__(self, example_inputs: tuple | None = None):
+        self.example_inputs = example_inputs
 
     def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
+        import time as _time
+
         try:
             from torch._inductor.fx_passes.fusion_regions import (
                 is_fusible_node,
                 is_view_node,
             )
-            from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner
-            from torch.fx.passes.operator_support import create_op_support
         except ImportError:
             logger.warning(
-                "InductorRegionExtractor: inductor partitioner not available, "
+                "InductorRegionExtractor: inductor not available, "
                 "falling back to FqnRegionExtractor"
             )
             return FqnRegionExtractor().extract(gm)
 
-        def _is_supported(_submodules, node):
-            return is_fusible_node(node)
-
-        # CapabilityBasedPartitioner.propose_partitions() is O(n²) due to
-        # DFS cycle checks on every merge attempt. On 10K+ node graphs it
-        # hangs. Workaround: segment by fqn first (fast, O(n)), then run
-        # the partitioner on each segment separately.
-        import time as _time
         _t0 = _time.time()
 
-        # CapabilityBasedPartitioner.propose_partitions() is O(n²) due to
-        # DFS cycle checks on every merge. Instead, group consecutive
-        # fusible nodes (split at non-fusible boundaries) — this matches
-        # inductor's fusion behavior without the expensive merge logic.
-        n_nodes = len(list(gm.graph.nodes))
+        # Step 1: Apply inductor decompositions
+        work_gm = gm
+        if self.example_inputs is not None:
+            try:
+                from torch._inductor.decomposition import select_decomp_table
+                from torch._subclasses.fake_tensor import FakeTensor
+                from torch.fx.experimental.proxy_tensor import make_fx
 
-        # Classify each node as fusible using inductor's heuristic
+                decomp_table = select_decomp_table()
+                fake_mode = None
+                for inp in self.example_inputs:
+                    if isinstance(inp, FakeTensor):
+                        fake_mode = inp.fake_mode
+                        break
+
+                if fake_mode is not None:
+                    with fake_mode:
+                        work_gm = make_fx(
+                            gm,
+                            decomposition_table=decomp_table,
+                            _allow_non_fake_inputs=True,
+                        )(*self.example_inputs)
+                    logger.info(
+                        f"InductorRegionExtractor: decomposed "
+                        f"{len(list(gm.graph.nodes))} → "
+                        f"{len(list(work_gm.graph.nodes))} nodes"
+                    )
+            except Exception as e:
+                logger.warning(f"InductorRegionExtractor: decomposition failed: {e}")
+
+        n_nodes = len(list(work_gm.graph.nodes))
+
+        # Step 2: Classify each node as fusible
         fusible_nodes: set[str] = set()
-        for node in gm.graph.nodes:
+        for node in work_gm.graph.nodes:
             if node.op == "call_function":
                 try:
                     if is_fusible_node(node):
@@ -346,10 +376,10 @@ class InductorRegionExtractor(RegionExtractor):
                 except Exception:
                     pass
 
-        # Group consecutive fusible nodes, split at non-fusible boundaries
+        # Step 3: Group consecutive fusible nodes
         partitions: list[tuple[list[torch.fx.Node], str]] = []
         current_partition: list[torch.fx.Node] = []
-        for node in gm.graph.nodes:
+        for node in work_gm.graph.nodes:
             if node.op != "call_function":
                 continue
             if node.name in fusible_nodes:
@@ -369,15 +399,13 @@ class InductorRegionExtractor(RegionExtractor):
             f"{len(partitions)} partitions in {_time.time()-_t0:.1f}s"
         )
 
+        # Step 4: Split disconnected components, filter
         all_regions: list[Region] = []
         for comp, norm_fqn in partitions:
-            # Skip view-only partitions
             if all(is_view_node(n) or n.op != "call_function" for n in comp):
                 continue
-            # Filter unfusable ops that slipped through
             if any(_is_unfusable(n) for n in comp):
                 continue
-            # Split disconnected components
             for connected in _split_connected(comp):
                 all_regions.append(_build_region(connected, norm_fqn))
 
@@ -877,7 +905,7 @@ def fused_kernel_pass(
             "Falling back to 'fqn'."
         )
         extractor_cls = FqnRegionExtractor
-    if extractor_cls == SchedulerRegionExtractor:
+    if extractor_cls in (SchedulerRegionExtractor, InductorRegionExtractor):
         all_regions = extractor_cls(example_inputs=example_inputs).extract(gm)
     else:
         all_regions = extractor_cls().extract(gm)
