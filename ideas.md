@@ -2732,3 +2732,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_NVL_CHUNKSIZE=262144` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives from excessive chunking overhead.
   Result: discarded at source state `dc58716`; 10,445 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The smaller 256 KiB NVLink P2P chunk is slower, so keep the default 512 KiB chunk size.
+
+- Idea: metrics log frequency 1 with NCCL_MULTI_SEGMENT_REGISTER=0
+  Current best source commit: d0825b92
+  Source: local NCCL registration path check after `NCCL_LOCAL_REGISTER=0` was too broad and slower
+  Expected mechanism: Disable NCCL registration for multi-segment cuMem allocations while keeping local registration enabled for simpler buffers. With `PYTORCH_ALLOC_CONF=expandable_segments:True`, some Torch allocations may be multi-segment; avoiding that registration path could reduce registration bookkeeping without fully giving up the direct registered-buffer path.
+  Supporting evidence: Local NCCL source defines `NCCL_PARAM(MultiSegmentRegister, "MULTI_SEGMENT_REGISTER", 1)` and gates P2P/NVLS/net registration for multi-segment buffers. The broader `NCCL_LOCAL_REGISTER=0` was clean but below peak, so this narrower registration knob is worth isolating.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_MULTI_SEGMENT_REGISTER=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives if multi-segment registration is important for direct P2P/NVLink access.
