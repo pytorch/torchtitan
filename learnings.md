@@ -2427,3 +2427,24 @@ Interpretation:
 
 - The power-of-two sweep's seq128 winner is not just an artifact of coarse sampling: the seq96 midpoint is slower.
 - Do not continue below seq128 unless mapping the curve is the goal; the next shape refinement should test the other side of the peak, between seq128 and seq256.
+
+## Experiment 91: Seq160 Local Batch 128 Constant-Token Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=160 --training.local_batch_size=128 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run91-flex-prefetch-seq160-lbs128-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,383, below run84's 9,709 and the seq96 midpoint.
+- Step 10 MFU: 35.17%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.50969 at step 1 to 7.06432 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The constant-token sequence-shape curve is locally peaked at seq128 among tested neighbors.
+- Seq160 is worse than both seq128 and seq96, so additional shape tests should either be very close to seq128 or use a different mechanism than simple constant-token sequence adjustment.
