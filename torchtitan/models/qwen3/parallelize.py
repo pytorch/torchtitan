@@ -90,15 +90,13 @@ def parallelize_qwen3(
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
 
-    fsdp_modules = [*layers, model.lm_head]
-    for idx, module in enumerate(fsdp_modules):
-        forward_targets = fsdp_modules[idx + 1 : idx + 3]
-        if forward_targets:
-            module.set_modules_to_forward_prefetch(forward_targets)
-
-        backward_targets = list(reversed(fsdp_modules[max(0, idx - 2) : idx]))
-        if backward_targets:
-            module.set_modules_to_backward_prefetch(backward_targets)
+    if layers:
+        for layer, next_layer in zip(layers, layers[1:]):
+            layer.set_modules_to_forward_prefetch([next_layer])
+        layers[-1].set_modules_to_forward_prefetch([model.lm_head])
+        model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
+        for layer, prev_layer in zip(reversed(layers[1:]), reversed(layers[:-1])):
+            layer.set_modules_to_backward_prefetch([prev_layer])
 
     disable_fsdp_gradient_division(model)
     logger.info(

@@ -1120,3 +1120,4 @@
   Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to set forward and backward prefetch targets from the adjacent two modules in the FSDP execution order.
   Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is extra all-gather memory causing OOM or allocator pressure, or too-early prefetch reducing overlap quality.
+  Result: discarded at source state `725c528`; 9,967 tps with finite decreasing loss and 169.80 GiB peak memory. Wider prefetch increases memory and does not improve overlap enough, so restore one-module bidirectional prefetch.
