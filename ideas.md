@@ -1212,3 +1212,12 @@
   Planned command or config overrides: Prefix the current durable best command with `TORCHINDUCTOR_CUDAGRAPHS=1`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is incompatibility with FSDP/NCCL or slower execution from capture overhead.
   Result: crash at source state `47b30d0`; failed during backward with `accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run` from the Qwen3 block forward. Cudagraphs are incompatible with this compiled FSDP training path.
+
+- Idea: SDPA seq128 local batch 160 with NCCL high-priority stream
+  Current best source commit: 846907b
+  Source: communication scheduling follow-up after SDPA profile showed NCCL/reduce-scatter as the largest non-GEMM bucket
+  Expected mechanism: `TORCH_NCCL_HIGH_PRIORITY=1` asks PyTorch ProcessGroupNCCL to create high-priority NCCL streams. If reduce-scatter/all-gather work is waiting behind compute or other default-stream work, high-priority communication may improve overlap without changing tensor semantics.
+  Supporting evidence: The SDPA profile showed rank0 NCCL kernels at roughly 1.69s, with reduce-scatter about 1.27s, while attention itself is only about 0.10s. This is a command-only PyTorch knob and keeps the durable source unchanged.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Prefix the current durable best command with `TORCH_NCCL_HIGH_PRIORITY=1`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is no measurable effect or worse stream scheduling.
