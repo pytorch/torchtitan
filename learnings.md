@@ -7417,3 +7417,25 @@ Interpretation:
 
 - The exact durable command is healthy after NVLS tuning closure, but current variance sampled low.
 - Continue search; do not treat the low exact sample as evidence for any NVLS knob.
+
+## Experiment 312: Metrics Log Frequency 1 With NCCL_ALGO=NVLS,Ring
+
+Command:
+
+```bash
+NCCL_ALGO=NVLS,Ring NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run312-nccl-algo-nvls-ring-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,519, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.39%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.36587 at step 1 to 7.26675 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_ALGO=NVLS,Ring` is valid but below the durable peak.
+- The automatic NCCL algorithm selection remains better for the current FSDP all-gather/reduce-scatter pattern than explicitly preferring NVLS with Ring fallback.

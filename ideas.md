@@ -3051,3 +3051,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=NVLS,Ring` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL initialization failure if the algorithm list is too restrictive or slower throughput if NVLS is selected for unsuitable collectives.
+  Result: discarded at source state `6c44a2e`; 10,519 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The ordered NVLS/Ring algorithm preference is valid but below peak, so keep NCCL's automatic algorithm selection.
