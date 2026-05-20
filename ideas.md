@@ -2672,3 +2672,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LOCAL_REGISTER=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower collectives if local registration is important for direct GPU P2P/NVLink or NVLS paths.
   Result: discarded at source state `c404e6e`; 10,525 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling local registration is clean but below the durable peak, so keep NCCL's default local registration behavior.
+
+- Idea: metrics log frequency 1 with NCCL_LAUNCH_ORDER_IMPLICIT=1
+  Current best source commit: e02d5856
+  Source: local NCCL source check after local registration was not useful
+  Expected mechanism: Enable NCCL's implicit launch ordering mode. If NCCL's default explicit ordering adds host-side dependency bookkeeping or launch jitter across the FSDP prefetch/reduce-scatter sequence, implicit ordering may reduce per-collective overhead on CUDA 13.1.
+  Supporting evidence: Local NCCL 2.29.7 source defines `NCCL_PARAM(LaunchOrderImplicit, "LAUNCH_ORDER_IMPLICIT", 0)` and switches to implicit serial or launch ordering when enabled. This is distinct from `NCCL_LAUNCH_MODE=GROUP`, which was already rejected.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_LAUNCH_ORDER_IMPLICIT=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect or slower execution if the default ordering is already optimal for the non-captured TorchTitan launch sequence.
