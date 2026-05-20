@@ -5915,3 +5915,26 @@ Interpretation:
 
 - Separately wrapping embeddings is structurally valid but only saves about 0.04 GiB and does not improve throughput.
 - Restore the durable source without separate embedding FSDP.
+
+## Experiment 245: Exact Current-Best Rerun After Embedding Source Restore
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run245-rerun-post-embedding-restore-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,560, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.54%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41419 at step 1 to 7.21442 at step 10; finite and overall decreasing.
+- The log confirmed `dp_shard=8`, `tp=1`, and `Applied baseline Qwen3 FSDP`.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The durable DP-only source is restored and healthy after discarding the embedding wrapper candidate.
+- Keep run242's 10,650 tps as the measured peak; this calibration is a normal high-but-not-peak sample.

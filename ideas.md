@@ -2381,3 +2381,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record the new measured peak for the same durable command. Risk is only high single-step variance.
+  Result: kept as calibration at source state `2b92e37`; 10,560 tps, 39.54% MFU, and unchanged 169.10 GiB peak memory. The log confirmed the restored baseline Qwen3 FSDP path, so the embedding source candidate was cleanly removed; run242's 10,650 remains the measured peak.
