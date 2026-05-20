@@ -1932,3 +1932,12 @@
   Planned command or config overrides: Current best two-worker command unchanged.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no FlexAttention compile/runtime warnings. Risk is slower block-mask construction or slower generic FlexAttention kernels than SDPA for this short-sequence workload.
   Result: discarded at source state `3adbc3f`; 9,992 tps with finite decreasing loss and 168.35 GiB peak memory. Plain FlexAttention runs in this environment, but it is slower than the validated SDPA backend for seq_len=128.
+
+- Idea: current best with structured logging disabled
+  Current best source commit: c155720f
+  Source: command-overhead probe after source/backend axes regressed
+  Expected mechanism: Structured JSONL logging writes metric records and setup metadata during the run. Disabling it may shave small host-side overhead from the 10-step benchmark while preserving console tps, loss, and memory reporting.
+  Supporting evidence: Every run writes a structured logger path at startup, and the current-best margin is small enough that low-risk host overhead probes are worth isolating. The flag was only tested earlier on a different FP8/flex path, not the durable SDPA two-worker command.
+  Planned source/config changes: None; keep durable SDPA source.
+  Planned command or config overrides: Current best two-worker command plus `--debug.no-enable-structured-logging`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,301 if rerun-worthy, with finite decreasing loss and no loss of required console metrics. Risk is no measurable effect because step logging is sparse.
