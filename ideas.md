@@ -2832,3 +2832,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LL_BUFFSIZE=1048576` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives from extra LL chunk overhead if the default buffer size is already balancing bandwidth and overlap.
   Result: discarded at source state `b420f98`; 10,446 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Smaller 1 MiB LL buffers do not improve the profiled LL collective bottleneck; keep the default LL buffer size.
+
+- Idea: metrics log frequency 1 with NCCL_LL_BUFFSIZE=4194304
+  Current best source commit: ec82d7c8
+  Source: high-side bracket after the profile-driven 1 MiB LL buffer probe was valid but slower
+  Expected mechanism: Increase or force the LL protocol buffer size to 4 MiB. Larger LL buffers may reduce per-chunk scheduling/bookkeeping overhead and improve bandwidth for the large FSDP reduce-scatter and all-gather `RING_LL` kernels observed in run289, though they can reduce overlap granularity.
+  Supporting evidence: Run290 showed the 1 MiB low-side LL buffer probe was slower at 10,446 tps. A high-side probe distinguishes whether LL collective performance wants coarser buffers rather than finer chunks. This remains narrower than global `NCCL_BUFFSIZE` because the trace specifically showed LL kernels.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_LL_BUFFSIZE=4194304` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap or no effect if 4 MiB equals the default LL buffer size on this build.
