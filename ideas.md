@@ -1681,3 +1681,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2 NCCL_MAX_CTAS=16` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL warnings. Risk is slower collectives if the cap underfeeds NCCL.
+  Result: discarded at source state `b2ac3e8`; 10,243 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Directly capping NCCL CTAs does not beat the durable zero-CTA command.
+
+- Idea: SDPA zero-CTA loss chunks 6 with one DataLoader worker and persistent prefetch
+  Current best source commit: 3a1ed15
+  Source: CPU/input-pipeline follow-up after GPU communication and optimizer variants plateaued
+  Expected mechanism: The `c4_test` text dataset tokenizes and batches on the host. Using one DataLoader worker with persistent workers and prefetching may overlap tokenization/collation for later steps with GPU training, reducing end-to-end time without changing model math.
+  Supporting evidence: The durable command is short-sequence and high batch count, so host input work may be more visible than in long-context runs. No DataLoader worker/prefetch setting has been tested yet.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--dataloader.num_workers=1 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no dataset re-loop or worker warnings. Risk is multiprocessing overhead dominating the tiny local dataset.
