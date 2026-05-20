@@ -2942,3 +2942,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROGRESS_APPENDOP_FREQ=4` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is extra proxy polling overhead or no effect if the collectives do not depend on this path.
   Result: discarded at source state `fc4db2a`; 10,524 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. More frequent append-op polling is also below peak, so close this proxy-progress frequency bracket and keep the default.
+
+- Idea: exact current best rerun after NCCL scheduler/resource probes
+  Current best source commit: 9a05d876
+  Source: calibration after L1 carveout and proxy append-op frequency probes were clean but below the measured peak
+  Expected mechanism: Repeat the durable command unchanged to measure current node variance and confirm the default NCCL scheduler/resource settings still sit in the high band. The measured peak came from an exact rerun, so periodic exact samples remain a valid way to detect whether rejected knobs were simply below normal variance.
+  Supporting evidence: Runs 299-301 did not beat the durable command, while exact reruns in this experiment have repeatedly sampled 10.5k-10.65k tps. After closing another small NCCL axis, a fresh exact rerun gives the next comparator before moving to lower-confidence variables.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
