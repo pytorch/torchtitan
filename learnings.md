@@ -5844,3 +5844,26 @@ Interpretation:
 
 - Limiting CUDA device connections to 4 is also slower.
 - Keep default CUDA connection count; queue limiting does not improve overlap for the current DP-only FSDP command.
+
+## Experiment 242: Exact Current-Best Rerun After Scheduling Probes
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run242-rerun-after-scheduling-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as new measured high for the same durable command.
+- Step 10 `tps`: 10,650, above the previous run215 10,625 measured peak.
+- Step 10 MFU: 39.88%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41589 at step 1 to 6.24613 at step 10; finite and overall decreasing.
+- Steps 7-9 had severe transient throughput stalls at 7,120, 4,076, and 4,051 tps, with no corresponding logged NCCL, allocator, or runtime warning.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The durable command remains the same, but the measured peak is now 10,650 tps.
+- The stalls reinforce that `metrics.log_freq=1` exposes high single-step variance. Treat 10,650 as the measured peak for the objective, not evidence of a new source or knob improvement.

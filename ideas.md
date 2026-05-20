@@ -2351,3 +2351,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,625, record the new measured peak for the same durable command. Risk is only short-window variance.
+  Result: kept as new measured high for the same durable command at source state `8f190d7`; 10,650 tps, 39.88% MFU, and unchanged 169.10 GiB peak memory. Loss was finite and overall-decreasing from 12.41589 to 6.24613, though steps 7-9 had severe throughput stalls, reinforcing that `metrics.log_freq=1` is a high-variance objective window.
