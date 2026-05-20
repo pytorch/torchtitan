@@ -50,8 +50,6 @@ tlp ()
 FUSED_KERNEL_FLAGS=""
 if [ -n "${FUSED_KERNEL_DIR:-}" ]; then
     FUSED_KERNEL_FLAGS="--compile.fused_kernel_dir $FUSED_KERNEL_DIR"
-elif [ "${FUSED_KERNELS:-0}" = "1" ]; then
-    FUSED_KERNEL_FLAGS="--compile.fused_kernel_dir torchtitan/experiments/graph_trainer/kernel_gen/generated"
 fi
 
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
