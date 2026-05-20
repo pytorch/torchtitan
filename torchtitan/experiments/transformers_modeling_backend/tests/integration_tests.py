@@ -34,6 +34,17 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             "transformers_modeling_backend_fsdp+tp+pp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module transformers_modeling_backend",
+                    "--config transformers_modeling_backend_sft_debugmodel",
+                ],
+            ],
+            "Transformers Backend SFT ChatDataset",
+            "transformers_modeling_backend_sft",
+            ngpu=2,
+        ),
     ]
     return integration_tests_flavors
 

@@ -12,15 +12,95 @@ from dataclasses import dataclass, fields
 import torch
 from torch import nn
 from torch.nn import init
+
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
+from torch.nn.attention.flex_attention import BlockMask
+
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import ModuleDict
 from torchtitan.tools.logging import logger
+
+
+class HFFlexAttention(FlexAttention):
+    """FlexAttention kernel for HF models.
+
+    Accepts Q/K/V in native TorchTitan layout (batch, seq, heads, dim) so that
+    apply_cp_to_forward's K/V all-gather (dim=1, the seq dim) works correctly.
+    The caller (_flex_torchtitan_attention_forward) transposes from HF layout
+    before calling this module, and transposes back after.
+
+    This subclass passes the isinstance(FlexAttention) check in
+    apply_cp_to_forward, so CP wrapping works naturally.
+    """
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        attention_masks: BlockMask | None = None,
+        scale: float | None = None,
+        enable_gqa: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        from torch.nn.attention.flex_attention import flex_attention
+
+        # Transpose to (batch, heads, seq, dim) for flex_attention kernel
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        out = flex_attention(
+            q,
+            k,
+            v,
+            block_mask=attention_masks,
+            scale=scale,
+            enable_gqa=enable_gqa,
+        )
+        # Transpose back to (batch, seq, heads, dim)
+        return out.transpose(1, 2)
+
+
+def _flex_torchtitan_attention_forward(
+    module, query, key, value, attention_mask, **kwargs
+):
+    """FlexAttention forward registered via AttentionInterface.
+
+    Routes the kernel call through the HFFlexAttention module attached to
+    each HF attention layer, so apply_cp_to_forward's K/V all-gather wrapping
+    applies automatically.
+
+    Transposes Q/K/V from HF layout (batch, heads, seq, dim) to native
+    TorchTitan layout (batch, seq, heads, dim) before calling the module,
+    so CP's dim=1 all-gather targets the sequence dimension correctly.
+    """
+    scaling = kwargs.get("scaling")
+    block_mask = attention_mask if isinstance(attention_mask, BlockMask) else None
+
+    flex_module = getattr(module, "_flex_kernel", None)
+    if flex_module is not None:
+        # HF layout → native layout: (batch, heads, seq, dim) → (batch, seq, heads, dim)
+        q = query.transpose(1, 2)
+        k = key.transpose(1, 2)
+        v = value.transpose(1, 2)
+        out = flex_module(
+            q, k, v, attention_masks=block_mask, scale=scaling
+        )
+        # Native layout → HF layout
+        return out.transpose(1, 2), None
+
+    # Fallback: call flex_attention directly (no CP support)
+    from torch.nn.attention.flex_attention import flex_attention
+
+    out = flex_attention(
+        query, key, value, block_mask=block_mask, scale=scaling, enable_gqa=True
+    )
+    return out, None
 
 
 class SliceableModuleDict(ModuleDict):
@@ -177,10 +257,18 @@ class HFTransformerModel(BaseModel):
             """Configure HuggingFace attention settings."""
             self._titan_injected_model_args["attn_implementation"] = attn_implementation
             self.attn_implementation = attn_implementation
-            # NOTE:(3outeille):This will force create_causal_mask to return None
-            AttentionInterface._global_mapping[
-                attn_implementation
-            ] = sdpa_attention_forward
+            if attn_implementation == "flex_torchtitan":
+                # HF model code has more dynamo guards than native TorchTitan,
+                # causing extra recompilations during TP warmup.
+                import torch._dynamo.config
+                torch._dynamo.config.cache_size_limit = 64
+                AttentionInterface._global_mapping[
+                    attn_implementation
+                ] = _flex_torchtitan_attention_forward
+            elif attn_implementation not in AttentionInterface._global_mapping:
+                AttentionInterface._global_mapping[
+                    attn_implementation
+                ] = sdpa_attention_forward
 
         def _create_getter_setter_dynamically(self, has_moe: bool):
             """
@@ -258,8 +346,17 @@ class HFTransformerModel(BaseModel):
             self.mlp_bias = False
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
+            # FlexAttention does not support dropout
+            if hasattr(self, "attention_dropout"):
+                self.attention_dropout = 0.0
 
-            if not hasattr(self, "inter_dim"):  # Only for llama model
+            # Recalculate intermediate_size only when model dimensions are
+            # explicitly overridden (debugmodel). When using the HF config's
+            # real architecture (full flavor, dim=None), trust its value.
+            if (
+                not hasattr(self, "inter_dim")
+                and self._titan_injected_model_args.get("dim") is not None
+            ):
                 ffn_hidden_size = 4 * self.dim
                 ffn_hidden_size = int(2 * ffn_hidden_size / 3)
                 if self.ffn_dim_multiplier is not None:
@@ -268,7 +365,10 @@ class HFTransformerModel(BaseModel):
                     (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
                 )
 
-            self.head_dim = self.dim // self.num_attention_heads
+            if self._titan_injected_model_args.get("dim") is not None:
+                self.head_dim = self.dim // self.num_attention_heads
+            elif not hasattr(self, "head_dim"):
+                self.head_dim = self.dim // self.num_attention_heads
 
             return self
 
@@ -353,6 +453,12 @@ class HFTransformerModel(BaseModel):
 
         for layer in self.model.model.layers.values():
             layer.moe_enabled = False
+            # Attach FlexAttention kernel module to each attention layer
+            # so apply_cp_to_forward can find and wrap it for CP.
+            if hasattr(layer, "self_attn") and config.attn_implementation == "flex_torchtitan":
+                layer.self_attn.register_module(
+                    "_flex_kernel", HFFlexAttention(config=HFFlexAttention.Config())
+                )
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
@@ -646,16 +752,24 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, positions=None, attention_masks=None, **kwargs):
         local_seq_len = self.max_seq_len
         local_seq_len //= (
             self.cp_mesh.size()
             if self.cp_mesh is not None and self.cp_mesh.size() > 1
             else 1
         )
-        kwargs["position_ids"] = torch.arange(
-            local_seq_len, device=args[0].device
-        ).unsqueeze(0)
+
+        if positions is not None:
+            kwargs["position_ids"] = positions.to(args[0].device)
+        else:
+            kwargs["position_ids"] = torch.arange(
+                local_seq_len, device=args[0].device
+            ).unsqueeze(0)
+
+        if attention_masks is not None:
+            kwargs["attention_mask"] = attention_masks
+
         output = self.model.model(*args, **kwargs)
         if self._skip_lm_head:
             return output.last_hidden_state
