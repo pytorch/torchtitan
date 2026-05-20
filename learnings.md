@@ -5572,3 +5572,28 @@ Interpretation:
 
 - This exact rerun is another lower sample in the `metrics.log_freq=1` distribution.
 - Keep the durable command unchanged and retain run215 as the measured peak.
+
+## Experiment 230: TP=2 With FSDP Shard 4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --parallelism.tensor_parallel_degree=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run230-tp2-fsdp4-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,323, below the validated 10,625 tps DP-only best.
+- Step 10 MFU: 34.91%.
+- Step 10 peak memory: 100.35 GiB, 56.27%.
+- Mesh and source behavior were as intended: `dp_shard=4`, `tp=2`, TP applied before compile, and FSDP applied on the 4-rank shard mesh.
+- Loss moved from 3.11665 at step 1 to 1.76364 at step 10; finite and overall decreasing.
+- The run emitted a DTensor warning that redistributing from `(_NormPartial(2.0), _NormPartial(2.0))` to replicated placement performs two sequential all-reduces across `fsdp` and `tp`.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- TP2 frees substantial memory but loses too much throughput for this short-sequence command.
+- The FSDP group-size reduction does not offset TP/DTensor communication and smaller local GEMM shape effects at sequence length 128 and local batch size 160.
+- Restore the DP-only source; TP should only be revisited if a later idea can convert the 69 GiB memory headroom into enough extra useful work without repeating the earlier TP batch-scaling cliff.
