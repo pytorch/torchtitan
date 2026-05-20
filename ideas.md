@@ -2272,3 +2272,12 @@
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite and clean. If it exceeds 10,625, record the new measured peak for the same durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `b54675e`; 10,528 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is a clean lower sample; run215 remains the measured peak for the durable command.
+
+- Idea: metrics log frequency 1 with NCCL_MIN_CTAS=32
+  Current best source commit: 51f4b02e
+  Source: remaining NCCL occupancy bracket after `NCCL_MIN_CTAS=16`, `NCCL_MAX_CTAS=8/16/32`, and `NCCL_CTA_POLICY` variants regressed
+  Expected mechanism: Force NCCL collective kernels to use at least 32 CTAs. If the exposed FSDP reduce-scatter/all-gather time is from under-occupied collective kernels rather than overlap contention, a stronger CTA floor may improve collective duration and raise the final-step tps.
+  Supporting evidence: Run219 still showed about 996 ms of NCCL kernels. `NCCL_MIN_CTAS=16` did not help, but it may have been too small to alter the chosen kernels meaningfully, while max caps test a different direction.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_MIN_CTAS=32` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is reduced GEMM overlap or worse collective scheduling if the default occupancy is already optimal.
