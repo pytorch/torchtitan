@@ -1091,3 +1091,12 @@
   Planned command or config overrides: Current best command plus `--training.global_batch_size=5120`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss, preferably by more than run-to-run noise. Risk is longer wall time, higher gradient memory, or no improvement because communication and fwd/bwd still occur per microbatch.
   Result: tentative keep at source state `90a00a0`; 10,014 tps, 37.50% MFU, 169.49 GiB peak memory, and loss decreased from 12.57751 to 8.43897. The run emitted a `Dataset c4_test is being re-looped` warning due to the larger effective batch, and the result needs exact validation before replacing the durable SDPA batch160 best.
+
+- Idea: exact rerun of SDPA gradient accumulation 4
+  Current best source commit: 846907b
+  Source: validation follow-up after run115 produced a clearer gradient-accumulation win
+  Expected mechanism: Repeating the exact run115 command checks whether 10,014 tps is durable, since the prior accumulation-2 improvement did not validate.
+  Supporting evidence: Run115 beat run99 by 9 tps, but run113's 1 tps lead disappeared on rerun. This exact rerun is needed before promoting accumulation 4 as the best command.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run115 command with a new dump folder.
+  Success criteria and expected risk: Keep if it remains above 10,005 tps with finite decreasing loss. Risk is normal variance, dataset re-loop noise, or the larger effective batch giving a less healthy short-run loss trend.
