@@ -7728,3 +7728,22 @@ Interpretation:
 
 - Root no-reshard successfully creates enough memory headroom for local batch size 162 without exceeding the durable command's peak memory.
 - The larger batch recovers some throughput versus root no-reshard at batch160, but remains below the durable source at batch160. Restore durable source and do not continue this root-no-reshard branch unless a different way to spend the memory saving appears.
+
+## Experiment 325: Exact Current Best Rerun After Root Source Restore
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run325-rerun-after-root-source-restore-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid/canceled.
+- The run was interrupted by SIGTERM before completing step 1.
+- No throughput, MFU, peak steady memory, or loss trend should be inferred.
+
+Interpretation:
+
+- This interrupted exact rerun has no performance signal.
+- Do not restart it; continue with new non-current-best probes.

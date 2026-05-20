@@ -3141,6 +3141,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,658, record it as the new measured peak. Risk is only short-window variance.
+  Result: invalid at source state `62c37e3`; the run was interrupted by SIGTERM before completing step 1, so it provides no performance signal. Do not restart this exact rerun; continue with new probes.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
