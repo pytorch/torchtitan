@@ -1651,3 +1651,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--training.seq_len=136 --training.local_batch_size=150 --loss.num_chunks=6` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and memory below the risk line. Risk is uneven chunks and lower batch reducing throughput.
+  Result: discarded at source state `afd8280`; 9,907 tps with finite decreasing loss and 168.53 GiB peak memory. The nearby longer-side shape does not beat seq128, so close this local shape bracket.
+
+- Idea: SDPA zero-CTA loss chunks 6 with BF16 fused optimizer states
+  Current best source commit: 3a1ed15
+  Source: command-only optimizer state retest after shape and optimizer-name variants failed
+  Expected mechanism: `--optimizer.implementation=fused_opt_states_bf16` keeps the fused AdamW path but stores optimizer momentum and variance in BF16. On the current short-sequence batch160 shape, optimizer memory traffic is small but nonzero; reducing state bandwidth may help without changing model communication.
+  Supporting evidence: This path regressed on an older local-batch-5 command, but it has not been tested with SDPA, zero-CTA, loss chunks 6, and local batch 160. Optimizer-side changes are cheap to isolate and within allowed CLI knobs.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--optimizer.implementation=fused_opt_states_bf16`, `NCCL_CTA_POLICY=2`, and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no optimizer/runtime warnings. Risk is slower optimizer kernels or altered short-run optimization dynamics.

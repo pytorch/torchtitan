@@ -4208,3 +4208,24 @@ Interpretation:
 
 - Seq120 lowers memory but still loses too much throughput versus seq128.
 - Test one nearby longer-side point before closing local shape retesting.
+
+## Experiment 172: SDPA Zero-CTA Loss Chunks 6 With Seq136 Local Batch 150
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=136 --training.local_batch_size=150 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run172-sdpa-prefetch-seq136-lbs150-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,907, below the durable seq128 chunks=6 command.
+- Step 10 MFU: 37.11%.
+- Step 10 peak memory: 168.53 GiB, 94.49%.
+- Loss moved from 12.59577 at step 1 to 6.69008 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Seq136 does not recover the throughput lost by the shorter shape retests.
+- Keep the durable seq128/local batch160 shape for this command family.
