@@ -381,18 +381,22 @@ class MoE(Module):
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
             mesh = current_mesh()
-            mesh_axis_names = spmd.current_mesh_names() or {}
-            if mesh is not None:
+            tp_enabled = (
+                mesh is not None
+                and mesh.mesh_dim_names is not None
+                and "tp" in mesh.mesh_dim_names
+                and torch.distributed.get_world_size(mesh.get_group("tp")) > 1
+            )
+            if spmd.is_type_checking() and tp_enabled:
                 for axis_name in ("dp", "cp"):
-                    if axis_name not in mesh_axis_names:
-                        continue
-                    num_tokens_per_expert = spmd.reinterpret(
-                        num_tokens_per_expert,
-                        mesh.get_group(axis_name),
-                        src=spmd.V,
-                        dst=spmd.P,
-                        expert_mode=True,
-                    )
+                    if axis_name in mesh.mesh_dim_names:
+                        num_tokens_per_expert = spmd.reinterpret(
+                            num_tokens_per_expert,
+                            mesh.get_group(axis_name),
+                            src=spmd.V,
+                            dst=spmd.P,
+                            expert_mode=True,
+                        )
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         if (
