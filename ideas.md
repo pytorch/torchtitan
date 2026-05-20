@@ -1182,3 +1182,12 @@
   Planned command or config overrides: Current durable best command plus `--loss.num_chunks=4`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is OOM or slower runtime if the larger chunks increase memory pressure more than they reduce loop overhead.
   Result: tentative keep at source state `ccbf3e4`; 10,007 tps, 37.47% MFU, 171.48 GiB peak memory, and loss decreased from 12.36063 to 5.18953. The speed margin is tiny and memory is above the 95% risk line, so validate before keeping.
+
+- Idea: exact rerun of SDPA loss num_chunks 4
+  Current best source commit: 846907b
+  Source: validation follow-up after run125 narrowly beat the best with higher memory
+  Expected mechanism: Repeating the exact loss-chunks-4 command checks whether the 2 tps improvement is durable or variance.
+  Supporting evidence: Several recent tiny wins failed validation. Run125 also raised peak memory to 171.48 GiB, so it should not replace the lower-memory best without a repeat.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run125 command with a new dump folder.
+  Success criteria and expected risk: Keep only if it remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings. If it falls below, keep default 8 chunks as the durable loss setting.
