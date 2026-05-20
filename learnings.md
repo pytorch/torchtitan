@@ -5057,3 +5057,25 @@ Interpretation:
 
 - Raising the NCCL CTA floor does not reduce exposed collective time enough to improve the command.
 - Combined with the `NCCL_MAX_CTAS=16`, `NCCL_MAX_CTAS=8`, channel, protocol, NVLS, high-priority-stream, and buffer-size results, nearby NCCL occupancy/selection knobs are unlikely to beat the current best.
+
+## Experiment 208: NCCL Buffer Size 2 MiB
+
+Command:
+
+```bash
+NCCL_BUFFSIZE=2097152 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run208-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-buffsize2m-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,244, below the validated current-best command.
+- Step 10 MFU: 38.36%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.47813 at step 1 to 5.28249 at step 10; finite and decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Reducing the NCCL buffer size to 2 MiB does not improve overlap; it is slower than both the default and the 8 MiB test.
+- Close the NCCL buffer-size axis and keep the default buffer size with only `NCCL_CTA_POLICY=2`.

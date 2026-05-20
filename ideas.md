@@ -2011,3 +2011,4 @@
   Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
   Planned command or config overrides: Current best command with `NCCL_BUFFSIZE=2097152` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss and no NCCL warnings. Risk is lower collective bandwidth or extra internal chunking overhead.
+  Result: discarded at source state `3dd87fe`; 10,244 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Smaller NCCL buffers are worse, so keep the default buffer size.
