@@ -2601,3 +2601,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_CUDA_EVENT_CACHE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is slower execution from event allocation overhead or no effect if the cache is not hot.
+  Result: discarded at source state `b738b87`; 10,607 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is a strong sample but below the 10,650 measured peak, so keep the default CUDA event cache behavior.

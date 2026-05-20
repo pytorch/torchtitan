@@ -6406,3 +6406,25 @@ Interpretation:
 
 - Explicitly pinning `NCCL_PROTO=LL` is much slower than automatic protocol selection.
 - Even though profiling showed LL in the durable path, forcing the protocol appears to block useful NCCL selection behavior for some collectives. Keep protocol selection default.
+
+## Experiment 267: Metrics Log Frequency 1 With TORCH_NCCL_CUDA_EVENT_CACHE=0
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run267-torch-nccl-cuda-event-cache-disable-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,607, below the run242 10,650 measured peak but stronger than recent exact reruns.
+- Step 10 MFU: 39.72%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.52254 at step 1 to 6.77251 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, event-cache warning, or DataLoader warning appeared.
+
+Interpretation:
+
+- Disabling the CUDA event cache is valid and samples high, but it does not beat the durable command's measured peak.
+- Because exact reruns also reach the 10.58k band and this run stays below 10,650, keep the default ProcessGroupNCCL CUDA event cache behavior.
