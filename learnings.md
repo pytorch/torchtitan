@@ -3735,3 +3735,24 @@ Interpretation:
 
 - Forcing NCCL Simple protocol is much slower than NCCL's profiled LL choice.
 - Do not use `NCCL_PROTO=Simple` for this command.
+
+## Experiment 150: SDPA Zero-CTA Loss Chunks 6 With NCCL_PROTO=LL128
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_PROTO=LL128 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run150-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-nccl-proto-ll128-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,131, below the durable chunks=6 command.
+- Step 10 MFU: 37.94%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.40859 at step 1 to 5.85245 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Forcing LL128 is slower than NCCL's default LL protocol.
+- Leave NCCL protocol selection at the default with `NCCL_CTA_POLICY=2`.

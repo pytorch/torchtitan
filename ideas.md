@@ -1431,3 +1431,4 @@
   Planned source/config changes: None; keep plain SDPA config, no converters, no AC.
   Planned command or config overrides: Current durable command plus `NCCL_PROTO=LL128`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication or NCCL ignoring/poorly handling forced LL128 for some collectives.
+  Result: discarded at source state `b62ab62`; 10,131 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. LL128 is slower than NCCL's default LL protocol on this command.
