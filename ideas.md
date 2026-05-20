@@ -745,6 +745,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory not materially above the 95% risk line. Main risk is OOM or allocator retries from the small memory margin.
   Result: discarded at source state `f49a323`; 3,741 tps, 173.30 GiB peak memory, 13 allocator retries, and repeated expandable-segment OOM mapping warnings.
 
+- Idea: seq128 shape with local batch 164
+  Current best source commit: 03d00df
+  Source: memory-cliff bisection after seq128/local-batch-168 crossed into allocator pressure
+  Expected mechanism: Local batch 164 adds 2.5% more tokens per step than the current seq128/local-batch-160 best while staying below the failed batch-168 point. If memory growth is smooth enough, it may improve reported tps without triggering allocation retries.
+  Supporting evidence: Batch 160 reached 9,709 tps at 168.96 GiB and batch 168 completed but slowed to 3,741 tps at 173.30 GiB with allocator retries. The midpoint tests whether there is still usable headroom before the cliff.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=164`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no allocator retries. Main risk is that the allocator cliff starts below batch 164, making the run slow or OOM.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
