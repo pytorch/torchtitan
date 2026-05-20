@@ -1111,3 +1111,12 @@
   Planned command or config overrides: Current best command with `--training.seq_len=160 --training.local_batch_size=128`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is that seq128 remains the kernel sweet spot and seq160 lands between the weaker seq96 and seq256 SDPA points.
   Result: discarded at source state `3d808f3`; 9,860 tps with finite decreasing loss and 168.57 GiB peak memory, below the SDPA seq128 best.
+
+- Idea: SDPA seq128 local batch 160 with two-module FSDP prefetch
+  Current best source commit: 846907b
+  Source: NCCL-overlap follow-up after SDPA profile
+  Expected mechanism: The current one-module bidirectional prefetch overlaps one upcoming FSDP all-gather/reduce-scatter target. Widening the prefetch window to the next two modules may hide more NCCL time now that SDPA attention is cheap and NCCL is a large share of the step.
+  Supporting evidence: Run102 showed NCCL around 1.69s of rank0 GPU kernel time, with reduce-scatter the largest communication cost. Forward-only prefetch regressed under flex, so keep bidirectional prefetch but increase the lookahead window.
+  Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to set forward and backward prefetch targets from the adjacent two modules in the FSDP execution order.
+  Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is extra all-gather memory causing OOM or allocator pressure, or too-early prefetch reducing overlap quality.
