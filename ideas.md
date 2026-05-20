@@ -2741,3 +2741,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_MULTI_SEGMENT_REGISTER=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives if multi-segment registration is important for direct P2P/NVLink access.
+  Result: discarded at source state `3a969da`; 10,530 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling multi-segment registration is valid but below the durable peak, so keep NCCL's default multi-segment registration behavior.
