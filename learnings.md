@@ -6204,3 +6204,25 @@ Interpretation:
 
 - Disabling NCCL checks does not improve throughput and removes useful safety diagnostics.
 - Keep default NCCL checks behavior with `NCCL_CTA_POLICY=2`.
+
+## Experiment 258: Metrics Log Frequency 1 With TORCH_NCCL_BLOCKING_WAIT=1
+
+Command:
+
+```bash
+TORCH_NCCL_BLOCKING_WAIT=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run258-torch-nccl-blocking-wait-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,518, below the run242 10,650 measured peak but in the normal current-best calibration band.
+- Step 10 MFU: 39.39%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.38820 at step 1 to 6.69154 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, blocking-wait warning, or DataLoader warning appeared in the rank0 log.
+
+Interpretation:
+
+- Blocking wait is valid on this command but does not beat the durable measured peak.
+- Keep default ProcessGroupNCCL wait/progress behavior with `NCCL_CTA_POLICY=2`.

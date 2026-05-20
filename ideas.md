@@ -2511,3 +2511,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_BLOCKING_WAIT=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL/runtime warnings. Risk is slower execution if blocking waits reduce communication/computation overlap, or incompatibility with any async work path.
+  Result: discarded at source state `380e2d4`; 10,518 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Blocking wait is clean but does not beat the durable command's measured peak, so keep default ProcessGroupNCCL wait behavior.
