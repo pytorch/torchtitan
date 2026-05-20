@@ -2961,3 +2961,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_LL_THRESHOLD=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect if collectives bypass this P2P threshold, or slower communication if the LL path is useful.
+  Result: discarded at source state `f7bc808`; 10,460 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The zero P2P LL threshold is below the durable command, so keep the default threshold.
