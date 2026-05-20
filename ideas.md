@@ -1101,3 +1101,12 @@
   Planned command or config overrides: Exact run115 command with a new dump folder.
   Success criteria and expected risk: Keep if it remains above 10,005 tps with finite decreasing loss. Risk is normal variance, dataset re-loop noise, or the larger effective batch giving a less healthy short-run loss trend.
   Result: discarded at source state `1c9fd82`; 9,935 tps with finite decreasing loss and 169.49 GiB peak memory. Accumulation 4 does not validate and the dataset re-loop warning appears again, so do not treat gradient accumulation as a durable improvement.
+
+- Idea: SDPA seq160 local batch 128 constant-token shape
+  Current best source commit: 846907b
+  Source: shape search gap after SDPA changed the attention cost model
+  Expected mechanism: Seq160/local-batch128 keeps the same 20,480 tokens per rank as the seq128/local-batch160 best while reducing batch count and increasing sequence length moderately. With SDPA attention now cheap, a slightly longer sequence could improve overhead amortization without paying the flex-attention penalty seen in older runs.
+  Supporting evidence: Under SDPA, seq96 and seq256 were below the best, but seq160 has not been tested since switching from flex to SDPA. The old flex seq160 result is not decisive because attention backend was different.
+  Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
+  Planned command or config overrides: Current best command with `--training.seq_len=160 --training.local_batch_size=128`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is that seq128 remains the kernel sweet spot and seq160 lands between the weaker seq96 and seq256 SDPA points.
