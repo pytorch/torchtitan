@@ -12,6 +12,7 @@ from typing import Any
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
+import torch.nn.functional as F
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
@@ -29,12 +30,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.actors.utils import (
-    compute_logprobs,
-    PartialLogprobDrift,
-    verify_logprob_identity,
-)
-from torchtitan.experiments.rl.types import OptimStepOutput, TrainBatch
+from torchtitan.experiments.rl.types import OptimStepOutput, TrainingBatch
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
@@ -42,6 +38,73 @@ from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
+
+
+@sl.log_trace_span("compute_logprobs")
+def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
+    """Compute per-token logprobs from logits.
+
+    Returns logprobs for positions 1..N (the predicted tokens).
+    Output shape is ``[batch, seq_len - 1]``.
+    """
+    from torch.distributed.tensor import DTensor
+
+    if isinstance(logits, DTensor):
+        # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
+        # contract explicit (see .claude/rules/distributed.md).
+        logits = logits.to_local()
+    shift_logits = logits[:, :-1, :].float()
+    shift_targets = token_ids[:, 1:]
+    B, S = shift_targets.shape
+    return -F.cross_entropy(
+        shift_logits.reshape(B * S, -1), shift_targets.reshape(B * S), reduction="none"
+    ).reshape(B, S)
+
+
+@dataclass(frozen=True, slots=True)
+class PartialLogprobDrift:
+    """Per-rank generator-vs-trainer logprob drift awaiting reduction across the loss-mesh."""
+
+    logprob_diff_mean: torch.Tensor
+    logprob_diff_max: torch.Tensor
+    ratio_tokens_different: torch.Tensor
+
+
+@torch.no_grad()
+@sl.log_trace_span("verify_logprob_identity")
+def verify_logprob_identity(
+    ref_logprobs: torch.Tensor,
+    policy_logprobs: torch.Tensor,
+    response_mask: torch.Tensor,
+    *,
+    num_global_valid_tokens: int,
+) -> PartialLogprobDrift:
+    """Compute per-rank drift between generator and trainer logprobs.
+
+    Args:
+        ref_logprobs: [B, L] reference (generator) logprobs from TrainingBatch.
+        policy_logprobs: [B, L] trainer-computed logprobs.
+        response_mask: [B, L] binary mask; 1.0 for response tokens.
+        num_global_valid_tokens: Total response tokens across all DP ranks.
+
+    Returns:
+        PartialLogprobDrift.
+    """
+    mask = response_mask.bool()
+    ref_flat = ref_logprobs[mask].float()
+    policy_flat = policy_logprobs[mask].float()
+
+    if ref_flat.numel() == 0:
+        zero = torch.zeros((), dtype=torch.float32, device=ref_logprobs.device)
+        return PartialLogprobDrift(zero, zero, zero)
+
+    denom = max(num_global_valid_tokens, 1)
+    diff = policy_flat - ref_flat
+    return PartialLogprobDrift(
+        logprob_diff_mean=diff.sum() / denom,
+        logprob_diff_max=diff.abs().max(),
+        ratio_tokens_different=(diff.abs() > 1e-6).sum() / denom,
+    )
 
 
 class PolicyTrainer(Actor, Configurable):
@@ -301,14 +364,14 @@ class PolicyTrainer(Actor, Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        train_data: list[TrainBatch],
+        training_data: list[TrainingBatch],
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Run forward pass, compute loss, call backward, and reduce metrics.
 
         Args:
-            train_data: List of TrainBatch, one per DP rank. Local rank
-                picks train_data[self.dp_rank].
+            training_data: List of TrainingBatch, one per DP rank. Local rank
+                picks training_data[self.dp_rank].
             num_global_valid_tokens: Total response tokens across all DP
                 ranks for this step. The controller computes this before
                 sharding episodes.
@@ -331,29 +394,13 @@ class PolicyTrainer(Actor, Configurable):
             )
         model = self.model_parts[0]
 
-        local_batch = train_data[self.dp_rank]
+        local_batch = training_data[self.dp_rank]
         device = self.device
-
         token_ids = local_batch.token_ids.to(device)
         positions = local_batch.positions.to(device)
         response_mask = local_batch.response_mask.to(device)
         ref_logprobs = local_batch.ref_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
-
-        seq_len = token_ids.shape[1]
-        rope_cache_len = self.model.freqs_cis.shape[0]
-        if seq_len > rope_cache_len:
-            raise ValueError(
-                f"Sequence length {seq_len} exceeds rope cache size "
-                f"{rope_cache_len}. Increase model max_seq_len or reduce "
-                f"generation max_tokens."
-            )
-
-        num_global_valid_tokens: torch.Tensor = torch.tensor(
-            float(max(num_global_valid_tokens, 1)),
-            device=device,
-            dtype=torch.float32,
-        )
 
         attention_masks = create_varlen_metadata_for_document(positions)
 
@@ -361,8 +408,7 @@ class PolicyTrainer(Actor, Configurable):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        # compute_logprobs returns [B, L-1]; pad first token to be 0 to [B, L]
-        # to align with response_mask
+        # compute_logprobs returns [B, L-1]; pad to [B, L] to align with response_mask
         policy_logprobs = torch.nn.functional.pad(
             compute_logprobs(logits, token_ids), (1, 0), value=0.0
         )
@@ -373,7 +419,7 @@ class PolicyTrainer(Actor, Configurable):
                 ref_logprobs=ref_logprobs,
                 response_mask=response_mask,
                 advantages=advantages,
-                global_valid_tokens=int(num_global_valid_tokens.item()),
+                num_global_valid_tokens=num_global_valid_tokens,
             )
 
         self.optimizers.zero_grad()

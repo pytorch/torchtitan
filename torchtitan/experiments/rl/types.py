@@ -86,7 +86,7 @@ class Episode:
 
 
 @dataclass(kw_only=True, slots=True)
-class TrainBatch:
+class TrainingBatch:
     token_ids: torch.Tensor  # [B, L]
     positions: torch.Tensor  # [B, L]
     ref_logprobs: torch.Tensor  # [B, L] — 0.0 for prompt/padding
