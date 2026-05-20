@@ -845,6 +845,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss. Risk is repeating the older regression if backward prefetch is still needed for parameter all-gather overlap.
   Result: discarded at source state `a364689`; 9,164 tps with finite decreasing loss and 168.08 GiB peak memory. Backward prefetch remains necessary at seq128.
 
+- Idea: seq128 no-reshard with local batch 144
+  Current best source commit: 03d00df
+  Source: profile-driven all-gather reduction test after forward-only prefetch failed
+  Expected mechanism: Retaining FSDP parameters after forward may reduce repeated all-gathers. Dropping local batch from 160 to 144 gives back activation memory so the no-reshard policy may fit while preserving most of the seq128 shape's throughput advantage.
+  Supporting evidence: The seq128 profile shows about 0.50 s rank0 all-gather kernels. Full no-reshard at the original 4096-token local-batch-5 shape OOMed, while lower-batch no-reshard fit but was slow; seq128 has a different launch/communication balance worth one retest.
+  Planned source/config changes: None; use the restored bidirectional prefetch source.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=144 --parallelism.fsdp_reshard_after_forward=never`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no allocator retries. Risks are OOM from retained parameters or lower tps because all-gather savings do not offset the smaller batch.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
