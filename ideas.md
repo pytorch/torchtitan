@@ -2702,3 +2702,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_READ_ENABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower P2P if the topology-selected default intentionally uses writes for some edges.
   Result: discarded at source state `37ee5af`; 10,450 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing P2P reads is slower, so leave NCCL's topology-selected direction behavior untouched.
+
+- Idea: exact current best rerun after P2P transport probes
+  Current best source commit: 7db19f09
+  Source: calibration after local registration, launch ordering, and forced P2P direction probes all regressed
+  Expected mechanism: Repeat the exact durable command. The recent NCCL transport micro-knobs did not beat the default path, and exact reruns remain the only trials that have sampled the 10.6k tps range.
+  Supporting evidence: Runs 274-277 were clean but below 10,525 tps or lower, while the durable command has previous exact samples at 10,588, 10,625, and 10,650. A rerun verifies the node is still in the normal band before trying lower-confidence chunk-size knobs.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
