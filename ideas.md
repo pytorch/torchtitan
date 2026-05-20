@@ -1090,3 +1090,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
   Planned command or config overrides: Current best command plus `--training.global_batch_size=5120`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss, preferably by more than run-to-run noise. Risk is longer wall time, higher gradient memory, or no improvement because communication and fwd/bwd still occur per microbatch.
+  Result: tentative keep at source state `90a00a0`; 10,014 tps, 37.50% MFU, 169.49 GiB peak memory, and loss decreased from 12.57751 to 8.43897. The run emitted a `Dataset c4_test is being re-looped` warning due to the larger effective batch, and the result needs exact validation before replacing the durable SDPA batch160 best.

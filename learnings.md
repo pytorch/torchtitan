@@ -2989,3 +2989,26 @@ Interpretation:
 
 - Gradient accumulation 2 did not validate; the run113 win was within variance.
 - Keep plain SDPA seq128/local-batch-160 without explicit global batch as the durable best.
+
+## Experiment 115: SDPA Seq128 Local Batch 160 With Gradient Accumulation 4
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --training.global_batch_size=5120 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run115-sdpa-prefetch-seq128-lbs160-gbs5120-gradacc4-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Trainer confirmed gradient accumulation steps 4.
+- Step 10 `tps`: 10,014, above run99's 10,005.
+- Step 10 MFU: 37.50%.
+- Step 10 peak memory: 169.49 GiB, 95.03%.
+- Loss moved from 12.57751 at step 1 to 8.43897 at step 10; finite and decreasing.
+- The run warned that `Dataset c4_test is being re-looped (epoch 1)`.
+
+Interpretation:
+
+- Larger gradient accumulation gives a clearer throughput signal than accumulation 2, likely from amortizing step-level overhead.
+- Because the dataset loops and the margin is still small, validate this exact command before treating it as the best.
