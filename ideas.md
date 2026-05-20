@@ -1851,3 +1851,4 @@
   Planned source/config changes: Edit `parallelize.py` so transformer layers use `reshard_after_forward=2` when the resolved policy is `True` on the 8-rank FSDP mesh; keep root and `lm_head` on the existing bool policy.
   Planned command or config overrides: Current best two-worker DataLoader command.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no allocator/NCCL warnings. Risk is still increasing memory and slowing scheduling without enough all-gather savings.
+  Result: discarded at source state `8f860b0`; 3,168 tps with finite decreasing loss but 175.94 GiB peak memory, 24 CUDA allocation retries, and repeated allocator mapping-failed warnings. Smaller integer partial resharding is even worse; restore bool resharding and close this axis.

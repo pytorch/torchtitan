@@ -4662,3 +4662,31 @@ Interpretation:
 - Partial layer resharding fits but consumes too much memory and slows the step.
 - The middle ground between bool resharding and no-reshard is not useful at batch160.
 - Keep normal bool `reshard_after_forward=True` for transformer layers.
+
+## Experiment 192: Transformer-Layer Partial FSDP Reshard After Forward 2
+
+Source change:
+
+- Candidate commit: `8f860b01`.
+- In `parallelize.py`, transformer layers used `reshard_after_forward=2` on the 8-rank FSDP mesh.
+- Root and `lm_head` stayed on the existing bool `reshard_after_forward=True` policy.
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run192-partial-reshard2-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard; source restored to bool resharding after the run.
+- Step 10 `tps`: 3,168, far below the validated two-worker command.
+- Step 10 MFU: 11.86%.
+- Step 10 peak memory: 175.94 GiB, 98.65%, above the memory-risk line.
+- Loss moved from 12.24873 at step 1 to 6.84074 at step 10; finite and decreasing.
+- The run logged 24 CUDA memory allocation retries and repeated allocator mapping-failed warnings.
+
+Interpretation:
+
+- `reshard_after_forward=2` creates severe allocator pressure and is much worse than both bool resharding and the `4` partial-reshard point.
+- Close integer partial FSDP resharding for this command.
