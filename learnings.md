@@ -4123,3 +4123,24 @@ Interpretation:
 
 - Fused Adam with no weight decay does not validate; run166 was timing variance.
 - Keep the default fused AdamW optimizer.
+
+## Experiment 168: SDPA Zero-CTA Loss Chunks 6 With NCCL_MIN_NCHANNELS=16
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_MIN_NCHANNELS=16 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run168-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-nccl-min-nchannels16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,843, below the durable chunks=6 command.
+- Step 10 MFU: 36.86%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41770 at step 1 to 8.72918 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Raising NCCL's minimum channel count to 16 slows this command.
+- Leave NCCL channel selection unconstrained; prior `NCCL_MAX_NCHANNELS=16` also regressed.

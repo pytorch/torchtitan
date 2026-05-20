@@ -1611,3 +1611,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2 NCCL_MIN_NCHANNELS=16` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/runtime warnings. Risk is higher channel overhead or no effect.
+  Result: discarded at source state `02ada7b`; 9,843 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Forcing at least 16 channels is slower; leave NCCL channel selection unconstrained.
+
+- Idea: SDPA zero-CTA loss chunks 6 with TORCH_NCCL_AVOID_RECORD_STREAMS=0
+  Current best source commit: 3a1ed15
+  Source: NCCL stream/allocator behavior follow-up after the explicit default value was a no-op
+  Expected mechanism: The build warns that `TORCH_NCCL_AVOID_RECORD_STREAMS=1` is already default. Setting it to `0` restores record-stream tracking for NCCL tensors, which may change allocator lifetime and stream synchronization behavior. It is unlikely but could improve overlap or reduce reference-holding overhead.
+  Supporting evidence: Explicit-on was already tested as a no-op, while the opposite behavior has not been tested. Several custom allocator paths changed performance substantially, so allocator/stream lifetime remains a plausible axis.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `TORCH_NCCL_AVOID_RECORD_STREAMS=0`, `NCCL_CTA_POLICY=2`, and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/allocator warnings. Risk is higher memory or worse synchronization overhead.
