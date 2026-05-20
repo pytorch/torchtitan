@@ -5666,3 +5666,25 @@ Interpretation:
 
 - Forcing Ring is not a durable improvement even though Ring was observed in the profile.
 - Keep NCCL auto algorithm selection with only `NCCL_CTA_POLICY=2`; explicit Tree crashes and explicit Ring can introduce stalls.
+
+## Experiment 234: Exact Current-Best Rerun After NCCL Probes
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run234-rerun-after-nccl-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration, not a new command.
+- Step 10 `tps`: 10,528, below the run215 10,625 measured peak.
+- Step 10 MFU: 39.43%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.39214 at step 1 to 6.93501 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The durable command remains healthy after the NCCL allocation and algorithm probes.
+- This lower exact sample reinforces that run215 is still the measured peak, not source drift.
