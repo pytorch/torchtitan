@@ -194,7 +194,7 @@ def qwen3_14b() -> Trainer.Config:
             attn_backend="flex",
             converters=[
                 MXFP8LinearConverter.Config(
-                    recipe_name="mxfp8_cublas",
+                    recipe_name="mxfp8_rceil",
                     model_compile_enabled=True,
                 ),
             ],

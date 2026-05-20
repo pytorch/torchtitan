@@ -652,6 +652,15 @@
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risks are converter/runtime incompatibility, slower dynamic quantization overhead, higher memory, or a short-run loss regression.
   Result: crashed before step metrics at source state `e84866a`; installed torchao rejects `mxfp8_cublas` with `ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe`.
 
+- Idea: MXFP8 rceil converter on robust prefetch baseline
+  Current best source commit: 7c1c351
+  Source: follow-up to run75 incompatibility
+  Expected mechanism: `mxfp8_rceil` uses the supported MXFP8 dynamic quantization path in this local torchao build and may reduce dense linear GEMM time on B200 while preserving the same FSDP prefetch baseline.
+  Supporting evidence: Run75 showed the converter integration reaches model construction but the cublas recipe string is unsupported. Local introspection shows supported recipes are `mxfp8_rceil`, `mxfp8_rceil_wgrad_with_hp`, and `mxfp8_emulated_rceil`. The robust profile still has a material GEMM bucket.
+  Planned source/config changes: Change only the MXFP8 converter recipe in `qwen3_14b()` from `mxfp8_cublas` to `mxfp8_rceil`; keep `attn_backend="flex"`, model compile enabled, and the robust transformer/lm_head FSDP prefetch source.
+  Planned command or config overrides: Exact robust prefetch command with compile, BF16 dtype, local batch size 5, and no flight recorder.
+  Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risks are slower dynamic quantization overhead, memory pressure, or short-run loss regression.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
