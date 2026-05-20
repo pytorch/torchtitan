@@ -2448,3 +2448,24 @@ Interpretation:
 
 - The constant-token sequence-shape curve is locally peaked at seq128 among tested neighbors.
 - Seq160 is worse than both seq128 and seq96, so additional shape tests should either be very close to seq128 or use a different mechanism than simple constant-token sequence adjustment.
+
+## Experiment 92: Seq128 Local Batch 162 Headroom Test
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=162 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run92-flex-prefetch-seq128-lbs162-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,707, two tps below run84's 9,709.
+- Step 10 MFU: 36.35%.
+- Step 10 peak memory: 170.66 GiB, 95.69%.
+- Loss moved from 12.38004 at step 1 to 6.12475 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Batch 162 is the closest headroom probe so far, but it does not beat run84 and is already above the 95% memory-risk line.
+- Keep seq128/local-batch-160 as the practical best. Batch increases above 160 are not worth continuing without a separate memory-saving change.
