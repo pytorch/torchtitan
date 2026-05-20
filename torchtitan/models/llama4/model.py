@@ -178,8 +178,7 @@ class Llama4Model(Decoder):
                 self,
                 loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
-                tp_enabled=parallelism.tensor_parallel_degree > 1,
-                ep_enabled=parallelism.expert_parallel_degree > 1,
+                enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(

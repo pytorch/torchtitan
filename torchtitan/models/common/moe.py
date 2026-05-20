@@ -14,10 +14,9 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 
 
 class GroupedExperts(Module):
@@ -80,28 +79,26 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        shared_experts is passed to combine() where it overlaps with the async
-        combine all-to-all (NCCL stream) or async DeepEP combine.
+        When parallelized, ``local_map`` (from ``sharding_config``) handles
+        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
+        on exit. The forward body operates on plain local tensors.
         """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+        return self.token_dispatcher.combine(routed_output, metadata, x)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize experts and wire dispatcher meshes.
-
-        After the base ``Module.parallelize`` distributes ``w1``/``w2``/
-        ``w3`` per ``state_shardings``, install the EP / TP meshes on the
-        non-Module ``token_dispatcher`` child via ``wire_meshes`` so its
-        ``dispatch`` / ``combine`` see the right meshes at run time.
-        """
+        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
+        so dispatch/combine see the right meshes at runtime."""
         super().parallelize(parallel_dims)
+        # TODO(@pianpwk): With spmd_types and set_current_mesh, replace wire_meshes
+        # with current_mesh calls inside AllToAllTokenDispatcher and
+        # DeepEPTokenDispatcher.
         self.token_dispatcher.wire_meshes(
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
@@ -272,18 +269,21 @@ class MoE(Module):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
-    1. Router computes expert assignments
-    2. GroupedExperts.forward() handles:
+    1. Router computes expert assignments (stays on DTensor)
+    2. GroupedExperts.forward() converts DTensor to local, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
-       b. expert computation
+       b. expert computation (local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
-          With EP, starts async communication (NCCL all-to-all or DeepEP
-          combine), runs shared_experts in parallel, then forces sync
-          (scatter_add for NCCL AllToAll, sync_combine for DeepEP) and
-          produces final output.
-          Without EP (LocalTokenDispatcher), no communication is needed.
+          - LocalTokenDispatcher (no EP): scatter_add only.
+          - AllToAll: all-to-all communication, then scatter_add.
+          - DeepEP: async combine_tokens (sync deferred to step 4 when
+            sp_size == 1; forced inside combine when sp_size > 1).
+          - HybridEP: synchronous combine_tokens.
+    3. Shared experts run on DTensor. Overlaps with DeepEP async combine
+       when sp_size == 1; no overlap otherwise.
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -334,14 +334,11 @@ class MoE(Module):
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
 
         Under TP, the MoE wrapper's ``sharding_config`` (set by
-        ``set_moe_sharding_config``) handles the dense<->local transition
-        declaratively: ``LocalMapConfig`` converts the (already-Replicate)
-        input to a local tensor for the body and wraps the local output as
-        a ``Partial`` DTensor on exit; ``out_dst_shardings`` then redistri-
-        butes ``Partial -> sp_layout`` once at the boundary. The body
-        operates on plain tensors throughout; children (router, experts,
-        shared_experts) re-wrap inputs to DTensors via their own
-        ``sharding_config`` wrappers as needed.
+        ``set_moe_sharding_config``) handles input/output redistribution:
+        input is redistributed from sp_layout to desired_input_layouts;
+        output (Partial) is redistributed to sp_layout. MoE.forward()
+        operates on DTensors — the DTensor→local conversion happens at
+        the GroupedExperts boundary.
         """
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
@@ -362,13 +359,24 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        out = self.experts(
-            x,
-            top_scores,
-            selected_experts_indices,
-            shared_experts=self.shared_experts,
-        )
+        out = self.experts(x, top_scores, selected_experts_indices)
 
+        # shared_experts runs in parallel with deepep combine communication.
+        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+
+        if (
+            isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
+            and self.experts.token_dispatcher.sp_size == 1
+        ):
+            # Sync the combine operation before using routed_output.
+            # This inserts a CUDA stream wait, ensuring combine is complete before
+            # the subsequent addition or reshape operations read routed output.
+            from torchtitan.distributed.deepep.deepep import sync_combine
+
+            sync_combine()
+
+        if shared_out is not None:
+            out = out + shared_out
         return out.reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

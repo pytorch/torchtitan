@@ -77,6 +77,7 @@ def parallelize_deepseekv3(
 
     # Read comm_backend from the model's token dispatcher config
     # (set by moe_comm_backend in model_registry / config factories).
+
     moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
     comm_backend = (
         getattr(moe_config.experts.token_dispatcher, "comm_backend", "standard")
@@ -88,6 +89,7 @@ def parallelize_deepseekv3(
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
+
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
