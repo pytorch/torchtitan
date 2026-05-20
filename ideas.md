@@ -2852,3 +2852,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and peak memory not exceeding a risky level. Risk is OOM or slower overlap from extra live full parameters; if discarded, restore the durable source.
   Result: discarded at source state `d03ed97`; 10,492 tps with finite overall-decreasing loss. Peak memory dropped to 167.57 GiB instead of increasing, but throughput stayed below the durable peak, so restore the durable all-layer resharding source.
+
+- Idea: last two no-reshard layers with local_batch_size=162
+  Current best source commit: bf7787e9
+  Source: follow-up to run292's unexpected 1.53 GiB peak-memory reduction
+  Expected mechanism: Reapply the last-two-layer `reshard_after_forward=False` source change and spend the recovered memory on a larger local batch size. The larger batch may improve useful work per FSDP collective and recover the throughput lost by the source-only candidate, while staying near the durable command's memory envelope.
+  Supporting evidence: Run292 reduced peak memory from 169.10 GiB to 167.57 GiB but only reached 10,492 tps. Prior durable-source batch-size probes made 161/162 unattractive because of speed or memory risk; the suffix no-reshard source changes the memory budget enough to justify one combined follow-up that explicitly converts the memory saving into more tokens.
+  Planned source/config changes: Reapply the run292 `parallelize.py` suffix no-reshard change for the last two transformer layers.
+  Planned command or config overrides: Use the current-best command with `--training.local_batch_size=162` instead of 160, keeping `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and no OOM. Risk is that the larger batch loses convergence stability, exceeds the safe memory envelope, or fails to offset the slower no-reshard scheduling.
