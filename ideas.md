@@ -2522,3 +2522,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is a large communication regression because FSDP collectives likely depend on P2P/NVLink bandwidth.
   Result: discarded at source state `1f944c3`; 8,170 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling P2P severely reduces throughput, confirming the default direct P2P/NVLink path is necessary.
+
+- Idea: metrics log frequency 1 with NCCL_SHM_DISABLE=1
+  Current best source commit: 774ab783
+  Source: NCCL intra-node transport-path cleanup after direct P2P was confirmed necessary
+  Expected mechanism: Disable NCCL shared-memory transport. With direct GPU P2P/NVLink clearly required, the host SHM path may be unused or may still affect fallback/control traffic and proxy scheduling. If SHM setup or polling adds jitter without carrying useful bandwidth, disabling it could slightly improve the FSDP collective path.
+  Supporting evidence: Full P2P disable was a severe regression, while narrower P2P level and PXN toggles also underperformed. `NCCL_SHM_DISABLE=1` is a distinct command-only transport toggle that has not been isolated on the final SDPA/logfreq1 command.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_SHM_DISABLE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if SHM is not used, or slower collectives if SHM carries useful intra-host traffic.
