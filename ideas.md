@@ -2891,3 +2891,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_LL_BUFFSIZE=4194304 NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss. Risk is no synergy, lower throughput from compounded overhead, or a high-variance sample still below peak.
+  Result: discarded at source state `f2e49dd`; 10,454 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The two high-band runtime knobs do not combine constructively, so keep both defaults.
