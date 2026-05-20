@@ -1271,3 +1271,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Current durable zero-CTA command with `--training.local_batch_size=161`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is the earlier batch161 slowdown returning or memory moving above the 95% risk line.
+  Result: discarded at source state `4440eb3`; 9,669 tps with finite decreasing loss and 169.20 GiB peak memory. Batch161 remains a bad shape even with zero-CTA.
