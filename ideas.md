@@ -2382,3 +2382,12 @@
   Planned command or config overrides: Exact current-best command.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record the new measured peak for the same durable command. Risk is only high single-step variance.
   Result: kept as calibration at source state `2b92e37`; 10,560 tps, 39.54% MFU, and unchanged 169.10 GiB peak memory. The log confirmed the restored baseline Qwen3 FSDP path, so the embedding source candidate was cleanly removed; run242's 10,650 remains the measured peak.
+
+- Idea: metrics log frequency 1 with TORCH_NCCL_ENABLE_MONITORING=0
+  Current best source commit: 52ca094b
+  Source: process-group overhead probe after communication-kernel and stream-scheduling knobs failed
+  Expected mechanism: Disable the Torch NCCL monitoring thread/path. The command already disables the NCCL flight recorder with `--comm.trace_buf_size=0`, but process-group monitoring may still add small host-side or synchronization overhead around collective progress and timeout handling.
+  Supporting evidence: Recent profiles and logs still show communication exposure, while most NCCL kernel-shape knobs regress. This is a distinct command-only c10d/NCCL wrapper knob and should not change model math, tensor shapes, or FSDP policy.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `TORCH_NCCL_ENABLE_MONITORING=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no process-group warnings. Risk is no effect, ignored environment variable, or weaker failure monitoring without speed benefit.
