@@ -1971,3 +1971,4 @@
   Planned source/config changes: None; keep durable DP-only FSDP source.
   Planned command or config overrides: Current best two-worker command with `NCCL_BUFFSIZE=8388608` in the environment, alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,328 or a result above the 10,301 rerun threshold that warrants exact validation, with finite decreasing loss and no NCCL warnings. Risk is worse overlap if larger slices monopolize resources or if the default 4 MiB buffer is already optimal.
+  Result: discarded at source state `68f7e79`; 10,256 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Increasing NCCL buffer size to 8 MiB is clean but slower than the validated current-best command.

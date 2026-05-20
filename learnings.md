@@ -4962,3 +4962,25 @@ Interpretation:
 
 - HSDP 2x4 successfully changes the collective shape, but replicated sharded state adds too much memory pressure at batch160.
 - The severe allocator pressure dominates any potential collective benefit. Do not keep HSDP for the current batch160 command.
+
+## Experiment 204: NCCL Buffer Size 8 MiB
+
+Command:
+
+```bash
+NCCL_BUFFSIZE=8388608 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run204-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-buffsize8m-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,256, below the validated current-best 10,328 tps and below the 10,301 exact rerun.
+- Step 10 MFU: 38.41%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.34047 at step 1 to 6.25700 at step 10; finite and decreasing.
+- No NCCL warning, allocator retry, mapping failure, OOM, traceback, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Increasing NCCL's buffer slice size from the default to 8 MiB does not improve this FSDP collective pattern.
+- Keep `NCCL_CTA_POLICY=2` without `NCCL_BUFFSIZE`; the remaining NCCL time is not helped by larger per-channel buffers.
