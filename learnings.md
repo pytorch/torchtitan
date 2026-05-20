@@ -2171,3 +2171,22 @@ Interpretation:
 
 - Increasing per-rank OpenMP threads from the torchrun default effectively hurts this workload. Keep the default one thread per rank.
 - The next runtime-overhead tests, if any, should not use higher OMP thread counts.
+
+## Experiment 78: Constant-Token Shorter Sequence Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=2048 --training.local_batch_size=10 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run78-flex-prefetch-seq2048-lbs10-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid.
+- The run OOMed before step metrics, but the failure message reported separate large processes on the same GPUs, for example 85-93 GiB held by other PIDs while the training rank held about 85-93 GiB.
+- A post-failure `nvidia-smi` check was clear, so the external processes had already exited by inspection time.
+
+Interpretation:
+
+- Do not count this OOM against the `seq_len=2048`, local-batch-10 candidate. It violates the external-allocation rule.
+- Retry the exact same command after a fresh clear-GPU check.
