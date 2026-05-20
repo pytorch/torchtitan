@@ -3181,6 +3181,7 @@
   Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, set `ScaledDotProductAttention.sdpa_backends = [SDPBackend.FLASH_ATTENTION]` before compiling/wrapping the model.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is SDPA rejecting Flash for this shape/GQA path, falling back poorly, or slowing because cuDNN was already the better backend.
+  Result: discarded at source state `13c3a98`; 10,522 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing SDPA Flash is valid but below the durable backend priority, so restore the default SDPA backend list.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
