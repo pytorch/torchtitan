@@ -1211,3 +1211,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current durable best command with `TORCHINDUCTOR_CUDAGRAPHS=1`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is incompatibility with FSDP/NCCL or slower execution from capture overhead.
+  Result: crash at source state `47b30d0`; failed during backward with `accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run` from the Qwen3 block forward. Cudagraphs are incompatible with this compiled FSDP training path.

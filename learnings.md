@@ -3261,3 +3261,23 @@ Interpretation:
 
 - Max autotune selected high-memory/slow behavior for this workload and did not preserve the short-run loss trend.
 - Do not retry max autotune for this SDPA shape.
+
+## Experiment 128: SDPA Seq128 Local Batch 160 With Inductor Cudagraphs
+
+Command:
+
+```bash
+TORCHINDUCTOR_CUDAGRAPHS=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run128-sdpa-prefetch-seq128-lbs160-compile-bf16-inductor-cudagraphs-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run failed during backward before completing step 1.
+- Error: `accessing tensor output of CUDAGraphs that has been overwritten by a subsequent run`.
+- The stack points to `Qwen3TransformerBlock.forward`, specifically the feed-forward residual line.
+
+Interpretation:
+
+- Inductor cudagraph capture is incompatible with this compiled FSDP training path as currently written.
+- Do not retry cudagraphs unless the model invocation is changed to mark cudagraph step boundaries or clone outputs, which is outside this narrow optimization loop.
