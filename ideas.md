@@ -2002,3 +2002,12 @@
   Planned command or config overrides: Current best command with `NCCL_MIN_CTAS=16` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss and no NCCL warnings. Risk is worse compute/communication overlap if more NCCL CTAs contend with transformer GEMMs.
   Result: discarded at source state `9164c0e`; 10,259 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Forcing a minimum of 16 NCCL CTAs does not improve the current command.
+
+- Idea: current best with smaller NCCL buffer size
+  Current best source commit: 6d61dbc
+  Source: communication-overlap follow-up after larger NCCL buffer size regressed
+  Expected mechanism: `NCCL_BUFFSIZE=2097152` lowers NCCL's per-channel buffer from the default 4 MiB to 2 MiB. Smaller slices may allow finer-grained interleaving between FSDP collectives and transformer GEMMs, improving overlap even if raw collective bandwidth is lower.
+  Supporting evidence: Increasing the buffer to 8 MiB was clean but slower, suggesting larger slices do not help this layer-wise FSDP payload mix. A single smaller-buffer bracket tests the opposite overlap tradeoff before closing the buffer-size axis.
+  Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
+  Planned command or config overrides: Current best command with `NCCL_BUFFSIZE=2097152` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss and no NCCL warnings. Risk is lower collective bandwidth or extra internal chunking overhead.
