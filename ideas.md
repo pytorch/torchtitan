@@ -1982,3 +1982,12 @@
   Planned command or config overrides: Current best two-worker command with `--training.local_batch_size=200`.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risks are the known `FSDPFloat8Linear` view warning, slower quantization overhead, memory pressure around the loss path, or the same batch-scaling regression seen at broad-FP8 batch220.
   Result: discarded at source state `3eb10e9`; 10,254 tps with finite decreasing loss and 156.98 GiB peak memory. Batch200 converts some Float8 memory headroom into work, but it remains below the BF16 current best and still emits the `FSDPFloat8Linear` view warning.
+
+- Idea: exact current-best rerun after Float8 restore
+  Current best source commit: 60f5cb78
+  Source: variance calibration after several source restore cycles and command-only NCCL probes
+  Expected mechanism: This is an exploit/measurement run, not a new optimization knob. Repeating the exact validated current-best command checks whether the 10,328 tps peak is still representative after HSDP, Float8, and NCCL-buffer restores, and provides a fresh baseline before further low-signal exploration.
+  Supporting evidence: Recent clean command variants have clustered around 10,254-10,256 tps, while the best exact current-best rerun was 10,301 and the peak validation was 10,328. A fresh exact run helps separate environment variance from candidate effects.
+  Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
+  Planned command or config overrides: Exact current-best two-worker command.
+  Success criteria and expected risk: Keep as the calibration row if it completes with finite decreasing loss and no warnings. If it exceeds 10,328, treat it as a new measured peak that still needs judgment against variance; otherwise keep the existing best.
