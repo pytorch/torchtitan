@@ -3870,3 +3870,22 @@ Interpretation:
 - Async unshard's memory headroom does not convert into a larger-batch win at local batch 162.
 - The batch increase also crosses the memory-risk line without improving throughput.
 - Restore the default unshard path and treat async unshard as discarded for this objective.
+
+## Experiment 156: SDPA Zero-CTA Loss Chunks 6 With NCCL_ALGO=Tree
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_ALGO=Tree NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run156-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-nccl-algo-tree-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- No step metrics were emitted.
+- NCCL failed during initialization: `no algorithm/protocol available for function Broadcast with datatype ncclInt8. NCCL_ALGO was set to Tree.`
+
+Interpretation:
+
+- `NCCL_ALGO=Tree` applies to all NCCL collectives in the process, including initialization broadcasts, and is incompatible with this job.
+- Do not force Tree globally. Any future NCCL algorithm work would need per-collective control, which is outside the current command-level search.

@@ -1491,3 +1491,13 @@
   Planned source/config changes: Restore default unshard path, default FSDP comm allocation, and no symmetric-memory calls.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2 NCCL_ALGO=Tree` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/OOM/allocator warnings. Risk is slower collectives because ring is usually strong intra-node.
+  Result: crash at source state `f07b803`; NCCL failed during initialization with `no algorithm/protocol available for function Broadcast with datatype ncclInt8` because `NCCL_ALGO=Tree` applies globally. Do not force Tree for this command.
+
+- Idea: SDPA zero-CTA loss chunks 6 with CUDA_DEVICE_MAX_CONNECTIONS=1
+  Current best source commit: f07b803
+  Source: command-level scheduling follow-up after direct NCCL algorithm forcing was unusable
+  Expected mechanism: `CUDA_DEVICE_MAX_CONNECTIONS=1` changes CUDA work-queue connection scheduling and can affect compute/communication ordering. For an FSDP workload with explicit forward/backward prefetch and substantial NCCL time, stricter connection scheduling may improve overlap or reduce contention without changing NCCL algorithms or FSDP allocation.
+  Supporting evidence: The durable profile remains GEMM+NCCL dominated. Prior high-priority stream and algorithm/protocol forcing did not help, but this is a distinct runtime scheduling knob often relevant to transformer communication overlap.
+  Planned source/config changes: None; keep restored durable source.
+  Planned command or config overrides: Current durable command with `CUDA_DEVICE_MAX_CONNECTIONS=1 NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/OOM/allocator warnings. Risk is worse scheduling or no effect.
