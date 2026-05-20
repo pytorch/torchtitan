@@ -2992,3 +2992,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
   Result: kept as calibration at source state `318b921`; 10,487 tps with finite overall-decreasing loss and restored 169.10 GiB peak memory. The durable source is restored and healthy, although this sample is below the high band.
+
+- Idea: metrics log frequency 1 with NCCL_NVLS_CHUNKSIZE=262144
+  Current best source commit: be9f696e
+  Source: narrow NVLS tuning retest on the final durable command stack after earlier NVLS enable/disable checks predated current metrics/log-frequency and dataloader settings
+  Expected mechanism: Raise the NVLS chunk size from the NCCL default 128 KiB to 256 KiB while leaving NCCL's automatic NVLS enablement unchanged. If NVLS is selected for the single-node B200 all-gather/reduce-scatter path, larger chunks may reduce per-chunk scheduling overhead for large FSDP collectives and improve bandwidth. If NVLS is not active or the default chunking is better for overlap, it should no-op or regress.
+  Supporting evidence: NCCL 2.29.7 exposes `NCCL_NVLS_CHUNKSIZE` with default 128 KiB. The current profile still shows substantial NCCL collective time, and this knob is distinct from the already-closed P2P chunk and LL-buffer axes.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_CHUNKSIZE=262144` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower overlap from coarser NVLS chunks or no effect if NVLS is not selected.
