@@ -2882,3 +2882,24 @@ Interpretation:
 
 - SDPA also does not shift the constant-token shape optimum downward to seq96.
 - The best shape remains seq128/local-batch-160 for the current SDPA source.
+
+## Experiment 110: SDPA Seq128 Local Batch 159
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=159 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run110-sdpa-prefetch-seq128-lbs159-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,949, below run99's 10,005.
+- Step 10 MFU: 37.26%.
+- Step 10 peak memory: 167.69 GiB, 94.02%.
+- Loss moved from 12.36410 at step 1 to 6.28357 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The lower-batch neighbor does not improve normalized throughput.
+- Keep SDPA seq128/local-batch-160 as the best shape: batch159 is lower, batch161 is lower, and nearby seq96/seq256 are lower.

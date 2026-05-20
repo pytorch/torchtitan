@@ -973,6 +973,7 @@
   Planned source/config changes: None; use plain SDPA, no converters, bidirectional prefetch.
   Planned command or config overrides: Run99 command shape with `--training.local_batch_size=159`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is simply doing less work per step without reducing bottleneck time enough.
+  Result: discarded at source state `c0ce544`; 9,949 tps with finite decreasing loss and 167.69 GiB peak memory, below the SDPA batch160 best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
