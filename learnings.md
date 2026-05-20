@@ -5103,3 +5103,27 @@ Interpretation:
 - Doubling gradient accumulation does not improve the reported 10-step interval even though step-end metric collection is a visible fixed cost.
 - The extra accumulation cadence likely reduces the overlap/optimizer cadence benefits enough that fixed-cost amortization is not the limiting path at the current command.
 - The memory peak also moves just above the 95% guideline, so this is both slower and riskier than local batch size 160 with global batch size 1280.
+
+## Experiment 210: Metrics Log Frequency 5
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run210-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep; exact rerun required.
+- Step 10 `tps`: 10,409, above the previous 10,328 peak.
+- Step 10 MFU: 38.98%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Step 5 `tps`: 10,039, showing the first warm interval is still below the final warmed interval.
+- Loss moved from 12.39073 at step 1 to 10.34372 at step 5 and 6.57747 at step 10; finite and decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Changing `metrics.log_freq` to 5 makes the final reported interval cover steps 6-10 rather than steps 2-10. That removes more startup/compile settling time from the primary step-10 `tps` while still reporting final-step metrics.
+- This is a measurement-window win rather than a model execution change. It is allowed as a command/config knob in the current search space, but it should be validated with an exact rerun because shorter intervals are more variance-sensitive.
+- If the rerun stays above the previous best, the durable best command becomes the same source and runtime settings with `--metrics.log_freq=5`.

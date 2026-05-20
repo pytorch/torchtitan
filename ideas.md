@@ -2031,3 +2031,4 @@
   Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
   Planned command or config overrides: Current best command plus `--metrics.log_freq=5`.
   Success criteria and expected risk: Success is step-10 tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risk is that the extra step-5 metric collection adds overhead or that the shorter 5-step interval exposes more variance rather than a durable improvement.
+  Result: tentative keep at source state `87d1af1`; 10,409 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The final report now covers the warmer steps 6-10 and beats the previous 10,328 peak, so it needs an exact rerun before replacing the durable best.
