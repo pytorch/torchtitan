@@ -4690,3 +4690,25 @@ Interpretation:
 
 - `reshard_after_forward=2` creates severe allocator pressure and is much worse than both bool resharding and the `4` partial-reshard point.
 - Close integer partial FSDP resharding for this command.
+
+## Experiment 193: Tokenizers Parallelism With Two DataLoader Workers
+
+Command:
+
+```bash
+TOKENIZERS_PARALLELISM=true NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run193-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-tokenizers-parallelism-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,279, below the current best and below the rerun-worthy bar.
+- Step 10 MFU: 38.49%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.26351 at step 1 to 5.96169 at step 10; finite and decreasing.
+- No dataset re-loop, tokenizer warning, DataLoader worker warning, OOM, traceback, or NCCL warning appeared.
+
+Interpretation:
+
+- Tokenizer-internal parallelism does not improve the two-worker DataLoader path.
+- Host-input tuning is effectively bracketed around two persistent workers with prefetch factor 2 and default tokenizer parallelism.

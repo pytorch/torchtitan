@@ -1852,3 +1852,13 @@
   Planned command or config overrides: Current best two-worker DataLoader command.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no allocator/NCCL warnings. Risk is still increasing memory and slowing scheduling without enough all-gather savings.
   Result: discarded at source state `8f860b0`; 3,168 tps with finite decreasing loss but 175.94 GiB peak memory, 24 CUDA allocation retries, and repeated allocator mapping-failed warnings. Smaller integer partial resharding is even worse; restore bool resharding and close this axis.
+
+- Idea: two-worker DataLoader command with TOKENIZERS_PARALLELISM=true
+  Current best source commit: b6933b89
+  Source: host-input follow-up after DataLoader workers were the only validated positive axis
+  Expected mechanism: Enabling tokenizer-internal parallelism inside the two DataLoader workers may reduce tokenization/collation latency for the short-sequence high-batch command.
+  Supporting evidence: The current best came from DataLoader worker overlap, so one tokenizer-specific environment knob is worth isolating before fully leaving host-input tuning.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command with `TOKENIZERS_PARALLELISM=true`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no tokenizer/DataLoader warnings. Risk is CPU oversubscription or tokenizer fork-safety warnings.
+  Result: discarded at source state `b6933b8`; 10,279 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Tokenizer-internal parallelism does not beat the validated two-worker DataLoader command.
