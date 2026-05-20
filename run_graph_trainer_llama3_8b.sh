@@ -69,7 +69,7 @@ COMMON_FLAGS="\
 if [ "${FAKE_BACKEND:-0}" = "1" ]; then
     # Single GPU, no NCCL — collectives are no-ops.
     # Useful for isolating compute time or running without 8 GPUs.
-    NGPU=8 LOCAL_RANK=0 python3 -m torchtitan.train \
+    tlp NGPU=8 LOCAL_RANK=0 python3 -m torchtitan.train \
         --module graph_trainer.llama3 --config graph_trainer_llama3_8b \
         --comm.mode=fake_backend \
         $COMMON_FLAGS \
