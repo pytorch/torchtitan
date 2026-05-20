@@ -2406,3 +2406,24 @@ Interpretation:
 
 - The seq128/local-batch-160 shape is robust enough to keep as the best practical shape for this line.
 - Increasing seq128 batch above 160 trades away throughput and memory headroom, so the next experiments should either reduce memory at this shape or return to source-level throughput changes.
+
+## Experiment 90: Seq96 Local Batch 213 Constant-Token Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=96 --training.local_batch_size=213 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run90-flex-prefetch-seq96-lbs213-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,527, below run84's 9,709 and run89's 9,676.
+- Step 10 MFU: 35.64%.
+- Step 10 peak memory: 168.72 GiB, 94.60%.
+- Loss moved from 12.42802 at step 1 to 5.85870 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The power-of-two sweep's seq128 winner is not just an artifact of coarse sampling: the seq96 midpoint is slower.
+- Do not continue below seq128 unless mapping the curve is the goal; the next shape refinement should test the other side of the peak, between seq128 and seq256.
