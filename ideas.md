@@ -2641,3 +2641,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_IGNORE_CPU_AFFINITY=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or worse CPU locality for NCCL helper threads.
+  Result: discarded at source state `e660a4d`; 10,528 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Ignoring CPU affinity is clean but below the durable peak, so keep NCCL default CPU-affinity handling.
