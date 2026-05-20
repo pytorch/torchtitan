@@ -2452,3 +2452,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_DMABUF_ENABLE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if NCCL was not using DMA-BUF, or slower IPC/collective setup if DMA-BUF is beneficial.
   Result: discarded at source state `c671468`; 10,452 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling DMA-BUF is clean but below the durable command's high band, so keep NCCL default DMA-BUF behavior.
+
+- Idea: metrics log frequency 1 with OMP_NUM_THREADS=2
+  Current best source commit: 0b80bdd8
+  Source: host-side scheduling bracket after current command shifted to per-step metrics logging
+  Expected mechanism: Explicitly set `OMP_NUM_THREADS=2` so torchrun does not force one OpenMP thread per rank. More host threads may reduce CPU-side overhead in compile/runtime launch, input preparation, optimizer bookkeeping, or communication scheduling under the current per-step logging window.
+  Supporting evidence: OMP=2 was tried before `--metrics.log_freq=1`; it produced one tiny non-validating win on an older command but was discarded on rerun. The current objective logs every step and has a different host-side measurement window, so this exact stack has not isolated the knob.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `OMP_NUM_THREADS=2` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is CPU oversubscription or another variance-only result.
