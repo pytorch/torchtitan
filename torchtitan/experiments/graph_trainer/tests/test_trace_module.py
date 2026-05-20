@@ -878,6 +878,76 @@ class TestTraceDTensor(unittest.TestCase):
         for gr, gt in zip(grads_ref, grads_tr, strict=True):
             self.assertTrue(torch.equal(gr.full_tensor(), gt.full_tensor()))
 
+    def test_full_inductor_pass_on_collective(self):
+        # ``make_fx`` traces ``dist.*`` collectives as raw ``c10d.{op}_``
+        # inplace ops with a torchbind ``ProcessGroup`` baked in as a graph
+        # attr. ``full_inductor_compilation_pass`` must functionalize the
+        # collective and unbox the PG before ``compile_fx_inner`` — otherwise
+        # the cache key calls ``__eq__`` on the torchbind and crashes.
+        import torch.distributed as dist
+
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            full_inductor_compilation_pass,
+        )
+
+        def f(_state, t):
+            t = t.clone()
+            dist.all_reduce(t)
+            return t + 1
+
+        traced = minimal_fx_tracer(f)({}, torch.ones(4, device=self.DEVICE))
+        compiled_gm = full_inductor_compilation_pass(traced.gm, traced.example_inputs)
+
+        real_input = torch.ones(4, device=self.DEVICE)
+        expected = f({}, real_input.clone())
+        actual = compiled_gm(real_input.clone())
+        if isinstance(actual, (list, tuple)):
+            actual = actual[0]
+        torch.testing.assert_close(actual, expected)
+
+    def test_full_inductor_pass_migrates_cpu_attrs(self):
+        from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_pass
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            full_inductor_compilation_pass,
+        )
+
+        def f(_state, x):
+            pad = torch.tensor(-1, dtype=torch.int64)
+            fill = torch.tensor(0, dtype=torch.bfloat16)
+            scale = torch.tensor(1.0, dtype=torch.float32)
+            return x + pad.to(x.dtype) + fill.to(x.dtype) + scale.to(x.dtype)
+
+        traced = minimal_fx_tracer(f)(
+            {}, torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
+        )
+
+        cpu_attr_names = [
+            n.target
+            for n in traced.gm.graph.find_nodes(op="get_attr")
+            if isinstance(getattr(traced.gm, n.target, None), torch.Tensor)
+            and getattr(traced.gm, n.target).device.type == "cpu"
+        ]
+
+        gm = full_inductor_compilation_pass(traced.gm, traced.example_inputs)
+
+        for name in cpu_attr_names:
+            attr = getattr(traced.gm, name, None)
+            self.assertIsInstance(attr, torch.Tensor)
+            self.assertEqual(
+                attr.device.type,
+                "cuda",
+                f"{name} should have been migrated to CUDA",
+            )
+
+        gm = cudagraph_pass(gm, traced.example_inputs, is_forward=True)
+        real_x = torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
+        expected = f({}, real_x.clone())
+        for _ in range(3):
+            actual = gm(real_x.clone())
+            if isinstance(actual, (list, tuple)):
+                actual = actual[0]
+            torch.testing.assert_close(actual, expected)
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestMetadataPropagation(unittest.TestCase):
