@@ -587,6 +587,7 @@
   Planned source/config changes: In Qwen3 FSDP wrapping, remove `set_modules_to_forward_prefetch` calls and keep the one-module backward prefetch chain from `lm_head` through the transformer blocks. Do not change batch size, reshard policy, converters, AC, or command flags.
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is lower tps if forward prefetch was hiding important forward all-gathers.
+  Attempt: run66 at source state `579e621` was invalid; external VLLM workers appeared on GPUs 4-7 and caused a contaminated OOM before any step metrics.
 
 - Idea: BF16 FSDP reduce dtype on prefetch flex best
   Current best source commit: 7c1c351

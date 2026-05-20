@@ -1926,3 +1926,21 @@ Next implications:
 - Second priority: HSDP 2x4 on the prefetch source. This changes FSDP collective topology without changing model math, attention, compile, local batch size, TP, CP, AC, or FP8.
 - Third priority: separately wrap `tok_embeddings` and add terminal backward prefetch to reduce root-wrapper communication/scheduling opacity.
 - Avoid more broad FP8, AC batch-scaling, CP, or Inductor autotune sweeps unless a later profile materially changes the bottleneck mix.
+
+## Experiment 66: Backward-Only FSDP Prefetch
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run66-flex-backward-only-prefetch-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid.
+- The run OOMed before step metrics.
+- External `VLLM::Worker_TP*` processes appeared on GPUs 4-7 during the run and held about 128 GiB each at failure time.
+
+Interpretation:
+
+- This is a contaminated OOM, not evidence against backward-only prefetch. Retry the same source when GPUs are clear.
