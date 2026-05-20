@@ -2222,3 +2222,12 @@
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite and clean. If it exceeds 10,625, record it as the new measured peak for the same durable command.
   Result: kept as calibration at source state `baf62dd`; 10,460 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is another lower sample in the high-variance `metrics.log_freq=1` band; keep run215's 10,625 tps as the measured peak.
+
+- Idea: TP=2 with FSDP shard 4
+  Current best source commit: bfb8359c
+  Source: layout exploration after DP-only NCCL collectives and GEMMs remain dominant
+  Expected mechanism: Enable tensor parallelism degree 2 and let data-parallel shard degree become 4 on 8 GPUs. TP shards dense projections and reduces the FSDP process-group size from 8 to 4, which may reduce all-gather/reduce-scatter latency and change GEMM shapes enough to improve final-step tps despite TP collectives.
+  Supporting evidence: Run219 profile showed GEMM as the largest bucket and FSDP NCCL as the second-largest. HSDP 2x4 reduced FSDP group size but replicated state and caused allocator pressure; TP2 x FSDP4 reduces the FSDP group size without HSDP state replication.
+  Planned source/config changes: Edit `qwen3/sharding.py` to install common decoder, GQA attention, QK norm, and dense FFN sharding configs; edit `parallelize.py` to call `model.parallelize(tp_mesh)` when TP is enabled instead of rejecting TP.
+  Planned command or config overrides: Current best command plus `--parallelism.tensor_parallel_degree=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no DTensor/FSDP/NCCL warnings. Risks are TP collectives dominating at seq_len 128, sharding-contract bugs, changed global batch semantics, or lower reported per-device tps after TP normalization.
