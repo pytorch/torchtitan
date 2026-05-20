@@ -895,6 +895,15 @@
   Success criteria and expected risk: Success is generating traces and extracting a rank0 bottleneck summary. Profiled tps is diagnostic only and should not replace unprofiled ranking.
   Result: completed at source state `aed3b50`; profiled step 10 was 9,236 tps. Rank0 trace shows about 4.45 s GPU kernel time: 2.22 s GEMM, 1.69 s NCCL, 0.10 s attention, with reduce-scatter the largest single kernel bucket.
 
+- Idea: FP8 rowwise converter on SDPA seq128 best
+  Current best source commit: 846907b
+  Source: profile-driven GEMM efficiency test after SDPA made attention cheap
+  Expected mechanism: The SDPA profile is dominated by dense GEMM kernels. Adding the existing Float8 rowwise converter with auto-filter may reduce GEMM time on B200 while preserving the SDPA attention backend, compile path, BF16 training dtype, and FSDP prefetch schedule.
+  Supporting evidence: Earlier FP8 rowwise auto-filter was a valid keep on the SDPA/default attention source before flex became best. Run102 shows GEMM is now about 2.22 s of rank0 GPU kernel time, making a compute-efficiency retest worthwhile on the new seq128 shape.
+  Planned source/config changes: Inside `qwen3_14b()`, add `Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)` to `model_registry("14B", attn_backend="sdpa", converters=[...])`.
+  Planned command or config overrides: Run99 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no memory regression. Risks are quantized logits/layers harming short-run loss or FP8 overhead exceeding GEMM savings at seq128.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
