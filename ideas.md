@@ -1461,3 +1461,13 @@
   Planned source/config changes: Restore no symmetric-memory calls, then call `set_allocate_memory_from_process_group_for_comm(True)` on the FSDP-wrapped transformer layers, `lm_head`, and root model after `fully_shard`.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss, no allocator/OOM warnings, and no NCCL teardown warnings. Risk is no backend support or slower allocation behavior.
+  Result: discarded at source state `7ffb0b9`; 10,303 tps with finite decreasing loss but 175.59 GiB peak memory, 98.45% utilization, and repeated NCCL IPC deregistration/socket warnings after training. The ProcessGroup allocator path is both memory-risky and noisy; restore default FSDP comm buffer allocation.
+
+- Idea: SDPA zero-CTA loss chunks 6 with FSDP async unshard op
+  Current best source commit: 3a1ed15
+  Source: FSDP communication/fragmentation follow-up after custom allocator paths were unsafe
+  Expected mechanism: `_set_unshard_async_op(True)` makes FSDP pre-forward and pre-backward unshard use `async_op=True`, and PyTorch documents that it lets all-gather allocations happen on the default stream to avoid inter-stream memory fragmentation. This may improve overlap or reduce allocation stalls without changing the allocator backend.
+  Supporting evidence: The durable profile still has substantial NCCL/all-gather cost and some copy/split overhead. Symmetric-memory and ProcessGroup allocator paths show that staging-buffer behavior matters, but both custom allocation backends produced teardown warnings.
+  Planned source/config changes: Restore default FSDP comm allocation and no symmetric-memory calls, then call `_set_unshard_async_op(True)` on the FSDP-wrapped transformer layers, `lm_head`, and root model after `fully_shard`.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss, no allocator/OOM warnings, and no NCCL teardown warnings. Risk is a private FSDP knob regressing overlap or increasing memory.
