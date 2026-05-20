@@ -805,6 +805,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory at or below the 95% risk line. Risk is that the small batch increase only adds memory pressure without a throughput gain.
   Result: discarded at source state `63b76a9`; 9,685 tps with finite decreasing loss and 169.86 GiB / 95.24% peak memory, below the seq128/local-batch-160 best.
 
+- Idea: separate tok_embeddings FSDP wrap at seq128 batch160
+  Current best source commit: 03d00df
+  Source: source-level memory probe after seq128 batch increases crossed the memory-risk line
+  Expected mechanism: Separately sharding `tok_embeddings` may reduce root-wrapper residency and slightly lower peak memory, giving the seq128/local-batch-160 best more allocator headroom without changing math, attention backend, or the transformer/lm_head prefetch schedule.
+  Supporting evidence: The earlier separate-embedding variant reduced peak memory at the original 4096-token shape, though it was not stable enough to replace the robust baseline there. The seq128 best is now memory-edged enough that even small headroom may matter.
+  Planned source/config changes: In `parallelize_qwen3()`, call `fully_shard(model.tok_embeddings, **fsdp_config)` before sharding transformer blocks. Do not add endpoint prefetch edges; keep the existing transformer-block/lm_head prefetch chain unchanged.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory below the robust batch-160 baseline. Risks are the instability seen in earlier embedding-wrap reruns or slower root/loss scheduling.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
