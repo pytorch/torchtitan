@@ -2190,3 +2190,13 @@ Interpretation:
 
 - Do not count this OOM against the `seq_len=2048`, local-batch-10 candidate. It violates the external-allocation rule.
 - Retry the exact same command after a fresh clear-GPU check.
+
+Retry result:
+
+- Status: invalid.
+- The retry OOMed before step metrics with the same contamination pattern: the OOM message reported separate ~96 GiB processes on failing GPUs while the training rank held about 82 GiB.
+- Immediate post-failure `nvidia-smi` and `ps` checks were clear, so the external allocations had already exited.
+
+Retry interpretation:
+
+- Two invalid attempts show the node is being preempted by short-lived large jobs during launch/compile. For any further retry, require a stable clear window rather than a single clear sample.
