@@ -2892,3 +2892,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_LL_BUFFSIZE=4194304 NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss. Risk is no synergy, lower throughput from compounded overhead, or a high-variance sample still below peak.
   Result: discarded at source state `f2e49dd`; 10,454 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The two high-band runtime knobs do not combine constructively, so keep both defaults.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_SCHEDULE_GROUP_SIZE=1
+  Current best source commit: 5505dd20
+  Source: supported NCCL scheduling knob after profile showed large ring LL collectives and direct transport/chunk-size probes did not improve peak
+  Expected mechanism: Reduce NCCL's P2P schedule group size to 1 so ring send/recv work is scheduled in finer groups. If the default grouping creates coarse bursts that interfere with compiled GEMMs, finer scheduling may smooth overlap for the FSDP all-gather and reduce-scatter rings. If the knob only affects explicit send/recv or adds scheduling overhead, it should regress or no-op.
+  Supporting evidence: The active NCCL library exposes `NCCL_P2P_SCHEDULE_GROUP_SIZE`, and the ledger has not tried it. Run289's trace showed no idle gap but large overlapped NCCL `RING_LL` collectives, so scheduling granularity is a plausible remaining overlap axis distinct from transport enable/disable and chunk-size probes.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_SCHEDULE_GROUP_SIZE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives from excessive scheduling overhead or no effect if collectives do not use this path.
