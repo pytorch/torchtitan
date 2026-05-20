@@ -3449,3 +3449,24 @@ Interpretation:
 
 - Lowering NCCL worker threads to 128 regresses throughput.
 - Keep default NCCL thread count with `NCCL_CTA_POLICY=2`.
+
+## Experiment 137: SDPA Zero-CTA Seq128 Local Batch 160 With NCCL_MAX_NCHANNELS=16
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_MAX_NCHANNELS=16 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run137-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-max-nchannels16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,967, below the zero-CTA durable command.
+- Step 10 MFU: 37.32%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.21079 at step 1 to 6.67282 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Capping NCCL channels at 16 regresses throughput.
+- Keep default NCCL channel selection with `NCCL_CTA_POLICY=2`.

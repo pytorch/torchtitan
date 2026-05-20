@@ -1301,3 +1301,13 @@
   Planned source/config changes: None; keep durable bidirectional one-module prefetch.
   Planned command or config overrides: Current durable zero-CTA command plus `NCCL_MAX_NCHANNELS=16`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is under-channeling reduce-scatter/all-gather and lowering bandwidth.
+  Result: discarded at source state `df55200`; 9,967 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Capping NCCL channels at 16 lowers bandwidth too much.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with explicit NCCL NVLS
+  Current best source commit: 3d045b1
+  Source: topology-specific NCCL follow-up after occupancy and channel caps regressed
+  Expected mechanism: `NCCL_NVLS_ENABLE=1` explicitly enables NVLink SHARP/NVLS collectives. On an 8x B200 single-node system, ensuring NVLS is enabled may improve all-gather/reduce-scatter bandwidth or avoid a fallback algorithm.
+  Supporting evidence: The hardware is NVLink/NVSwitch class and the profile is NCCL-heavy. TorchTitan's deterministic batch-invariant mode explicitly disables NVLS, which implies NVLS is a meaningful NCCL lever for this topology.
+  Planned source/config changes: None; keep durable bidirectional one-module prefetch.
+  Planned command or config overrides: Current durable zero-CTA command plus `NCCL_NVLS_ENABLE=1`.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is no effect if already enabled or slower execution if it forces a suboptimal algorithm.
