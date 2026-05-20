@@ -2782,3 +2782,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_USE_CUDA_MEMCPY=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is much slower communication if copy-engine P2P cannot match NCCL's default direct path.
   Result: crashed at source state `10a3561`; no training step completed. The first FSDP `_ALLGATHER_BASE` timed out after 300 seconds with `NCCL_P2P_USE_CUDA_MEMCPY=1`, so do not use the CUDA memcpy P2P path.
+
+- Idea: exact current best rerun after invalid P2P CUDA memcpy probe
+  Current best source commit: 0c97a519
+  Source: health calibration after `NCCL_P2P_USE_CUDA_MEMCPY=1` timed out and required orphan cleanup
+  Expected mechanism: Repeat the exact durable command with default direct P2P. This confirms the previous timeout was isolated to the invalid memcpy P2P path and that the node returns to the normal throughput band.
+  Supporting evidence: Run285 timed out before step 1 in the first FSDP all-gather. After cleanup, no unrelated large GPU allocations were visible. Exact reruns after invalid NCCL probes have been the quickest way to verify environment health.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
