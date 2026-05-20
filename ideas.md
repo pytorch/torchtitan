@@ -1782,3 +1782,13 @@
   Planned command or config overrides: Current best command with `--compile.components '["model"]'` in addition to `--compile.enable`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no Dynamo/loss warnings. Risk is slower eager loss execution because compiled CE was already efficient.
   Result: crash at source state `5bc61e7`; eager loss OOMed before step 1. Each rank held about 177.06 GiB and then failed trying to allocate 1.99 GiB in `torch.nn.functional.cross_entropy`. Compiled loss is required for the current memory-edged batch160/chunks6 command.
+
+- Idea: two-worker DataLoader command with BF16 fused optimizer states
+  Current best source commit: 49bd1b04
+  Source: optimizer-state interaction retest after DataLoader workers became the validated command addition
+  Expected mechanism: `--optimizer.implementation=fused_opt_states_bf16` reduces optimizer-state bandwidth while the two-worker DataLoader setting reduces host input jitter. The prior BF16 optimizer-state run had one small win and one failed exact rerun before DataLoader tuning; retesting on the current validated command checks whether the interaction clears enough variance to matter.
+  Supporting evidence: The profile is still mostly GEMM/NCCL, so upside is limited, but optimizer state traffic is an isolated legal CLI knob and the current best margin is small.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command plus `--optimizer.implementation=fused_opt_states_bf16`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no optimizer warnings. Risk is repeating the previous failed validation and staying below the default fused AdamW state path.
+  Result: discarded at source state `49bd1b0`; 10,263 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. BF16 optimizer states do not improve the two-worker DataLoader command.
