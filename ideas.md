@@ -1081,3 +1081,12 @@
   Planned command or config overrides: Exact run113 command with a new dump folder.
   Success criteria and expected risk: Keep if it again lands at or above 10,005 tps with finite decreasing loss. Risk is that the result falls back into normal variance and the original SDPA batch160 command remains the durable best.
   Result: discarded at source state `180dede`; 9,991 tps with finite decreasing loss and 169.49 GiB peak memory. This fails to validate run113's 1 tps lead, so keep the original SDPA batch160 run99/run100 result as the durable best.
+
+- Idea: SDPA seq128 local batch 160 with gradient accumulation 4
+  Current best source commit: 846907b
+  Source: stronger optimizer-overhead amortization after noisy gradient accumulation 2
+  Expected mechanism: Raising `training.global_batch_size` to 5120 makes each step process four local microbatches per rank before the optimizer step. If run113's narrow gain came from amortizing step-level optimizer, scheduler, and metric overhead, a larger accumulation factor should amplify the effect.
+  Supporting evidence: Gradient accumulation 2 produced one above-best result and one below-best validation, suggesting any benefit is small relative to variance. A factor of 4 tests whether the trend becomes large enough to measure.
+  Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
+  Planned command or config overrides: Current best command plus `--training.global_batch_size=5120`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss, preferably by more than run-to-run noise. Risk is longer wall time, higher gradient memory, or no improvement because communication and fwd/bwd still occur per microbatch.
