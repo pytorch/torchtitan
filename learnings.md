@@ -6115,3 +6115,25 @@ Interpretation:
 
 - `OMP_NUM_THREADS=2` remains healthy but does not beat the measured peak under the `metrics.log_freq=1` objective.
 - Keep torchrun's default one OpenMP thread per rank for the durable command.
+
+## Experiment 254: Metrics Log Frequency 1 With OMP_NUM_THREADS=4
+
+Command:
+
+```bash
+OMP_NUM_THREADS=4 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run254-omp4-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,443, below the run242 10,650 measured peak and below OMP=2's 10,505.
+- Step 10 MFU: 39.11%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.38837 at step 1 to 5.90598 at step 10; finite and overall decreasing, although steps 9-10 rose locally.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Increasing OpenMP threads to 4 is clean but slower than both OMP=2 and the durable default.
+- Close the OMP thread-count bracket for the current command and keep torchrun's default one thread per rank.
