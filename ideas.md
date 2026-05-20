@@ -2492,3 +2492,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `3ae78d2`; 10,493 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The durable command remains healthy, but run242's 10,650 tps remains the measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_CHECKS_DISABLE=1
+  Current best source commit: 51cfbfd
+  Source: narrow NCCL runtime-overhead probe after scheduling and transport knobs plateaued
+  Expected mechanism: Disable NCCL runtime checks. If argument or safety checks are still on a hot path for FSDP collectives, this may shave a small amount of communication-side overhead without changing model math, tensor shapes, or launch scheduling.
+  Supporting evidence: Recent NCCL transport, occupancy, buffer-registration, launch, and CUDA scheduling knobs have all been clean but below peak. `NCCL_CHECKS_DISABLE` is an untested command-only knob and is narrower than `TORCH_NCCL_BLOCKING_WAIT`, which changes progress semantics.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_CHECKS_DISABLE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if checks are not on the hot path, or unsafe reduced diagnostics if an error occurs.
