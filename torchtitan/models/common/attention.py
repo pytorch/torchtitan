@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -56,16 +56,36 @@ __all__ = [
 ]
 
 
-class VarlenMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
+@dataclass(frozen=True, eq=False)
+class VarlenMetadata:
+    """Metadata for variable-length attention (``varlen_attn``).
 
+    ``cu_seq_q``, ``cu_seq_k``, ``max_q``, ``max_k`` are the standard
+    varlen kernel arguments describing document boundaries within a
+    packed sequence.
+
+    ``k_local_indices`` is an optional 1-D gather index of length
+    ``cu_seq_k[-1]`` over the packed K/V layout. When set (e.g. by
+    :class:`torchtitan.distributed.varlen_cp.CPVarlenMetadata` after CP
+    all-gather), :class:`VarlenAttention` repacks K/V via
+    ``index_select`` before calling the kernel; when ``None`` the
+    kernel sees K/V unchanged.
+
+    For self-attention, ``cu_seq_q`` and ``cu_seq_k`` should be the same
+    tensor object (not just equal-valued); :class:`CPVarlenMetadata`
+    uses an identity check to avoid a per-forward D2H sync.
+
+    Kept as a frozen dataclass with ``eq=False`` because the default
+    dataclass ``__eq__`` would compare tensor fields elementwise (and
+    break identity-based hashing); subclasses such as
+    :class:`CPVarlenMetadata` extend it without adding new fields.
     """
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    k_local_indices: torch.Tensor | None = None
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
@@ -107,21 +127,47 @@ class VarlenAttention(Module):
         scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, VarlenMetadata
-        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        if not isinstance(attention_masks, VarlenMetadata):
+            raise ValueError(
+                f"attention_masks must be a VarlenMetadata, "
+                f"got {type(attention_masks).__name__}"
+            )
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        batch_size, seq_len, _, head_dim = q.shape
+        # Q and K may have different seq lengths under CP: K/V are
+        # all-gathered across the CP dim while Q stays sharded, so K's seq
+        # equals the global seq while Q's is the local shard.
+        batch_size, q_seq_len, _, head_dim = q.shape
+        k_seq_len = k.shape[1]
 
         # varlen attention expects (bs*seqlen, n_heads, head_dim)
-        xq_packed = q.reshape(batch_size * seq_len, -1, head_dim)
-        xk_packed = k.reshape(batch_size * seq_len, -1, head_dim)
-        xv_packed = v.reshape(batch_size * seq_len, -1, head_dim)
+        xq_packed = q.reshape(batch_size * q_seq_len, -1, head_dim)
+        xk_packed = k.reshape(batch_size * k_seq_len, -1, head_dim)
+        xv_packed = v.reshape(batch_size * k_seq_len, -1, head_dim)
+
+        # Under CP, the global K is replicated on each rank but cu_seq_k
+        # describes only the per-segment visible regions, which can be
+        # non-contiguous in the standard packed layout when B > 1 (gaps
+        # between batches). The CP metadata builder ships an index tensor
+        # that gathers the visible K (and V) positions into a contiguous
+        # layout matching cu_seq_k. ``k_local_indices`` defaults to None
+        # for non-CP callers.
+        if attention_masks.k_local_indices is not None:
+            # The CP builder constructs cu_seq_k as a right-aligned causal
+            # window per (doc, rank) chunk, so it is only valid for causal
+            # attention. Non-causal varlen+CP would need a different K shard
+            # layout (full K per doc, not just past-and-current).
+            if self.window_size != (-1, 0):
+                raise ValueError(
+                    "Varlen attention under CP only supports causal masking "
+                    f"(window_size=(-1, 0)); got window_size={self.window_size}."
+                )
+            xk_packed = xk_packed.index_select(0, attention_masks.k_local_indices)
+            xv_packed = xv_packed.index_select(0, attention_masks.k_local_indices)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support
@@ -160,7 +206,7 @@ class VarlenAttention(Module):
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
-        out = out_packed.view(batch_size, seq_len, -1, head_dim)
+        out = out_packed.view(batch_size, q_seq_len, -1, head_dim)
 
         return out.to(q.dtype)
 
