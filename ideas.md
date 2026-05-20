@@ -1110,3 +1110,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
   Planned command or config overrides: Current best command with `--training.seq_len=160 --training.local_batch_size=128`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is that seq128 remains the kernel sweet spot and seq160 lands between the weaker seq96 and seq256 SDPA points.
+  Result: discarded at source state `3d808f3`; 9,860 tps with finite decreasing loss and 168.57 GiB peak memory, below the SDPA seq128 best.

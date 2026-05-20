@@ -3035,3 +3035,24 @@ Interpretation:
 
 - Gradient accumulation 4 did not validate; run115 was another variance win.
 - Do not pursue larger global batch on the tiny `c4_test` asset unless a separate requirement accepts dataset re-looping and variance-heavy results.
+
+## Experiment 117: SDPA Seq160 Local Batch 128 Constant-Token Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=160 --training.local_batch_size=128 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run117-sdpa-prefetch-seq160-lbs128-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,860, below run99's 10,005.
+- Step 10 MFU: 36.96%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.37278 at step 1 to 7.61206 at step 10; finite and decreasing.
+
+Interpretation:
+
+- SDPA seq160 does not fill the shape-search gap between seq128 and seq256.
+- The SDPA shape evidence now points strongly to seq128/local-batch-160 as the best constant-token shape tested.
