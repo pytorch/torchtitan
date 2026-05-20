@@ -640,6 +640,7 @@
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or a stable result above the 8,835 simpler prefetch best. Risk is no benefit if embedding prefetch was necessary for run70's best measurement.
   Result: diagnostic discard at source state `549bd46`; 8,836 tps with finite decreasing loss, below run70's 8,847 but slightly above the older run59/run62 robust prefetch source.
+  Rerun result: discarded at source state `7374453`; 8,670 tps and loss increased from 12.42399 to 15.21730. Do not keep the no-endpoint embedding-wrap variant.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
