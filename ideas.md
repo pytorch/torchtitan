@@ -2691,3 +2691,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_READ_ENABLE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower P2P if NCCL's topology-selected read path is already optimal.
+  Result: discarded at source state `cc3a65c`; 10,457 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing write-based P2P is slower, so keep NCCL's topology-selected P2P read/write behavior.

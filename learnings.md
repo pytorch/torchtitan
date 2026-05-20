@@ -6603,3 +6603,25 @@ Interpretation:
 
 - `NCCL_LAUNCH_ORDER_IMPLICIT=1` is accepted on this CUDA 13.1/NCCL 2.29.7 stack but is slower than the default.
 - Keep NCCL's default launch-ordering mode. The earlier `NCCL_LAUNCH_MODE=GROUP` regression and this result both argue against changing NCCL launch semantics for this command.
+
+## Experiment 276: Metrics Log Frequency 1 With NCCL_P2P_READ_ENABLE=0
+
+Command:
+
+```bash
+NCCL_P2P_READ_ENABLE=0 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run276-nccl-p2p-read-disable-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,457, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.16%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.47633 at step 1 to 7.12398 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or P2P warning appeared.
+
+Interpretation:
+
+- Forcing NCCL P2P writes with `NCCL_P2P_READ_ENABLE=0` is slower than topology-selected behavior.
+- Keep NCCL's default P2P read/write selection on the B200/NVSwitch topology. This also reinforces that the P2P path itself is required, while manually steering it has not helped.
