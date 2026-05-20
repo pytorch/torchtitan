@@ -19,7 +19,7 @@ from typing import Any, cast
 import torch
 from torch.distributed.tensor import DeviceMesh
 
-DEFAULT_NUM_CTAS = 1024
+_NUM_CTAS = 1024
 MAX_TLX_NUM_CTAS = 152
 TLX_NUM_STAGES = 8
 EP_TIMEOUT_SECONDS = 30.0
@@ -2469,7 +2469,6 @@ class FlexEPRouter:
         ep_rank: int,
         ep_size: int,
         workspace: FlexEPWorkspace,
-        num_ctas: int = DEFAULT_NUM_CTAS,
         capacity_factor: float = 1.0,
     ) -> None:
         self.max_tokens = max_tokens
@@ -2478,7 +2477,6 @@ class FlexEPRouter:
         self.top_k = top_k
         self.ep_rank = ep_rank
         self.ep_size = ep_size
-        self.num_ctas = num_ctas
         self.workspace = workspace
         self.capacity_factor = capacity_factor
         self.router_fns = self._make_router_fns()
@@ -2505,7 +2503,6 @@ class FlexEPRouter:
         top_k: int,
         device: torch.device,
         ep_mesh: DeviceMesh,
-        num_ctas: int = DEFAULT_NUM_CTAS,
         capacity_factor: float = 1.0,
     ) -> "FlexEPRouter":
         capacity_factor = _validate_flex_ep_capacity_factor(capacity_factor)
@@ -2530,7 +2527,6 @@ class FlexEPRouter:
             ep_rank=ep_rank,
             ep_size=ep_size,
             workspace=workspace,
-            num_ctas=num_ctas,
             capacity_factor=capacity_factor,
         )
 
@@ -2708,7 +2704,7 @@ class FlexEPRouter:
                 operands.offs_dispatch_recv_weights,
                 operands.offs_dispatch_recv_origin_global_token_id,
                 operands.ep_rank,
-                self.num_ctas,
+                _NUM_CTAS,
                 self.max_tokens,
             )
             barrier = torch.ops._flex_ep.barrier_arrive(
@@ -2780,7 +2776,7 @@ class FlexEPRouter:
                 operands.ep_rank,
                 self.max_tokens,
                 self.top_k,
-                self.num_ctas,
+                _NUM_CTAS,
                 self.max_tokens,
             )
             combine_recv_buffer = _router_barrier(
@@ -2844,7 +2840,7 @@ class FlexEPRouter:
                 operands.offs_dispatch_recv_weights,
                 -1,
                 operands.ep_rank,
-                self.num_ctas,
+                _NUM_CTAS,
                 self.max_tokens,
             )
             barrier = torch.ops._flex_ep.barrier_arrive(
@@ -2916,7 +2912,7 @@ class FlexEPRouter:
                 operands.ep_rank,
                 self.max_tokens,
                 self.top_k,
-                self.num_ctas,
+                _NUM_CTAS,
                 self.max_tokens,
             )
             combine_recv_buffer = _router_barrier(

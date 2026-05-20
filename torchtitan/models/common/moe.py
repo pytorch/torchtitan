@@ -163,7 +163,6 @@ class FlexGroupedExperts(Module):
         top_k: int
         score_before_experts: bool = False
         use_grouped_mm: bool = True
-        num_ctas: int = 1024
         flex_ep_capacity_factor: float = 1.0
 
     def __init__(self, config: Config):
@@ -183,7 +182,6 @@ class FlexGroupedExperts(Module):
 
         self.num_experts = config.num_experts
         self.top_k = config.top_k
-        self.num_ctas = config.num_ctas
         self.flex_ep_capacity_factor = config.flex_ep_capacity_factor
         self.w1 = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
@@ -240,7 +238,6 @@ class FlexGroupedExperts(Module):
                 top_k=self.top_k,
                 device=x.device,
                 ep_mesh=self.ep_mesh,
-                num_ctas=self.num_ctas,
                 capacity_factor=self.flex_ep_capacity_factor,
             )
         self._router = router
@@ -313,7 +310,6 @@ class FlexGroupedExperts(Module):
             ep_size=router.ep_size,
             max_tokens=router.max_tokens,
             topk=self.top_k,
-            num_ctas=router.num_ctas,
         )
         out = flex_ep_weighted_sum(y_partial, top_scores).to(x.dtype)
         if shared_experts is not None:
