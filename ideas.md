@@ -2882,3 +2882,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_MEM_SYNC_DOMAIN=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap if NCCL's default remote sync domain is better isolated for communication.
   Result: discarded at source state `4403dd9`; 10,476 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing NCCL into the default memory sync domain is slower, so keep NCCL's default sync-domain choice.
+
+- Idea: TORCH_NCCL_CUDA_EVENT_CACHE=0 with NCCL_LL_BUFFSIZE=4194304
+  Current best source commit: d997938f
+  Source: interaction probe between two valid high-band but sub-peak runtime knobs
+  Expected mechanism: `TORCH_NCCL_CUDA_EVENT_CACHE=0` may change event lifetime/synchronization behavior, while `NCCL_LL_BUFFSIZE=4194304` makes LL collectives use coarser buffers. Together they may reduce synchronization or bookkeeping overhead around the large `RING_LL` FSDP collectives seen in the profile, even though each knob alone stayed below peak.
+  Supporting evidence: `TORCH_NCCL_CUDA_EVENT_CACHE=0` reached 10,607 tps in run267, the highest non-winning runtime knob, and `NCCL_LL_BUFFSIZE=4194304` reached 10,583 tps in run291. Both were valid and clean. The profile showed NCCL LL collectives are substantial, so testing their interaction is more targeted than an unrelated fresh knob.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_LL_BUFFSIZE=4194304 NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss. Risk is no synergy, lower throughput from compounded overhead, or a high-variance sample still below peak.
