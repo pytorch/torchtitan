@@ -1903,3 +1903,26 @@ Interpretation:
 
 - Backward prefetch is contributing to the current best despite the visible reduce-scatter bucket. Removing it regresses throughput.
 - Restore the one-module bidirectional prefetch schedule as the best known prefetch policy.
+
+## Manager Review After Experiment 65
+
+Current best:
+
+- Source state: `7c1c351`.
+- Command shape: flex attention, no FP8 converter, compile enabled, BF16 training dtype, local batch size 5, `--comm.trace_buf_size=0`, no AC/TP/CP/PP/EP, FSDP across 8 B200s, one-module FSDP prefetch.
+- Metrics: run59 at 8,835 tps, 36.91% MFU, 168.10 GiB peak memory, finite decreasing loss. Exact rerun run62 was 8,829 tps with finite decreasing loss, so the improvement is reproducible.
+
+Search state:
+
+- Run59's prefetch schedule is the first strong communication-overlap win after flex attention.
+- Run63 profile shows the remaining bottleneck is now dominated by NCCL reduce-scatter plus GEMM: about 2.40 s NCCL kernels on rank 0, including 1.76 s reduce-scatter and 0.63 s all-gather, versus 2.05 s nvjet GEMM and 0.78 s flex attention.
+- Wider two-module prefetch is too aggressive: run64 slowed to 8,627 tps and raised memory to 169.33 GiB.
+- Forward-only prefetch is worse at 8,596 tps, so backward prefetch is important and should remain part of the best policy unless a narrower complementary test proves otherwise.
+- Selective FP8 with BF16 `lm_head` fixed the short-run loss trend but still reached only 8,762 tps, so FP8 coverage is lower priority than communication reduction.
+
+Next implications:
+
+- Highest-priority next idea: BF16 FSDP reduce dtype on the run59 prefetch source. This directly attacks the 1.76 s reduce-scatter bucket and is more likely to help than another prefetch-window width change.
+- Second priority: HSDP 2x4 on the prefetch source. This changes FSDP collective topology without changing model math, attention, compile, local batch size, TP, CP, AC, or FP8.
+- Third priority: separately wrap `tok_embeddings` and add terminal backward prefetch to reduce root-wrapper communication/scheduling opacity.
+- Avoid more broad FP8, AC batch-scaling, CP, or Inductor autotune sweeps unless a later profile materially changes the bottleneck mix.

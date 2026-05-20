@@ -588,6 +588,33 @@
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risk is lower tps if forward prefetch was hiding important forward all-gathers.
 
+- Idea: BF16 FSDP reduce dtype on prefetch flex best
+  Current best source commit: 7c1c351
+  Source: Manager review after run65
+  Expected mechanism: Change only the FSDP mixed-precision reduce dtype from FP32 to BF16 so reduce-scatter communicates half as many bytes. This directly targets the largest remaining profile bucket without changing batch size, attention backend, FSDP prefetch policy, or parameter dtype.
+  Supporting evidence: Run63 profile on the current best shows about 2.40 s NCCL kernels on rank 0, dominated by about 1.76 s reduce-scatter. The config type currently exposes `training.mixed_precision_reduce` only as `"float32"`, so this should be an explicit Qwen3 `parallelize.py` experiment rather than a CLI-only override.
+  Planned source/config changes: In Qwen3 `parallelize_qwen3()`, keep `param_dtype` from `training.mixed_precision_param` but set `MixedPrecisionPolicy(reduce_dtype=torch.bfloat16)` for this candidate only. Keep the run59 one-module prefetch schedule unchanged.
+  Planned command or config overrides: Exact current best command with a new dump folder.
+  Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risks are short-run loss regression from BF16 gradient reductions or no speedup if NCCL is already overlapped enough that reduced payload does not affect step time.
+
+- Idea: HSDP 2x4 on prefetch flex best
+  Current best source commit: 7c1c351
+  Source: Manager review after run65
+  Expected mechanism: Use two data-parallel replicas and four-rank FSDP shards (`dp_replicate=2`, `dp_shard=4`) to reduce the per-shard FSDP collective group size while preserving the same 8-GPU workload. This may reduce the exposed reduce-scatter/all-gather cost now dominating the profile.
+  Supporting evidence: Whole-model no-reshard and TP were too costly, but run63 shows communication is now the largest visible bucket. HSDP is less invasive than TP because it keeps Qwen3 tensor shapes, attention backend, compile path, and local batch size unchanged while changing only the data-parallel mesh.
+  Planned source/config changes: Narrowly allow `parallel_dims.dp_replicate > 1` in Qwen3 `parallelize_qwen3()` and select `parallel_dims.get_mesh(["dp_replicate", "fsdp"])` for `fully_shard`; preserve the current one-module prefetch schedule. Do not add TP, CP, AC, FP8, or batch-size changes in the same run.
+  Planned command or config overrides: Current best command plus `--parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4`.
+  Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss and no memory regression. Risks are slower replica synchronization, incorrect gradient scaling if HSDP interacts badly with the current disabled FSDP gradient division, or lower MFU from smaller shard groups.
+
+- Idea: separately FSDP-wrap tok_embeddings with terminal backward prefetch
+  Current best source commit: 7c1c351
+  Source: Manager review after run65
+  Expected mechanism: Separately wrapping `tok_embeddings` and adding it as the final backward-prefetch target may expose and overlap embedding/root FSDP communication instead of leaving it inside the root wrapper.
+  Supporting evidence: The transformers-modeling backend separately shards `tok_embeddings` and uses terminal backward prefetch to embeddings. Run59 proved prefetch scheduling matters materially, while wider prefetch and forward-only variants were worse. This is a narrower source-structure refinement than reopening TP, CP, AC, or broad FP8.
+  Planned source/config changes: In Qwen3 `parallelize_qwen3()`, call `fully_shard(model.tok_embeddings, **fsdp_config)` before the transformer blocks, keep `lm_head` as currently wrapped, and make the first transformer block prefetch `model.tok_embeddings` in backward as the terminal target. Keep the one-module prefetch window.
+  Planned command or config overrides: Exact current best command with a new dump folder.
+  Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risks are no improvement if root communication is not material, or extra all-gather scheduling overhead from an additional FSDP unit.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
