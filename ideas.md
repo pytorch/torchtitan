@@ -2072,3 +2072,12 @@
   Planned command or config overrides: Current best command with `--metrics.log_freq=1` instead of `--metrics.log_freq=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,504 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is that metric collection overhead over one step dominates, or that one-step reporting is too noisy to validate.
   Result: tentative keep at source state `d77a2db`; 10,530 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The final one-step report beats `log_freq=2`, but it is the highest-variance measurement window and requires exact rerun.
+
+- Idea: exact metrics log frequency 1 rerun
+  Current best source commit: dbb4cd48
+  Source: validation follow-up after run214 produced a new reported-tps high
+  Expected mechanism: Repeat the exact `--metrics.log_freq=1` command to validate whether the single final-step report is durably above `log_freq=2`.
+  Supporting evidence: Run214 reported 10,530 tps at step 10 with clean memory and no runtime warnings, but only one step contributes to the final interval.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run214 command.
+  Success criteria and expected risk: Keep `--metrics.log_freq=1` as the new durable best if the rerun remains above 10,504 with finite overall-decreasing loss and no allocator/NCCL warnings. Otherwise keep `--metrics.log_freq=2`.
