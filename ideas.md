@@ -3052,3 +3052,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=NVLS,Ring` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL initialization failure if the algorithm list is too restrictive or slower throughput if NVLS is selected for unsuitable collectives.
   Result: discarded at source state `6c44a2e`; 10,519 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The ordered NVLS/Ring algorithm preference is valid but below peak, so keep NCCL's automatic algorithm selection.
+
+- Idea: metrics log frequency 1 with NCCL_ALGO=NVLSTree,Ring
+  Current best source commit: b31e82c
+  Source: algorithm-selection follow-up after `NCCL_ALGO=NVLS,Ring` was valid but below peak
+  Expected mechanism: Prefer the NVLS tree algorithm for collectives where NCCL supports it while keeping Ring as fallback for initialization broadcasts and other unsupported operations. If the profiled FSDP all-gather/reduce-scatter path is communication-limited and can use NVLSTree more efficiently than ring LL, this may improve step throughput. If default selection already chooses the best algorithm or NVLSTree has worse overlap with GEMMs, it should regress.
+  Supporting evidence: Local NCCL references list `NVLSTree` as a valid `NCCL_ALGO` spelling. Run289 showed substantial `RING_LL` collective time, while run312 showed plain `NVLS,Ring` is accepted but not faster. This isolates NVLS tree selection from plain NVLS selection.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=NVLSTree,Ring` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL rejecting the algorithm list, selecting a slower algorithm, or no effect if NVLSTree is not used for the dominant collectives.
