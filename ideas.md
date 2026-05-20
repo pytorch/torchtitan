@@ -2102,3 +2102,12 @@
   Planned command or config overrides: Current best command plus `--metrics.disable_color_printing`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is no measurable effect or a repeat of earlier color-printing-disabled regressions from older command stacks.
   Result: discarded at source state `ffbdf7c`; 10,550 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Removing ANSI color formatting does not beat the validated colored console path.
+
+- Idea: metrics log frequency 1 with local batch size 161
+  Current best source commit: a9b93e80
+  Source: batch-shape retest after `metrics.log_freq=1` changed the reported objective to the final warmed step
+  Expected mechanism: Increase local batch size from 160 to 161 while keeping sequence length 128. This adds 0.625% more tokens per step and may improve final-step reported `tps` if the warmed compute kernels absorb the slightly larger batch without significant allocator pressure.
+  Supporting evidence: Earlier batch161 probes were slower on older command stacks, but the durable objective now uses `metrics.log_freq=1`, and prior SDPA batch161 memory was close to batch160 rather than catastrophic. This is the smallest capacity increase and safer than retesting batch162 first.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current best command with `--training.local_batch_size=161`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is the known odd-batch shape slowdown or memory crossing the 95% risk line.
