@@ -1121,3 +1121,12 @@
   Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is extra all-gather memory causing OOM or allocator pressure, or too-early prefetch reducing overlap quality.
   Result: discarded at source state `725c528`; 9,967 tps with finite decreasing loss and 169.80 GiB peak memory. Wider prefetch increases memory and does not improve overlap enough, so restore one-module bidirectional prefetch.
+
+- Idea: SDPA seq128 local batch 160 without lm_head endpoint prefetch
+  Current best source commit: 846907b
+  Source: prefetch-boundary follow-up after two-module prefetch increased memory
+  Expected mechanism: The current best prefetches from the final transformer layer into `lm_head` and back from `lm_head` to the final layer. Removing only those endpoint prefetches may reduce peak memory and allocator pressure while keeping layer-to-layer overlap intact.
+  Supporting evidence: Two-module prefetch raised peak memory to 169.80 GiB and slowed down. The current best is near the memory-risk line, so endpoint prefetch might be costing more memory than overlap benefit at seq128.
+  Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to keep one-module layer-to-layer forward/backward prefetch but omit the `lm_head` endpoint prefetch calls.
+  Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower `lm_head` all-gather/loss boundary because the endpoint overlap was useful.
