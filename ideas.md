@@ -2621,3 +2621,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_IB_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower fallback if NCCL unexpectedly needed IB for part of the topology.
+  Result: crashed at source state `6c80a66`; NCCL failed before training during deterministic seed broadcast with `Failed to initialize any NET plugin`. `NCCL_IB_DISABLE=1` is invalid on this stack and should not be used.

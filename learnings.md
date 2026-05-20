@@ -6451,3 +6451,23 @@ Interpretation:
 
 - The exact durable command still has wide final-step variance after the event-cache probe.
 - Run267's high-but-not-best sample is not enough to justify changing ProcessGroupNCCL's CUDA event cache default.
+
+## Experiment 269: Metrics Log Frequency 1 With NCCL_IB_DISABLE=1
+
+Command:
+
+```bash
+NCCL_IB_DISABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run269-nccl-ib-disable-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run failed before training steps, during deterministic seed broadcast in `dist_utils.set_determinism`.
+- Error: `ncclInvalidUsage` with NCCL last error `Failed to initialize any NET plugin`.
+- No external large GPU allocation was present after the failed run.
+
+Interpretation:
+
+- `NCCL_IB_DISABLE=1` is not a harmless single-node guard on this stack; NCCL still requires a NET plugin to initialize this process group path.
+- Do not use IB-disable for this workload. The valid transport path depends on the default network/plugin initialization even though steady-state collectives rely on direct GPU P2P/NVLink.
