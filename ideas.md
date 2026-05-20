@@ -1822,3 +1822,13 @@
   Planned command or config overrides: Current best command without `--dataloader.persistent_workers`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no DataLoader warnings. Risk is slower startup/iteration behavior if persistent workers are required for the short 10-step run.
   Result: discarded at source state `252ff08`; 10,255 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Persistent workers are part of the validated DataLoader setting.
+
+- Idea: exact current-best rerun after DataLoader bracket closure
+  Current best source commit: fbfd4d99
+  Source: stability refresh after all adjacent DataLoader settings regressed
+  Expected mechanism: Repeat the validated two-worker persistent prefetch command unchanged to measure current run-to-run variance and ensure the active best command still clears the prior durable threshold.
+  Supporting evidence: The best command has one 10,290 run and one 10,328 validation run; subsequent nearby DataLoader settings were slower. A fresh exact run gives a better durability estimate before moving to more invasive source ideas.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Exact current best command with two workers, persistent workers, prefetch factor 2, and a new dump folder.
+  Success criteria and expected risk: Keep the command if it remains above the old durable threshold with finite decreasing loss. If it falls materially below 10,258, treat the DataLoader win as less stable and revisit the baseline command.
+  Result: kept at source state `fbfd4d9`; 10,301 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This is below the 10,328 peak but above the old 10,258 durable threshold, so the two-worker persistent prefetch command remains the durable best.

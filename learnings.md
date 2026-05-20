@@ -4611,3 +4611,25 @@ Interpretation:
 
 - Removing `persistent_workers` loses the DataLoader improvement.
 - The durable DataLoader command remains two workers, persistent workers, and prefetch factor 2.
+
+## Experiment 190: Exact Current-Best Rerun
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run190-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep.
+- Step 10 `tps`: 10,301, below the 10,328 peak but above the old durable 10,258 threshold.
+- Step 10 MFU: 38.58%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.38208 at step 1 to 6.57400 at step 10; finite and decreasing.
+- No dataset re-loop, DataLoader worker warning, OOM, traceback, or NCCL warning appeared.
+
+Interpretation:
+
+- The two-worker DataLoader command remains durable but not always at the 10,328 peak.
+- Use 10,301 as the latest stability sample and 10,328 as the measured best for future rerun decisions.
