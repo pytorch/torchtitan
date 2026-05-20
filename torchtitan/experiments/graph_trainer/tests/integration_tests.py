@@ -299,6 +299,8 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ],
             "jit_deepseekv3_auto_bucketing",
             ngpu=8,
+
+
         ),
         # === aot_fx_trace mode tests ===
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
@@ -523,8 +525,8 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda", "rocm", "xpu"],
+        help="GPU architecture type. Must be specified as either 'cuda', 'rocm', 'xpu' .",
     )
     parser.add_argument(
         "--test_suite",
