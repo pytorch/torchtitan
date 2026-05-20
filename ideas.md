@@ -2181,3 +2181,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command without `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Expected risk is regression if zero-CTA still improves compute/communication overlap.
+  Result: discarded at source state `5459123`; 10,559 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The run is healthy but below the validated zero-CTA best, so keep `NCCL_CTA_POLICY=2`.
