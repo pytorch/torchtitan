@@ -3113,6 +3113,15 @@
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,658, record it as the new measured peak. Risk is only short-window variance.
   Result: kept as calibration at source state `ed6bce9`; 10,477 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command remains healthy but this sample is below the current peak.
 
+- Idea: root FSDP wrapper with reshard_after_forward disabled
+  Current best source commit: 475ea4e
+  Source: source-level root-wrapper policy probe after separate endpoint wrapping and last-layer no-reshard probes were slower
+  Expected mechanism: Keep the root FSDP wrapper's parameters, primarily `tok_embeddings` and final norm, unsharded after forward while leaving transformer blocks and `lm_head` on the durable resharding policy. This may avoid a root all-gather before embedding/norm backward and reduce root-wrapper communication without adding separate FSDP endpoint wrappers.
+  Supporting evidence: Whole-model no-reshard and suffix layer no-reshard were not wins, and explicit endpoint wrapping was slower. Root-only no-reshard is a narrower memory-for-communication tradeoff that has not been isolated; expected extra residency is much smaller than keeping transformer layers unsharded.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, call `fully_shard(model, **root_fsdp_config)` with `root_fsdp_config["reshard_after_forward"] = False`, leaving layer and `lm_head` FSDP configs unchanged.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is memory rising above the preferred envelope or slower execution if root all-gather is not a meaningful bottleneck.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command

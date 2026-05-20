@@ -88,7 +88,9 @@ def parallelize_qwen3(
     for layer in layers:
         fully_shard(layer, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
-    fully_shard(model, **fsdp_config)
+    root_fsdp_config = fsdp_config.copy()
+    root_fsdp_config["reshard_after_forward"] = False
+    fully_shard(model, **root_fsdp_config)
     if layers:
         for layer, next_layer in zip(layers, layers[1:]):
             layer.set_modules_to_forward_prefetch([next_layer])
