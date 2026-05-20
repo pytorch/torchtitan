@@ -1992,3 +1992,12 @@
   Planned command or config overrides: Exact current-best two-worker command.
   Success criteria and expected risk: Keep as the calibration row if it completes with finite decreasing loss and no warnings. If it exceeds 10,328, treat it as a new measured peak that still needs judgment against variance; otherwise keep the existing best.
   Result: kept as calibration at source state `82f5bef`; 10,281 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This does not beat the 10,328 peak, but confirms the restored source remains in the expected current-best variance band.
+
+- Idea: current best with NCCL_MIN_CTAS=16
+  Current best source commit: 6c7d7d7
+  Source: communication-profile follow-up after CTA caps and buffer-size increase regressed
+  Expected mechanism: Prior `NCCL_MAX_CTAS=16` and `NCCL_MAX_CTAS=8` limited NCCL occupancy and slowed the run. `NCCL_MIN_CTAS=16` tests the opposite direction: if the exposed reduce-scatter/all-gather time is from under-provisioned collective kernels rather than compute overlap pressure, a CTA floor may reduce collective duration and improve reported tps.
+  Supporting evidence: Run202 still showed about 1.59 s NCCL kernels on rank0, led by reduce-scatter. The current-best calibration remains healthy, while larger NCCL buffers did not help payload slicing. This is a command-only NCCL occupancy test and does not change memory residency or model math.
+  Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
+  Planned command or config overrides: Current best command with `NCCL_MIN_CTAS=16` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss and no NCCL warnings. Risk is worse compute/communication overlap if more NCCL CTAs contend with transformer GEMMs.
