@@ -6919,3 +6919,25 @@ Interpretation:
 
 - Current best is a mixed compute/communication workload with very high GPU occupancy and substantial overlapped FSDP all-gather/reduce-scatter cost.
 - The next profile-driven ideas should target NCCL LL collective behavior or reduce FSDP communication volume/reshard cost. Dataloader, CPU launch overhead, and attention backend are lower-priority based on this trace.
+
+## Experiment 290: Metrics Log Frequency 1 With NCCL_LL_BUFFSIZE=1048576
+
+Command:
+
+```bash
+NCCL_LL_BUFFSIZE=1048576 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run290-nccl-ll-buffsize1m-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,446, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.12%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.42951 at step 1 to 6.14200 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Reducing `NCCL_LL_BUFFSIZE` to 1 MiB is valid but slower than the durable command.
+- The profile correctly identified LL collectives as important, but smaller LL chunks appear to add overhead or reduce bandwidth more than they improve overlap. Keep NCCL's default LL buffer size.

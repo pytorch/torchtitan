@@ -2831,3 +2831,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LL_BUFFSIZE=1048576` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives from extra LL chunk overhead if the default buffer size is already balancing bandwidth and overlap.
+  Result: discarded at source state `b420f98`; 10,446 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Smaller 1 MiB LL buffers do not improve the profiled LL collective bottleneck; keep the default LL buffer size.
