@@ -3239,3 +3239,25 @@ Interpretation:
 
 - Loss chunks 4 did not validate and consistently uses much more memory.
 - Keep the default 8 chunks.
+
+## Experiment 127: SDPA Seq128 Local Batch 160 With Inductor Max Autotune
+
+Command:
+
+```bash
+TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run127-sdpa-prefetch-seq128-lbs160-compile-bf16-inductor-max-autotune-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 6,995, far below run99's 10,005.
+- Step 10 MFU: 26.19%.
+- Step 10 peak memory: 174.02 GiB, 97.57%.
+- Runtime reported 9 CUDA allocation retries.
+- Loss moved from 12.62944 at step 1 to 14.30904 at step 10; finite but increasing, so the run fails loss sanity.
+
+Interpretation:
+
+- Max autotune selected high-memory/slow behavior for this workload and did not preserve the short-run loss trend.
+- Do not retry max autotune for this SDPA shape.

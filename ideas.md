@@ -1201,3 +1201,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current durable best command with `TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risks are longer compile time, a slower autotuned choice, or no effect if cuBLAS/ATen remains best.
+  Result: discarded at source state `a05a979`; 6,995 tps, 174.02 GiB peak memory, 9 CUDA allocation retries, and loss increased from 12.62944 to 14.30904. Inductor max autotune chooses expensive/high-memory behavior and should not be retried.
