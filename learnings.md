@@ -6625,3 +6625,25 @@ Interpretation:
 
 - Forcing NCCL P2P writes with `NCCL_P2P_READ_ENABLE=0` is slower than topology-selected behavior.
 - Keep NCCL's default P2P read/write selection on the B200/NVSwitch topology. This also reinforces that the P2P path itself is required, while manually steering it has not helped.
+
+## Experiment 277: Metrics Log Frequency 1 With NCCL_P2P_READ_ENABLE=1
+
+Command:
+
+```bash
+NCCL_P2P_READ_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run277-nccl-p2p-read-enable-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,450, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.13%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.49819 at step 1 to 6.89877 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or P2P warning appeared.
+
+Interpretation:
+
+- Forcing P2P reads with `NCCL_P2P_READ_ENABLE=1` is also slower than the durable command.
+- The P2P direction axis is closed: both forced writes and forced reads are below the measured peak, so keep NCCL's topology-selected read/write behavior.
