@@ -6384,3 +6384,25 @@ Interpretation:
 
 - The durable command remains healthy after restoring the default NCCL buffer size.
 - This higher exact rerun reinforces that command-only ablations below 10.5k are not wins; run242 remains the measured peak, with 10.6k reachable only by exact-command variance so far.
+
+## Experiment 266: Metrics Log Frequency 1 With NCCL_PROTO=LL
+
+Command:
+
+```bash
+NCCL_PROTO=LL NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run266-nccl-proto-ll-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,710, far below the run242 10,650 measured peak.
+- Step 10 MFU: 36.36%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.48816 at step 1 to 5.94833 at step 10; finite and overall decreasing, although step 9 rose from step 8.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, protocol warning, or DataLoader warning appeared.
+
+Interpretation:
+
+- Explicitly pinning `NCCL_PROTO=LL` is much slower than automatic protocol selection.
+- Even though profiling showed LL in the durable path, forcing the protocol appears to block useful NCCL selection behavior for some collectives. Keep protocol selection default.

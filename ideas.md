@@ -2591,3 +2591,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROTO=LL` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if LL is already selected, or slower collectives if some operations benefited from another protocol.
+  Result: discarded at source state `67890f0`; 9,710 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Explicitly pinning LL severely underperforms automatic protocol selection, so keep NCCL protocol selection on default.
