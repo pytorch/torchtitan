@@ -99,6 +99,25 @@ class BucketSpec:
     reshard_after_forward: bool = True
 
 
+@dataclass(frozen=True)
+class BucketParamLayout:
+    """Bucket-global layout metadata for one parameter."""
+
+    param_offset: int
+    local_global_offset: int
+
+
+@dataclass(frozen=True)
+class BucketLayout:
+    """Bucket-global storage layout shared by parameters in one bucket."""
+
+    global_numel: int
+    local_numel: int
+    rank_offsets: tuple[int, ...]
+    rank_numels: tuple[int, ...]
+    param_layouts: dict[str, BucketParamLayout]
+
+
 @dataclass
 class ParamInfo:
     """Metadata for a parameter in chunked storage."""
@@ -114,6 +133,7 @@ class ParamInfo:
     byte_offset: int = 0  # byte offset into the sharded storage
     storage_nbytes: int = 0  # bytes reserved for this param's local storage
     global_numel: int = 0  # total elements in unsharded param
+    bucket_layout: BucketLayout | None = None
 
     @property
     def placement(self) -> Placement:
@@ -223,6 +243,17 @@ class ShardedBucketStorage:
         uniform dtype. Each placement owns its per-parameter local storage layout;
         bucket storage only places those layouts sequentially in the byte buffer.
         """
+        if named_params:
+            first_fqn = named_params[0][0]
+            placement = _get_single_placement(param_placements[first_fqn])
+            maybe_bucket_infos = placement.create_bucket_param_infos(
+                named_params,
+                param_placements,
+                mesh,
+            )
+            if maybe_bucket_infos is not None:
+                return maybe_bucket_infos
+
         param_infos: dict[str, ParamInfo] = {}
         current_byte_offset = 0
 
