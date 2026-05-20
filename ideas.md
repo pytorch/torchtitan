@@ -1181,3 +1181,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current durable best command plus `--loss.num_chunks=4`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is OOM or slower runtime if the larger chunks increase memory pressure more than they reduce loop overhead.
+  Result: tentative keep at source state `ccbf3e4`; 10,007 tps, 37.47% MFU, 171.48 GiB peak memory, and loss decreased from 12.36063 to 5.18953. The speed margin is tiny and memory is above the 95% risk line, so validate before keeping.

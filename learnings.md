@@ -3197,3 +3197,24 @@ Interpretation:
 
 - Backward-only prefetch did not validate; run123 was variance.
 - Restore one-module bidirectional prefetch as the durable source.
+
+## Experiment 125: SDPA Seq128 Local Batch 160 With Loss Num Chunks 4
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=4 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run125-sdpa-prefetch-seq128-lbs160-compile-bf16-loss-chunks4-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Step 10 `tps`: 10,007, narrowly above run99's 10,005.
+- Step 10 MFU: 37.47%.
+- Step 10 peak memory: 171.48 GiB, 96.15%.
+- Loss moved from 12.36063 at step 1 to 5.18953 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Reducing loss chunks from 8 to 4 can shave enough loop overhead to barely beat the best, but it spends much more memory.
+- This needs exact validation; even if it validates, the memory-risk tradeoff is worse than the original SDPA best.
