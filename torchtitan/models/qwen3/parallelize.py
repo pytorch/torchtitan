@@ -59,6 +59,8 @@ def parallelize_qwen3(
     if skip_dp or not parallel_dims.dp_enabled:
         return model
 
+    if parallel_dims.dp_replicate != 1:
+        raise NotImplementedError("Qwen3 baseline FSDP bootstrap does not support HSDP.")
     if training.enable_cpu_offload:
         raise NotImplementedError(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
@@ -67,9 +69,7 @@ def parallelize_qwen3(
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
-    fsdp_mesh = parallel_dims.get_mesh(
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else "fsdp"
-    )
+    fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
         param_dtype=getattr(torch, training.mixed_precision_param),
         reduce_dtype=getattr(torch, training.mixed_precision_reduce),
@@ -100,8 +100,7 @@ def parallelize_qwen3(
 
     disable_fsdp_gradient_division(model)
     logger.info(
-        "Applied baseline Qwen3 FSDP with dp_replicate=%s, dp_shard=%s, reshard_after_forward=%s",
-        parallel_dims.dp_replicate,
+        "Applied baseline Qwen3 FSDP with dp_shard=%s, reshard_after_forward=%s",
         parallel_dims.dp_shard,
         reshard_after_forward,
     )

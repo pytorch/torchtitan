@@ -1985,3 +1985,25 @@ Interpretation:
 
 - BF16 FSDP reductions reduce memory, but they break the short-run training sanity signal and do not improve throughput.
 - Restore FP32 reduce dtype from `training.mixed_precision_reduce`; do not pursue lower-precision gradient reductions without a numerics-focused redesign.
+
+## Experiment 69: HSDP 2x4 On Prefetch Source
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run69-flex-prefetch-hsdp2x4-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 1,984, far below the 8,835 current best.
+- Step 10 MFU: 8.29%.
+- Step 10 peak memory: 172.10 GiB, 96.50%.
+- Loss moved from 12.50010 at step 1 to 10.01193 at step 10; finite and decreasing.
+- The run logged 37 CUDA memory allocation retries and repeated expandable-segment mapping OOM warnings.
+
+Interpretation:
+
+- HSDP 2x4 is not viable for this Qwen3 14B workload at local batch size 5. It increases model memory residency and allocator pressure enough to dominate any collective-topology benefit.
+- Restore the DP-only FSDP source and do not pursue nearby HSDP variants unless a later memory-saving source change creates substantial headroom.

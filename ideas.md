@@ -608,6 +608,7 @@
   Planned source/config changes: Narrowly allow `parallel_dims.dp_replicate > 1` in Qwen3 `parallelize_qwen3()` and select `parallel_dims.get_mesh(["dp_replicate", "fsdp"])` for `fully_shard`; preserve the current one-module prefetch schedule. Do not add TP, CP, AC, FP8, or batch-size changes in the same run.
   Planned command or config overrides: Current best command plus `--parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4`.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss and no memory regression. Risks are slower replica synchronization, incorrect gradient scaling if HSDP interacts badly with the current disabled FSDP gradient division, or lower MFU from smaller shard groups.
+  Result: discarded at source state `316182a`; 1,984 tps, 8.29% MFU, 172.10 GiB, and 37 CUDA allocation retries.
 
 - Idea: separately FSDP-wrap tok_embeddings with terminal backward prefetch
   Current best source commit: 7c1c351
