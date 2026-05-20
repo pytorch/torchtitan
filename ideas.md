@@ -913,6 +913,7 @@
   Planned source/config changes: In `qwen3_14b()`, keep `Float8LinearConverter.Config(recipe_name="rowwise", model_compile_enabled=True)` but remove `filter_fqns=["auto_filter_small_kn"]`.
   Planned command or config overrides: Run99 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no memory regression. Risks are slower small-linear conversion overhead or loss instability from broader FP8 coverage.
+  Result: discarded at source state `61c48ce`; 9,547 tps with finite decreasing loss and 128.96 GiB peak memory. Slower at batch160, but the large memory reduction creates batch-scaling headroom.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

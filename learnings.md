@@ -2749,3 +2749,29 @@ Interpretation:
 
 - Auto-filtered FP8 rowwise is training-sane on the SDPA seq128 source, but it does not beat plain SDPA.
 - The result is close enough that broader FP8 coverage can be tested once, but the current best remains plain SDPA.
+
+## Experiment 104: FP8 Rowwise Without Auto-Filter On SDPA Seq128 Best
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run104-sdpa-fp8-rowwise-no-filter-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Removed `filter_fqns=["auto_filter_small_kn"]` from the SDPA Float8 rowwise converter config.
+
+Result:
+
+- Status: discard at batch160.
+- Step 10 `tps`: 9,547, below the plain SDPA best.
+- Step 10 MFU: N/A in the log.
+- Step 10 peak memory: 128.96 GiB, 72.31%.
+- Loss moved from 12.57628 at step 1 to 6.15252 at step 10; finite and decreasing.
+- Runtime emitted the known `FSDPFloat8Linear` view warning.
+
+Interpretation:
+
+- Broad FP8 coverage is slower at the same batch size, but it dramatically lowers peak memory.
+- Before restoring, test whether the extra memory headroom can be converted into throughput with a larger seq128 local batch.
