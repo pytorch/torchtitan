@@ -25,7 +25,7 @@ from torchtitan.experiments.transformers_modeling_backend.moe_load_balancing imp
     attach_hf_moe_load_balancing,
 )
 from torchtitan.experiments.transformers_modeling_backend.parallelize import (
-    apply_moe_ep_tp,
+    apply_moe_sharding,
 )
 
 try:
@@ -343,7 +343,7 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         )
 
         # Apply EP
-        apply_moe_ep_tp(model.model, ep_mesh=ep_mesh)
+        apply_moe_sharding(model.model, ep_mesh=ep_mesh)
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
@@ -407,7 +407,7 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         )
 
         # Apply EP+TP (shards params, registers all hooks)
-        apply_moe_ep_tp(model.model, tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+        apply_moe_sharding(model.model, tp_mesh=tp_mesh, ep_mesh=ep_mesh)
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
@@ -438,7 +438,7 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         # Backward
         output.sum().backward()
         experts = layer.mlp.experts
-        # Expert params are TP-sharded DTensors (via distribute_tensor in apply_moe_ep_tp)
+        # Expert params are TP-sharded DTensors (via distribute_tensor in apply_moe_sharding)
         # but with hook-based EP, they may be plain tensors after manual slicing
         self.assertIsNotNone(experts.gate_up_proj.grad)
         self.assertIsNotNone(experts.down_proj.grad)
@@ -487,7 +487,7 @@ class TestTPOnlyMoeForwardBackward(DTensorTestBase):
         )
 
         # Apply TP-only MoE (shards expert weights, registers hooks)
-        apply_moe_ep_tp(model.model, tp_mesh=tp_mesh)
+        apply_moe_sharding(model.model, tp_mesh=tp_mesh)
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
@@ -569,7 +569,7 @@ class TestMixedMoeDenseLayers(DTensorTestBase):
 
         # Apply EP (only affects MoE layers)
         ep_mesh = self.build_device_mesh()
-        apply_moe_ep_tp(model.model, ep_mesh=ep_mesh)
+        apply_moe_sharding(model.model, ep_mesh=ep_mesh)
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
