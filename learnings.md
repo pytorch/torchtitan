@@ -6889,3 +6889,33 @@ Interpretation:
 
 - `NCCL_SINGLE_PROC_MEM_REG_ENABLE=1` is valid but slower than the durable command.
 - In this 8-process `torchrun` setup, the single-process registration path either does not apply or adds overhead. This closes another registration-family knob; default NCCL memory registration remains the best observed behavior.
+
+## Experiment 289: Profiled Exact Current Best After Registration-Path Closure
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run289-profile-current-best-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as profile evidence; do not compare profiled tps directly against unprofiled runs.
+- Step 10 `tps`: 10,394 with profiler enabled.
+- Step 10 MFU: 38.92%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.55800 at step 1 to 5.39052 at step 10; finite and overall decreasing.
+- Traces were written for ranks 0-7 under `profiling/traces/iteration_10`.
+
+Profile summary:
+
+- The active traced step spans about 1.97 seconds per rank, and GPU kernel busy union is about 1.96 seconds. This does not look dataloader-idle or launch-gap dominated during the profiled step.
+- Compute kernels also cover most of the active step. Large NVJET GEMMs are the top non-communication kernels; rank 0's largest GEMMs are about 475 ms, 340 ms, 281 ms, and 222 ms summed by kernel name across the active window.
+- NCCL kernels are substantial and use `RING_LL`: rank 0 has about 830 ms of `ncclDevKernel_ReduceScatter_Sum_f32_RING_LL` and 423 ms of `ncclDevKernel_AllGather_RING_LL`; rank 7 has about 959 ms reduce-scatter and 577 ms all-gather. Small all-reduces are negligible at about 1-5 ms per rank.
+- The summed NCCL kernel time varies by rank from about 270 ms to 1,603 ms, and reduce-scatter dominates most ranks. The variation likely reflects ring position and overlap, but the collective kernels are large enough to matter even with overlap.
+- Flash attention kernels are visible but much smaller than GEMM and FSDP collective kernels in this seq_len=128 workload; attention backend work is not the main bottleneck in this profile.
+
+Interpretation:
+
+- Current best is a mixed compute/communication workload with very high GPU occupancy and substantial overlapped FSDP all-gather/reduce-scatter cost.
+- The next profile-driven ideas should target NCCL LL collective behavior or reduce FSDP communication volume/reshard cost. Dataloader, CPU launch overhead, and attention backend are lower-priority based on this trace.

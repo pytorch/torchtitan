@@ -2821,3 +2821,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a completed 10-step run with finite overall-decreasing loss and a trace under the dump folder. Risk is profiler overhead; do not compare profiled tps directly against unprofiled candidates.
+  Result: kept as profile evidence at source state `15db2e9`; the profiled 10-step run completed with finite overall-decreasing loss and produced rank traces under `run289.../profiling/traces/iteration_10`. Trace summary shows a nearly fully busy GPU active span with NCCL `RING_LL` reduce-scatter and all-gather kernels taking substantial time, so the next search should focus on LL collective behavior or reducing FSDP collective cost rather than dataloader or launch idle.

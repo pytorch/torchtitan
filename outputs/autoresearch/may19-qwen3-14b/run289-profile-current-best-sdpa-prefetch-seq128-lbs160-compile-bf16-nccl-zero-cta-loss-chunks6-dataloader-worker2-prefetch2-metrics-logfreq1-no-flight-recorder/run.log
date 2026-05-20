@@ -1,0 +1,61 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run289-profile-current-best-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder
+W0520 06:46:54.871000 131648 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0520 06:46:54.871000 131648 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0520 06:46:54.871000 131648 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0520 06:46:54.871000 131648 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0520 06:47:02.877000 133104 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-20 06:47:03,589 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-20 06:47:03,646 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run289-profile-current-best-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/structured_logs/training.global_rank_0.20260520-064703-9FOYDG.jsonl
+[rank0]:[titan] 2026-05-20 06:47:05,203 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-20 06:47:05,205 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-20 06:47:05,213 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-20 06:47:05,213 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-20 06:47:08,329 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-20 06:47:08,334 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-20 06:47:08,409 - root - INFO - Building qwen3 14B
+[rank0]:[titan] 2026-05-20 06:47:08,489 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-20 06:47:08,620 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-20 06:47:08,620 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-20 06:47:08,620 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-20 06:47:08,636 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-20 06:47:08,725 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-20 06:47:09,155 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-20 06:47:09,155 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-20 06:47:09,157 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-20 06:47:09,157 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-20 06:47:09,174 - root - INFO - Trainer is initialized with local batch size 160, global batch size 1280, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-20 06:47:09,174 - root - INFO - Training starts at step 1
+[rank0]:[titan] 2026-05-20 06:47:09,174 - root - INFO - Profiling active. Traces will be saved at outputs/autoresearch/may19-qwen3-14b/run289-profile-current-best-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/profiling/traces
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-20 06:47:26,657 - root - INFO - [31mstep:  1  [32mloss: 12.55800  [38;2;180;60;0mgrad_norm: 20.8750  [38;2;54;234;195mmemory: 160.86GiB(90.19%)  [34mtps: 1,135  [36mtflops: 95.66  [35mmfu: 4.25%[39m
+[rank0]:[titan] 2026-05-20 06:47:26,658 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:[titan] 2026-05-20 06:47:28,723 - root - INFO - [31mstep:  2  [32mloss: 10.55498  [38;2;180;60;0mgrad_norm: 53.7500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 9,916  [36mtflops: 835.49  [35mmfu: 37.13%[39m
+[rank0]:[titan] 2026-05-20 06:47:30,788 - root - INFO - [31mstep:  3  [32mloss: 16.02453  [38;2;180;60;0mgrad_norm: 26.8750  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 9,919  [36mtflops: 835.75  [35mmfu: 37.14%[39m
+[rank0]:[titan] 2026-05-20 06:47:32,802 - root - INFO - [31mstep:  4  [32mloss: 10.99423  [38;2;180;60;0mgrad_norm: 32.7500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,172  [36mtflops: 857.09  [35mmfu: 38.09%[39m
+[rank0]:[titan] 2026-05-20 06:47:34,816 - root - INFO - [31mstep:  5  [32mloss: 11.64368  [38;2;180;60;0mgrad_norm: 37.2500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,170  [36mtflops: 856.89  [35mmfu: 38.08%[39m
+[rank0]:[titan] 2026-05-20 06:47:36,825 - root - INFO - [31mstep:  6  [32mloss:  7.92339  [38;2;180;60;0mgrad_norm: 26.1250  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,196  [36mtflops: 859.08  [35mmfu: 38.18%[39m
+[rank0]:[titan] 2026-05-20 06:47:38,804 - root - INFO - [31mstep:  7  [32mloss:  7.68339  [38;2;180;60;0mgrad_norm: 53.7500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,347  [36mtflops: 871.82  [35mmfu: 38.75%[39m
+[rank0]:[titan] 2026-05-20 06:47:42,465 - root - INFO - [31mstep:  8  [32mloss:  6.07076  [38;2;180;60;0mgrad_norm: 28.3750  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 5,594  [36mtflops: 471.37  [35mmfu: 20.95%[39m
+[rank0]:USDT:2026-05-20 06:47:44 133104:133104 SyncActivityProfilerHandler.cpp:52] profiler_start
+[rank0]:[titan] 2026-05-20 06:47:44,432 - root - INFO - [31mstep:  9  [32mloss:  5.56668  [38;2;180;60;0mgrad_norm: 38.2500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,414  [36mtflops: 877.48  [35mmfu: 39.00%[39m
+[rank0]:[titan] 2026-05-20 06:47:46,403 - root - INFO - [31mstep: 10  [32mloss:  5.39052  [38;2;180;60;0mgrad_norm: 24.2500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,394  [36mtflops: 875.76  [35mmfu: 38.92%[39m
+[rank0]:USDT:2026-05-20 06:47:46 133104:133104 SyncActivityProfilerHandler.cpp:59] profiler_stop
+[rank0]:[titan] 2026-05-20 06:47:46,572 - root - INFO - Dumping profiler traces at step 10
+[rank0]:[titan] 2026-05-20 06:47:46,654 - root - INFO - Finished dumping profiler traces in 0.08 seconds
+[rank0]:[titan] 2026-05-20 06:47:46,654 - root - INFO - Sleeping 2 seconds for other ranks to complete
+[rank0]:[titan] 2026-05-20 06:47:48,654 - root - INFO - Training completed
+[rank0]:[titan] 2026-05-20 06:47:49,415 - root - INFO - Process group destroyed
