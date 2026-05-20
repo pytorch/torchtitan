@@ -1931,3 +1931,4 @@
   Planned source/config changes: Edit only `qwen3_14b()` to use `model_registry("14B", attn_backend="flex")`.
   Planned command or config overrides: Current best two-worker command unchanged.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no FlexAttention compile/runtime warnings. Risk is slower block-mask construction or slower generic FlexAttention kernels than SDPA for this short-sequence workload.
+  Result: discarded at source state `3adbc3f`; 9,992 tps with finite decreasing loss and 168.35 GiB peak memory. Plain FlexAttention runs in this environment, but it is slower than the validated SDPA backend for seq_len=128.

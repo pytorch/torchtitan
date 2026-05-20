@@ -4851,3 +4851,29 @@ Interpretation:
 
 - `flex_flash` is not runnable in this environment despite B200 hardware capability because the required CUTE flash attention library is missing.
 - Keep SDPA as the attention backend for the durable command. A non-FLASH `flex` backend remains a separate possible test, but `flex_flash` is closed unless the environment changes.
+
+## Experiment 200: Plain flex Attention Backend
+
+Source change:
+
+- Changed Qwen3 14B `attn_backend` from `sdpa` to `flex`.
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run200-flex-attention-sdpa-replacement-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard; source should be restored to SDPA.
+- Step 10 `tps`: 9,992, below the validated two-worker SDPA command.
+- Step 10 MFU: 37.42%.
+- Step 10 peak memory: 168.35 GiB, 94.39%.
+- Loss moved from 12.49441 at step 1 to 6.25505 at step 10; finite and decreasing.
+- No FlexAttention lowering error, OOM, traceback, allocator retry, or NCCL warning appeared.
+
+Interpretation:
+
+- Plain FlexAttention is runnable but slower than SDPA for this short-sequence workload.
+- Close the attention-backend axis for now: `flex_flash` is unavailable and `flex` regresses throughput.
