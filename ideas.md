@@ -875,6 +875,15 @@
   Success criteria and expected risk: Keep as validation if it remains above run84's 9,709 with finite decreasing loss and similar memory. Risk is variance or a short-run loss increase.
   Result: kept as validation at source state `9c7e6fc`; 9,982 tps, 37.38% MFU, 168.57 GiB peak memory, and finite decreasing loss.
 
+- Idea: SDPA seq128 shape with local batch 161
+  Current best source commit: 846907b
+  Source: batch-headroom retest under the new SDPA best source
+  Expected mechanism: SDPA batch160 uses 168.57 GiB, slightly different from the flex source. Local batch 161 may fit close to the memory-risk line and could improve reported tps if SDPA's lower attention overhead leaves enough headroom.
+  Supporting evidence: Flex batch161 crossed 95% and did not beat the flex best, but SDPA batch160 is now faster and has a validated 168.57 GiB peak. The one-batch headroom point should be retested after the backend change.
+  Planned source/config changes: None; use the current SDPA attention, no-converter, bidirectional prefetch source.
+  Planned command or config overrides: Run99 command shape with `--training.local_batch_size=161`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator retries. Risk is crossing the memory-risk line for a negligible or negative throughput gain.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
