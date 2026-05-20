@@ -1,0 +1,48 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run119-sdpa-layer-only-prefetch-no-lm-head-endpoint-seq128-lbs160-compile-bf16-no-flight-recorder
+W0519 20:46:27.530000 1376155 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 20:46:27.530000 1376155 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 20:46:27.530000 1376155 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 20:46:27.530000 1376155 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 20:46:34.295000 1377171 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 20:46:34,964 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 20:46:35,021 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run119-sdpa-layer-only-prefetch-no-lm-head-endpoint-seq128-lbs160-compile-bf16-no-flight-recorder/structured_logs/training.global_rank_0.20260519-204635-05GMV1.jsonl
+[rank0]:[titan] 2026-05-19 20:46:36,244 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 20:46:36,248 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 20:46:36,257 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 20:46:36,257 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-19 20:46:41,203 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 20:46:41,208 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-19 20:46:41,232 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 20:46:41,312 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-19 20:46:41,449 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-19 20:46:41,449 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-19 20:46:41,449 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-19 20:46:41,465 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-19 20:46:41,542 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-19 20:46:41,968 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-19 20:46:41,969 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-19 20:46:41,971 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-19 20:46:41,971 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-19 20:46:41,994 - root - INFO - Trainer is initialized with local batch size 160, global batch size 1280, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-19 20:46:41,994 - root - INFO - Training starts at step 1
+[rank0]:[titan] 2026-05-19 20:46:55,061 - root - INFO - [31mstep:  1  [32mloss: 12.30921  [38;2;180;60;0mgrad_norm: 24.6250  [38;2;54;234;195mmemory: 160.60GiB(90.05%)  [34mtps: 1,504  [36mtflops: 126.76  [35mmfu: 5.63%[39m
+[rank0]:[titan] 2026-05-19 20:46:55,061 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-19 20:47:13,513 - root - INFO - [31mstep: 10  [32mloss:  8.10188  [38;2;180;60;0mgrad_norm: 40.7500  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 9,989  [36mtflops: 841.67  [35mmfu: 37.41%[39m
+[rank0]:[titan] 2026-05-19 20:47:13,513 - root - INFO - Sleeping 2 seconds for other ranks to complete
+[rank0]:[titan] 2026-05-19 20:47:15,513 - root - INFO - Training completed
+[rank0]:[titan] 2026-05-19 20:47:20,858 - root - INFO - Process group destroyed

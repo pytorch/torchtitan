@@ -1130,3 +1130,4 @@
   Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to keep one-module layer-to-layer forward/backward prefetch but omit the `lm_head` endpoint prefetch calls.
   Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower `lm_head` all-gather/loss boundary because the endpoint overlap was useful.
+  Result: discarded at source state `f63303a`; 9,989 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Endpoint prefetch is useful enough to keep.

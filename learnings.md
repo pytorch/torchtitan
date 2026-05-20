@@ -3077,3 +3077,24 @@ Interpretation:
 
 - Two-module prefetch raises memory and does not improve the NCCL-overlap balance.
 - Restore one-module bidirectional prefetch as the best source behavior.
+
+## Experiment 119: SDPA Seq128 Local Batch 160 Without Lm Head Endpoint Prefetch
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run119-sdpa-layer-only-prefetch-no-lm-head-endpoint-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,989, below run99's 10,005.
+- Step 10 MFU: 37.41%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.30921 at step 1 to 8.10188 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Removing the `lm_head` endpoint prefetch does not reduce peak memory and costs throughput.
+- Keep one-module bidirectional prefetch including the `lm_head` endpoint.
