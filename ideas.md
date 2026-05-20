@@ -765,6 +765,15 @@
   Success criteria and expected risk: Keep if it matches or exceeds 9,709 tps with finite decreasing loss and peak memory around 168.96 GiB. Risk is short-run throughput variance or an increasing 10-step loss trend.
   Result: kept as validation at source state `f0822c10`; 9,676 tps with finite decreasing loss and 168.08 GiB peak memory, close to but below run84's 9,709.
 
+- Idea: seq96 constant-token shape
+  Current best source commit: 03d00df
+  Source: refine the constant-token sequence-shape sweep after seq128 beat seq64 and seq256
+  Expected mechanism: Seq96/local-batch-213 keeps per-rank tokens nearly equal to the seq128/local-batch-160 best while testing whether smaller sequence length and larger batch count improve kernel scheduling or reduce attention overhead without the seq64 overhead regression.
+  Supporting evidence: The power-of-two sweep improved from seq2048 through seq128, then regressed at seq64. A midpoint between seq128 and seq64 can identify whether the curve peaks around 128 or somewhere lower.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=96 --training.local_batch_size=213`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory below the 95% risk line. Risks are lower kernel efficiency from non-power-of-two sequence length or extra overhead from the larger batch count.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
