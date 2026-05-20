@@ -6581,3 +6581,25 @@ Interpretation:
 
 - `NCCL_LOCAL_REGISTER=0` is valid on NCCL 2.29.7 for this workload, but it does not improve throughput.
 - Keep NCCL's default local registration path. The direct P2P/NVLink registration path is either beneficial or at least not the source of the observed final-step variance.
+
+## Experiment 275: Metrics Log Frequency 1 With NCCL_LAUNCH_ORDER_IMPLICIT=1
+
+Command:
+
+```bash
+NCCL_LAUNCH_ORDER_IMPLICIT=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run275-nccl-launch-order-implicit-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,468, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.20%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.58730 at step 1 to 5.55888 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or launch-ordering warning appeared.
+
+Interpretation:
+
+- `NCCL_LAUNCH_ORDER_IMPLICIT=1` is accepted on this CUDA 13.1/NCCL 2.29.7 stack but is slower than the default.
+- Keep NCCL's default launch-ordering mode. The earlier `NCCL_LAUNCH_MODE=GROUP` regression and this result both argue against changing NCCL launch semantics for this command.
