@@ -2752,3 +2752,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_GRAPH_REGISTER=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect or slower execution if graph registration is used beneficially by compiled kernels or NCCL persistent plans.
   Result: discarded at source state `aabc7e9`; 10,526 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling graph registration is clean but below the durable peak, so keep NCCL's default graph-registration behavior.
+
+- Idea: metrics log frequency 1 with NCCL_CUMEM_HOST_ENABLE=0
+  Current best source commit: b2a8bfd7
+  Source: local NCCL cuMem host allocation check after broad `NCCL_CUMEM_ENABLE=0` was clean but below peak
+  Expected mechanism: Disable NCCL's cuMem host allocation path while leaving device cuMem allocation enabled. This may change shared host-buffer allocation and proxy/shm behavior with less blast radius than disabling all NCCL cuMem support.
+  Supporting evidence: Local NCCL source defines `NCCL_PARAM(CuMemHostEnable, "CUMEM_HOST_ENABLE", -1)` and defaults it based on driver support. Earlier `NCCL_CUMEM_ENABLE=0` reached 10,581 tps but stayed below the durable peak; this narrower host-side knob has not been isolated.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_CUMEM_HOST_ENABLE=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower proxy/shm behavior or no effect if host cuMem buffers are not important for the steady-state collectives.
