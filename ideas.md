@@ -834,6 +834,15 @@
   Planned command or config overrides: Run84 command shape plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is generating traces and extracting a rank0 bottleneck summary. Profiled tps is diagnostic only and should not replace unprofiled ranking.
 
+- Idea: forward-only FSDP prefetch at seq128 batch160
+  Current best source commit: 03d00df
+  Source: profile-driven prefetch retest on the seq128 workload shape
+  Expected mechanism: The seq128 profile shows NCCL reduce-scatter as the largest communication kernel bucket. Removing backward prefetch while keeping forward prefetch may reduce all-gather contention during backward/reduce-scatter at the shorter sequence shape.
+  Supporting evidence: The earlier 4096-token forward-only run was slower, but seq128 has much less per-layer compute to hide communication and a different bottleneck mix. The new profile has about 1.16 s rank0 reduce-scatter kernels and 0.50 s all-gather kernels.
+  Planned source/config changes: In `parallelize_qwen3()`, keep the forward prefetch chain through `lm_head`, but remove `set_modules_to_backward_prefetch` calls.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss. Risk is repeating the older regression if backward prefetch is still needed for parameter all-gather overlap.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
