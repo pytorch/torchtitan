@@ -16,13 +16,9 @@ import dataclasses
 import torch
 import torch._dynamo
 import torch.distributed as dist
-import torch.distributed.checkpoint as dcp
 from torch.distributed._tensor import DTensor, Replicate
-from torch.distributed.checkpoint.state_dict import (
-    set_model_state_dict,
-    StateDictOptions,
-)
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -120,6 +116,7 @@ class VLLMModelWrapper(Module):
         model_spec: ModelSpec,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig,
+        checkpoint_config: CheckpointManager.Config,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
@@ -235,8 +232,9 @@ class VLLMModelWrapper(Module):
                 self.model.freqs_cis, max_model_len
             )
 
-        # Initial load model weights from HuggingFace checkpoint path.
-        self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
+        # Load initial weights based on checkpoint config.
+        self._checkpoint_config = checkpoint_config
+        self._maybe_initial_load_weights()
 
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int
@@ -370,62 +368,37 @@ class VLLMModelWrapper(Module):
 
         return logits
 
-    def load_weights_from_state_dict(self, state_dict):
-        """
-        Load model weights from a state dict.
+    def _maybe_initial_load_weights(self) -> None:
+        """Load initial HF weights via CheckpointManager.
 
-        Expects DTensor-wrapped tensors matching the model's placements.
-        The caller is responsible for reconstructing DTensors from plain
-        local tensors before calling this method.
+        Controlled by ``self._checkpoint_config``:
+        - ``enable=True`` and ``initial_load_in_hf=True``: load from HF
+          via CheckpointManager (standalone inference path).
+        - ``enable=False``: skip (RL loop — weights arrive via TorchStore).
         """
-        set_model_state_dict(
-            model=self.model,
-            model_state_dict=state_dict,
-            options=StateDictOptions(strict=False),
+        cfg = self._checkpoint_config
+        if not cfg.enable:
+            return
+
+        sd_adapter = None
+        if self.state_dict_adapter is not None:
+            sd_adapter = self.state_dict_adapter(
+                model_config=self.config,
+                hf_assets_path=cfg.initial_load_path,
+            )
+
+        # Model-only CheckpointManager: initial_load_model_only=True (default)
+        # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
+        # are never accessed.
+        checkpointer = cfg.build(
+            dataloader=None,
+            model_parts=[self.model],
+            optimizers=None,
+            lr_schedulers=None,
+            states={},
+            sd_adapter=sd_adapter,
         )
-
-        return state_dict.keys()
-
-    def _initial_load_weights(self, checkpoint_path):
-        """
-        Helper function to load torchtitan model weights from HF checkpoint when initialize this model.
-
-        Args:
-            checkpoint_path: Path to the HuggingFace checkpoint directory
-        """
-        # Create adapter instance
-        adapter = self.state_dict_adapter(
-            model_config=self.config,
-            hf_assets_path=None,
-        )
-
-        # Get HF storage reader from adapter
-        storage_reader = adapter.get_hf_storage_reader(checkpoint_path)
-
-        # Load HF state dict using DCP
-        hf_state_dict = adapter.to_hf(self.model.state_dict())
-        dcp.load(hf_state_dict, storage_reader=storage_reader)
-
-        # Convert HF state dict to TorchTitan format
-        torchtitan_state_dict = adapter.from_hf(hf_state_dict)
-
-        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
-
-        # Convert to DTensor if target is DTensor (when the target model is sharded)
-        # This only happens when initial loading from HF full state dict
-        for name, tensor in torchtitan_state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                device_mesh = target_dtensor.device_mesh
-                torchtitan_state_dict[name] = DTensor.from_local(
-                    tensor.to(device_mesh.device_type),
-                    device_mesh=device_mesh,
-                    placements=[Replicate()],
-                )
-
-        return self.load_weights_from_state_dict(torchtitan_state_dict)
+        checkpointer.load()
 
     def load_weights(self, weights_iter):
         """

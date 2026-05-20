@@ -14,7 +14,6 @@ regional_inductor.
 from __future__ import annotations
 
 import torch
-from torch._inductor.compile_fx import compile_fx_inner
 from torch.fx.passes.regional_inductor import regional_inductor
 
 from torchtitan.tools.logging import logger
@@ -36,6 +35,7 @@ def _ops_filter_with_distributed(name: str) -> bool:
             "torch.ops._c10d_functional",
             "torch.ops._dtensor",
             "torch.ops.device_mesh",
+            "torch.ops.bucketing",
         )
     )
 
@@ -199,56 +199,66 @@ def annotate_flex_attention_for_regional_inductor_pass(
     return gm
 
 
+def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
+    """Move CPU constant tensor get_attrs to CUDA so cudagraph capture works."""
+    from torch.fx.graph_module import _assign_attr, _get_attr
+
+    for module in gm.modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.find_nodes(op="get_attr"):
+            attr = _get_attr(module, node.target)
+            if isinstance(attr, torch.Tensor) and attr.device.type == "cpu":
+                _assign_attr(attr.cuda(), module, node.target)
+
+
 def full_inductor_compilation_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple
 ) -> torch.fx.GraphModule:
-    """Apply full Inductor compilation with code generation.
+    """Apply full Inductor compilation by tagging every node and delegating
+    to :func:`regional_inductor_pass`.
 
-    Applies inductor decompositions (e.g. ``aten.t`` → ``aten.permute``),
-    then compiles the graph into optimized Triton/C++ kernels via
-    ``compile_fx_inner`` and replaces the GraphModule's ``forward``
-    with the compiled callable.
+    Marks every non-placeholder/output node with the ``compile_with_inductor``
+    custom metadata key so ``regional_inductor`` scoops the entire graph as
+    one compiled region. This reuses the regional path (which goes through
+    ``standalone_compile`` and gets c10d functionalization, PG unboxing,
+    decompositions, and caching for free) instead of duplicating that prep
+    around a direct ``compile_fx_inner`` call.
+
+    The collapse hides cudagraph-incompatible ops (unpinned D2H copies,
+    sm<10 ``_grouped_mm``) inside the opaque ``standalone_compile_inner``
+    node, so the later :func:`is_cudagraph_compatible` scan can't see
+    them. Snapshot the verdict on the pre-collapse gm and stash it on
+    the result so the downstream scan can honor it.
 
     Must be the **terminal** pass — no FX-graph-level passes (e.g.
     ``custom_codegen_pass``, ``insert_kernel_annotations_pass``) can
     run after this because the FX graph is no longer authoritative.
     """
+    import torch._inductor.config as ic
 
-    def _apply_decompositions(
-        gm: torch.fx.GraphModule, example_inputs: tuple
-    ) -> torch.fx.GraphModule:
-        """Retrace with ``select_decomp_table()`` so that ops like ``aten.t``
-        are decomposed before ``compile_fx_inner``."""
-        from torch._inductor.decomposition import select_decomp_table
-        from torch._subclasses.fake_tensor import FakeTensor
-        from torch.fx.experimental.proxy_tensor import make_fx
+    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-        decomp_table = select_decomp_table()
+    pre_collapse_cudagraph_compatible = is_cudagraph_compatible(gm)
 
-        fake_mode = None
-        for inp in example_inputs:
-            if isinstance(inp, FakeTensor):
-                fake_mode = inp.fake_mode
-                break
+    _migrate_cpu_get_attrs_to_cuda(gm)
+    for module in gm.modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.nodes:
+            if node.op in ("placeholder", "output"):
+                continue
+            node.meta.setdefault("custom", {}).setdefault(
+                "compile_with_inductor", {"inductor_configs": {}}
+            )
+    # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
+    # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
+    # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
+    with ic.patch(reorder_for_peak_memory=True):
+        result = regional_inductor_pass(gm, example_inputs)
 
-        if fake_mode is not None:
-            with fake_mode:
-                gm = make_fx(
-                    gm,
-                    decomposition_table=decomp_table,
-                    _allow_non_fake_inputs=True,
-                )(*example_inputs)
-
-        return gm
-
-    gm = _apply_decompositions(gm, example_inputs)
-    output_code = compile_fx_inner(gm, example_inputs)
-
-    # compile_fx_inner returns OutputCode with boxed calling convention
-    # (single list arg). Adapt to positional args so the graph trainer's
-    # execution path (gm(*flat_inputs)) works unchanged.
-    def _compiled_forward(*args):
-        return output_code(list(args))
-
-    gm.forward = _compiled_forward
-    return gm
+    # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
+    # collapse is information-destroying; this is how downstream passes
+    # know whether the artifact contains hidden cudagraph-incompatible ops.
+    result.meta["cudagraph_compatible"] = pre_collapse_cudagraph_compatible
+    return result

@@ -89,7 +89,7 @@ def apply_compile_sparse(model: nn.Module, compile_config: CompileConfig):
                 #      `post_attention_layernorm` wrapped with `SequenceParallel()`.
                 #   2. TP/EP-wrapped MLP children detected via `_has_hooks` — e.g.
                 #      `mlp.gate` / `mlp.router` wrapped with
-                #      `NoParallel(local_output_grad_placements=(Partial(),))`.
+                #      `NoParallel(use_local_output=True)`.
                 #
                 # This boundary converts TP DTensors into local `to_local(Partial)`
                 # inputs before MoE routing. Force-compiling the layernorms together

@@ -7,29 +7,31 @@
 """Sharding types for config-based parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize(mesh)``.  All placements use
+and read by ``Module.parallelize(parallel_dims)``.  All placements use
 ``NamedPlacement`` (dict keyed by ``MeshAxisName``) so they are
 self-documenting and support multi-dimensional meshes.
 """
 
 from dataclasses import dataclass, field
 
-from torch.distributed.tensor import Placement
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import Placement, Replicate, Shard
 
-from torchtitan.protocols.types import MeshAxisName
+from torchtitan.protocols.types import MeshAxisName, NamedPlacement
 
 
-# Placement per mesh axis, keyed by MeshAxisName.
-# Example: {MeshAxisName.TP: Shard(0), MeshAxisName.DP_SHARD: Replicate()}
-# Every sharding_config must declare a placement for every mesh axis it will be applied
-# against; ``resolve_placements`` errors otherwise.
-#
+__all__ = [
+    "LocalMapConfig",
+    "NamedPlacement",
+    "ShardingConfig",
+    "resolve_placements",
+]
+
 # Shard order: we implicitly assume the trivial outer -> inner order matching
 # the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
 # tensor dim 0, but it doesn't need to be annotated today.
 # TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
 # carrying explicit shard-order info) once that lands.
-NamedPlacement = dict[MeshAxisName, Placement]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -39,18 +41,17 @@ class LocalMapConfig:
     Wraps forward with ``local_map()``: DTensor -> local before forward,
     local -> DTensor after forward.
 
-    Placements are ``NamedPlacement`` (keyed by mesh axis name). At
-    parallelize time they are resolved to positional tuples matching the
-    runtime mesh's axis order.
+    Input placements come from ``ShardingConfig.in_dst_shardings``
+    (already aligned by ``_redistribute_inputs``); output placements from
+    ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
+    ``in_grad_placements`` since there's no equivalent slot on
+    ``ShardingConfig`` today.
 
     Attributes:
-        in_placements: Per-input NamedPlacements (positional: q, k, v).
-        out_placements: Per-output NamedPlacements.
-        in_grad_placements: Per-input-gradient NamedPlacements.
+        in_grad_placements: Per-input-gradient NamedPlacements (positional,
+            ordered by ``forward`` args).
     """
 
-    in_placements: tuple[NamedPlacement, ...]
-    out_placements: tuple[NamedPlacement, ...]
     in_grad_placements: tuple[NamedPlacement, ...]
 
     def to_dict(self) -> dict:
@@ -89,19 +90,27 @@ class ShardingConfig:
             keyed by ``forward()`` arg name.
             e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
             ``None`` means no input redistribution.
+        out_src_shardings: Source placement of the forward's output as a
+            DTensor. When ``local_map`` is set this also tells ``local_map``
+            what to wrap the local output back to. Accepts a single
+            ``NamedPlacement`` (single-output case) or a tuple (multi-
+            output case, e.g. attention with ``return_lse=True``). ``None``
+            means "infer from the output" (it's already a DTensor at the
+            right placement, or there's no local_map to drive).
+            e.g. ``{TP: Partial()}`` for the MoE wrapper.
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_map: If set, wraps forward with ``local_map()``.
-
-    TODO: add ``out_src_shardings`` to declare the output's source placement
-    when integrating with spmd_type (erased types), which requires both src
-    and dst for every redistribute.
+        local_map: If set, wraps forward with ``local_map()``. Input and
+            output placements come from ``in_dst_shardings`` and
+            ``out_src_shardings``; ``LocalMapConfig`` only carries
+            ``in_grad_placements``.
     """
 
     state_shardings: dict[str, NamedPlacement] = field(default_factory=dict)
     in_src_shardings: dict[str, NamedPlacement] | None = None
     in_dst_shardings: dict[str, NamedPlacement] | None = None
+    out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
     out_dst_shardings: NamedPlacement | None = None
     local_map: LocalMapConfig | None = None
 
@@ -112,23 +121,35 @@ class ShardingConfig:
 
 def resolve_placements(
     named: NamedPlacement,
-    mesh_axis_names: tuple[str, ...],
+    mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
     """Resolve NamedPlacement against a mesh in axis order.
 
     Every sharding_config must explicitly declare a placement for every mesh axis
     it will be applied against. Missing declarations raise ``ValueError``;
     extra declarations (axes not in the mesh) are ignored.
+
+    ``Shard(d)`` on a size-1 mesh axis is normalized to ``Replicate()`` --
+    the two are operationally identical on a 1-rank axis, but DTensor's op
+    rules (placement-equality, view/reshape strict mode, ...) treat them
+    as distinct and reject ``Shard`` in places where ``Replicate`` would
+    work.
     """
+    # TODO(fegin): remove the ``Shard(d)`` on a size-1 mesh to ``Replicate()``
+    # conversion once FlexShard replaces ``fully_shard``.
+    assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     result = []
-    for axis_name in mesh_axis_names:
+    for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
         if key not in named:
             raise ValueError(
-                f"Sharding sharding_config does not declare a placement for mesh axis "
+                f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
                 f"{sorted(k.value for k in named)}; "
-                f"required: {list(mesh_axis_names)}."
+                f"required: {list(mesh.mesh_dim_names)}."
             )
-        result.append(named[key])
+        p = named[key]
+        if isinstance(p, Shard) and mesh.size(i) == 1:
+            p = Replicate()
+        result.append(p)
     return tuple(result)

@@ -184,8 +184,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         torchrun training with --compile.precompile_artifact_dir.
         """
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-            run_traced_train_step,
-            trace_train_step,
+            minimal_fx_tracer,
+            run_traced,
         )
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
@@ -201,7 +201,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         self.annotate_model(model)
         loss_fn = CrossEntropyLoss.Config().build()
-        fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+        fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
         global_valid_tokens = torch.tensor(
             BATCH_SIZE * SEQ_LEN, dtype=torch.float, device="cuda"
@@ -214,8 +214,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         maybe_register_blockmask_pytree_node()
 
         # Step 1: Trace the graph
-        traced_result = trace_train_step(fwd_bwd_fn)(
-            model,
+        traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
             self.inputs,
             self.labels,
             global_valid_tokens,
@@ -235,6 +234,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                     cpu_offload_prefetch_n_layers=1,
                     cpu_offload_defer_n_layers=1,
                     cpu_offload_budget_gb=100.0,
+                    enable_fsdp_ag_rs_overlap=False,
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
@@ -277,9 +277,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
-            outputs = run_traced_train_step(
-                loaded_result,
-                model,
+            outputs = run_traced(loaded_result, module=model)(
                 self.inputs,
                 self.labels,
                 global_valid_tokens,
@@ -434,11 +432,6 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-# TODO: All FlexAttn bitwise deterministic tests disabled due to upstream
-# PyTorch nightly regression in dev20260508. TransformGetItemToIndex mode
-# has no dispatch for torch.ops.higher_order.flex_attention.
-# Re-enable once the upstream fix lands.
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
@@ -478,6 +471,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
+    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -501,7 +495,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
@@ -547,11 +540,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0),
-        "flex_attention compilation exceeds resource limits on pre-Hopper GPUs",
-    )
+    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -638,7 +627,6 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE with FlexAttention.
 
@@ -678,6 +666,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
+    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)

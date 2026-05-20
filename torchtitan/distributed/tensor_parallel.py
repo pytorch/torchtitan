@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from collections.abc import Sequence
 from functools import partial
 from typing import Any
 
@@ -14,11 +13,21 @@ import torch._inductor.config
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import distribute_module, DTensor, Replicate
-from torch.distributed.tensor.parallel import ColwiseParallel, ParallelStyle
+from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
 from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.tools.logging import logger
+
+
+def _to_local_if_dtensor(
+    t: torch.Tensor, output_layout: Placement, use_local_output: bool
+) -> torch.Tensor:
+    if isinstance(t, DTensor):
+        if t.placements != (output_layout,):
+            t = t.redistribute(placements=(output_layout,), async_op=True)
+        return t.to_local() if use_local_output else t
+    return t
 
 
 class NoParallel(ParallelStyle):
@@ -39,16 +48,13 @@ class NoParallel(ParallelStyle):
         *,
         input_layout: Placement | None = None,
         output_layout: Placement | None = None,
-        local_output_grad_placements: Sequence[Placement] | None = None,
+        use_local_output: bool = False,
     ):
         super().__init__()
         self.input_layout = input_layout or Replicate()
         self.output_layout = output_layout or Replicate()
         self.desired_input_layout = Replicate()
-        # If None, output stays as DTensor.
-        # If provided, output is cast to local tensor via
-        # to_local(grad_placements=local_output_grad_placements).
-        self.local_output_grad_placements = local_output_grad_placements
+        self.use_local_output = use_local_output
 
     @staticmethod
     def _prepare_input_fn(
@@ -76,24 +82,17 @@ class NoParallel(ParallelStyle):
     @staticmethod
     def _prepare_output_fn(
         output_layout: Placement,
-        local_output_grad_placements: Sequence[Placement] | None,
+        use_local_output: bool,
         mod: nn.Module,
         outputs: DTensor | tuple,
         device_mesh: DeviceMesh,
     ) -> torch.Tensor | DTensor | tuple:
-        def _process(outputs):
-            if outputs.placements != (output_layout,):
-                outputs = outputs.redistribute(
-                    placements=(output_layout,), async_op=True
-                )
-            if local_output_grad_placements is not None:
-                return outputs.to_local(grad_placements=local_output_grad_placements)
-            else:
-                return outputs
-
         if isinstance(outputs, tuple):
-            return tuple(_process(o) for o in outputs)
-        return _process(outputs)
+            return tuple(
+                _to_local_if_dtensor(o, output_layout, use_local_output)
+                for o in outputs
+            )
+        return _to_local_if_dtensor(outputs, output_layout, use_local_output)
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -108,90 +107,7 @@ class NoParallel(ParallelStyle):
             partial(
                 self._prepare_output_fn,  # pyrefly: ignore [bad-argument-type]
                 self.output_layout,
-                self.local_output_grad_placements,
-            ),
-        )
-
-
-class ColwiseParallelWithGradPlacement(ColwiseParallel):
-    """ColwiseParallel with explicit control over backward gradient placement.
-
-    By default, ``ColwiseParallel`` with ``input_layouts=Replicate()`` wraps
-    the input via ``from_local(Replicate)``, whose backward all-reduces d_x
-    back to Replicate.  This subclass overrides ``_prepare_input_fn`` to pass
-    ``local_input_grad_placements`` to ``DTensor.from_local``, giving users
-    explicit control over the gradient placement during backward.  When not
-    specified, defaults to ``None`` and the gradient placement follows the
-    default guarantees of ``DTensor.from_local``.
-    """
-
-    def __init__(
-        self,
-        *,
-        input_layouts: Placement | None = None,
-        output_layouts: Placement | None = None,
-        use_local_output: bool = True,
-        local_input_grad_placements: Sequence[Placement] | None = None,
-    ):
-        super().__init__(
-            input_layouts=input_layouts,
-            output_layouts=output_layouts,
-            use_local_output=use_local_output,
-        )
-        self.local_input_grad_placements = local_input_grad_placements
-
-    @staticmethod
-    # pyrefly: ignore [bad-param-name-override]
-    def _prepare_input_fn(
-        input_layouts,
-        desired_input_layouts,
-        local_input_grad_placements,
-        mod,
-        inputs,
-        device_mesh,
-    ):
-        input_tensor = inputs[0]
-        if not isinstance(input_tensor, DTensor):
-            assert local_input_grad_placements is not None, (
-                "local_input_grad_placements must be specified when input is a "
-                "plain tensor. Please think about what you want the from_local(Replicate) backward behavior like."
-            )
-            input_tensor = DTensor.from_local(
-                input_tensor,
-                device_mesh,
-                input_layouts,
-                run_check=False,
-                grad_placements=local_input_grad_placements,
-            )
-
-        if input_layouts != desired_input_layouts:
-            input_tensor = input_tensor.redistribute(
-                placements=desired_input_layouts, async_op=True
-            )
-        return input_tensor
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        if isinstance(module, nn.Linear):
-            partition_fn = self._partition_linear_fn
-        elif isinstance(module, nn.Embedding):
-            partition_fn = self._partition_embedding_fn
-        else:
-            raise NotImplementedError(
-                "ColwiseParallelWithGradPlacement currently only supports nn.Linear and nn.Embedding!"
-            )
-
-        return distribute_module(
-            module,
-            device_mesh,
-            partition_fn,
-            partial(
-                self._prepare_input_fn,  # pyrefly: ignore [bad-argument-type]
-                self.input_layouts,
-                self.desired_input_layouts,
-                self.local_input_grad_placements,
-            ),
-            partial(
-                self._prepare_output_fn, self.output_layouts, self.use_local_output
+                self.use_local_output,
             ),
         )
 

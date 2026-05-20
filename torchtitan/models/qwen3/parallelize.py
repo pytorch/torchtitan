@@ -19,7 +19,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
+from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
 
@@ -42,6 +42,9 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    if parallelism.full_dtensor:
+        raise NotImplementedError("full_dtensor is not supported yet.")
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -55,17 +58,11 @@ def parallelize_qwen3(
             parallel_dims.get_mesh("cp"),
         )
 
-    if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
-        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
-
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-        )
+        model.parallelize(parallel_dims)
+
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if ac_config.mode != "none":
         apply_ac(
