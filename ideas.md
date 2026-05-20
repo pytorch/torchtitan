@@ -2671,3 +2671,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LOCAL_REGISTER=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower collectives if local registration is important for direct GPU P2P/NVLink or NVLS paths.
+  Result: discarded at source state `c404e6e`; 10,525 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling local registration is clean but below the durable peak, so keep NCCL's default local registration behavior.
