@@ -2572,3 +2572,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_BUFFSIZE=1048576` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower collectives from excessive chunking overhead.
   Result: discarded at source state `1015e32`; 10,522 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The 1 MiB low-side buffer is clean but below the durable command, so keep the default 4 MiB buffer size.
+
+- Idea: exact current best rerun after NCCL buffer-size closure
+  Current best source commit: ef9e9b45
+  Source: variance calibration after 1 MiB and 16 MiB buffer-size probes closed the remaining bracket
+  Expected mechanism: Repeat the exact durable command. The buffer-size probes did not improve throughput, and exact reruns remain the only way this high-variance final-step objective has sampled above the normal 10.4k-10.5k band.
+  Supporting evidence: `NCCL_BUFFSIZE` values 1 MiB, 2 MiB, 8 MiB, and 16 MiB all underperformed default 4 MiB. A clean exact rerun verifies the restored default path and may resample the measured peak.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
