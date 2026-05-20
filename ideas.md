@@ -1962,3 +1962,12 @@
   Planned command or config overrides: Current best two-worker command plus `--parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4`.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risk is OOM or allocator pressure because HSDP doubles sharded state residency versus dp_shard=8.
   Result: discarded at source state `a3ecec9`; 2,824 tps with finite decreasing loss but 175.38 GiB peak memory, 98.34%, 27 CUDA allocation retries, and repeated expandable-segment OOM mapping warnings. The 2x4 mesh applied correctly, but the replicated state pushes the run into severe allocator pressure and destroys throughput.
+
+- Idea: current best with larger NCCL buffer size
+  Current best source commit: 22a12d08
+  Source: communication-profile follow-up after HSDP and NCCL channel/CTA/protocol probes
+  Expected mechanism: `NCCL_BUFFSIZE=8388608` increases NCCL's per-channel buffer from the default 4 MiB to 8 MiB. The refreshed profile still shows about 1.59 s of NCCL kernels, dominated by FSDP reduce-scatter and all-gather. Larger slices may improve collective bandwidth or reduce internal chunking overhead for the layer-wise FSDP payloads while leaving tensor shapes, memory residency, and overlap schedule unchanged.
+  Supporting evidence: Prior NCCL protocol, channel, CTA cap, high-priority, and NVLS toggles did not produce a durable win, but none changed NCCL's buffer slice size. This is a command-only communication knob with low implementation risk and directly targets the remaining NCCL bucket without increasing model parameter residency.
+  Planned source/config changes: None; keep durable DP-only FSDP source.
+  Planned command or config overrides: Current best two-worker command with `NCCL_BUFFSIZE=8388608` in the environment, alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 10,328 or a result above the 10,301 rerun threshold that warrants exact validation, with finite decreasing loss and no NCCL warnings. Risk is worse overlap if larger slices monopolize resources or if the default 4 MiB buffer is already optimal.
