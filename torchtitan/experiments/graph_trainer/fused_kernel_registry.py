@@ -386,55 +386,6 @@ def _filter_regions(
 # Subgraph extraction → GraphModule
 # ---------------------------------------------------------------------------
 
-def _create_subgraph_module(
-    region: Region,
-) -> torch.fx.GraphModule:
-    """Create a GraphModule that executes the region's ops."""
-    nodes = region.nodes
-    external_inputs = region.external_inputs
-    output_nodes = region.output_nodes
-    node_names = {n.name for n in nodes}
-
-    # Build new graph
-    new_graph = torch.fx.Graph()
-
-    # Map from original node → new node
-    node_map: dict[torch.fx.Node, torch.fx.Node] = {}
-
-    # Placeholders for external inputs
-    for i, inp in enumerate(external_inputs):
-        ph = new_graph.placeholder(f"input_{i}")
-        ph.meta = inp.meta.copy()
-        node_map[inp] = ph
-
-    # Copy region nodes
-    def _map_arg(arg: Any) -> Any:
-        if isinstance(arg, torch.fx.Node):
-            if arg in node_map:
-                return node_map[arg]
-            return arg
-        if isinstance(arg, (list, tuple)):
-            mapped = [_map_arg(a) for a in arg]
-            return type(arg)(mapped)
-        return arg
-
-    for n in nodes:
-        new_args = tuple(_map_arg(a) for a in n.args)
-        new_kwargs = {k: _map_arg(v) for k, v in n.kwargs.items()}
-        new_node = new_graph.call_function(n.target, new_args, new_kwargs)
-        new_node.meta = n.meta.copy()
-        node_map[n] = new_node
-
-    # Output
-    if len(output_nodes) == 1:
-        new_graph.output(node_map[output_nodes[0]])
-    else:
-        new_graph.output(tuple(node_map[o] for o in output_nodes))
-
-    new_graph.lint()
-    return torch.fx.GraphModule(torch.nn.Module(), new_graph)
-
-
 # ---------------------------------------------------------------------------
 # Kernel loading + backend selection
 # ---------------------------------------------------------------------------
@@ -636,68 +587,25 @@ def get_init_inputs():
 # Graph replacement
 # ---------------------------------------------------------------------------
 
-def _rewrite_subgraph_to_kernel_call(
-    subgraph_module: torch.fx.GraphModule,
-    kernel_fn: Callable,
-) -> None:
-    """Rewrite a subgraph module's FX graph to a single kernel_fn call.
-
-    Replaces the multi-node subgraph with:
-        def forward(self, input_0, input_1, ...):
-            return kernel_fn(input_0, input_1, ...)
-
-    This way custom_codegen inlines the kernel call directly instead of
-    the original ops. The kernel_fn is stored as a module attribute.
-    """
-    old_graph = subgraph_module.graph
-    placeholders = [n for n in old_graph.nodes if n.op == "placeholder"]
-
-    new_graph = torch.fx.Graph()
-    new_phs = []
-    for ph in placeholders:
-        new_ph = new_graph.placeholder(ph.name)
-        new_ph.meta = ph.meta.copy()
-        new_phs.append(new_ph)
-
-    # Store kernel_fn as a module attribute so the codegen can reference it
-    subgraph_module._kernel_fn = kernel_fn  # type: ignore[attr-defined]
-
-    # call_function with the kernel_fn
-    call_node = new_graph.call_function(kernel_fn, args=tuple(new_phs))
-    # Copy output meta from the original graph's output
-    for n in old_graph.nodes:
-        if n.op == "output":
-            call_node.meta = {}
-            break
-
-    new_graph.output(call_node)
-    new_graph.lint()
-
-    subgraph_module.graph = new_graph
-    subgraph_module.recompile()
-
-
-def _replace_region(
+def _replace_region_with_kernel(
     gm: torch.fx.GraphModule,
     region: Region,
-    module_name: str,
-    subgraph_module: torch.fx.GraphModule,
+    kernel_fn: Callable,
 ) -> None:
-    """Replace a region's nodes with a call_module to the subgraph module."""
-    gm.add_module(module_name, subgraph_module)
+    """Replace a region's nodes with a direct call_function to kernel_fn.
 
+    No call_module, no subgraph module — just inserts
+    ``kernel_fn(input_0, input_1, ...)`` directly into the parent graph.
+    """
     graph = gm.graph
     nodes = region.nodes
     external_inputs = region.external_inputs
     output_nodes = region.output_nodes
-    node_names = {n.name for n in nodes}
 
-    # Insert call_module right before the first node in the region
-    # (all external inputs are defined before this point)
     first_node = nodes[0]
     with graph.inserting_before(first_node):
-        call_node = graph.call_module(
-            module_name, args=tuple(external_inputs)
+        call_node = graph.call_function(
+            kernel_fn, args=tuple(external_inputs)
         )
 
         if len(output_nodes) == 1:
@@ -705,7 +613,6 @@ def _replace_region(
         else:
             call_node.meta = {}
 
-    # Redirect users of output nodes to the call_module (or getitems)
     if len(output_nodes) == 1:
         output_nodes[0].replace_all_uses_with(call_node)
     else:
@@ -717,7 +624,6 @@ def _replace_region(
                 gi.meta = out_node.meta.copy()
                 out_node.replace_all_uses_with(gi)
 
-    # Erase old nodes in reverse topological order
     for old in reversed(nodes):
         if not old.users:
             graph.erase_node(old)
@@ -820,21 +726,14 @@ def fused_kernel_pass(
         else:
             backend_counts["eager"] += 1
 
-    # Only replace instances whose hash has a non-eager winner
+    # Only replace instances whose hash has a non-eager winner.
+    # Inserts call_function(kernel_fn) directly — no call_module wrapper.
     replaced = 0
     for pos, h, r in instances:
         if h not in hash_best:
-            continue  # leave original FX nodes untouched
-        best_fn, backend_name = hash_best[h]
-
-        # Build subgraph module and rewrite its FX graph to a single
-        # call_function node calling the kernel — this way custom_codegen
-        # inlines the kernel call, not the original ops.
-        subgraph_module = _create_subgraph_module(r)
-        _rewrite_subgraph_to_kernel_call(subgraph_module, best_fn)
-
-        module_name = f"_fused_{h}_{replaced}"
-        _replace_region(gm, r, module_name, subgraph_module)
+            continue
+        best_fn, _ = hash_best[h]
+        _replace_region_with_kernel(gm, r, best_fn)
         replaced += 1
 
     if replaced > 0:
