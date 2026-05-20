@@ -52,22 +52,20 @@ def qwen3_debugmodel() -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_param_groups() -> Trainer.Config:
-    config = qwen3_debugmodel()
+def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
+    config = qwen3_moe_debug()
     config.optimizer = OptimizersContainer.Config(
+        name="AdamW",
         lr=8e-4,
         param_groups=[
             ParamGroupConfig(
-                pattern=r"tok_embeddings\.",
-                weight_decay_multiplier=0.0,
+                pattern=r"(?:tok_embeddings|output)\.",
+                optimizer_kwargs={"weight_decay": 0.0},
             ),
             ParamGroupConfig(
-                pattern=r"\.bias$",
-                weight_decay_multiplier=0.0,
-            ),
-            ParamGroupConfig(
-                pattern=r"(?:attention_norm|ffn_norm|norm)\.",
-                weight_decay_multiplier=0.0,
+                pattern=r"\.router\.gate\.",
+                optimizer_name="SGD",
+                optimizer_kwargs={"lr": 1e-4, "momentum": 0.0},
             ),
         ],
     )

@@ -710,8 +710,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
-        # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        # Save per-optimizer-group learning rates for logging
+        lr_metrics = self.lr_schedulers.get_lr_metrics()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -806,7 +806,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
-            "lr": lr,
+            **lr_metrics,
         }
         self.metrics_processor.log(
             self.step,

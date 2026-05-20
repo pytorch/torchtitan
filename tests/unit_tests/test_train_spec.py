@@ -110,9 +110,7 @@ class TestModelSpec:
         optimizers = OptimizersContainer.Config(
             name="Adam",
             lr=0.1,
-            beta1=0.9,
-            beta2=0.95,
-            weight_decay=0.1,
+            optimizer_kwargs={"betas": (0.9, 0.95), "weight_decay": 0.1},
             implementation="fused",
         ).build(model_parts=model_parts)
         spec.post_optimizer_build_fn(optimizers, model_parts, None, my_hook)
