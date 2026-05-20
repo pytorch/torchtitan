@@ -1961,3 +1961,4 @@
   Planned source/config changes: Edit `parallelize.py` to allow `dp_replicate>1` and select `parallel_dims.get_mesh(["dp_replicate", "fsdp"])` when the replicate axis is enabled.
   Planned command or config overrides: Current best two-worker command plus `--parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4`.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risk is OOM or allocator pressure because HSDP doubles sharded state residency versus dp_shard=8.
+  Result: discarded at source state `a3ecec9`; 2,824 tps with finite decreasing loss but 175.38 GiB peak memory, 98.34%, 27 CUDA allocation retries, and repeated expandable-segment OOM mapping warnings. The 2x4 mesh applied correctly, but the replicated state pushes the run into severe allocator pressure and destroys throughput.

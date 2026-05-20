@@ -4934,3 +4934,31 @@ Interpretation:
 - The refreshed profile agrees with run184: the durable command is dominated by compiled dense GEMMs plus FSDP reduce-scatter/all-gather.
 - Recent negative tests line up with this: DataLoader, structured logging, and attention backend are not the active bottleneck.
 - The next high-leverage ideas should reduce exposed FSDP collective time or materially change GEMM execution. Prior partial resharding, no-reshard, Float8, and TP attempts have regressed, so further source ideas need a narrow mechanism and should avoid memory-risky parameter residency.
+
+## Experiment 203: HSDP 2x4 Mesh
+
+Source change:
+
+- Allowed `dp_replicate>1` in Qwen3 `parallelize.py`.
+- Used `parallel_dims.get_mesh(["dp_replicate", "fsdp"])` for FSDP when the replicate axis is enabled.
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run203-hsdp2x4-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard; source should be restored to DP-only FSDP.
+- Step 10 `tps`: 2,824, far below the validated two-worker command.
+- Step 10 MFU: 10.58%.
+- Step 10 peak memory: 175.38 GiB, 98.34%, above the memory-risk line.
+- Loss moved from 12.34027 at step 1 to 10.28724 at step 10; finite and decreasing, but much worse than the best-command samples.
+- The run logged 27 CUDA memory allocation retries and repeated expandable-segment OOM mapping warnings.
+- The mesh and source change were active: logs showed `dp_replicate=2, dp_shard=4` and `Applied baseline Qwen3 FSDP with dp_replicate=2, dp_shard=4`.
+
+Interpretation:
+
+- HSDP 2x4 successfully changes the collective shape, but replicated sharded state adds too much memory pressure at batch160.
+- The severe allocator pressure dominates any potential collective benefit. Do not keep HSDP for the current batch160 command.
