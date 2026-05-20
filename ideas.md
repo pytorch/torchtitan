@@ -1251,3 +1251,13 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Exact run131 command with a new dump folder.
   Success criteria and expected risk: Promote zero-CTA only if the rerun remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings.
+  Result: keep at source state `e011c93`; 10,023 tps, 37.53% MFU, 168.57 GiB peak memory, and loss decreased from 12.39262 to 6.74983. Zero-CTA validated above the prior durable best and becomes the current durable command setting.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with NCCL high-priority stream
+  Current best source commit: 3d045b1
+  Source: follow-up interaction test after zero-CTA validated and high-priority alone failed
+  Expected mechanism: With zero-CTA reducing collective SM pressure, `TORCH_NCCL_HIGH_PRIORITY=1` may improve communication launch/stream ordering without causing the slowdown observed when high-priority was tested against the default CTA policy.
+  Supporting evidence: High-priority alone produced one fast run but failed validation; zero-CTA now changes the collective execution profile while preserving memory. The combination is a single command-level addition to the new durable zero-CTA command.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Current zero-CTA command plus `TORCH_NCCL_HIGH_PRIORITY=1`.
+  Success criteria and expected risk: Success is tps above 10,060 for a single measured improvement or above the validated 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is the high-priority stream regression repeating.
