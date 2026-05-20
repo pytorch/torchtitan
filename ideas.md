@@ -3083,6 +3083,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss, or a clean high-band sample indicating lower registration overhead. Risk is slower allocation/free paths, extra memory registration overhead, or no effect if FSDP tensors are already on the fast registration path.
   Result: discarded at source state `c90a5c8`; 10,584 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The PyTorch allocator-hook registration path is valid but below the durable peak, so keep the default ProcessGroupNCCL registration behavior.
 
+- Idea: exact current best with loss.num_chunks=3
+  Current best source commit: 2b8effb
+  Source: final low-side loss-chunk bracket after chunks 4, 5, 7, and 8 were tested but chunks 3 was still untested
+  Expected mechanism: Use fewer, larger loss chunks to reduce per-chunk `lm_head` call overhead and loss-loop bookkeeping. If chunking overhead is measurable and memory still fits, a three-chunk loss may improve tps; if the larger logits/activation residency dominates, it should OOM or slow down.
+  Supporting evidence: The durable command uses `--loss.num_chunks=6`. Chunks 7 and 8 were slower from extra overhead, while chunks 4 and 5 were slower and memory heavier; chunks 3 is unlikely but closes the remaining lower-chunk bracket.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command but set `--loss.num_chunks=3` instead of 6.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator/OOM warnings. Risk is high memory or OOM because chunks 4 already reached about 171.5 GiB in earlier runs.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
