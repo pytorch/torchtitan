@@ -2182,3 +2182,12 @@
   Planned command or config overrides: Current best command without `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Expected risk is regression if zero-CTA still improves compute/communication overlap.
   Result: discarded at source state `5459123`; 10,559 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The run is healthy but below the validated zero-CTA best, so keep `NCCL_CTA_POLICY=2`.
+
+- Idea: metrics log frequency 1 with NCCL_CTA_POLICY=1
+  Current best source commit: 18a4237d
+  Source: communication-overlap bracket after default CTA policy underperformed policy 2
+  Expected mechanism: Set `NCCL_CTA_POLICY=1` instead of 2. If the benefit comes from using a non-default CTA scheduling policy but policy 2 is overly restrictive, policy 1 may improve the compute/communication overlap tradeoff.
+  Supporting evidence: Run225 without `NCCL_CTA_POLICY=2` reached 10,559 tps, below the 10,625 best but close enough that a middle CTA policy is a narrow remaining communication bracket.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current best command with `NCCL_CTA_POLICY=1`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or lower throughput if policy 2 is the only beneficial scheduling mode.
