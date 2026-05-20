@@ -2202,3 +2202,12 @@
   Planned command or config overrides: Current best command with `--dataloader.prefetch_factor=3`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no DataLoader warnings. Risk is no measurable effect or slower host scheduling.
   Result: discarded at source state `7f6c7aa`; 10,378 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Prefetch factor 3 is slower, so keep the validated prefetch factor 2.
+
+- Idea: metrics log frequency 1 with NCCL_MAX_CTAS=32
+  Current best source commit: ecfd8a36
+  Source: communication-overlap bracket after lower CTA caps underfed collectives
+  Expected mechanism: Set `NCCL_MAX_CTAS=32` alongside `NCCL_CTA_POLICY=2`. Prior caps of 16 and 8 were too restrictive; a 32-CTA cap may reduce collective/GEMM contention while preserving more collective bandwidth.
+  Supporting evidence: Run219 still showed about 996 ms of NCCL kernel time. Earlier `NCCL_MAX_CTAS=16` and `NCCL_MAX_CTAS=8` were negative, but a higher cap has not been tested on the `metrics.log_freq=1` best.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix current best command with `NCCL_MAX_CTAS=32` in addition to `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or reduced collective bandwidth if the default CTA count is already optimal.
