@@ -2262,3 +2262,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_ALGO=Ring` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower collectives if auto-selection was already better than all-Ring.
   Result: discarded at source state `ad7fe20`; 10,580 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The run had severe transient slowdowns at steps 8 and 9 despite no NCCL warnings, so forcing Ring is not better than NCCL auto-selection.
+
+- Idea: exact current best rerun after NCCL allocation and algorithm probes
+  Current best source commit: cc2adfce
+  Source: variance calibration after two command-only NCCL probes landed near but below the validated peak
+  Expected mechanism: This is a measurement run, not a new optimization knob. Repeat the exact current-best command to see whether the durable command can sample above the 10,625 tps peak after nearby NCCL probes showed clean 10,58x tps final steps.
+  Supporting evidence: Run232 and run233 were clean and close to the current-best band but did not beat run215. The single-step `metrics.log_freq=1` objective has high variance, so exact calibration remains useful after clusters of near-band command probes.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command from run215.
+  Success criteria and expected risk: Keep as calibration if finite and clean. If it exceeds 10,625, record the new measured peak for the same durable command. Risk is only short-window variance.
