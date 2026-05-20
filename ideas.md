@@ -2252,3 +2252,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_CUMEM_ENABLE=0` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is lower communication bandwidth, NCCL ignoring the variable, or allocator regressions.
   Result: discarded at source state `c974d65`; 10,581 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling the NCCL cuMem allocation path is clean and near the current-best variance band, but it does not beat the validated 10,625 tps peak.
+
+- Idea: metrics log frequency 1 with NCCL_ALGO=Ring
+  Current best source commit: 8dc806cb
+  Source: communication-algorithm follow-up after Tree crashed earlier and the run219 trace showed Ring collectives in the current best
+  Expected mechanism: Explicitly force NCCL Ring algorithms for all collectives. If NCCL auto-selection occasionally considers non-Ring paths or per-collective choices with worse overlap on this single-node B200/NVLink topology, forcing Ring may reduce final-step variance or improve FSDP all-gather/reduce-scatter timing.
+  Supporting evidence: The profile identified NCCL as the second-largest bucket, and earlier `NCCL_ALGO=Tree` was not viable. Ring appears to be the healthy observed algorithm, but it has not been isolated as an explicit environment setting on the `metrics.log_freq=1` command.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_ALGO=Ring` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower collectives if auto-selection was already better than all-Ring.
