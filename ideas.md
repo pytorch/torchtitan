@@ -1691,3 +1691,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--dataloader.num_workers=1 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no dataset re-loop or worker warnings. Risk is multiprocessing overhead dominating the tiny local dataset.
+  Result: tentative keep at source state `40032d1`; 10,307 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This is a new measured best, but the margin is small enough to require an exact rerun.
+
+- Idea: exact rerun of SDPA zero-CTA loss chunks 6 with one DataLoader worker and persistent prefetch
+  Current best source commit: 40032d1
+  Source: validation follow-up after run176 produced a tentative new measured best
+  Expected mechanism: Repeat the exact command to determine whether DataLoader worker prefetching is a durable host-input improvement or timing variance.
+  Supporting evidence: Run176 beat the measured best by 19 tps and the durable rerun by 49 tps, but many small wins in this loop have failed exact reruns.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Exact run176 command with a new dump folder.
+  Success criteria and expected risk: Promote only if the rerun stays above 10,258 tps with finite decreasing loss and no dataset worker warnings; otherwise discard the DataLoader worker prefetch change.
