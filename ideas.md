@@ -885,6 +885,15 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator retries. Risk is crossing the memory-risk line for a negligible or negative throughput gain.
   Result: discarded at source state `3337de3`; 9,646 tps with finite decreasing loss and 169.20 GiB peak memory, below the SDPA batch160 best.
 
+- Idea: profile SDPA seq128 local batch 160 best
+  Current best source commit: 846907b
+  Source: bottleneck refresh after SDPA attention became the new best
+  Expected mechanism: Profiling the SDPA best should show what changed versus the flex seq128 profile and whether the remaining target is now GEMM, NCCL reduce-scatter/all-gather, SDPA kernels, loss/lm_head, or launch overhead.
+  Supporting evidence: SDPA improved unprofiled tps from 9,709 to 10,005 and validated at 9,982. The old profile describes the flex backend, not the current best.
+  Planned source/config changes: None; use the current SDPA attention, no-converter, bidirectional prefetch source.
+  Planned command or config overrides: Run99 command shape plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is generating traces and extracting a rank0 bottleneck summary. Profiled tps is diagnostic only and should not replace unprofiled ranking.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
