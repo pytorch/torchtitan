@@ -865,6 +865,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss. Risks are lower attention efficiency, changed compile graph quality, or memory regression.
   Result: kept at source state `846907b`; 10,005 tps, 37.47% MFU, 168.57 GiB peak memory, and finite decreasing loss.
 
+- Idea: exact rerun of SDPA seq128 batch160 best
+  Current best source commit: 846907b
+  Source: variance check after SDPA attention produced a new measured best
+  Expected mechanism: Repeating the exact SDPA best command validates whether the 10,005 tps result is robust enough to keep as the current source line.
+  Supporting evidence: Prior best improvements near the memory edge sometimes regressed on rerun. The SDPA result is a material win over flex, so it should be confirmed before adding batch or source changes.
+  Planned source/config changes: None; use the current SDPA attention, no-converter, bidirectional prefetch source.
+  Planned command or config overrides: Exact run99 command with a new dump folder.
+  Success criteria and expected risk: Keep as validation if it remains above run84's 9,709 with finite decreasing loss and similar memory. Risk is variance or a short-run loss increase.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
