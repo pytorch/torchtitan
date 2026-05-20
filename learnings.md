@@ -3714,3 +3714,24 @@ Interpretation:
 
 - FP8 rowwise auto-filter remains slower than plain BF16 GEMMs on this short-sequence command.
 - Do not pursue FP8 rowwise for the current durable path; restore plain SDPA config.
+
+## Experiment 149: SDPA Zero-CTA Loss Chunks 6 With NCCL_PROTO=Simple
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_PROTO=Simple NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run149-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-nccl-proto-simple-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,389, below the durable chunks=6 command.
+- Step 10 MFU: 35.16%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.56241 at step 1 to 9.80419 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Forcing NCCL Simple protocol is much slower than NCCL's profiled LL choice.
+- Do not use `NCCL_PROTO=Simple` for this command.

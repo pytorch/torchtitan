@@ -1421,3 +1421,13 @@
   Planned source/config changes: None; keep plain SDPA config, no converters, no AC.
   Planned command or config overrides: Current durable command plus `NCCL_PROTO=Simple`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication if LL is already optimal for these collectives.
+  Result: discarded at source state `62bd955`; 9,389 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Forcing Simple protocol is much slower than NCCL's profiled LL choice.
+
+- Idea: SDPA zero-CTA loss chunks 6 with NCCL_PROTO=LL128
+  Current best source commit: 3a1ed15
+  Source: communication protocol follow-up after Simple regressed and profile showed LL kernels
+  Expected mechanism: `NCCL_PROTO=LL128` forces NCCL's LL128 protocol, which may offer a better latency/bandwidth tradeoff than LL or Simple for this reduce-scatter/all-gather mix.
+  Supporting evidence: Simple was too slow, but the profile still leaves NCCL as the second-largest bucket. LL128 is the remaining standard NCCL protocol point to isolate before leaving protocol tuning.
+  Planned source/config changes: None; keep plain SDPA config, no converters, no AC.
+  Planned command or config overrides: Current durable command plus `NCCL_PROTO=LL128`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication or NCCL ignoring/poorly handling forced LL128 for some collectives.
