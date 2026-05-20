@@ -1941,3 +1941,4 @@
   Planned source/config changes: None; keep durable SDPA source.
   Planned command or config overrides: Current best two-worker command plus `--debug.no-enable-structured-logging`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,301 if rerun-worthy, with finite decreasing loss and no loss of required console metrics. Risk is no measurable effect because step logging is sparse.
+  Result: discarded at source state `2eeafe1`; 9,690 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The log confirmed structured logging was disabled, but removing JSONL did not improve the 10-step run.
