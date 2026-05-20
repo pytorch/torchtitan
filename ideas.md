@@ -2872,3 +2872,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `cf4644a`; 10,568 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Durable source recovered cleanly after suffix no-reshard probes, but the sample remains below the measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_MEM_SYNC_DOMAIN=0
+  Current best source commit: fcf69315
+  Source: profile-driven compute/communication overlap probe after run289 showed near-full GPU busy time with large overlapped NCCL and GEMM kernels
+  Expected mechanism: Force NCCL launches into CUDA's default memory sync domain instead of NCCL's chosen domain. On Blackwell, sync-domain mapping can affect how communication kernels fence or interfere with compute kernels; using the default domain may reduce domain-switch or fence overhead for this tightly overlapped FSDP workload, though it could also increase interference.
+  Supporting evidence: The installed NCCL 2.29.7 library exposes `NCCL_MEM_SYNC_DOMAIN`, and it has not been tried. Run289 showed no large idle gaps but substantial overlap between NCCL `RING_LL` collectives and NVJET GEMMs, making synchronization-domain behavior a plausible remaining communication/compute interaction knob.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_MEM_SYNC_DOMAIN=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap if NCCL's default remote sync domain is better isolated for communication.
