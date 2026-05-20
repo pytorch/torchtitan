@@ -3163,6 +3163,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and memory not materially above 169.10 GiB. Risk is longer compile, allocator pressure, or selecting slower GEMM variants as in earlier broader autotune probes.
   Result: discarded at source state `635bce9`; 10,286 tps with finite overall-decreasing loss and 174.10 GiB peak memory. Autotune mostly selected the existing `mm` path over Triton candidates and increased memory pressure, so close GEMM max autotune for the final SDPA stack.
 
+- Idea: block compile with fullgraph disabled
+  Current best source commit: 71037a8
+  Source: compile-granularity follow-up after attention/FFN submodule compile and GEMM-only autotune both regressed
+  Expected mechanism: Keep one compiled region per Qwen transformer block but use `fullgraph=False` instead of the durable `fullgraph=True`. If fullgraph capture prevents useful graph partitioning or forces heavier memory planning, allowing graph breaks may reduce memory pressure while retaining most compiled GEMM kernels.
+  Supporting evidence: Attention/FFN submodule compile lowered memory but lost throughput, suggesting compile boundary placement matters. This test keeps the block boundary while only relaxing Dynamo's fullgraph requirement. It is narrower than whole-model compile or changing the attention backend.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, compile each transformer block directly with `fullgraph=False` instead of calling shared `apply_compile()`.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no compile graph-break warnings that imply eager execution. Risk is slower throughput if graph breaks remove fusion or if the generated regions are equivalent but less optimized.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command

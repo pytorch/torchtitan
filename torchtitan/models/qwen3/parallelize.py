@@ -21,7 +21,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -66,9 +65,6 @@ def parallelize_qwen3(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
 
-    if compile_config.enable and "model" in compile_config.components:
-        apply_compile(model, compile_config)
-
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
         param_dtype=getattr(torch, training.mixed_precision_param),
@@ -85,6 +81,15 @@ def parallelize_qwen3(
     }
 
     layers = list(model.layers.values())
+    if compile_config.enable and "model" in compile_config.components:
+        torch._dynamo.config.capture_scalar_outputs = True
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = (
+            True  # pyrefly: ignore [bad-assignment]
+        )
+        for layer in layers:
+            layer.compile(backend=compile_config.backend, fullgraph=False)
+        logger.info("Compiled Qwen3 transformer blocks with fullgraph=False")
+
     for layer in layers:
         fully_shard(layer, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
