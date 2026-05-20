@@ -2903,3 +2903,23 @@ Interpretation:
 
 - The lower-batch neighbor does not improve normalized throughput.
 - Keep SDPA seq128/local-batch-160 as the best shape: batch159 is lower, batch161 is lower, and nearby seq96/seq256 are lower.
+
+## Experiment 111: SDPA Seq128 Local Batch 160 Model-Only Compile
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components '["model"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run111-sdpa-prefetch-seq128-lbs160-compile-model-only-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash.
+- The run OOMed before completing step 1 after a stable-clear GPU check.
+- OOM happened in `ChunkedCELoss.__call__` during `chunk_loss.backward()`.
+- Each rank reported about 177.65 GiB in use and failed on a 1.45 GiB allocation.
+
+Interpretation:
+
+- Compiling only the model increases memory enough to cross the loss-backward cliff at the current best batch160 shape.
+- Keep full compile scope for the current SDPA best; do not retry model-only compile at batch160.

@@ -1050,3 +1050,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
   Planned command or config overrides: Current best command plus `--compile.components '["model"]'`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is model-only compile OOM or slowdown; an earlier long-sequence model-only compile attempt failed under a different source/shape, so use the stable-clear check before running.
+  Result: valid crash at source state `39f6d75`; OOM during loss backward before step 1 after stable-clear GPU check. The process reached about 177.65 GiB per GPU and failed on a 1.45 GiB allocation, so model-only compile is not viable at batch160.
