@@ -374,6 +374,7 @@ class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     def test_llama3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_llama3_loss_compare())
 
+    @unittest.skip("upstream AutoParallel FakeTensor device mismatch regression")
     def test_deepseek_v3_aot_fx_trace_autoparallel_vs_eager(self):
         self.assertTrue(_run_autoparallel_deepseek_v3_loss_compare())
 
