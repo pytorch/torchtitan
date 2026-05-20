@@ -2652,3 +2652,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_COMM_BLOCKING=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower execution from reduced overlap or a no-op if NCCL ignores the variable.
   Result: discarded at source state `9fe6a05`; 10,537 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. NCCL communicator blocking is valid but below the durable measured peak, so keep default NCCL communicator progress behavior.
+
+- Idea: exact current best rerun after NCCL runtime probes
+  Current best source commit: 745bbe82
+  Source: calibration after CPU-affinity and communicator-blocking probes both landed below the durable peak
+  Expected mechanism: Repeat the exact durable command with default runtime behavior. Exact reruns are still the only trials that have produced the measured peak, so another calibration can either resample that band or show the current environment remains lower.
+  Supporting evidence: `NCCL_IGNORE_CPU_AFFINITY=1` and `NCCL_COMM_BLOCKING=1` were clean but below 10,650. Recent exact reruns span roughly 10.35k-10.59k, making calibration useful before trying lower-confidence knobs.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
