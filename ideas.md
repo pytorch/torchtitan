@@ -724,6 +724,15 @@
   Success criteria and expected risk: Success is tps above 9,599 with finite decreasing loss and no external-allocation contamination. Risks are small-sequence kernel inefficiency, high batch/collation overhead, or loss trend noise.
   Result: kept at source state `03d00df`; 9,709 tps with finite decreasing loss, improving on run83 at the same per-step token count.
 
+- Idea: constant-token shorter sequence shape, seq_len 64 and local batch 320
+  Current best source commit: 03d00df
+  Source: follow-up to run84 sequence-shape win
+  Expected mechanism: Seq64/batch320 keeps the same dense token count while nearly eliminating attention sequence cost. If batch overhead and small-tile inefficiency are still modest, it may beat run84; otherwise this should mark the turnover point.
+  Supporting evidence: Run84 improved to 9,709 tps at seq128/batch160, and memory remained stable. The measured trend still favors shorter sequences.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=64 --training.local_batch_size=320`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no external-allocation contamination. Risks are worse attention kernel efficiency, Python/dataloader overhead from large batch count, or invalid short-sequence loss behavior.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
