@@ -57,8 +57,8 @@ fi
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b tlp ./run_train.sh \
     --compile.mode aot_fx_trace \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2 \
+    --parallelism.data_parallel_shard_degree=8 \
+    --parallelism.tensor_parallel_degree=1 \
     --training.steps 10 \
     --dataloader.dataset c4_test \
     --compile.debug_graph_passes \
@@ -67,7 +67,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b tlp ./run_trai
     --profiler.profile_freq 10 \
     --dump_folder "$PROFILE_DIR" \
     --debug.print-config \
-    --compile.memory_policy=sac_and_offload \
+    --compile.memory_policy=default \
     $FUSED_KERNEL_FLAGS \
     2>&1 | tee "$LOG_FILE"
 
