@@ -325,23 +325,63 @@ class InductorRegionExtractor(RegionExtractor):
         def _is_supported(_submodules, node):
             return is_fusible_node(node)
 
-        support = create_op_support(_is_supported)
-        partitioner = CapabilityBasedPartitioner(
-            gm, support, allows_single_node_partition=True,
+        # CapabilityBasedPartitioner.propose_partitions() is O(n²) due to
+        # DFS cycle checks on every merge attempt. On 10K+ node graphs it
+        # hangs. Workaround: segment by fqn first (fast, O(n)), then run
+        # the partitioner on each segment separately.
+        import time as _time
+        _t0 = _time.time()
+
+        # CapabilityBasedPartitioner.propose_partitions() is O(n²) due to
+        # DFS cycle checks on every merge. Instead, group consecutive
+        # fusible nodes (split at non-fusible boundaries) — this matches
+        # inductor's fusion behavior without the expensive merge logic.
+        n_nodes = len(list(gm.graph.nodes))
+
+        # Classify each node as fusible using inductor's heuristic
+        fusible_nodes: set[str] = set()
+        for node in gm.graph.nodes:
+            if node.op == "call_function":
+                try:
+                    if is_fusible_node(node):
+                        fusible_nodes.add(node.name)
+                except Exception:
+                    pass
+
+        # Group consecutive fusible nodes, split at non-fusible boundaries
+        partitions: list[tuple[list[torch.fx.Node], str]] = []
+        current_partition: list[torch.fx.Node] = []
+        for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
+            if node.name in fusible_nodes:
+                current_partition.append(node)
+            else:
+                if current_partition:
+                    norm_fqn = _normalize_fqn(_get_node_fqn(current_partition[0]))
+                    partitions.append((current_partition, norm_fqn))
+                    current_partition = []
+        if current_partition:
+            norm_fqn = _normalize_fqn(_get_node_fqn(current_partition[0]))
+            partitions.append((current_partition, norm_fqn))
+
+        logger.info(
+            f"InductorRegionExtractor: {n_nodes} nodes, "
+            f"{len(fusible_nodes)} fusible, "
+            f"{len(partitions)} partitions in {_time.time()-_t0:.1f}s"
         )
-        partitions = partitioner.propose_partitions()
 
         all_regions: list[Region] = []
-        for partition in partitions:
-            comp = list(partition.nodes.keys())
+        for comp, norm_fqn in partitions:
             # Skip view-only partitions
             if all(is_view_node(n) or n.op != "call_function" for n in comp):
                 continue
             # Filter unfusable ops that slipped through
             if any(_is_unfusable(n) for n in comp):
                 continue
-            norm_fqn = _normalize_fqn(_get_node_fqn(comp[0])) if comp else ""
-            all_regions.append(_build_region(comp, norm_fqn))
+            # Split disconnected components
+            for connected in _split_connected(comp):
+                all_regions.append(_build_region(connected, norm_fqn))
 
         return all_regions
 
