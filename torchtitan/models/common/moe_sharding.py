@@ -24,7 +24,11 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
 )
-from torchtitan.protocols.sharding import LocalSpmdConfig, NamedPlacement, ShardingConfig
+from torchtitan.protocols.sharding import (
+    LocalSpmdConfig,
+    NamedPlacement,
+    ShardingConfig,
+)
 from torchtitan.protocols.types import MeshAxisName
 
 if TYPE_CHECKING:
@@ -193,12 +197,10 @@ def routed_expert_ep_config(
         mesh_reinterpret = {
             DP_REPLICATE: spmd.V,
             EFSDP: spmd.V,
-            EP: spmd.R,
+            EP: spmd.V,
         }
     return ShardingConfig(
-        state_shardings={
-            name: sparse_param_placement() for name in param_names
-        },
+        state_shardings={name: sparse_param_placement() for name in param_names},
         mesh_reinterpret=mesh_reinterpret,
     )
 
@@ -253,15 +255,9 @@ def set_moe_sharding_config(
         moe_cfg.router.gate.sharding_config = router_gate_config()
 
         if getattr(moe_cfg, "shared_experts", None) is not None:
-            moe_cfg.shared_experts.w1.sharding_config = (
-                shared_expert_colwise_config()
-            )
-            moe_cfg.shared_experts.w2.sharding_config = (
-                shared_expert_rowwise_config()
-            )
-            moe_cfg.shared_experts.w3.sharding_config = (
-                shared_expert_colwise_config()
-            )
+            moe_cfg.shared_experts.w1.sharding_config = shared_expert_colwise_config()
+            moe_cfg.shared_experts.w2.sharding_config = shared_expert_rowwise_config()
+            moe_cfg.shared_experts.w3.sharding_config = shared_expert_colwise_config()
     else:
         moe_cfg.sharding_config = moe_wrapper_state_config()
         moe_cfg.router.gate.sharding_config = router_gate_config()
@@ -274,13 +270,12 @@ def set_moe_sharding_config(
     if enable_ep:
         expert_params = ["w1", "w2", "w3"]
         moe_cfg.experts.sharding_config = routed_expert_ep_config(
-            expert_params, enable_tp=enable_tp,
+            expert_params,
+            enable_tp=enable_tp,
         )
     elif enable_tp:
         moe_cfg.experts.sharding_config = routed_expert_tp_config(
             {"w1": spmd.S(1), "w2": spmd.S(2), "w3": spmd.S(1)}
         )
     else:
-        moe_cfg.experts.sharding_config = routed_expert_state_config(
-            ["w1", "w2", "w3"]
-        )
+        moe_cfg.experts.sharding_config = routed_expert_state_config(["w1", "w2", "w3"])

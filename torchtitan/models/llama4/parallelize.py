@@ -64,9 +64,7 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
@@ -102,9 +100,14 @@ def parallelize_llama(
     if parallel_dims.tp_enabled:
         mesh_names.append("tp")
     dp_mesh = parallel_dims.get_mesh(mesh_names)
-    dp_mesh_dims = DataParallelMeshDims(
-        shard="fsdp",
-        replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+    dense_spmd_mesh = parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+    dp_mesh_dims = (
+        DataParallelMeshDims(
+            shard="fsdp",
+            replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+        )
+        if dense_spmd_mesh is not None
+        else None
     )
 
     edp_mesh = None
@@ -289,11 +292,14 @@ def apply_fsdp(
                         )
                     if mesh.ndim == 1:
                         return FSDPMeshInfo(
-                            mesh=mesh, shard_mesh_dim=0,
+                            mesh=mesh,
+                            shard_mesh_dim=0,
                         )
                     if mesh.ndim == 2:
                         return HSDPMeshInfo(
-                            mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1,
+                            mesh=mesh,
+                            replicate_mesh_dim=0,
+                            shard_mesh_dim=1,
                         )
                     raise ValueError(
                         f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh."

@@ -26,6 +26,7 @@ IGNORE_INDEX = -100
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
+
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
     return torch.nn.functional.cross_entropy(
@@ -396,21 +397,24 @@ class ChunkedCELoss(BaseLoss):
 
         total_loss = h_detached.new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
+            mesh = current_mesh()
             mesh_axis_names = spmd.current_mesh_names() or {}
             for axis_name in ("dp", "cp"):
                 if axis_name not in mesh_axis_names:
                     continue
+                assert mesh is not None
                 total_loss = spmd.reinterpret(
                     total_loss,
-                    current_mesh().get_group(axis_name),
+                    mesh.get_group(axis_name),
                     src=spmd.R,
                     dst=spmd.P,
                     expert_mode=True,
                 )
             if "tp" in mesh_axis_names:
+                assert mesh is not None
                 total_loss = spmd.convert(
                     total_loss,
-                    current_mesh().get_group("tp"),
+                    mesh.get_group("tp"),
                     src=spmd.R,
                     dst=spmd.I,
                     expert_mode=True,
@@ -440,12 +444,13 @@ class ChunkedCELoss(BaseLoss):
             if global_valid_tokens is not None:
                 loss_scale = global_valid_tokens
                 if spmd.is_type_checking() and isinstance(loss_scale, torch.Tensor):
-                    mesh_axis_names = current_mesh().mesh_dim_names
-                    assert mesh_axis_names is not None
+                    mesh = current_mesh()
+                    mesh_axis_names = spmd.current_mesh_names() or {}
                     if "cp" in mesh_axis_names:
+                        assert mesh is not None
                         loss_scale = spmd.convert(
                             loss_scale,
-                            current_mesh().get_group("cp"),
+                            mesh.get_group("cp"),
                             src=spmd.I,
                             dst=spmd.R,
                             expert_mode=True,
@@ -453,14 +458,15 @@ class ChunkedCELoss(BaseLoss):
                 chunk_loss = chunk_loss / loss_scale
 
             if spmd.is_type_checking():
-                mesh_axis_names = current_mesh().mesh_dim_names
-                assert mesh_axis_names is not None
+                mesh = current_mesh()
+                mesh_axis_names = spmd.current_mesh_names() or {}
                 for axis_name in ("dp", "cp"):
                     if axis_name not in mesh_axis_names:
                         continue
+                    assert mesh is not None
                     chunk_loss = spmd.reinterpret(
                         chunk_loss,
-                        current_mesh().get_group(axis_name),
+                        mesh.get_group(axis_name),
                         src=spmd.V,
                         dst=spmd.P,
                         expert_mode=True,

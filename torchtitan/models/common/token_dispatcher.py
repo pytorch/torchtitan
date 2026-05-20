@@ -206,6 +206,18 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         self.sp_size: int = 1
         self.sp_rank: int | torch.SymInt = -1
 
+    def _sp_rank(self) -> int | torch.SymInt | spmd.Scalar:
+        if not isinstance(self.sp_rank, int):
+            return self.sp_rank
+        assert self.ep_mesh is not None
+        mesh_names = spmd.current_mesh_names()
+        assert mesh_names is not None
+        local_type = {axis: spmd.R for axis in mesh_names.values()}
+        # In this sparse-mesh region, the TP/SP rank coordinate is represented
+        # by the EP axis. It is replicated over every other active mesh axis.
+        local_type[spmd.MeshAxis.of(self.ep_mesh.get_group())] = spmd.V
+        return spmd.Scalar(self.sp_rank, local_type)
+
     def _split_along_sp(self, *tensors: torch.Tensor) -> list[torch.Tensor]:
         """Split tensors along the first dim across EP ranks for sequence parallel."""
         assert self.ep_mesh is not None
@@ -229,7 +241,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             return t
 
         sp_size = self.sp_size
-        sp_rank = self.sp_rank
+        sp_rank = self._sp_rank()
         results = []
         for t in tensors:
             assert t.is_contiguous()
@@ -241,7 +253,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 )
             local_num_tokens = num_tokens // sp_size
             offset = sp_rank * local_num_tokens
-            results.append(annotate_sp_shard(t[offset : offset + local_num_tokens]))
+            local_t = torch.narrow(t, 0, offset, local_num_tokens)
+            results.append(annotate_sp_shard(local_t))
         return results
 
     def dispatch(
@@ -382,6 +395,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Input layout:  (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
         Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
         """
+
         def body():
             device = num_tokens_per_expert_group.device
             total = num_tokens_per_expert_group.sum()
@@ -425,6 +439,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
     def _unpermute(self, routed_output, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
+
         def body():
             out_unpermuted = routed_output.new_empty(input_shape)
             out_unpermuted[permuted_indices, :] = routed_output
@@ -503,9 +518,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                     (-original_num_tokens) % self.sp_size
                 )
                 local_num_tokens = padded_num_tokens // self.sp_size
+                sp_rank = self._sp_rank()
                 token_indices_experts_sorted = (
-                    metadata.token_indices_experts_sorted
-                    + local_num_tokens * self.sp_rank
+                    metadata.token_indices_experts_sorted + local_num_tokens * sp_rank
                 )
                 assert isinstance(token_indices_experts_sorted, torch.Tensor)
                 # Drop pad-row entries: their global indices fall in
