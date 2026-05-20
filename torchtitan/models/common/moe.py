@@ -27,35 +27,6 @@ if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
 
 
-def _convert_counter_to_accumulator_type(
-    count: torch.Tensor,
-    accumulator: torch.Tensor,
-) -> torch.Tensor:
-    if not spmd.is_type_checking():
-        return count
-    if not spmd.has_local_type(count) or not spmd.has_local_type(accumulator):
-        return count
-
-    mesh = current_mesh()
-    if mesh is None or mesh.mesh_dim_names is None:
-        return count
-
-    count_type = spmd.get_local_type(count)
-    accumulator_type = spmd.get_local_type(accumulator)
-    for axis_name in mesh.mesh_dim_names:
-        pg = mesh.get_group(axis_name)
-        axis = spmd.MeshAxis.of(pg)
-        if accumulator_type.get(axis) is spmd.P and count_type.get(axis) is spmd.V:
-            count = spmd.reinterpret(
-                count,
-                pg,
-                src=spmd.V,
-                dst=spmd.P,
-                expert_mode=True,
-            )
-    return count
-
-
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -84,38 +55,45 @@ class GroupedExperts(Module):
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
-        def body() -> torch.Tensor:
-            if isinstance(self.w1, DTensor):
-                # Convert parameters from DTensors to plain Tensors, to work with
-                # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-                w1 = self.w1.to_local()
-                # pyrefly: ignore [missing-attribute]
-                w2 = self.w2.to_local()
-                # pyrefly: ignore [missing-attribute]
-                w3 = self.w3.to_local()
-            else:
-                w1 = self.w1
-                w2 = self.w2
-                w3 = self.w3
+        x_type = spmd.type_like(x)
+        count_type = spmd.type_like(num_tokens_per_expert)
+        return spmd.local_map(
+            in_types=(x_type, count_type),
+            out_types=x_type,
+            local_typecheck=True,
+        )(self._run_grouped_experts)(x, num_tokens_per_expert)
 
-            offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+    def _run_grouped_experts(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        if isinstance(self.w1, DTensor):
+            # Convert parameters from DTensors to plain Tensors, to work with
+            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
+            w1 = self.w1.to_local()
+            # pyrefly: ignore [missing-attribute]
+            w2 = self.w2.to_local()
+            # pyrefly: ignore [missing-attribute]
+            w3 = self.w3.to_local()
+        else:
+            w1 = self.w1
+            w2 = self.w2
+            w3 = self.w3
 
-            h = F.silu(
-                torch._grouped_mm(
-                    x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
-                )
+        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+
+        h = F.silu(
+            torch._grouped_mm(
+                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
             )
-            h = h * torch._grouped_mm(
-                x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
-            )
-            return torch._grouped_mm(
-                h, w2.bfloat16().transpose(-2, -1), offs=offsets
-            ).type_as(x)
-
-        if spmd.is_type_checking():
-            with spmd.typecheck(local=True):
-                return body()
-        return body()
+        )
+        h = h * torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        return torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
 
     def forward(
         self,
@@ -377,12 +355,12 @@ class MoE(Module):
         # This holds for all MoE components (router.gate, routed experts, shared
         # experts) and regardless of score_before_experts.
         if isinstance(x, DTensor):
-            assert (
-                x.device_mesh.ndim == 1
-            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            assert x.device_mesh.mesh_dim_names == (
-                "tp",
-            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
+            assert x.device_mesh.ndim == 1, (
+                f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
+            )
+            assert x.device_mesh.mesh_dim_names == ("tp",), (
+                f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
+            )
             x = x.to_local(grad_placements=(Partial(),))
         x_3d = x
         bs, slen, dim = x.shape
@@ -402,11 +380,46 @@ class MoE(Module):
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
-            num_tokens_per_expert = _convert_counter_to_accumulator_type(
-                num_tokens_per_expert,
-                self.tokens_per_expert,
-            )
+            mesh = current_mesh()
+            mesh_axis_names = spmd.current_mesh_names() or {}
+            if mesh is not None:
+                for axis_name in ("dp", "cp"):
+                    if axis_name not in mesh_axis_names:
+                        continue
+                    num_tokens_per_expert = spmd.reinterpret(
+                        num_tokens_per_expert,
+                        mesh.get_group(axis_name),
+                        src=spmd.V,
+                        dst=spmd.P,
+                        expert_mode=True,
+                    )
             self.tokens_per_expert.add_(num_tokens_per_expert)
+
+        if (
+            spmd.is_type_checking()
+            and self.experts._sharding_config is not None
+            and self.experts._sharding_config.mesh_reinterpret is not None
+        ):
+            mesh = current_mesh()
+            mesh_axis_names = spmd.current_mesh_names() or {}
+            if mesh is not None:
+                expert_inputs = [x, top_scores, selected_experts_indices]
+                for i, t in enumerate(expert_inputs):
+                    if not spmd.has_local_type(t):
+                        continue
+                    local_type = spmd.get_local_type(t)
+                    for axis_name, axis in mesh_axis_names.items():
+                        if local_type.get(axis) is not spmd.R:
+                            continue
+                        t = spmd.reinterpret(
+                            t,
+                            mesh.get_group(axis_name),
+                            src=spmd.R,
+                            dst=spmd.V,
+                            expert_mode=True,
+                        )
+                    expert_inputs[i] = t
+                x, top_scores, selected_experts_indices = expert_inputs
 
         out = self.experts(
             x,
@@ -418,7 +431,10 @@ class MoE(Module):
         if spmd.is_type_checking():
             with spmd.typecheck(local=True):
                 out = out.reshape(bs, slen, dim)
-            if self._sharding_config is None or self._sharding_config.local_spmd is None:
+            if (
+                self._sharding_config is None
+                or self._sharding_config.local_spmd is None
+            ):
                 return spmd.assert_type(
                     out,
                     spmd.get_local_type(x_3d),

@@ -364,32 +364,11 @@ class Module(nn.Module, Configurable):
             if _mesh_reinterpret is not None
             else None
         )
-        _axis_to_pg = {}
-        if _resolved_reinterpret is not None:
-            for axis_mesh in parallel_dims.get_all_one_dimensional_meshes().values():
-                pg = axis_mesh.get_group()
-                _axis_to_pg[spmd.MeshAxis.of(pg)] = pg
 
         def _apply_mesh_reinterpret(t: torch.Tensor) -> torch.Tensor:
             if not isinstance(t, torch.Tensor) or not spmd.has_local_type(t):
                 return t
             assert _resolved_reinterpret is not None
-            if _resolved_reinterpret and all(
-                typ is spmd.V for typ in _resolved_reinterpret.values()
-            ):
-                dst_axes = set(_resolved_reinterpret)
-                for axis, typ in list(spmd.get_local_type(t).items()):
-                    if axis in dst_axes or typ is not spmd.R:
-                        continue
-                    pg = _axis_to_pg.get(axis)
-                    if pg is not None:
-                        t = spmd.reinterpret(
-                            t,
-                            pg,
-                            src=spmd.R,
-                            dst=spmd.V,
-                            expert_mode=True,
-                        )
             return spmd.reinterpret_mesh(t, _resolved_reinterpret, inplace=True)
 
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
