@@ -6048,3 +6048,26 @@ Interpretation:
 
 - Increasing loss chunks to 8 reduces peak memory slightly but costs too much throughput from extra chunked `lm_head`/loss work.
 - The small 0.53 GiB memory reduction is not enough to justify a larger-batch follow-up because the overhead is far larger than the expected token-count gain from a one-sample local-batch increase.
+
+## Experiment 251: Exact Current-Best Rerun After Loss And NCCL Probes
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run251-rerun-after-loss-nccl-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,382, below the run242 10,650 measured peak.
+- Step 10 MFU: 38.88%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.35025 at step 1 to 4.73355 at step 10; finite and overall decreasing.
+- Step 2 had a transient low-throughput sample at 7,783 tps, but the run recovered by step 4 and logged no corresponding warning.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The durable command remains healthy after the loss-chunk and NCCL thread-block probes.
+- This lower exact sample reinforces that run242's 10,650 tps is a high-variance measured peak, not a repeatable shift.
