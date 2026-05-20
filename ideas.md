@@ -1591,3 +1591,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, `--optimizer.name=Adam`, and `--optimizer.weight_decay=0.0`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no optimizer/runtime warnings. Risk is no speed impact or worse short-run optimization dynamics.
+  Result: tentative keep at source state `897e995`; 10,288 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This matches the prior measured best and needs an exact rerun before promotion.
+
+- Idea: exact rerun of SDPA zero-CTA loss chunks 6 with fused Adam and weight_decay=0
+  Current best source commit: 897e995
+  Source: validation follow-up after run166 matched the measured best
+  Expected mechanism: Repeat the exact command to test whether fused Adam with no weight decay is a durable optimizer-kernel improvement or timing variance.
+  Supporting evidence: The adjacent AdamW weight_decay=0 run failed validation, so this optimizer variant needs an exact rerun.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Exact run166 command with a new dump folder.
+  Success criteria and expected risk: Keep only if the rerun remains above 10,258 tps with finite decreasing loss and no warnings; otherwise discard the fused Adam change.
