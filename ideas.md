@@ -2991,3 +2991,4 @@
   Planned source/config changes: None; durable all-layer FSDP source is restored.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
+  Result: kept as calibration at source state `318b921`; 10,487 tps with finite overall-decreasing loss and restored 169.10 GiB peak memory. The durable source is restored and healthy, although this sample is below the high band.
