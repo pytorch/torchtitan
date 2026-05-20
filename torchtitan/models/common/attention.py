@@ -183,7 +183,9 @@ class FlexAttention(Module):
         kernel_options: dict = field(default_factory=dict)
 
     inductor_configs: ClassVar[dict[str, bool]] = {
-        "wrap_inductor_compiled_regions": True,
+        # TODO: turn on wrap_inductor_compiled_regions after PyTorch fix is
+        # landed again: https://github.com/pytorch/pytorch/pull/175733.
+        "wrap_inductor_compiled_regions": False,
         # Recommended workflow: run once with max_autotune=True to discover
         # good kernel_options, then set kernel_options explicitly in the config
         # and keep max_autotune disabled for faster compilation.
