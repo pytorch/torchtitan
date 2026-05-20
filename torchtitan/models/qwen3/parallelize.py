@@ -89,7 +89,7 @@ def parallelize_qwen3(
         fully_shard(layer, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
-    for fsdp_module in [*layers, model.lm_head, model]:
+    for fsdp_module in layers:
         fsdp_module.set_symm_mem_for_comm("NCCL")
 
     if layers:
