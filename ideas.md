@@ -1621,3 +1621,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `TORCH_NCCL_AVOID_RECORD_STREAMS=0`, `NCCL_CTA_POLICY=2`, and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/allocator warnings. Risk is higher memory or worse synchronization overhead.
+  Result: discarded at source state `0c8bf2f`; 10,110 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The default avoid-record-stream behavior is better.
+
+- Idea: SDPA zero-CTA loss chunks 6 with seq96 local batch 213
+  Current best source commit: 3a1ed15
+  Source: shape retest after zero-CTA and loss chunks 6 changed the durable command
+  Expected mechanism: Sequence length 96 with local batch 213 keeps nearly the same tokens per step as seq128/local batch160 while changing activation/loss chunk shapes. With `--loss.num_chunks=6`, seq96 divides evenly into smaller 16-token chunks, which may improve loss/projection locality or reduce memory pressure enough to offset the earlier shape regression.
+  Supporting evidence: Earlier SDPA seq96/local batch213 was below seq128 before zero-CTA and chunks6 were combined. The durable command changed the loss/communication balance materially, so one nearby shape retest is justified.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--training.seq_len=96 --training.local_batch_size=213 --loss.num_chunks=6` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss, no dataset re-loop warning, and memory below the risk line. Risk is lower GEMM efficiency from shorter sequence length.
