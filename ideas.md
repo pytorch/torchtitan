@@ -2352,3 +2352,12 @@
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,625, record the new measured peak for the same durable command. Risk is only short-window variance.
   Result: kept as new measured high for the same durable command at source state `8f190d7`; 10,650 tps, 39.88% MFU, and unchanged 169.10 GiB peak memory. Loss was finite and overall-decreasing from 12.41589 to 6.24613, though steps 7-9 had severe throughput stalls, reinforcing that `metrics.log_freq=1` is a high-variance objective window.
+
+- Idea: exact rerun of 10,650 tps current-best sample
+  Current best source commit: a6bb18ad
+  Source: validation follow-up after run242 sampled a new measured high but showed severe transient stalls
+  Expected mechanism: Repeat the exact unchanged durable command. If the rerun stays near or above 10,650 tps, the measured peak is more credible; if it falls back into the 10,4xx-10,5xx band, run242 should still be recorded as the peak but treated as a variance spike.
+  Supporting evidence: Previous improvements from measurement-window changes were validated with exact reruns. Run242 was itself a calibration rerun, but the step 7-9 stalls and small margin over 10,625 justify one more exact sample before returning to new knobs.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command from run242.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record the new measured peak for the same command. Risk is only high single-step variance.
