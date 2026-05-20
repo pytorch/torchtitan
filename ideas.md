@@ -1071,3 +1071,12 @@
   Planned command or config overrides: Current best command plus `--training.global_batch_size=2560`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no improvement because FSDP communication still occurs per microbatch, longer wall time per 10-step candidate, or a different short-run loss path from the larger effective global batch.
   Result: tentative keep at source state `3595c11`; 10,006 tps, 37.47% MFU, 169.49 GiB peak memory, and loss decreased from 12.27569 to 5.89456. The margin is only 1 tps over run99, so validate with an exact rerun before treating it as a durable best.
+
+- Idea: exact rerun of SDPA gradient accumulation 2
+  Current best source commit: 846907b
+  Source: validation follow-up after a 1 tps tentative improvement
+  Expected mechanism: Repeating the exact run113 command measures whether the 10,006 tps result is durable or just run-to-run noise. The source and all performance-relevant command knobs stay unchanged.
+  Supporting evidence: Run99 and run100 showed about 23 tps spread on the same SDPA batch160 command. Run113's lead over run99 is only 1 tps, so validation is mandatory before treating gradient accumulation 2 as the best.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run113 command with a new dump folder.
+  Success criteria and expected risk: Keep if it again lands at or above 10,005 tps with finite decreasing loss. Risk is that the result falls back into normal variance and the original SDPA batch160 command remains the durable best.
