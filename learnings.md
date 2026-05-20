@@ -5528,3 +5528,25 @@ Interpretation:
 
 - Prefetch factor 3 is slower than the validated prefetch factor 2 setting.
 - The DataLoader axis is closed for this command: two persistent workers with prefetch factor 2 remain best, and fetching is not a relevant bottleneck in the profile.
+
+## Experiment 228: Metrics Log Frequency 1 With NCCL_MAX_CTAS=32
+
+Command:
+
+```bash
+NCCL_MAX_CTAS=32 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run228-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-max-ctas32-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,408, below the validated current best.
+- Step 10 MFU: 38.97%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.47096 at step 1 to 5.95154 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_MAX_CTAS=32` is still slower than the uncapped default with `NCCL_CTA_POLICY=2`.
+- Close explicit NCCL max-CTA caps: 32, 16, and 8 do not improve this command.
