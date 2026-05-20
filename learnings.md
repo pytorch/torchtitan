@@ -4165,3 +4165,25 @@ Interpretation:
 
 - Re-enabling record-stream behavior for NCCL tensors is slower.
 - Keep the default `TORCH_NCCL_AVOID_RECORD_STREAMS=1` behavior.
+
+## Experiment 170: SDPA Zero-CTA Loss Chunks 6 With Seq96 Local Batch 213
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=96 --training.local_batch_size=213 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run170-sdpa-prefetch-seq96-lbs213-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,456, below the durable seq128 chunks=6 command.
+- Step 10 MFU: 35.38%.
+- Step 10 peak memory: 168.34 GiB, 94.38%.
+- Loss moved from 12.62078 at step 1 to 8.56880 at step 10; finite and decreasing.
+- No dataset re-loop warning appeared.
+
+Interpretation:
+
+- Seq96 remains much slower even after zero-CTA and chunks6 changed the command balance.
+- Continue shape retesting only near seq128; shorter sequence lengths lose too much GEMM efficiency.

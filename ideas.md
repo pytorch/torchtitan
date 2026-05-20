@@ -1631,3 +1631,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--training.seq_len=96 --training.local_batch_size=213 --loss.num_chunks=6` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss, no dataset re-loop warning, and memory below the risk line. Risk is lower GEMM efficiency from shorter sequence length.
+  Result: discarded at source state `ebf8af0`; 9,456 tps with finite decreasing loss and 168.34 GiB peak memory. Seq96 remains much slower even with zero-CTA and chunks6.
+
+- Idea: SDPA zero-CTA loss chunks 6 with seq120 local batch 170
+  Current best source commit: 3a1ed15
+  Source: closer shape retest after seq96 regressed
+  Expected mechanism: Sequence length 120 with local batch 170 keeps token count close to seq128/local batch160 and splits into six equal 20-token loss chunks. It may retain more GEMM efficiency than seq96 while slightly reducing memory and loss projection chunk size versus seq128.
+  Supporting evidence: Seq96 was too short and slow; seq120 is a closer point between seq96 and the durable seq128 shape and has clean chunk divisibility for chunks6.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--training.seq_len=120 --training.local_batch_size=170 --loss.num_chunks=6` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss, no dataset re-loop warning, and memory below the risk line. Risk is reduced matmul efficiency or higher memory from the larger batch.
