@@ -712,6 +712,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Run82 command shape with `--training.seq_len=256 --training.local_batch_size=80`.
   Success criteria and expected risk: Success is tps above 9,579 with finite decreasing loss and no external-allocation contamination. Risks are lower FlexAttention/GEMM efficiency, larger batch overhead, or a short-run loss trend failure.
+  Result: kept at source state `b980f65`; 9,599 tps with finite decreasing loss, a small improvement over run82 at the same per-step token count.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
