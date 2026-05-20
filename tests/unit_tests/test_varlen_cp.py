@@ -4,7 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Pure-logic CPU tests for ``CPVarlenMetadata.from_global``.
+"""Pure-logic CPU tests for ``CPVarlenMetadata.from_global`` and
+``_VarlenPTRRLoadBalancer``.
 
 These do not require a real distributed environment; we mock the
 ``DeviceMesh`` with ``_MockMesh`` and iterate over ranks manually.
@@ -14,7 +15,7 @@ import torch
 from torch.distributed.tensor.experimental._attention import _HeadTailLoadBalancer
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.distributed.varlen_cp import CPVarlenMetadata
+from torchtitan.distributed.varlen_cp import _VarlenPTRRLoadBalancer, CPVarlenMetadata
 from torchtitan.models.common.attention import VarlenMetadata
 
 
@@ -253,15 +254,16 @@ class TestCPVarlenMetadata(TestCase):
             )
 
     def test_seq_len_divisibility_with_load_balancer(self) -> None:
-        # With a load balancer, each shard is split into 2 halves, so
-        # seq_length must be divisible by 2 * cp_world_size, not just
-        # cp_world_size. seq_length=6, CP=2 satisfies CP but not 2*CP.
-        # The LB itself is never invoked because divisibility fires first.
+        # With a load balancer, seq_length must be divisible by
+        # 2 * cp_world_size (the extra divisibility comes from the way
+        # CP load balancers chunk each shard). seq_length=6, CP=2
+        # satisfies CP but not 2*CP. The LB itself is never invoked
+        # because divisibility fires first.
         meta = _build_varlen_meta([0, 6], B=1, seq_len=6)
         lb = _HeadTailLoadBalancer(
             seq_length=8, world_size=2, device=torch.device("cpu")
         )
-        with self.assertRaisesRegex(ValueError, "load balancers chunk"):
+        with self.assertRaisesRegex(ValueError, "extra divisibility"):
             CPVarlenMetadata.from_global(
                 meta,
                 device_mesh=_MockMesh(2, 0),
@@ -293,6 +295,214 @@ class TestCPVarlenMetadata(TestCase):
             CPVarlenMetadata.from_global(
                 sharded, device_mesh=_MockMesh(2, 0), batch_size=1, seq_length=32
             )
+
+
+def _synthetic_doc_lengths(seq_len: int, kind: str, seed: int = 0) -> list[int]:
+    """Generate doc lengths summing to seq_len.
+
+    ``kind="mixture"`` (deterministic, hand-checkable):
+        ~30 short docs U(16,64), 2 medium docs U(200,320), 1 long doc =
+        remainder. Long doc placed mid-sequence (worst for headtail).
+    """
+    rng = torch.Generator().manual_seed(seed)
+    if kind == "mixture":
+        short_lens = [
+            int(torch.randint(16, 65, (1,), generator=rng).item()) for _ in range(30)
+        ]
+        medium_lens = [
+            int(torch.randint(200, 321, (1,), generator=rng).item()) for _ in range(2)
+        ]
+        used = sum(short_lens) + sum(medium_lens)
+        if used >= seq_len:
+            raise ValueError("mixture overflows seq_len; bump seq_len")
+        long_len = seq_len - used
+        mid = len(short_lens) // 2
+        return short_lens[:mid] + medium_lens + [long_len] + short_lens[mid:]
+    else:
+        raise ValueError(f"unknown kind {kind!r}")
+
+
+def _build_varlen_meta_from_doc_lens(
+    doc_lens: list[int], B: int, seq_len: int
+) -> VarlenMetadata:
+    if sum(doc_lens) != seq_len:
+        raise ValueError("doc_lens must sum to seq_len")
+    cum = [0]
+    for length in doc_lens:
+        cum.append(cum[-1] + length)
+    return _build_varlen_meta(cum, B=B, seq_len=seq_len)
+
+
+def _per_rank_total_work(
+    indices: torch.Tensor, cu_seq_q: torch.Tensor, B: int, S: int, W: int
+) -> torch.Tensor:
+    """Sum of visible-K-token-counts per rank for a given (B, S) permutation."""
+    cu = cu_seq_q.to(torch.long)
+    positions = torch.arange(B * S, dtype=torch.long)
+    doc_id = torch.searchsorted(cu, positions, right=True) - 1
+    work_per_token = positions - cu[doc_id] + 1
+    work_per_token_2d = work_per_token.view(B, S)
+    work_rearr = torch.gather(work_per_token_2d, 1, indices.to(torch.long))
+    shard = S // W
+    return work_rearr.view(B, W, shard).sum(dim=(0, 2))
+
+
+class TestVarlenPTRRLoadBalancer(TestCase):
+    @staticmethod
+    def _check_perm(indices: torch.Tensor) -> None:
+        B, S = indices.shape
+        for b in range(B):
+            torch.testing.assert_close(
+                torch.sort(indices[b]).values,
+                torch.arange(S, dtype=indices.dtype),
+            )
+
+    @staticmethod
+    def _check_restore(lb: _VarlenPTRRLoadBalancer) -> None:
+        fwd = lb._generate_indices(restore=False).to(torch.long)
+        rev = lb._generate_indices(restore=True).to(torch.long)
+        for b in range(fwd.shape[0]):
+            roundtrip = fwd[b][rev[b]]
+            torch.testing.assert_close(
+                roundtrip, torch.arange(fwd.shape[1], dtype=torch.long)
+            )
+
+    def test_single_doc_hand_balance(self) -> None:
+        # B=1, W=2, S=128, BS=32. One full-seq doc.
+        # PTRR pairs heaviest with lightest: blocks should sum to
+        # 528+3600 and 1552+2576 -- both 4128.
+        S, BS, W = 128, 32, 2
+        meta = _build_varlen_meta_from_doc_lens([S], B=1, seq_len=S)
+        lb = _VarlenPTRRLoadBalancer(
+            meta.cu_seq_q,
+            batch_size=1,
+            seq_length=S,
+            world_size=W,
+            block_size=BS,
+        )
+        idx = lb._generate_indices(restore=False)
+        self._check_perm(idx)
+        self._check_restore(lb)
+        per_rank = _per_rank_total_work(idx, meta.cu_seq_q, B=1, S=S, W=W)
+        torch.testing.assert_close(
+            per_rank, torch.tensor([4128, 4128], dtype=per_rank.dtype)
+        )
+
+    def test_multi_batch_different_doc_structures(self) -> None:
+        BS, W = 32, 2
+        # batch 0: one doc of 128; batch 1: two docs of 64+64.
+        cu = torch.tensor([0, 128, 192, 256], dtype=torch.int32)
+        lb = _VarlenPTRRLoadBalancer(
+            cu,
+            batch_size=2,
+            seq_length=128,
+            world_size=W,
+            block_size=BS,
+        )
+        idx = lb._generate_indices(restore=False)
+        self._check_perm(idx)
+        self._check_restore(lb)
+
+    def test_balance_quality_beats_headtail(self) -> None:
+        # On a skewed mixture, PTRR's per-rank-work spread should be
+        # < 0.5x headtail's.
+        S, BS, W = 4096, 128, 2
+        doc_lens = _synthetic_doc_lengths(S, kind="mixture", seed=0)
+        meta = _build_varlen_meta_from_doc_lens(doc_lens, B=1, seq_len=S)
+
+        ptrr = _VarlenPTRRLoadBalancer(
+            meta.cu_seq_q,
+            batch_size=1,
+            seq_length=S,
+            world_size=W,
+            block_size=BS,
+        )
+        ht = _HeadTailLoadBalancer(S, W, torch.device("cpu"))
+
+        ptrr_work = _per_rank_total_work(
+            ptrr._generate_indices(restore=False),
+            meta.cu_seq_q,
+            B=1,
+            S=S,
+            W=W,
+        )
+        ht_work = _per_rank_total_work(
+            ht._generate_indices(restore=False),
+            meta.cu_seq_q,
+            B=1,
+            S=S,
+            W=W,
+        )
+        ptrr_spread = (ptrr_work.max() - ptrr_work.min()).item()
+        ht_spread = (ht_work.max() - ht_work.min()).item()
+        self.assertLess(
+            ptrr_spread,
+            0.5 * ht_spread,
+            msg=(
+                f"PTRR spread {ptrr_spread} should be < 0.5 * "
+                f"headtail spread {ht_spread}"
+            ),
+        )
+
+    def test_num_blocks_equals_world_size(self) -> None:
+        S, BS, W = 64, 32, 2
+        meta = _build_varlen_meta_from_doc_lens([S], B=1, seq_len=S)
+        lb = _VarlenPTRRLoadBalancer(
+            meta.cu_seq_q,
+            batch_size=1,
+            seq_length=S,
+            world_size=W,
+            block_size=BS,
+        )
+        idx = lb._generate_indices(restore=False)
+        self._check_perm(idx)
+
+    def test_block_size_divisibility_error(self) -> None:
+        meta = _build_varlen_meta_from_doc_lens([128], B=1, seq_len=128)
+        with self.assertRaisesRegex(ValueError, "divisible by block_size"):
+            _VarlenPTRRLoadBalancer(
+                meta.cu_seq_q,
+                batch_size=1,
+                seq_length=128,
+                world_size=2,
+                block_size=100,
+            )
+
+    def test_world_size_divisibility_error(self) -> None:
+        meta = _build_varlen_meta_from_doc_lens([192], B=1, seq_len=192)
+        with self.assertRaisesRegex(ValueError, "must be divisible by world_size"):
+            _VarlenPTRRLoadBalancer(
+                meta.cu_seq_q,
+                batch_size=1,
+                seq_length=192,
+                world_size=4,
+                block_size=32,
+            )
+
+    def test_through_cpvarlen_metadata_builder(self) -> None:
+        # End-to-end: _VarlenPTRRLoadBalancer returns (B, S) indices,
+        # which CPVarlenMetadata.from_global must accept (the per-row
+        # argsort branch). Guards against the (1, S)-only regression.
+        S, BS, W = 64, 32, 2
+        meta = _build_varlen_meta_from_doc_lens([S], B=2, seq_len=S)
+        lb = _VarlenPTRRLoadBalancer(
+            meta.cu_seq_q,
+            batch_size=2,
+            seq_length=S,
+            world_size=W,
+            block_size=BS,
+        )
+        # Should construct without raising; sanity-check per-rank shapes.
+        for rank in range(W):
+            per_rank = CPVarlenMetadata.from_global(
+                meta,
+                device_mesh=_MockMesh(W, rank),
+                batch_size=2,
+                seq_length=S,
+                load_balancer=lb,
+            )
+            # Q is sharded into B * shard_len positions.
+            self.assertEqual(int(per_rank.cu_seq_q[-1].item()), 2 * (S // W))
 
 
 if __name__ == "__main__":

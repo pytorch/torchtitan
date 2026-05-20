@@ -23,7 +23,7 @@ from torch.distributed.tensor.experimental._context_parallel._attention import (
 )
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.varlen_cp import CPVarlenMetadata
+from torchtitan.distributed.varlen_cp import _VarlenPTRRLoadBalancer, CPVarlenMetadata
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexAttention,
@@ -117,6 +117,7 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     device: torch.device,
     load_balancer_type: str | None = "headtail",
+    ptrr_block_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -134,6 +135,9 @@ def prepare_context_parallel_input(
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
+        ptrr_block_size: Block size used by the varlen PTRR load balancer
+            (only consulted when ``load_balancer_type='ptrr'`` and
+            ``attention_masks`` is a ``VarlenMetadata``).
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -149,6 +153,7 @@ def prepare_context_parallel_input(
         (inputs, labels, positions),
         attention_masks,
         load_balancer_type,
+        ptrr_block_size=ptrr_block_size,
     )
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
@@ -163,6 +168,7 @@ def cp_shard(
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 1,
+    ptrr_block_size: int = 128,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -180,8 +186,8 @@ def cp_shard(
         load_balancer_type: Type of load balancer to use. Options:
             - "headtail": Use HeadTailLoadBalancer (works for SDPA, varlen,
               and FlexAttention)
-            - "ptrr": Use PTRRLoadBalancer (FlexAttention only; not yet
-              supported for varlen)
+            - "ptrr": Use PTRRLoadBalancer (FlexAttention) or
+              _VarlenPTRRLoadBalancer (varlen)
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
@@ -189,6 +195,9 @@ def cp_shard(
             [batch_size, seq_len]. Can be changed by passing a
             different value if your tensors use a different sequence
             dimension layout.
+        ptrr_block_size: Block size used by the varlen PTRR load balancer
+            (only consulted when ``load_balancer_type='ptrr'`` and
+            ``attention_masks`` is a ``VarlenMetadata``).
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -200,8 +209,8 @@ def cp_shard(
 
     Raises:
         ValueError: If load_balancer_type is "ptrr" and attention_masks
-            is None, a dict, or a VarlenMetadata (PTRR + varlen is not
-            yet supported).
+            is None or a dict (FlexAttention PTRR requires a BlockMask;
+            VarlenMetadata is routed to _VarlenPTRRLoadBalancer).
         ValueError: If attention_masks is a VarlenMetadata and
             input_seq_dim is not 1 (varlen sharding assumes the
             (B, S, ...) layout).
@@ -220,6 +229,11 @@ def cp_shard(
     seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size()
 
+    # batch_size is only meaningful for VarlenMetadata branches (varlen
+    # PTRR balancer construction and CPVarlenMetadata.from_global), which
+    # both require the (B, S, ...) layout asserted above.
+    batch_size = inputs[0].size(0)
+
     load_balancer = None
     if load_balancer_type:
         match load_balancer_type:
@@ -228,26 +242,31 @@ def cp_shard(
                     seq_len, cp_world_size, cp_mesh.device_type
                 )
             case "ptrr":
-                # _PTRRLoadBalancer is FlexAttention-only today: it needs
-                # a BlockMask to compute per-block work. The varlen variant
-                # would share the algorithm but read work from cu_seq_q,
-                # and is not yet implemented.
+                # FlexAttention takes a BlockMask; varlen takes the global
+                # cu_seq_q via _VarlenPTRRLoadBalancer. The varlen balancer
+                # assumes document-causal masking, which is the only varlen
+                # path currently in the codebase (VarlenAttention.forward
+                # also rejects non-causal window_size under CP).
                 if isinstance(attention_masks, VarlenMetadata):
-                    raise ValueError(
-                        "PTRR load balancer is not yet implemented for "
-                        "varlen attention; use 'headtail' or None."
+                    load_balancer = _VarlenPTRRLoadBalancer(
+                        attention_masks.cu_seq_q,
+                        batch_size=batch_size,
+                        seq_length=seq_len,
+                        world_size=cp_world_size,
+                        block_size=ptrr_block_size,
                     )
-                if attention_masks is None or isinstance(attention_masks, dict):
-                    raise ValueError(
-                        "PTRRLoadBalancer requires attention_masks to be a "
-                        "BlockMask, but got None or dict[str, BlockMask]"
-                    )
-                if not isinstance(attention_masks, BlockMask):
-                    raise ValueError(
-                        f"PTRRLoadBalancer requires attention_masks to be a "
-                        f"BlockMask, but got {type(attention_masks)}"
-                    )
-                load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+                else:
+                    if attention_masks is None or isinstance(attention_masks, dict):
+                        raise ValueError(
+                            "PTRRLoadBalancer requires attention_masks to be a "
+                            "BlockMask, but got None or dict[str, BlockMask]"
+                        )
+                    if not isinstance(attention_masks, BlockMask):
+                        raise ValueError(
+                            f"PTRRLoadBalancer requires attention_masks to be a "
+                            f"BlockMask, but got {type(attention_masks)}"
+                        )
+                    load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
             case _:
                 raise ValueError(
                     f"Invalid load_balancer_type '{load_balancer_type}'. "
@@ -273,7 +292,7 @@ def cp_shard(
             attention_masks = CPVarlenMetadata.from_global(
                 attention_masks,
                 device_mesh=cp_mesh,
-                batch_size=inputs[0].size(0),
+                batch_size=batch_size,
                 seq_length=seq_len,
                 load_balancer=load_balancer,
             )
