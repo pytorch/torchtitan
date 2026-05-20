@@ -642,6 +642,15 @@
   Result: diagnostic discard at source state `549bd46`; 8,836 tps with finite decreasing loss, below run70's 8,847 but slightly above the older run59/run62 robust prefetch source.
   Rerun result: discarded at source state `7374453`; 8,670 tps and loss increased from 12.42399 to 15.21730. Do not keep the no-endpoint embedding-wrap variant.
 
+- Idea: MXFP8 cublas converter on robust prefetch baseline
+  Current best source commit: 7c1c351
+  Source: profile follow-up after embedding-wrap instability
+  Expected mechanism: The robust prefetch profile still spends about 2.05 s of rank0 CUDA kernel time in GEMMs. On B200, MXFP8 cublas may reduce dense linear GEMM time more effectively than the earlier Float8 rowwise attempts while leaving FSDP communication in high precision.
+  Supporting evidence: TorchTitan's MXFP8 docs target B200 dense training and list `MXFP8LinearConverter` through the existing `model_registry(..., converters=...)` hook. Previous Float8 variants did not beat the prefetch baseline, but they used a different quantization path and the post-prefetch profile still has enough GEMM time to justify one MXFP8 test.
+  Planned source/config changes: Inside `qwen3_14b()`, add a local import of `MXFP8LinearConverter` and pass `converters=[MXFP8LinearConverter.Config(recipe_name="mxfp8_cublas", model_compile_enabled=True)]` to `model_registry("14B", attn_backend="flex", ...)`. Keep the restored transformer-block/lm_head FSDP prefetch source unchanged.
+  Planned command or config overrides: Exact robust prefetch command with compile, BF16 dtype, local batch size 5, and no flight recorder.
+  Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risks are converter/runtime incompatibility, slower dynamic quantization overhead, higher memory, or a short-run loss regression.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
