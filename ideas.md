@@ -1371,3 +1371,13 @@
   Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
   Planned command or config overrides: Exact run143 command with a new dump folder.
   Success criteria and expected risk: Promote chunks=6 only if the rerun remains above 10,023 tps with finite decreasing loss and no allocator/OOM warnings; above 10,060 would validate it as the new measured best family.
+  Result: keep at source state `699746f`; 10,258 tps, 38.42% MFU, 169.10 GiB peak memory, and loss decreased from 12.32446 to 8.26058. Loss chunks 6 validates as the current durable command setting with zero-CTA.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with loss num_chunks 5
+  Current best source commit: 3a1ed15
+  Source: local search around validated chunks=6 optimum
+  Expected mechanism: Chunks=5 further reduces loss/lm_head loop iterations compared with chunks=6 while still likely using less memory than chunks=4. It may improve tps if the memory pressure remains acceptable.
+  Supporting evidence: Chunks=6 validated strongly at 169.10 GiB, while chunks=4 used 171.48 GiB and failed validation. Chunks=5 is the next nearest point in the loss chunking tradeoff.
+  Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
+  Planned command or config overrides: Current durable zero-CTA command plus `--loss.num_chunks=5`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is crossing the memory-risk line or repeating chunks=4 instability.
