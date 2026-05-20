@@ -2101,3 +2101,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command plus `--metrics.disable_color_printing`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is no measurable effect or a repeat of earlier color-printing-disabled regressions from older command stacks.
+  Result: discarded at source state `ffbdf7c`; 10,550 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Removing ANSI color formatting does not beat the validated colored console path.

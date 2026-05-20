@@ -5271,3 +5271,26 @@ Interpretation:
 
 - Disabling structured logging still regresses even when `metrics.log_freq=1` makes every step emit metrics.
 - Keep structured logging enabled. The logging win came from changing the metric interval, not from removing JSONL/structured logging.
+
+## Experiment 217: Metrics Log Frequency 1 With Color Printing Disabled
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --metrics.disable_color_printing --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run217-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-color-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,550, below the validated `log_freq=1` best.
+- Step 10 MFU: 39.51%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Console metric lines were emitted without ANSI color escapes, confirming the flag applied.
+- Loss moved from 12.55223 at step 1 to 6.92163 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Removing color formatting does not improve the final single-step reported tps.
+- Keep the default colored console logging with structured logging enabled; the best logging setting remains `metrics.log_freq=1` only.
