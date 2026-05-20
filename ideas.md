@@ -1241,3 +1241,13 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Prefix the current durable best command with `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is no effect if the default is already optimal, or slower collectives from under-occupying NCCL kernels.
+  Result: tentative keep at source state `3d045b1`; 10,060 tps, 37.67% MFU, 168.57 GiB peak memory, and loss decreased from 12.43969 to 6.06744. Validate with an exact rerun before promoting zero-CTA into the durable command.
+
+- Idea: exact rerun of SDPA NCCL zero-CTA policy
+  Current best source commit: 3d045b1
+  Source: validation follow-up after run131 produced a stronger communication-knob win
+  Expected mechanism: Repeating the exact zero-CTA command checks whether the improved tps comes from less NCCL/compute SM contention or from run variance.
+  Supporting evidence: Run131 beat the durable run99 best by 55 tps with the same peak memory and finite decreasing loss, but previous command-only wins failed exact reruns.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Exact run131 command with a new dump folder.
+  Success criteria and expected risk: Promote zero-CTA only if the rerun remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings.
