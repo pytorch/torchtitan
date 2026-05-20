@@ -3012,3 +3012,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_CHUNKSIZE=65536` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower throughput from extra NVLS chunk overhead or no effect if NVLS is not selected.
   Result: discarded at source state `30be510`; 10,509 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The low-side NVLS chunk is also below peak, so close this axis and keep NCCL's default NVLS chunk size.
+
+- Idea: metrics log frequency 1 with NCCL_NVLS_NCHANNELS=16
+  Current best source commit: fb182560
+  Source: NVLS occupancy/channel-count probe after NVLS chunk-size tuning did not improve the current durable command
+  Expected mechanism: Force fewer NVLS channels than the Blackwell single-node default. If the current collective kernels use too many communication CTAs and interfere with compiled GEMMs, fewer NVLS channels may improve compute/communication overlap even if raw collective bandwidth drops. If bandwidth is the limiter, it should regress.
+  Supporting evidence: The NCCL build exposes `NCCL_NVLS_NCHANNELS`; source constants indicate SM100 single-node NVLS defaults to a high channel count. The current profile showed NCCL collectives overlapped with large GEMMs, making CTA/channel pressure a plausible remaining axis distinct from generic `NCCL_MIN/MAX_NCHANNELS`.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_NCHANNELS=16` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower all-gather/reduce-scatter if fewer NVLS channels underutilize NVLink/NVSwitch bandwidth or no effect if NVLS is not selected.
