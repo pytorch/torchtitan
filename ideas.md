@@ -2851,3 +2851,4 @@
   Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, wrap the last two transformer layers with the same FSDP config except `reshard_after_forward=False`; leave `lm_head` and root behavior unchanged.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and peak memory not exceeding a risky level. Risk is OOM or slower overlap from extra live full parameters; if discarded, restore the durable source.
+  Result: discarded at source state `d03ed97`; 10,492 tps with finite overall-decreasing loss. Peak memory dropped to 167.57 GiB instead of increasing, but throughput stayed below the durable peak, so restore the durable all-layer resharding source.
