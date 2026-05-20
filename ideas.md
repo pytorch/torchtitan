@@ -1741,3 +1741,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=4`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is extra queued host memory or no impact because the input queue is already deep enough.
+  Result: discarded at source state `8601022`; 10,268 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Prefetch factor 4 regresses; keep prefetch factor 2.
+
+- Idea: SDPA zero-CTA loss chunks 6 with two DataLoader workers and pinned host memory
+  Current best source commit: 40032d1
+  Source: final input-pipeline follow-up after worker count and prefetch depth were bracketed
+  Expected mechanism: `pin_memory=True` may speed the CPU-to-GPU transfer of token and label tensors when paired with the validated two-worker prefetch path.
+  Supporting evidence: Trainer copies input tensors to the CUDA device each step. Even though copies are synchronous, pinned memory can still improve host-to-device transfer bandwidth.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command with `--dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --dataloader.pin_memory`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no DataLoader warnings. Risk is pinning overhead or no benefit because tensor copy time is not material.
