@@ -755,6 +755,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no allocator retries. Main risk is that the allocator cliff starts below batch 164, making the run slow or OOM.
   Result: discarded at source state `b80d8fb`; 9,588 tps with finite decreasing loss, but below the seq128/local-batch-160 best and at 172.50 GiB / 96.72% peak memory.
 
+- Idea: exact rerun of seq128 local batch 160 best
+  Current best source commit: 03d00df
+  Source: variance check after the seq128 batch-size headroom probes
+  Expected mechanism: Repeating the current best command measures whether the 9,709 tps result is robust after nearby batch 164 and 168 probes showed the memory edge. No kernel or layout behavior should change.
+  Supporting evidence: Seq128/local-batch-160 is the best measured point, while batch 164 is slower and over the memory-risk line and batch 168 hits allocator pressure. The best shape has only one exact run in this source line.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Exact run84 command with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Keep if it matches or exceeds 9,709 tps with finite decreasing loss and peak memory around 168.96 GiB. Risk is short-run throughput variance or an increasing 10-step loss trend.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
