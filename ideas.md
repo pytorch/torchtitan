@@ -2811,3 +2811,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_SINGLE_PROC_MEM_REG_ENABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect, slower registration bookkeeping, or an unsupported path warning.
+  Result: discarded at source state `270d4a8`; 10,508 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The single-process memory-registration toggle is clean but below the durable peak, so keep the default behavior.
