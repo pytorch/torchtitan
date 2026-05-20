@@ -140,7 +140,20 @@ def _prepare_hf_moe_layers(model, load_balance_coeff=1e-3):
 
 
 class _FakeParallelDims:
+    """Minimal ParallelDims stub for tests that don't use full distributed setup."""
+
+    full_dtensor = False
+
+    def __init__(self, meshes=None):
+        self._meshes = meshes or {}
+
     def get_optional_mesh(self, _mesh_axis_names):
+        return None
+
+    def resolve_mesh(self, axes):
+        for axis in axes:
+            if axis.value in self._meshes:
+                return self._meshes[axis.value]
         return None
 
 
@@ -335,7 +348,9 @@ class TestEPMoeForwardBackward(DTensorTestBase):
             )
 
         # Create EP mesh (4 ranks, ep=4)
-        ep_mesh = self.build_device_mesh()
+        from torch.distributed.device_mesh import init_device_mesh
+
+        ep_mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("ep",))
 
         from torchtitan.experiments.transformers_modeling_backend.parallelize import (
             _experts_restore_post_hook,
@@ -343,7 +358,11 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         )
 
         # Apply EP
-        apply_moe_sharding(model.model, ep_mesh=ep_mesh)
+        apply_moe_sharding(
+            model.model,
+            parallel_dims=_FakeParallelDims({"ep": ep_mesh}),
+            ep_mesh=ep_mesh,
+        )
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
@@ -407,7 +426,12 @@ class TestEPMoeForwardBackward(DTensorTestBase):
         )
 
         # Apply EP+TP (shards params, registers all hooks)
-        apply_moe_sharding(model.model, tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+        apply_moe_sharding(
+            model.model,
+            parallel_dims=_FakeParallelDims({"ep": ep_mesh, "tp": tp_mesh}),
+            tp_mesh=tp_mesh,
+            ep_mesh=ep_mesh,
+        )
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
@@ -487,7 +511,11 @@ class TestTPOnlyMoeForwardBackward(DTensorTestBase):
         )
 
         # Apply TP-only MoE (shards expert weights, registers hooks)
-        apply_moe_sharding(model.model, tp_mesh=tp_mesh)
+        apply_moe_sharding(
+            model.model,
+            parallel_dims=_FakeParallelDims({"tp": tp_mesh}),
+            tp_mesh=tp_mesh,
+        )
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
@@ -562,14 +590,20 @@ class TestMixedMoeDenseLayers(DTensorTestBase):
                 layer.mlp, "experts"
             )
 
+        # Apply EP (only affects MoE layers)
+        from torch.distributed.device_mesh import init_device_mesh
+
         from torchtitan.experiments.transformers_modeling_backend.parallelize import (
             _experts_restore_post_hook,
             _experts_to_local_pre_hook,
         )
 
-        # Apply EP (only affects MoE layers)
-        ep_mesh = self.build_device_mesh()
-        apply_moe_sharding(model.model, ep_mesh=ep_mesh)
+        ep_mesh = init_device_mesh("cuda", (self.world_size,), mesh_dim_names=("ep",))
+        apply_moe_sharding(
+            model.model,
+            parallel_dims=_FakeParallelDims({"ep": ep_mesh}),
+            ep_mesh=ep_mesh,
+        )
 
         # Register experts to_local hooks (normally done in
         # parallelize_hf_transformers after apply_fsdp)
