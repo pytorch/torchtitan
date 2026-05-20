@@ -2941,3 +2941,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROGRESS_APPENDOP_FREQ=4` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is extra proxy polling overhead or no effect if the collectives do not depend on this path.
+  Result: discarded at source state `fc4db2a`; 10,524 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. More frequent append-op polling is also below peak, so close this proxy-progress frequency bracket and keep the default.
