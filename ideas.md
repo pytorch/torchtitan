@@ -2972,3 +2972,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_LL_THRESHOLD=65536` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is additional low-latency protocol overhead or no effect if collectives bypass this threshold.
   Result: discarded at source state `c36aa62`; 10,458 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The high-side threshold is also below peak, so close this P2P LL-threshold axis and keep NCCL's default.
+
+- Idea: separate root endpoint FSDP wraps with full one-module prefetch chain
+  Current best source commit: 875a1a41
+  Source: source-side FSDP scheduling probe after runtime NCCL thresholds were closed and profiling still showed substantial overlapped FSDP all-gather/reduce-scatter cost
+  Expected mechanism: Wrap `tok_embeddings` and `norm` separately instead of leaving them to the root FSDP wrapper, then include `tok_embeddings -> first layer -> ... -> last layer -> norm -> lm_head` in the forward prefetch chain and the reverse in the backward prefetch chain. This may make endpoint all-gathers more explicit and improve communication ordering around the first and last transformer blocks without changing tensor math or model shape.
+  Supporting evidence: The durable source already benefits from a one-module bidirectional prefetch chain across transformer layers and `lm_head`, but the root endpoint modules are not explicit in that chain. Earlier root endpoint ideas predated the final SDPA/log-frequency/NCCL stack, so a narrow retest on the current durable command can check whether endpoint scheduling now helps.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, fully-shard `model.tok_embeddings` and `model.norm` with the same FSDP config before the root wrapper, and extend the forward/backward prefetch chain through those endpoints.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss. Risk is extra FSDP wrappers increasing small all-gather overhead, memory movement, or exposing the root endpoint ordering as slower; if discarded, restore durable source.
