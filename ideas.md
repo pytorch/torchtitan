@@ -618,6 +618,7 @@
   Planned source/config changes: In Qwen3 `parallelize_qwen3()`, call `fully_shard(model.tok_embeddings, **fsdp_config)` before the transformer blocks, keep `lm_head` as currently wrapped, and make the first transformer block prefetch `model.tok_embeddings` in backward as the terminal target. Keep the one-module prefetch window.
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risks are no improvement if root communication is not material, or extra all-gather scheduling overhead from an additional FSDP unit.
+  Result: kept at source state `b6ccf9c`; 8,847 tps, 36.96% MFU, 167.77 GiB, and loss decreased from 12.45754 to 8.00693.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

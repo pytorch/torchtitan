@@ -2007,3 +2007,25 @@ Interpretation:
 
 - HSDP 2x4 is not viable for this Qwen3 14B workload at local batch size 5. It increases model memory residency and allocator pressure enough to dominate any collective-topology benefit.
 - Restore the DP-only FSDP source and do not pursue nearby HSDP variants unless a later memory-saving source change creates substantial headroom.
+
+## Experiment 70: Separate `tok_embeddings` FSDP Wrap With Terminal Prefetch
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run70-flex-prefetch-separate-tok-embeddings-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep; new best.
+- Step 10 `tps`: 8,847, above the prior 8,835 best.
+- Step 10 MFU: 36.96%.
+- Step 10 peak memory: 167.77 GiB, 94.07%.
+- Loss moved from 12.45754 at step 1 to 8.00693 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Separately wrapping `tok_embeddings` and including it in the terminal prefetch chain gives a small but valid improvement and slightly lowers peak memory.
+- Current best source is now `b6ccf9c`: flex attention, no FP8 converter, compile enabled, BF16 training dtype, local batch size 5, `--comm.trace_buf_size=0`, one-module bidirectional FSDP prefetch, and separate `tok_embeddings` FSDP wrapping.
+- Next useful checks are an exact rerun for variance and, if stable, a profile refresh on the new source.
