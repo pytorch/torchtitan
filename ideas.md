@@ -945,6 +945,15 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator retries. Risks are entering the same allocator-pressure regime as batch240 or still missing the plain SDPA best.
   Result: discarded at source state `041eef8`; 7,506 tps with finite decreasing loss and 168.72 GiB peak memory. Broad FP8 batch scaling does not beat plain SDPA.
 
+- Idea: SDPA seq256 constant-token shape
+  Current best source commit: 846907b
+  Source: sequence-shape retest after SDPA attention replaced flex as the best backend
+  Expected mechanism: SDPA changes the attention kernel behavior, so the best sequence/local-batch shape may shift from the flex sweep's seq128 optimum. Seq256/local-batch-80 keeps the same 20,480 tokens per rank while testing the higher-sequence neighbor.
+  Supporting evidence: Under flex, seq256 was close but below seq128. SDPA made attention much cheaper at seq128 and may change the balance between batch count, sequence length, GEMM, and collectives.
+  Planned source/config changes: None; use plain SDPA, no converters, bidirectional prefetch.
+  Planned command or config overrides: Run99 command shape with `--training.seq_len=256 --training.local_batch_size=80`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and peak memory below the 95% risk line. Risk is repeating the flex result where seq256 was slower.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
