@@ -4229,3 +4229,24 @@ Interpretation:
 
 - Seq136 does not recover the throughput lost by the shorter shape retests.
 - Keep the durable seq128/local batch160 shape for this command family.
+
+## Experiment 173: SDPA Zero-CTA Loss Chunks 6 With BF16 Fused Optimizer States
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --optimizer.implementation=fused_opt_states_bf16 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run173-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-bf16-optimizer-states-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep; exact rerun required.
+- Step 10 `tps`: 10,274, above the durable rerun threshold but below the measured best.
+- Step 10 MFU: 38.47%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.53743 at step 1 to 5.90726 at step 10; finite and decreasing.
+
+Interpretation:
+
+- BF16 fused optimizer states may be a small optimizer-side improvement on the current command.
+- Because the gain is small, run an exact rerun before treating it as durable.

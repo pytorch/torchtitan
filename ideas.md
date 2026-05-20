@@ -1661,3 +1661,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--optimizer.implementation=fused_opt_states_bf16`, `NCCL_CTA_POLICY=2`, and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no optimizer/runtime warnings. Risk is slower optimizer kernels or altered short-run optimization dynamics.
+  Result: tentative keep at source state `4e34691`; 10,274 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This clears the durable rerun threshold but is below the measured best, so validate with an exact rerun before promotion.
+
+- Idea: exact rerun of SDPA zero-CTA loss chunks 6 with BF16 fused optimizer states
+  Current best source commit: 4e34691
+  Source: validation follow-up after run173 produced a small tentative optimizer-state win
+  Expected mechanism: Repeat the exact command to distinguish a real BF16 optimizer-state improvement from short-run timing variance.
+  Supporting evidence: Many small 10-step wins have failed exact reruns, and this result is only 16 tps above the durable rerun threshold.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Exact run173 command with a new dump folder.
+  Success criteria and expected risk: Promote only if the rerun stays above 10,258 tps with finite decreasing loss and no warnings; otherwise discard the BF16 optimizer-state change.
