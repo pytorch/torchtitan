@@ -5732,3 +5732,25 @@ Interpretation:
 
 - Grouped NCCL launch ordering is valid but slower than the default launch mode for this command.
 - Keep the current default launch mode with `NCCL_CTA_POLICY=2`.
+
+## Experiment 237: Metrics Log Frequency 1 With TORCH_NCCL_HIGH_PRIORITY=1
+
+Command:
+
+```bash
+TORCH_NCCL_HIGH_PRIORITY=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run237-torch-nccl-high-priority-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,482, below the run215 10,625 measured peak.
+- Step 10 MFU: 39.25%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.32231 at step 1 to 5.13915 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- High-priority NCCL streams are clean but slower on the current final-step command.
+- Keep default NCCL stream priority with `NCCL_CTA_POLICY=2`.

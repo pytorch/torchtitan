@@ -2301,3 +2301,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `TORCH_NCCL_HIGH_PRIORITY=1` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse GEMM/collective contention or no effect if stream priority is already optimal.
+  Result: discarded at source state `394bb02`; 10,482 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. High-priority NCCL is slower than the default stream priority on the current final-step command, so keep the default stream behavior.
