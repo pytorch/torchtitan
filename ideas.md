@@ -1080,3 +1080,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact run113 command with a new dump folder.
   Success criteria and expected risk: Keep if it again lands at or above 10,005 tps with finite decreasing loss. Risk is that the result falls back into normal variance and the original SDPA batch160 command remains the durable best.
+  Result: discarded at source state `180dede`; 9,991 tps with finite decreasing loss and 169.49 GiB peak memory. This fails to validate run113's 1 tps lead, so keep the original SDPA batch160 run99/run100 result as the durable best.
