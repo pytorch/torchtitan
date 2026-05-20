@@ -3061,6 +3061,7 @@
   Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, call `fully_shard(model.norm, **fsdp_config)` before `lm_head` when present, set the last layer's forward prefetch to `model.norm`, set `model.norm` forward prefetch to `model.lm_head`, set `model.lm_head` backward prefetch to `model.norm`, and set `model.norm` backward prefetch to the last layer. Leave `tok_embeddings` inside the root wrapper.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss, or a clean high-band sample with a plausible memory/scheduling improvement. Risk is extra FSDP wrapper overhead or worse final all-gather ordering; if discarded, restore the durable source.
+  Result: discarded at source state `4680f65`; 10,515 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Isolating the final norm endpoint did not beat the durable direct last-layer-to-lm_head prefetch schedule, so restore the durable source.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b

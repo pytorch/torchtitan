@@ -7535,3 +7535,32 @@ Interpretation:
 
 - The post-algorithm-probe profile matches the earlier bottleneck model: compiled GEMMs dominate, while FSDP ring-LL reduce-scatter/all-gather is substantial and mostly overlapped.
 - Explicit `NCCL_ALGO` preferences did not help, and the trace does not show a new host-side or input-pipeline bottleneck. Continue with narrower source/config scheduling or untried low-risk runtime axes rather than more algorithm-list overrides.
+
+## Experiment 317: Final Norm FSDP Wrap With Norm-to-LM-Head Prefetch Chain
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run317-final-norm-fsdp-prefetch-chain-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Separately FSDP-wrapped `model.norm`.
+- Changed the terminal forward prefetch chain from `last layer -> lm_head` to `last layer -> norm -> lm_head`.
+- Changed the terminal backward prefetch chain from `lm_head -> last layer` to `lm_head -> norm -> last layer`.
+- Left `tok_embeddings` inside the root wrapper.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,515, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.38%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41229 at step 1 to 11.37920 at step 10; finite and overall decreasing, though noisy.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Separating only the final norm endpoint is valid, but it does not improve throughput or memory versus the durable source.
+- The direct `last layer -> lm_head` prefetch schedule remains better than inserting a separate norm FSDP wrapper. Restore durable source before continuing.
