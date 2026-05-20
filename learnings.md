@@ -7191,3 +7191,25 @@ Interpretation:
 
 - `NCCL_PROGRESS_APPENDOP_FREQ=4` is valid but below the durable peak and below the high-side run300 sample.
 - The proxy append-op frequency bracket does not show a useful direction; keep NCCL's default value.
+
+## Experiment 302: Exact Current Best Rerun After NCCL Scheduler/Resource Probes
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run302-rerun-after-nccl-scheduler-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,600, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.70%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.42840 at step 1 to 6.82453 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The durable exact command remains in the strong high band after the NCCL scheduler/resource probes.
+- Run302 does not exceed the run242 measured peak, but it reinforces that the rejected NCCL knobs were below normal durable-command variance rather than new wins.
