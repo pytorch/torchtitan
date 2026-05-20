@@ -1862,3 +1862,13 @@
   Planned command or config overrides: Current best command with `TOKENIZERS_PARALLELISM=true`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no tokenizer/DataLoader warnings. Risk is CPU oversubscription or tokenizer fork-safety warnings.
   Result: discarded at source state `b6933b8`; 10,279 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Tokenizer-internal parallelism does not beat the validated two-worker DataLoader command.
+
+- Idea: current best with effectively disabled gradient clipping
+  Current best source commit: 20cc9100
+  Source: optimizer/gradient path isolation after the profile showed synchronization around grad norm and the default max norm clips every step
+  Expected mechanism: Setting `--training.max_norm=1000000.0` keeps gradient norm computation/reporting but avoids actually scaling gradients by a small clipping coefficient. If the foreach scaling path has measurable cost or if clipping perturbs optimizer dynamics enough to affect short-run timing, this may improve tps.
+  Supporting evidence: Default runs report grad norms far above 1.0, so clipping is active every step. This is an isolated legal training CLI knob; correctness criterion remains finite decreasing loss.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command plus `--training.max_norm=1000000.0`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no nonfinite grad warnings. Risk is no performance effect because norm computation and foreach multiply still run, or worse loss behavior from much larger updates.
+  Result: discarded at source state `20cc910`; 6,808 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Avoiding clipping severely slows the run and does not improve the grad path; keep the default max norm.
