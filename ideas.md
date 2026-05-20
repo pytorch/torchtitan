@@ -672,6 +672,15 @@
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risk is CPU oversubscription or no measurable effect.
   Result: discarded at source state `8e03eab`; 8,322 tps with finite decreasing loss, well below the robust prefetch baseline.
 
+- Idea: constant-token shorter sequence shape, seq_len 2048 and local batch 10
+  Current best source commit: 7c1c351
+  Source: workload-shape tuning allowed by `program.md`
+  Expected mechanism: Halving sequence length from 4096 to 2048 and doubling local batch size from 5 to 10 keeps the same per-step token count while reducing quadratic attention work and improving GEMM batch shape. This may raise reported tokens/sec if memory fits and data loading keeps up.
+  Supporting evidence: Program.md permits tuning training settings including sequence length and batch size. The robust baseline is memory-constrained at local batch 5, while a shorter sequence should reduce attention activation memory enough to fit the doubled batch at the same tokens per step.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Exact robust prefetch command plus `--training.seq_len=2048 --training.local_batch_size=10`.
+  Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss. Risks are OOM from doubled batch metadata/logits, reduced GPU efficiency from shorter sequence, or a non-comparable workload shape that should be logged separately from 4096-token context results.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
