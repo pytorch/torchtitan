@@ -1981,3 +1981,4 @@
   Planned source/config changes: Edit only `qwen3_14b()` to pass `converters=[Float8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
   Planned command or config overrides: Current best two-worker command with `--training.local_batch_size=200`.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risks are the known `FSDPFloat8Linear` view warning, slower quantization overhead, memory pressure around the loss path, or the same batch-scaling regression seen at broad-FP8 batch220.
+  Result: discarded at source state `3eb10e9`; 10,254 tps with finite decreasing loss and 156.98 GiB peak memory. Batch200 converts some Float8 memory headroom into work, but it remains below the BF16 current best and still emits the `FSDPFloat8Linear` view warning.

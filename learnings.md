@@ -4984,3 +4984,31 @@ Interpretation:
 
 - Increasing NCCL's buffer slice size from the default to 8 MiB does not improve this FSDP collective pattern.
 - Keep `NCCL_CTA_POLICY=2` without `NCCL_BUFFSIZE`; the remaining NCCL time is not helped by larger per-channel buffers.
+
+## Experiment 205: Float8 Linear Converter With Local Batch 200
+
+Source change:
+
+- Added `Float8LinearConverter.Config(model_compile_enabled=True)` to the Qwen3 14B `model_registry(...)` converters list.
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=200 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run205-float8-linear-sdpa-prefetch-seq128-lbs200-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard; source should be restored to the non-Float8 best.
+- Step 10 `tps`: 10,254, below the validated BF16 current-best command.
+- Step 10 MFU: N/A because quantized training disables MFU reporting.
+- Step 10 peak memory: 156.98 GiB, 88.02%.
+- Loss moved from 12.45780 at step 1 to 7.13001 at step 10; finite and decreasing.
+- The run logged `Float8 training active with recipe rowwise` and `Swapped to Float8Linear layers`.
+- The known `FSDPFloat8Linear` view warning appeared again.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Larger batch partially uses the Float8 memory headroom, but not enough to overcome Float8 overhead or beat the BF16 path.
+- The current command now has both Float8 batch160 and Float8 batch200 negative results, and older broad-FP8 batch220/batch240 also regressed or crashed. Close Float8 batch-scaling unless a future converter path removes the FSDP view warning or materially changes kernel behavior.
