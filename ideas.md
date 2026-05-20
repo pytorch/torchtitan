@@ -3183,6 +3183,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is SDPA rejecting Flash for this shape/GQA path, falling back poorly, or slowing because cuDNN was already the better backend.
   Result: discarded at source state `13c3a98`; 10,522 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing SDPA Flash is valid but below the durable backend priority, so restore the default SDPA backend list.
 
+- Idea: two-layer FSDP parameter groups
+  Current best source commit: e0ffb97
+  Source: profiler-led FSDP granularity follow-up after compile and attention backend probes did not improve the GEMM/collective dominated profile
+  Expected mechanism: Group adjacent transformer layers with `fully_shard([layer_i, layer_i+1], ...)` so each pair shares one FSDP parameter group. This should reduce the number of all-gather and reduce-scatter collectives and may improve overlap/scheduling versus one collective per layer, at the cost of larger all-gather granularity and higher peak unsharded parameter residency.
+  Supporting evidence: The PyTorch FSDP2 API explicitly supports grouped `fully_shard([a, b, ...])`. Run316 shows FSDP collectives remain a dominant bucket alongside GEMM. Prior integer partial resharding was too memory-heavy, but grouping pairs is a different communication-count tradeoff and may fit because run326 and root no-reshard showed some memory movement around the 167-169 GiB range.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, replace per-layer `fully_shard(layer, **fsdp_config)` with pairwise grouped `fully_shard(layers[i : i + 2], **fsdp_config)`, leaving `lm_head`, root FSDP, and the existing one-module prefetch chain unchanged.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator retry/OOM. Risk is higher memory or worse overlap if two-layer all-gathers become too coarse.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
