@@ -3973,3 +3973,25 @@ Interpretation:
 
 - Compiling `lm_head` as a plain `nn.Linear` module with `fullgraph=True` is not viable.
 - Restore the uncompiled `lm_head`. Any future output-projection compilation would need a different wrapper or functional path, which is outside the narrow source change for this attempt.
+
+## Experiment 161: SDPA Zero-CTA Loss Chunks 6 With Root FSDP Endpoint Prefetch
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run161-sdpa-root-endpoint-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,931, below the durable chunks=6 command.
+- Step 10 MFU: 37.19%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.50644 at step 1 to 7.15740 at step 10; finite and decreasing.
+- No FSDP/runtime warnings appeared.
+
+Interpretation:
+
+- Parent-wrapper endpoint prefetch is accepted by FSDP but harms throughput.
+- Isolate forward-only root prefetch once before discarding root endpoint prefetch entirely.

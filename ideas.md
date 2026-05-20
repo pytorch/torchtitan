@@ -1541,3 +1541,13 @@
   Planned source/config changes: Restore uncompiled `lm_head`, then set `model.set_modules_to_forward_prefetch([layers[0]])` and `layers[0].set_modules_to_backward_prefetch([model])` when layers exist.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no FSDP/runtime warnings. Risk is prefetching a parent wrapper being ineffective or harmful.
+  Result: discarded at source state `53ac215`; 9,931 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Parent-wrapper endpoint prefetch is valid but slower than the durable schedule.
+
+- Idea: SDPA zero-CTA loss chunks 6 with root forward-only FSDP prefetch
+  Current best source commit: 3a1ed15
+  Source: isolation follow-up after bidirectional root endpoint prefetch regressed
+  Expected mechanism: The forward root-to-first-layer prefetch may still hide the first layer all-gather, while the first-layer-to-root backward prefetch may have hurt scheduling near the end of backward. Testing only the forward endpoint isolates that half.
+  Supporting evidence: Bidirectional root endpoint prefetch completed without warnings but was slower. Earlier transformer/lm_head prefetch isolation showed asymmetric variants can matter, so the root endpoint should be bracketed before discarding it entirely.
+  Planned source/config changes: Restore the durable schedule, then add only `model.set_modules_to_forward_prefetch([layers[0]])` when layers exist.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no FSDP/runtime warnings. Risk is no effect or the forward prefetch alone still disrupting scheduling.
