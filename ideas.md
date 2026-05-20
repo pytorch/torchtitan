@@ -2841,3 +2841,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LL_BUFFSIZE=4194304` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap or no effect if 4 MiB equals the default LL buffer size on this build.
+  Result: discarded at source state `bf9809b`; 10,583 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The 4 MiB high-side LL buffer sample is strong but still below the measured peak and exact durable reruns, so keep the default LL buffer size.

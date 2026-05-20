@@ -6941,3 +6941,25 @@ Interpretation:
 
 - Reducing `NCCL_LL_BUFFSIZE` to 1 MiB is valid but slower than the durable command.
 - The profile correctly identified LL collectives as important, but smaller LL chunks appear to add overhead or reduce bandwidth more than they improve overlap. Keep NCCL's default LL buffer size.
+
+## Experiment 291: Metrics Log Frequency 1 With NCCL_LL_BUFFSIZE=4194304
+
+Command:
+
+```bash
+NCCL_LL_BUFFSIZE=4194304 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run291-nccl-ll-buffsize4m-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,583, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.63%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.55824 at step 1 to 7.94156 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_LL_BUFFSIZE=4194304` is valid and samples much better than the 1 MiB low-side probe, but it still does not beat the durable peak.
+- The LL buffer-size bracket does not reveal a clear improvement: 1 MiB regressed, 4 MiB is a normal high-band sample but below run242 and the best exact reruns. Keep the default LL buffer size and move to another profile-driven collective axis.
