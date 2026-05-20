@@ -2650,3 +2650,24 @@ Interpretation:
 - At the seq128/local-batch-160 workload shape, SDPA is faster than flex despite flex being better at the original 4096-token shape.
 - The current best source is now SDPA attention, no converters, compile enabled, BF16 training dtype, seq128/local-batch-160, no flight recorder, and one-module bidirectional FSDP prefetch.
 - Next step should be an exact rerun to validate the 10,005 tps result before layering further changes.
+
+## Experiment 100: Exact SDPA Seq128 Batch160 Rerun
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run100-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as validation; run99 remains the measured peak.
+- Step 10 `tps`: 9,982, above the previous flex best of 9,709.
+- Step 10 MFU: 37.38%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.47929 at step 1 to 4.98934 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The SDPA seq128 source line is robust across back-to-back runs.
+- Use SDPA attention as the current best source for subsequent batch, shape, or profile-guided refinements.

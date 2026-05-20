@@ -873,6 +873,7 @@
   Planned source/config changes: None; use the current SDPA attention, no-converter, bidirectional prefetch source.
   Planned command or config overrides: Exact run99 command with a new dump folder.
   Success criteria and expected risk: Keep as validation if it remains above run84's 9,709 with finite decreasing loss and similar memory. Risk is variance or a short-run loss increase.
+  Result: kept as validation at source state `9c7e6fc`; 9,982 tps, 37.38% MFU, 168.57 GiB peak memory, and finite decreasing loss.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
