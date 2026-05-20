@@ -1721,3 +1721,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Exact run178 command with a new dump folder.
   Success criteria and expected risk: Promote only if the rerun stays above 10,270 tps with finite decreasing loss and no dataset worker warnings; otherwise keep the one-worker setting.
+  Result: kept at source state `e82d946`; 10,328 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Two DataLoader workers validate and become the current best command addition.
+
+- Idea: SDPA zero-CTA loss chunks 6 with four DataLoader workers and persistent prefetch
+  Current best source commit: 40032d1
+  Source: input-pipeline bracket after two workers validated
+  Expected mechanism: Four workers may further reduce host tokenization/collation stalls if the input pipeline remains visible; if CPU contention dominates, throughput will fall back below the two-worker command.
+  Supporting evidence: One worker validated and two workers improved further, so worker count deserves one higher bracket before settling.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--dataloader.num_workers=4 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is CPU oversubscription from 32 workers across 8 ranks.

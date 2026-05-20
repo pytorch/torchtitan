@@ -4358,3 +4358,25 @@ Interpretation:
 
 - Two workers may be slightly better than one worker, but the margin is small.
 - Validate with an exact rerun before replacing the one-worker durable command.
+
+## Experiment 179: Exact Rerun of Two DataLoader Workers
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run179-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep; new validated best command.
+- Step 10 `tps`: 10,328, above run178 and the one-worker validation result.
+- Step 10 MFU: 38.67%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.37479 at step 1 to 6.09396 at step 10; finite and decreasing.
+- No dataset re-loop or DataLoader worker warning appeared.
+
+Interpretation:
+
+- Two persistent DataLoader workers with prefetching validate and become the current best input-pipeline setting.
+- Test four workers once to bracket CPU contention versus remaining input overlap.
