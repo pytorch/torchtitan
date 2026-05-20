@@ -1352,3 +1352,12 @@
   Planned command or config overrides: Current zero-CTA AC command with `--training.local_batch_size=640`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is recomputation dominating or tiny c4_test dataset re-looping.
   Result: discarded at source state `6432543`; 8,754 tps with finite decreasing loss, 75.22 GiB peak memory, and a dataset re-loop warning. Full AC does not recover throughput even at 4x batch, so restore the no-AC durable source.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with loss num_chunks 6
+  Current best source commit: 3d045b1
+  Source: loss-loop overhead follow-up after AC memory tradeoff failed
+  Expected mechanism: Reducing `ChunkedCELoss` chunks from 8 to 6 should reduce loss/lm_head loop overhead with less memory increase than the failed chunks=4 run. Zero-CTA may provide enough communication improvement that a moderate loss-loop reduction can become durable.
+  Supporting evidence: Chunks=4 produced one tiny win but failed validation and used 171.48 GiB. A moderate chunks=6 setting may capture some overhead reduction while keeping memory closer to the 168.57 GiB durable command.
+  Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
+  Planned command or config overrides: Current durable zero-CTA command plus `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is higher memory or same variance behavior as chunks=4.
