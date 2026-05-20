@@ -7774,3 +7774,26 @@ Interpretation:
 
 - Finer attention/FFN compile granularity is valid and lowers memory by about 1.1 GiB, but it is materially slower than block-level compile.
 - The lost fusion or increased compiled-region overhead outweighs the memory saving for the current command. Restore durable block-level compile before continuing.
+
+## Experiment 327: Inductor GEMM Max Autotune Only
+
+Command:
+
+```bash
+TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run327-inductor-max-autotune-gemm-only-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,286, below the run318 10,658 measured peak.
+- Step 10 MFU: 38.52%.
+- Step 10 peak memory: 174.10 GiB, 97.62%.
+- Loss moved from 12.36062 at step 1 to 5.53720 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- GEMM-only autotune is valid but substantially slower and much more memory-heavy on the final SDPA stack.
+- The autotune report mostly selected the existing `mm` extern path over Triton candidates, with only one sampled large shape selecting a Triton kernel. This explains why the flag adds compile/search and memory cost without improving steady-state throughput.
+- Close Inductor GEMM max autotune for this command unless the source shape changes materially.

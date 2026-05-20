@@ -3161,6 +3161,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` and keep `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and memory not materially above 169.10 GiB. Risk is longer compile, allocator pressure, or selecting slower GEMM variants as in earlier broader autotune probes.
+  Result: discarded at source state `635bce9`; 10,286 tps with finite overall-decreasing loss and 174.10 GiB peak memory. Autotune mostly selected the existing `mm` path over Triton candidates and increased memory pressure, so close GEMM max autotune for the final SDPA stack.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
