@@ -12,14 +12,13 @@ Each class uses diamond inheritance (``nn.X`` + ``Module``) so that:
 - The ``Module`` protocol is satisfied and ``build()`` is inherited
   from ``Configurable.Config``.
 
-This is the same pattern used by ``Linear``, ``RMSNorm``, and
-``Embedding``.
+Each ``Config`` only exposes the fields that current callsites set;
+add more if a new callsite needs them. This matches the precedent set
+by ``Linear``, ``RMSNorm``, and ``Embedding``.
 """
 
 from dataclasses import dataclass
-from typing import Literal
 
-import torch
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
@@ -32,15 +31,9 @@ class Conv2d(nn.Conv2d, Module):
     class Config(Module.Config):
         in_channels: int
         out_channels: int
-        kernel_size: int | tuple[int, int]
-        stride: int | tuple[int, int] = 1
-        padding: int | tuple[int, int] | str = 0
-        dilation: int | tuple[int, int] = 1
-        groups: int = 1
-        # Diverges from ``Linear.Config.bias`` (which defaults to False) to
-        # match nn.Conv2d's default. The common autoencoder case uses bias.
-        bias: bool = True
-        padding_mode: Literal["zeros", "reflect", "replicate", "circular"] = "zeros"
+        kernel_size: int
+        stride: int = 1
+        padding: int = 0
 
     def __init__(self, config: Config):
         super().__init__(
@@ -49,17 +42,7 @@ class Conv2d(nn.Conv2d, Module):
             config.kernel_size,
             stride=config.stride,
             padding=config.padding,
-            dilation=config.dilation,
-            groups=config.groups,
-            bias=config.bias,
-            padding_mode=config.padding_mode,
         )
-
-    def _init_self_parameters(self) -> None:
-        if self._param_init is not None:
-            super()._init_self_parameters()
-        else:
-            self.reset_parameters()
 
 
 class GELU(nn.GELU, Module):
@@ -81,21 +64,13 @@ class GroupNorm(nn.GroupNorm, Module):
         num_groups: int
         num_channels: int
         eps: float = 1e-5
-        affine: bool = True
 
     def __init__(self, config: Config):
         super().__init__(
             config.num_groups,
             config.num_channels,
             eps=config.eps,
-            affine=config.affine,
         )
-
-    def _init_self_parameters(self) -> None:
-        if self._param_init is not None:
-            super()._init_self_parameters()
-        else:
-            self.reset_parameters()
 
 
 class Identity(nn.Identity, Module):
@@ -114,24 +89,16 @@ class LayerNorm(nn.LayerNorm, Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        normalized_shape: int | list[int] | torch.Size
+        normalized_shape: int
         eps: float = 1e-5
         elementwise_affine: bool = True
-        bias: bool = True
 
     def __init__(self, config: Config):
         super().__init__(
             config.normalized_shape,
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
-            bias=config.bias,
         )
-
-    def _init_self_parameters(self) -> None:
-        if self._param_init is not None:
-            super()._init_self_parameters()
-        else:
-            self.reset_parameters()
 
 
 class SiLU(nn.SiLU, Module):
