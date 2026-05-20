@@ -684,6 +684,15 @@
   Retry attempt: run79 at source state `8191d88` was also invalid; the OOM log again reported separate ~96 GiB processes on the failing GPUs despite a clear pre-launch check.
   Result: kept on stable-clear retry run80 at source state `e102690`; 9,198 tps with finite decreasing loss, but classify separately from 4096-token context results because this changes sequence shape.
 
+- Idea: constant-token shorter sequence shape, seq_len 1024 and local batch 20
+  Current best source commit: e102690
+  Source: follow-up to run80 sequence-shape win
+  Expected mechanism: Keeping per-rank tokens constant at 20,480 while lowering sequence length from 2048 to 1024 and raising local batch from 10 to 20 should preserve dense GEMM token count but further reduce attention's sequence-quadratic work. This may improve reported tokens/sec beyond run80 if memory and launch overhead remain healthy.
+  Supporting evidence: Run80's 2048x10 shape improved tps to 9,198 with finite decreasing loss and 168.96 GiB peak memory. The linears operate on the same flattened token count for 1024x20, while attention has shorter per-sample context.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run80 command shape with `--training.seq_len=1024 --training.local_batch_size=20`.
+  Success criteria and expected risk: Success is tps above 9,198 with finite decreasing loss and no external-allocation contamination. Risks are worse GPU efficiency from smaller attention tiles, dataloader/collation overhead from larger batch count, or memory pressure in logits/loss despite constant token count.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
