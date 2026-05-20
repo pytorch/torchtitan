@@ -2341,3 +2341,25 @@ Retry interpretation:
 
 - The constant-token sequence-shape sweep turns over between seq128 and seq64. Keep seq128/local-batch-160 as the best measured shape for this line.
 - The regression is large enough that testing seq32/local-batch-640 is not a high-priority next step unless the goal is to map the full curve.
+
+## Experiment 87: Seq128 Local Batch 168 Headroom Test
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run87-flex-prefetch-seq128-lbs168-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 3,741, far below run84's 9,709.
+- Step 10 MFU: 14.01%.
+- Step 10 peak memory: 173.30 GiB, 97.17%.
+- Loss moved from 12.44794 at step 1 to 8.77524 at step 10; finite and decreasing.
+- The run logged 13 CUDA memory allocation retries and repeated expandable-segment OOM mapping warnings.
+
+Interpretation:
+
+- Seq128/local-batch-168 crosses the practical memory edge. Even though it completes, allocator pressure destroys throughput and exceeds the 95% risk line.
+- Keep seq128/local-batch-160 as the best measured and practical point. Do not increase batch further at seq128 without adding a memory-saving change first.

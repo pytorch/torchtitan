@@ -743,6 +743,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=168`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and peak memory not materially above the 95% risk line. Main risk is OOM or allocator retries from the small memory margin.
+  Result: discarded at source state `f49a323`; 3,741 tps, 173.30 GiB peak memory, 13 allocator retries, and repeated expandable-segment OOM mapping warnings.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
