@@ -3143,6 +3143,15 @@
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,658, record it as the new measured peak. Risk is only short-window variance.
   Result: invalid at source state `62c37e3`; the run was interrupted by SIGTERM before completing step 1, so it provides no performance signal. Do not restart this exact rerun; continue with new probes.
 
+- Idea: attention and FFN compile granularity
+  Current best source commit: b1395fd
+  Source: user-suggested compile-granularity follow-up after profiler refresh showed the run remains GEMM-heavy and after whole-block compile remained the durable source path
+  Expected mechanism: Compile each Qwen transformer block's `attention` and `feed_forward`/`moe` submodules separately instead of compiling the entire block. This may reduce compiled-region memory pressure or produce better local kernels for the GEMM-heavy attention/MLP subgraphs while keeping FSDP wrapping, prefetch, SDPA, loss chunking, and DataLoader settings unchanged.
+  Supporting evidence: The current `apply_compile()` path compiles every `TransformerBlock` with `fullgraph=True`. Prior public Inductor knobs (`max_autotune`, cudagraphs, coordinate descent) regressed or crashed, but source-level granularity has not been isolated. Local checks show CUTE/Flash attention dependencies are unavailable, so this tests compile granularity without changing the attention backend.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, replace the `apply_compile(model, compile_config)` call with a Qwen-local loop that compiles `layer.attention` and `layer.feed_forward`/`layer.moe` using `backend=compile_config.backend, fullgraph=True`.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no new compiler/FSDP warnings. Risk is slower throughput from losing fusion across RMSNorm/residual boundaries or a compile failure if submodule fullgraph capture handles module boundaries worse than block capture.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command

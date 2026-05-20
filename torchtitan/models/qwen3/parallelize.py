@@ -21,7 +21,6 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -66,9 +65,6 @@ def parallelize_qwen3(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
 
-    if compile_config.enable and "model" in compile_config.components:
-        apply_compile(model, compile_config)
-
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
         param_dtype=getattr(torch, training.mixed_precision_param),
@@ -85,6 +81,18 @@ def parallelize_qwen3(
     }
 
     layers = list(model.layers.values())
+    if compile_config.enable and "model" in compile_config.components:
+        for layer in layers:
+            layer.attention.compile(backend=compile_config.backend, fullgraph=True)
+            if layer.moe_enabled:
+                layer.moe.compile(backend=compile_config.backend, fullgraph=True)
+            else:
+                layer.feed_forward.compile(
+                    backend=compile_config.backend,
+                    fullgraph=True,
+                )
+        logger.info("Compiled Qwen3 attention and feed-forward submodules")
+
     for layer in layers:
         fully_shard(layer, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
