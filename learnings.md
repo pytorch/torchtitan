@@ -7257,3 +7257,31 @@ Interpretation:
 
 - `NCCL_P2P_LL_THRESHOLD=65536` is valid but below the durable peak.
 - Together with run303, both sides of the P2P LL-threshold bracket regress or no-op below normal durable-command variance. Keep the default threshold.
+
+## Experiment 305: Separate Root Endpoint FSDP Wraps With Full One-Module Prefetch Chain
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run305-root-endpoint-fsdp-prefetch-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Separately FSDP-wrapped `model.tok_embeddings` and `model.norm`.
+- Extended forward prefetch through `tok_embeddings -> layers -> norm -> lm_head`.
+- Extended backward prefetch through `lm_head -> norm -> layers -> tok_embeddings`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,500, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.32%.
+- Step 10 peak memory: 169.06 GiB, 94.79%.
+- Loss moved from 12.52694 at step 1 to 6.41995 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Explicit root endpoint wrapping is valid but slower than the durable root-wrapper source.
+- The 0.04 GiB memory reduction is too small to convert into useful batch headroom. Restore the durable source.
