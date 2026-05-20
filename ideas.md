@@ -1551,3 +1551,13 @@
   Planned source/config changes: Restore the durable schedule, then add only `model.set_modules_to_forward_prefetch([layers[0]])` when layers exist.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no FSDP/runtime warnings. Risk is no effect or the forward prefetch alone still disrupting scheduling.
+  Result: tentative keep at source state `a3d1dce`; 10,296 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This is above the prior measured best but by a tiny margin, so validate with an exact rerun before promoting.
+
+- Idea: exact rerun of SDPA zero-CTA loss chunks 6 with root forward-only FSDP prefetch
+  Current best source commit: a3d1dce
+  Source: validation follow-up after run162 produced a small tentative win
+  Expected mechanism: Repeat the exact command to distinguish a real prefetch improvement from normal 10-step timing variance.
+  Supporting evidence: Many sub-1% wins in this search failed exact reruns; run162 beats the prior measured best by only 8 tps.
+  Planned source/config changes: Keep root forward-only FSDP prefetch source unchanged.
+  Planned command or config overrides: Exact run162 command with a new dump folder.
+  Success criteria and expected risk: Promote only if the rerun stays above the durable rerun threshold of 10,258 tps with finite decreasing loss and no warnings; otherwise restore the durable schedule.

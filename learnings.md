@@ -3995,3 +3995,25 @@ Interpretation:
 
 - Parent-wrapper endpoint prefetch is accepted by FSDP but harms throughput.
 - Isolate forward-only root prefetch once before discarding root endpoint prefetch entirely.
+
+## Experiment 162: SDPA Zero-CTA Loss Chunks 6 With Root Forward-Only FSDP Prefetch
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run162-sdpa-root-forward-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Step 10 `tps`: 10,296, narrowly above the prior measured best.
+- Step 10 MFU: 38.56%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41271 at step 1 to 7.65884 at step 10; finite and decreasing.
+- No FSDP/runtime warnings appeared.
+
+Interpretation:
+
+- Root forward-only prefetch is the first root-endpoint variant to beat the current measured best, but the margin is tiny.
+- Validate with an exact rerun before promoting; if it fails validation, restore the durable schedule.
