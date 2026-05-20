@@ -1501,3 +1501,13 @@
   Planned source/config changes: None; keep restored durable source.
   Planned command or config overrides: Current durable command with `CUDA_DEVICE_MAX_CONNECTIONS=1 NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/OOM/allocator warnings. Risk is worse scheduling or no effect.
+  Result: discarded at source state `e3a1f3d`; 9,801 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The stricter CUDA connection scheduling worsens this FSDP/SDPA command.
+
+- Idea: SDPA zero-CTA loss chunks 6 with FSDP forward input casts disabled
+  Current best source commit: 3a1ed15
+  Source: FSDP mixed-precision overhead follow-up after communication allocator/scheduling knobs failed
+  Expected mechanism: FSDP's `MixedPrecisionPolicy(cast_forward_inputs=True)` applies a floating-input cast before each FSDP module forward. This command initializes model parameters and activations in BF16 via `--training.dtype=bfloat16`, so those casts should be redundant no-ops that still add traversal/dispatch overhead across 48 layers plus `lm_head`/root.
+  Supporting evidence: The local FSDP docs note that casts apply per module, including standalone per-chunk calls. The durable path uses separately wrapped layers and `lm_head`, and the profile still has non-GEMM/NCCL overhead buckets where Python/module traversal can matter.
+  Planned source/config changes: Set `cast_forward_inputs=False` in the Qwen3 FSDP `MixedPrecisionPolicy` while keeping BF16 params and FP32 reductions.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no dtype/runtime warnings. Risk is a hidden FP32 input path requiring the cast.
