@@ -2592,3 +2592,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROTO=LL` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if LL is already selected, or slower collectives if some operations benefited from another protocol.
   Result: discarded at source state `67890f0`; 9,710 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Explicitly pinning LL severely underperforms automatic protocol selection, so keep NCCL protocol selection on default.
+
+- Idea: metrics log frequency 1 with TORCH_NCCL_CUDA_EVENT_CACHE=0
+  Current best source commit: 5d0b185d
+  Source: PyTorch ProcessGroupNCCL runtime knob discovered in local source after transport and protocol axes plateaued
+  Expected mechanism: Disable ProcessGroupNCCL's CUDA event cache. If cached event reuse causes synchronization or bookkeeping overhead in the short FSDP work sequence, disabling it may reduce tail jitter; more likely, it will increase CUDA event allocation overhead.
+  Supporting evidence: Local `ProcessGroupNCCL.cpp` reads `TORCH_NCCL_CUDA_EVENT_CACHE` with default `true`. This knob has not been tested in the experiment log and is narrower than blocking wait or monitoring toggles.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_CUDA_EVENT_CACHE=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is slower execution from event allocation overhead or no effect if the cache is not hot.
