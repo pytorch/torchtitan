@@ -2531,3 +2531,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_SHM_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if SHM is not used, or slower collectives if SHM carries useful intra-host traffic.
+  Result: discarded at source state `f490ec5`; 10,469 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling SHM is clean but below the durable command, so keep NCCL default shared-memory behavior.
