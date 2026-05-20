@@ -1131,3 +1131,12 @@
   Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower `lm_head` all-gather/loss boundary because the endpoint overlap was useful.
   Result: discarded at source state `f63303a`; 9,989 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Endpoint prefetch is useful enough to keep.
+
+- Idea: SDPA seq128 local batch 160 with foreach AdamW
+  Current best source commit: 846907b
+  Source: optimizer implementation follow-up after communication and shape plateau
+  Expected mechanism: The default fused AdamW is expected to be fastest, but foreach can have different launch and memory behavior. If fused optimizer overhead or allocator interaction is unfavorable at this short-sequence shape, foreach may improve end-to-end tps.
+  Supporting evidence: BF16 optimizer states regressed, but foreach has not been tested on the SDPA batch160 best. Optimizer work is small, so this is a low-probability command-only check.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Current durable best command plus `--optimizer.implementation=foreach`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower optimizer step or higher memory than fused AdamW.
