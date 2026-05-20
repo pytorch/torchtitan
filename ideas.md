@@ -2091,3 +2091,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command plus `--debug.no-enable-structured-logging`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is the prior regression repeats or the flag changes structured trace behavior in a way that slows execution.
+  Result: discarded at source state `3d1561d`; 10,410 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The log confirmed structured logging was disabled, but it remains slower than the structured logging path even when metrics log every step.
