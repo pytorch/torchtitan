@@ -2361,3 +2361,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command from run242.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record the new measured peak for the same command. Risk is only high single-step variance.
+  Result: kept as calibration at source state `524037f`; 10,439 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This does not validate 10,650 as repeatable, but the unchanged durable command remains healthy; keep run242 as the measured peak while treating it as a high-variance sample.
