@@ -6823,3 +6823,25 @@ Interpretation:
 
 - `NCCL_P2P_USE_CUDA_MEMCPY=1` is invalid for this workload on this stack. It does not merely slow the run; it prevents the first large FSDP all-gather from completing.
 - Keep NCCL's default direct P2P path. The P2P path is required, and copy-engine P2P is not a viable overlap strategy here.
+
+## Experiment 286: Exact Current Best Rerun After Invalid P2P CUDA Memcpy Probe
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run286-rerun-after-invalid-p2p-memcpy-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,586, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.64%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.52638 at step 1 to 7.22027 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The default direct P2P command runs normally after the invalid memcpy P2P timeout and cleanup.
+- This is the strongest recent exact rerun after run265 but still below run242's measured peak, so the durable command remains unchanged.

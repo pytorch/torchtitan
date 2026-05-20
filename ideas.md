@@ -2791,3 +2791,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
+  Result: kept as calibration at source state `c0080c4`; 10,586 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The environment recovered cleanly after the invalid P2P memcpy timeout, but this did not exceed the measured peak.
