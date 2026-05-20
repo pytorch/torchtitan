@@ -2122,3 +2122,12 @@
   Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a complete 10-step profile with finite overall-decreasing loss and a usable trace. The profiled tps is diagnostic only and should not replace the unprofiled best.
   Result: diagnostic profile completed at source state `b943d52`; profiled step 10 reported 10,404 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Rank0 trace showed kernel time still led by GEMMs around 1,630 ms and NCCL around 996 ms, with smaller Triton and attention buckets.
+
+- Idea: metrics log frequency 1 with Inductor coordinate descent tuning only
+  Current best source commit: 10a7d801
+  Source: profile-backed compiler-kernel follow-up after run219 showed GEMMs remain the largest kernel bucket
+  Expected mechanism: Set `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1` without enabling max autotune. Coordinate descent may improve generated kernel tile choices for compiled transformer-block pointwise/reduction regions and possibly GEMM-adjacent code while avoiding the allocator pressure and kernel-selection churn from the earlier max-autotune bundle.
+  Supporting evidence: Run219 rank0 trace still showed about 1.63 s in GEMM kernels and 152 ms in Triton kernels. The prior `TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1` experiment regressed badly, but it did not isolate coordinate descent by itself.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current best command with `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss, unchanged-safe memory, and no Inductor/runtime warnings. Risk is longer compile, no effect, or a repeat of the earlier allocator/performance regression if coordinate descent changes memory behavior.
