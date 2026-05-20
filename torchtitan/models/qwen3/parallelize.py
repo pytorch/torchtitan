@@ -87,11 +87,7 @@ def parallelize_qwen3(
     layers = list(model.layers.values())
     for layer in layers:
         fully_shard(layer, **fsdp_config)
-    lm_head_fsdp_config = {
-        **fsdp_config,
-        "reshard_after_forward": False,
-    }
-    fully_shard(model.lm_head, **lm_head_fsdp_config)
+    fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
     if layers:
         for layer, next_layer in zip(layers, layers[1:]):
