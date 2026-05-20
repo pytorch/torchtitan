@@ -1311,3 +1311,13 @@
   Planned source/config changes: None; keep durable bidirectional one-module prefetch.
   Planned command or config overrides: Current durable zero-CTA command plus `NCCL_NVLS_ENABLE=1`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is no effect if already enabled or slower execution if it forces a suboptimal algorithm.
+  Result: tentative keep at source state `e36e329`; 10,029 tps, 37.56% MFU, 168.57 GiB peak memory, and loss decreased from 12.37962 to 7.56087. This narrowly beats the validated zero-CTA rerun, so validate with an exact rerun.
+
+- Idea: exact rerun of SDPA zero-CTA explicit NCCL NVLS
+  Current best source commit: e36e329
+  Source: validation follow-up after run138 narrowly beat the validated zero-CTA command
+  Expected mechanism: Repeating the exact `NCCL_CTA_POLICY=2 NCCL_NVLS_ENABLE=1` command checks whether explicit NVLS is a durable improvement or a tiny variance win.
+  Supporting evidence: Run138 beat run132 by 6 tps with identical memory and clean loss, but this search has repeatedly seen small wins fail validation.
+  Planned source/config changes: None; keep durable bidirectional one-module prefetch.
+  Planned command or config overrides: Exact run138 command with a new dump folder.
+  Success criteria and expected risk: Keep explicit NVLS only if the rerun remains above 10,023 tps with finite decreasing loss and no allocator/OOM warnings.

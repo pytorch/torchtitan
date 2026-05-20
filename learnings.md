@@ -3470,3 +3470,24 @@ Interpretation:
 
 - Capping NCCL channels at 16 regresses throughput.
 - Keep default NCCL channel selection with `NCCL_CTA_POLICY=2`.
+
+## Experiment 138: SDPA Zero-CTA Seq128 Local Batch 160 With Explicit NCCL NVLS
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_NVLS_ENABLE=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run138-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-nvls-enable-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Step 10 `tps`: 10,029, slightly above run132's validated 10,023.
+- Step 10 MFU: 37.56%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.37962 at step 1 to 7.56087 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Explicit `NCCL_NVLS_ENABLE=1` is memory-neutral and may slightly help, but the margin is tiny.
+- Validate before adding NVLS to the durable command.
