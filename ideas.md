@@ -2912,3 +2912,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_SCHEDULE_GROUP_SIZE=8` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap if coarser groups reduce communication/compute interleaving.
   Result: discarded at source state `710556f`; 10,450 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Coarser P2P schedule grouping is also slower, so close this axis and keep the default group size.
+
+- Idea: metrics log frequency 1 with NCCL_L1_SHARED_MEMORY_CARVEOUT=100
+  Current best source commit: dd11b69b
+  Source: profile-driven NCCL kernel resource probe after P2P schedule grouping and LL buffer size brackets did not improve the measured peak
+  Expected mechanism: Prefer the maximum shared-memory carveout for NCCL kernels. If the `RING_LL` all-gather and reduce-scatter kernels seen in the profile benefit from more shared memory or from a different L1/shared-memory split on B200, this may reduce collective kernel time or interference with GEMMs. If the default driver choice is already best, it should regress or no-op.
+  Supporting evidence: The active NCCL 2.29.7 build exposes `NCCL_L1_SHARED_MEMORY_CARVEOUT`, and `enqueue.cc` applies it to NCCL CUDA kernels via `cudaFuncAttributePreferredSharedMemoryCarveout`. Run289 showed substantial NCCL `RING_LL` time with GPUs otherwise busy, so a kernel-resource preference is a distinct remaining overlap axis from transport, protocol, and buffer-size knobs.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_L1_SHARED_MEMORY_CARVEOUT=100` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives if the setting reduces useful L1 cache or worsens occupancy.
