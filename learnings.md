@@ -3407,3 +3407,24 @@ Interpretation:
 
 - Local batch 161 remains a poor shape even with zero-CTA.
 - Keep local batch 160 as the durable batch size.
+
+## Experiment 135: SDPA Zero-CTA Seq128 Local Batch 160 With Backward-Only FSDP Prefetch
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run135-sdpa-backward-only-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,700, below the zero-CTA bidirectional prefetch runs.
+- Step 10 MFU: 36.33%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.56282 at step 1 to 5.70065 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Backward-only prefetch still regresses after zero-CTA.
+- Forward prefetch remains part of the durable source; restore bidirectional one-module layer-to-layer plus `lm_head` endpoint prefetch.

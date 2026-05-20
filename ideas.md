@@ -1281,3 +1281,4 @@
   Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to remove the two `set_modules_to_forward_prefetch` calls while keeping `lm_head` and layer backward prefetch.
   Planned command or config overrides: Current durable zero-CTA command with seq128/local_batch160.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is losing forward all-gather overlap again.
+  Result: discarded at source state `7488049`; 9,700 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Forward prefetch remains necessary; restore bidirectional one-module prefetch.
