@@ -903,6 +903,7 @@
   Planned source/config changes: Inside `qwen3_14b()`, add `Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)` to `model_registry("14B", attn_backend="sdpa", converters=[...])`.
   Planned command or config overrides: Run99 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no memory regression. Risks are quantized logits/layers harming short-run loss or FP8 overhead exceeding GEMM savings at seq128.
+  Result: discarded at source state `04c966d`; 9,995 tps with finite decreasing loss and 168.57 GiB peak memory, just below the plain SDPA best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

@@ -2724,3 +2724,28 @@ Interpretation:
 
 - SDPA's win comes from cutting attention cost substantially versus flex at seq128, but the remaining bottleneck is still GEMM plus NCCL reduce-scatter.
 - Since lower-precision reductions failed sanity and no-reshard hit allocator pressure, the next source-level target should be GEMM efficiency on the SDPA source.
+
+## Experiment 103: FP8 Rowwise Converter On SDPA Seq128 Best
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run103-sdpa-fp8-rowwise-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Added `Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)` to the SDPA Qwen3 14B model spec.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,995, slightly below run99's 10,005.
+- Step 10 MFU: 37.43%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.47790 at step 1 to 6.89079 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Auto-filtered FP8 rowwise is training-sane on the SDPA seq128 source, but it does not beat plain SDPA.
+- The result is close enough that broader FP8 coverage can be tested once, but the current best remains plain SDPA.
