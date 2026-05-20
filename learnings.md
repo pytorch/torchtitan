@@ -2238,3 +2238,25 @@ Interpretation:
 - The constant-token sequence-shape trend continues: shorter context and larger local batch gives higher reported tps at the same token count per step.
 - Peak memory is unchanged from run80, suggesting the loss/logit and dense-token dimensions dominate memory more than the attention sequence dimension at these shapes.
 - Next follow-up is seq_len 512 with local batch 40, again as a workload-shape tuning result rather than a 4096-context layout comparison.
+
+## Experiment 82: Constant-Token Seq512 Local Batch 40 Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=512 --training.local_batch_size=40 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run82-flex-prefetch-seq512-lbs40-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep; new best measured reported `tps`.
+- Step 10 `tps`: 9,579, above run81's 9,394.
+- Step 10 MFU: 36.27%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.28811 at step 1 to 6.65670 at step 10; finite and decreasing.
+- Per-step tokens remain 163,840: 8 ranks * local batch 40 * seq_len 512.
+
+Interpretation:
+
+- The shorter-context constant-token sweep is still improving reported tps.
+- Memory remains at the same peak as seq2048 and seq1024, so the next natural neighbor is seq_len 256 with local batch 80. Risk shifts further toward per-sample overhead and lower attention-tile efficiency.
