@@ -13,6 +13,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``memory_policy.py`` — SAC tagging and memory policy dispatch
 - ``inductor_passes.py`` — regional and full Inductor compilation
 - ``cudagraph.py`` — cudagraph wrapping and kernel annotations
+- ``xpugraph.py`` —  xpugraph wrapping
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
 - ``remove_noop_passes.py`` — no-op removal (detach, identity view/slice)
 - ``performance_passes.py`` — opt-in numerics-changing optimizations
@@ -66,6 +67,13 @@ from torchtitan.tools.logging import logger
 aten = torch.ops.aten
 c10d = torch.ops._c10d_functional
 
+def _get_graph_capture_backend() -> str | None:
+    """Return the active device backend for graph capture."""
+    if hasattr(torch, "xpu") and torch.xpu.is_available() and torch.xpu.is_initialized():
+        return "xpu"
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        return "cuda"
+    return None
 
 def normalize_view_ops_as_reshape(
     gm: torch.fx.GraphModule,
@@ -224,11 +232,43 @@ def construct_default_graph_passes(
     """Build the pass list for the aot_fx_trace path.
 
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
-    FlexAttention annotation, regional_inductor, and cudagraph.
+    FlexAttention annotation, regional_inductor, and graph capture.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
-    transformed during precompile phase, so only cudagraph is returned.
+    transformed during precompile phase, so only graph capture is returned.
     """
+    graph_backend = _get_graph_capture_backend()
+    logger.info("Graph capture backend selected: %s", graph_backend)
+
+    use_cudagraph = False
+    use_xpugraph = False
+    graph_capture_pass = None
+
+    # Keep cudagraph_pass as a backwards-compatible way to disable graph capture.
+    graph_capture_disabled = (
+        "cudagraph_pass" in config.compile.disable_passes
+        or "xpugraph_pass" in config.compile.disable_passes
+    )
+
+    if not graph_capture_disabled:
+        if graph_backend == "cuda":
+            from torchtitan.experiments.graph_trainer.cudagraph import (
+                is_cudagraph_compatible,
+            )
+
+            use_cudagraph = is_cudagraph_compatible(traced_result.gm)
+            if use_cudagraph:
+                graph_capture_pass = cudagraph_pass
+
+        elif graph_backend == "xpu":
+            from torchtitan.experiments.graph_trainer.xpugraph import (
+                is_xpugraph_compatible,
+                xpugraph_pass,
+            )
+
+            use_xpugraph = is_xpugraph_compatible(traced_result.gm)
+            if use_xpugraph:
+                graph_capture_pass = xpugraph_pass
     want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
@@ -243,12 +283,13 @@ def construct_default_graph_passes(
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
-                cudagraph_pass,
+                graph_capture_pass,
                 is_forward=True,
                 static_input_indices=static_input_indices,
                 tensor_input_indices=traced_result.tensor_input_indices,
             )
         )
+
     return passes
 
 
