@@ -65,18 +65,18 @@ def sparse_param_placement() -> NamedPlacement:
 def moe_wrapper_config(*, enable_sp: bool) -> ShardingConfig:
     """Sharding at the MoE wrapper boundary (dense mesh, TP axis).
 
-    Input arrives at ``sp_layout`` (S(1) when SP, R otherwise).
+    Input arrives at ``sp_layout`` (S(1) when SP, I otherwise).
     Redistributed to R@tp (allgather when SP) for the body.
     ``local_spmd`` converts R@tp DTensor to local tensor for the body.
     Body output is P@tp (each TP rank holds a partial sum).
     Redistributed to ``sp_layout`` (reduce-scatter when SP, allreduce
     otherwise).
     """
-    sp_tp = spmd.S(1) if enable_sp else spmd.R
+    sp_tp = spmd.S(1) if enable_sp else spmd.I
     return ShardingConfig(
         state_shardings={
             "expert_bias": dense_param_placement(tp=spmd.R),
-            "tokens_per_expert": dense_param_placement(tp=spmd.R),
+            "tokens_per_expert": dense_counter_placement(),
         },
         in_src_shardings={"x": dense_activation_placement(tp=sp_tp)},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
@@ -84,6 +84,25 @@ def moe_wrapper_config(*, enable_sp: bool) -> ShardingConfig:
         out_dst_shardings=dense_activation_placement(tp=sp_tp),
         local_spmd=LocalSpmdConfig(),
     )
+
+
+def moe_wrapper_state_config() -> ShardingConfig:
+    """MoE wrapper state only, for runs without real dense TP."""
+    return ShardingConfig(
+        state_shardings={
+            "expert_bias": dense_param_placement(tp=spmd.R),
+            "tokens_per_expert": dense_counter_placement(),
+        },
+    )
+
+
+def dense_counter_placement() -> NamedPlacement:
+    """Placement for additive counters accumulated from local token shards."""
+    return {
+        DP: spmd.P,
+        CP: spmd.P,
+        TP: spmd.R,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +144,16 @@ def shared_expert_colwise_config() -> ShardingConfig:
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
         out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
+    )
+
+
+def shared_expert_state_config() -> ShardingConfig:
+    """Shared expert state only, for runs without real dense TP."""
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.I),
+            "bias": dense_param_placement(tp=spmd.I),
+        },
     )
 
 
@@ -190,6 +219,15 @@ def routed_expert_tp_config(
     )
 
 
+def routed_expert_state_config(param_names: list[str]) -> ShardingConfig:
+    """Routed expert state only, for runs without TP or EP."""
+    return ShardingConfig(
+        state_shardings={
+            name: dense_param_placement(tp=spmd.I) for name in param_names
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level helper
 # ---------------------------------------------------------------------------
@@ -224,6 +262,14 @@ def set_moe_sharding_config(
             moe_cfg.shared_experts.w3.sharding_config = (
                 shared_expert_colwise_config()
             )
+    else:
+        moe_cfg.sharding_config = moe_wrapper_state_config()
+        moe_cfg.router.gate.sharding_config = router_gate_config()
+
+        if getattr(moe_cfg, "shared_experts", None) is not None:
+            moe_cfg.shared_experts.w1.sharding_config = shared_expert_state_config()
+            moe_cfg.shared_experts.w2.sharding_config = shared_expert_state_config()
+            moe_cfg.shared_experts.w3.sharding_config = shared_expert_state_config()
 
     if enable_ep:
         expert_params = ["w1", "w2", "w3"]
@@ -233,4 +279,8 @@ def set_moe_sharding_config(
     elif enable_tp:
         moe_cfg.experts.sharding_config = routed_expert_tp_config(
             {"w1": spmd.S(1), "w2": spmd.S(2), "w3": spmd.S(1)}
+        )
+    else:
+        moe_cfg.experts.sharding_config = routed_expert_state_config(
+            ["w1", "w2", "w3"]
         )

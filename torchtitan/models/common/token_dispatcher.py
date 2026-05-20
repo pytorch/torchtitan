@@ -10,9 +10,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 import spmd_types as spmd
-from torch.distributed._functional_collectives import (
-    all_to_all_single,
-)
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
@@ -38,6 +35,56 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     # Pre-pad token count. dispatch() rounds bs*slen up to a multiple of
     # sp_size when sp_size > 1; combine() slices pad rows off using this.
     original_num_tokens: int
+
+
+def _local_expert_sort(
+    x: torch.Tensor,
+    top_scores: torch.Tensor,
+    selected_experts_indices: torch.Tensor,
+    *,
+    num_experts: int,
+    top_k: int,
+    score_before_experts: bool,
+) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
+    """Locally reorder tokens by expert assignment.
+
+    The sort is intentionally local: under EP, each rank sorts its local token
+    shard before the explicit all-to-all dispatch.
+    """
+
+    def body() -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
+        num_tokens_per_expert = torch.histc(
+            selected_experts_indices.view(-1),
+            bins=num_experts,
+            min=0,
+            max=num_experts,
+        )
+
+        # Reorder token indices to match expert order.
+        token_indices_experts_sorted = torch.argsort(
+            selected_experts_indices.view(-1), stable=True
+        )
+
+        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
+        token_indices_experts_sorted = token_indices_experts_sorted // top_k
+
+        routed_input = x[token_indices_experts_sorted]
+        if score_before_experts:
+            routed_input = (
+                routed_input.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
+            ).to(x.dtype)
+
+        metadata = LocalDispatchMetadata(
+            token_indices_experts_sorted=token_indices_experts_sorted,
+            top_scores_experts_sorted=top_scores_experts_sorted,
+        )
+        return routed_input, num_tokens_per_expert, metadata
+
+    if spmd.is_type_checking():
+        with spmd.typecheck(local=True):
+            return body()
+    return body()
 
 
 class LocalTokenDispatcher(Configurable):
@@ -78,39 +125,13 @@ class LocalTokenDispatcher(Configurable):
             num_tokens_per_expert: (num_experts,) token counts per expert
             metadata: LocalDispatchMetadata for combine()
         """
-        # TODO: Extract this local reordering block (histc, argsort, score
-        # application) into a shared helper — it's duplicated in
-        # AllToAllTokenDispatcher.dispatch.
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
-
-        # Reorder the token indices to match the order of the experts
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
-        token_indices_experts_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
-        )
-
-        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = x[token_indices_experts_sorted]
-
-        # Apply scores before expert computation if configured
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        metadata = LocalDispatchMetadata(
-            token_indices_experts_sorted=token_indices_experts_sorted,
-            top_scores_experts_sorted=top_scores_experts_sorted,
+        routed_input, num_tokens_per_expert, metadata = _local_expert_sort(
+            x,
+            top_scores,
+            selected_experts_indices,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            score_before_experts=self.score_before_experts,
         )
         return routed_input, num_tokens_per_expert, metadata
 
@@ -138,19 +159,26 @@ class LocalTokenDispatcher(Configurable):
         """
         out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
 
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * metadata.top_scores_experts_sorted.reshape(-1, 1)
-            ).to(routed_output.dtype)
+        def scatter_body() -> torch.Tensor:
+            local_routed_output = routed_output
 
-        dim = x.shape[-1]
-        out = deterministic_scatter_add(
-            out,
-            metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
-            routed_output,
-        )
-        return out
+            if not self.score_before_experts:
+                local_routed_output = (
+                    local_routed_output.to(torch.float32)
+                    * metadata.top_scores_experts_sorted.reshape(-1, 1)
+                ).to(local_routed_output.dtype)
+
+            dim = x.shape[-1]
+            return deterministic_scatter_add(
+                out,
+                metadata.token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+                local_routed_output,
+            )
+
+        if spmd.is_type_checking():
+            with spmd.typecheck(local=True):
+                return scatter_body()
+        return scatter_body()
 
 
 class AllToAllTokenDispatcher(LocalTokenDispatcher):
@@ -267,71 +295,49 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 x, top_scores, selected_experts_indices
             )
 
-        # TODO: Extract this local reordering block (histc, argsort, score
-        # application) into a shared helper — it's duplicated in
-        # LocalTokenDispatcher.dispatch.
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+        routed_input, num_tokens_per_expert, local_metadata = _local_expert_sort(
+            x,
+            top_scores,
+            selected_experts_indices,
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            score_before_experts=self.score_before_experts,
         )
-
-        # Reorder the token indices to match the order of the experts
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
-        token_indices_experts_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
-        )
-
-        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = x[token_indices_experts_sorted]
-
-        # Apply scores before expert computation if configured
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
+        ep_pg = self.ep_mesh.get_group()
+        spmd.assert_type(num_tokens_per_expert, {ep_pg: spmd.S(0)})
+        spmd.assert_type(routed_input, {ep_pg: spmd.S(0)})
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
-            num_tokens_per_expert_group = all_to_all_single(
+            num_tokens_per_expert_group = spmd.all_to_all(
                 num_tokens_per_expert,
-                None,
-                None,
-                group=self.ep_mesh,
-            )
-            # Need to wait explicitly because it is used by a triton kernel later
-            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
-                num_tokens_per_expert_group
+                ep_pg,
+                src=spmd.S(0),
+                dst=spmd.S(0),
             )
             # non_blocking=True is safe in eager, but under torch.compile the
             # async D2H transfer can race with the subsequent .tolist()/.item()
             # calls, producing stale values and failing unbacked-symint guards.
             non_blocking = not torch.compiler.is_compiling()
-            input_splits = (
-                num_tokens_per_expert.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=non_blocking)
-            )
-            # NOTE: this would incur a device-to-host sync
-            output_splits = (
-                num_tokens_per_expert_group.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
-            input_splits_list = input_splits.tolist()
-            output_splits_list = output_splits.tolist()
+            with spmd.no_typecheck():
+                input_splits = (
+                    num_tokens_per_expert.view(ep_size, -1)
+                    .sum(dim=1)
+                    .to(torch.device("cpu"), non_blocking=non_blocking)
+                )
+                # NOTE: this would incur a device-to-host sync
+                output_splits = (
+                    num_tokens_per_expert_group.view(ep_size, -1)
+                    .sum(dim=1)
+                    .to(torch.device("cpu"), non_blocking=False)
+                )
+                input_splits_list = input_splits.tolist()
+                output_splits_list = output_splits.tolist()
 
         # All-to-all dispatch tokens to EP ranks
         routed_input = spmd.all_to_all(
             routed_input,
-            self.ep_mesh.get_group(),
+            ep_pg,
             src=spmd.S(0),
             dst=spmd.S(0),
             output_split_sizes=output_splits_list,
@@ -358,8 +364,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         )
 
         metadata = AllToAllDispatchMetadata(
-            token_indices_experts_sorted=token_indices_experts_sorted,
-            top_scores_experts_sorted=top_scores_experts_sorted,
+            token_indices_experts_sorted=local_metadata.token_indices_experts_sorted,
+            top_scores_experts_sorted=local_metadata.top_scores_experts_sorted,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
@@ -376,46 +382,58 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         Input layout:  (e0,r0), (e1,r0), ..., (e0,r1), (e1,r1), ...  (rank-major)
         Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
         """
-        device = num_tokens_per_expert_group.device
-        total = num_tokens_per_expert_group.sum()
+        def body():
+            device = num_tokens_per_expert_group.device
+            total = num_tokens_per_expert_group.sum()
 
-        # [R, E] matrix of token counts per (rank, expert)
-        t_mat = num_tokens_per_expert_group.view(ep_size, num_local_experts)
+            # [R, E] matrix of token counts per (rank, expert)
+            t_mat = num_tokens_per_expert_group.view(ep_size, num_local_experts)
 
-        # Where each (r, e) segment starts in the input (rank-major order)
-        input_starts = (
-            num_tokens_per_expert_group.cumsum(0) - num_tokens_per_expert_group
-        ).view(ep_size, num_local_experts)
+            # Where each (r, e) segment starts in the input (rank-major order)
+            input_starts = (
+                num_tokens_per_expert_group.cumsum(0) - num_tokens_per_expert_group
+            ).view(ep_size, num_local_experts)
 
-        # Transpose to expert-major [E, R] and flatten
-        segment_lens = t_mat.t().reshape(-1)
-        input_starts = input_starts.t().reshape(-1)
+            # Transpose to expert-major [E, R] and flatten
+            segment_lens = t_mat.t().reshape(-1)
+            input_starts = input_starts.t().reshape(-1)
 
-        # For each output position, find its input position:
-        #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
-        seg_ids = torch.arange(segment_lens.shape[0], device=device).repeat_interleave(
-            segment_lens
-        )
-        output_starts = segment_lens.cumsum(0) - segment_lens
-        permuted_indices = (
-            input_starts[seg_ids]
-            + torch.arange(total, device=device)
-            - output_starts[seg_ids]
-        )
+            # For each output position, find its input position:
+            #   output[p] = input[input_starts[seg] + (p - output_starts[seg])]
+            seg_ids = torch.arange(
+                segment_lens.shape[0], device=device
+            ).repeat_interleave(segment_lens)
+            output_starts = segment_lens.cumsum(0) - segment_lens
+            permuted_indices = (
+                input_starts[seg_ids]
+                + torch.arange(total, device=device)
+                - output_starts[seg_ids]
+            )
 
-        num_tokens_per_expert = t_mat.sum(0)
-        return (
-            routed_input.shape,
-            routed_input[permuted_indices, :],
-            permuted_indices,
-            num_tokens_per_expert,
-        )
+            num_tokens_per_expert = t_mat.sum(0)
+            return (
+                routed_input.shape,
+                routed_input[permuted_indices, :],
+                permuted_indices,
+                num_tokens_per_expert,
+            )
+
+        if spmd.is_type_checking():
+            with spmd.typecheck(local=True):
+                return body()
+        return body()
 
     def _unpermute(self, routed_output, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
-        out_unpermuted = routed_output.new_empty(input_shape)
-        out_unpermuted[permuted_indices, :] = routed_output
-        return out_unpermuted
+        def body():
+            out_unpermuted = routed_output.new_empty(input_shape)
+            out_unpermuted[permuted_indices, :] = routed_output
+            return out_unpermuted
+
+        if spmd.is_type_checking():
+            with spmd.typecheck(local=True):
+                return body()
+        return body()
 
     # pyrefly: ignore [bad-override]
     def combine(
@@ -451,10 +469,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         routed_output = self._unpermute(
             routed_output, metadata.input_shape, metadata.permuted_indices
         )
+        ep_pg = self.ep_mesh.get_group()
+        spmd.assert_type(routed_output, {ep_pg: spmd.S(0)})
         # All-to-all combine
         routed_output = spmd.all_to_all(
             routed_output,
-            self.ep_mesh.get_group(),
+            ep_pg,
             src=spmd.S(0),
             dst=spmd.S(0),
             output_split_sizes=metadata.input_splits,
@@ -465,40 +485,48 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         # Score application + scatter_add forces the a2a to sync.
         out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
 
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * metadata.top_scores_experts_sorted.reshape(-1, 1)
-            ).to(routed_output.dtype)
+        def scatter_body() -> torch.Tensor:
+            local_routed_output = routed_output
 
-        # When sequence_parallel is active, dispatch splits tokens to a local
-        # shard, so token_indices_experts_sorted are 0-based local indices.
-        # Offset them to global positions so scatter_add into full x is correct.
-        original_num_tokens = metadata.original_num_tokens
-        if self.sp_size > 1:
-            padded_num_tokens = original_num_tokens + (
-                (-original_num_tokens) % self.sp_size
+            if not self.score_before_experts:
+                local_routed_output = (
+                    local_routed_output.to(torch.float32)
+                    * metadata.top_scores_experts_sorted.reshape(-1, 1)
+                ).to(local_routed_output.dtype)
+
+            # When sequence_parallel is active, dispatch splits tokens to a local
+            # shard, so token_indices_experts_sorted are 0-based local indices.
+            # Offset them to global positions so scatter_add into full x is correct.
+            original_num_tokens = metadata.original_num_tokens
+            if self.sp_size > 1:
+                padded_num_tokens = original_num_tokens + (
+                    (-original_num_tokens) % self.sp_size
+                )
+                local_num_tokens = padded_num_tokens // self.sp_size
+                token_indices_experts_sorted = (
+                    metadata.token_indices_experts_sorted
+                    + local_num_tokens * self.sp_rank
+                )
+                assert isinstance(token_indices_experts_sorted, torch.Tensor)
+                # Drop pad-row entries: their global indices fall in
+                # [original_num_tokens, padded_num_tokens), out of `out`'s range.
+                # scatter_add itself is not padded; `out` matches x's shape.
+                if padded_num_tokens != original_num_tokens:
+                    mask = token_indices_experts_sorted < original_num_tokens
+                    token_indices_experts_sorted = token_indices_experts_sorted[mask]
+                    local_routed_output = local_routed_output[mask]
+            else:
+                token_indices_experts_sorted = metadata.token_indices_experts_sorted
+            return deterministic_scatter_add(
+                out,
+                token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
+                local_routed_output,
             )
-            local_num_tokens = padded_num_tokens // self.sp_size
-            token_indices_experts_sorted = (
-                metadata.token_indices_experts_sorted + local_num_tokens * self.sp_rank
-            )
-            assert isinstance(token_indices_experts_sorted, torch.Tensor)
-            # Drop pad-row entries: their global indices fall in
-            # [original_num_tokens, padded_num_tokens), out of `out`'s range.
-            # scatter_add itself is not padded; `out` matches x's shape.
-            if padded_num_tokens != original_num_tokens:
-                mask = token_indices_experts_sorted < original_num_tokens
-                token_indices_experts_sorted = token_indices_experts_sorted[mask]
-                routed_output = routed_output[mask]
-        else:
-            token_indices_experts_sorted = metadata.token_indices_experts_sorted
-        out = deterministic_scatter_add(
-            out,
-            token_indices_experts_sorted.reshape(-1, 1).expand(-1, x.shape[-1]),
-            routed_output,
-        )
-        return out
+
+        if spmd.is_type_checking():
+            with spmd.typecheck(local=True):
+                return scatter_body()
+        return scatter_body()
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
