@@ -2162,3 +2162,12 @@
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite, clean, and in the expected current-best band. If it exceeds 10,625, treat it as a new measured peak for the same command.
   Result: kept as calibration at source state `c789129`; 10,456 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Source restore is healthy, but this lower sample confirms the one-step final interval has high variance; keep run215 as the measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_MAX_NCHANNELS=8
+  Current best source commit: 80983e3a
+  Source: communication-overlap follow-up after run219 profile showed NCCL remains the second-largest kernel bucket
+  Expected mechanism: Set `NCCL_MAX_NCHANNELS=8` alongside the existing `NCCL_CTA_POLICY=2`. Capping NCCL to fewer channels may reduce collective resource contention and improve overlap with transformer GEMMs in the final warmed step, even if raw collective bandwidth is lower.
+  Supporting evidence: Run219 rank0 trace showed about 996 ms in NCCL kernels, mostly reduce-scatter and all-gather. Earlier `NCCL_MAX_NCHANNELS=16` and `NCCL_MIN_NCHANNELS=16` were negative, but an 8-channel cap tests a stronger overlap/bandwidth tradeoff that has not been isolated on the `metrics.log_freq=1` best.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix current best command with `NCCL_MAX_NCHANNELS=8` in addition to `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is lower collective bandwidth or no effect if default NCCL channel selection is already optimal.
