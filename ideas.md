@@ -2332,3 +2332,12 @@
   Planned command or config overrides: Prefix the current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=2` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is worse overlap or lower GEMM concurrency if queue limiting is still too restrictive.
   Result: discarded at source state `a6b8b7b`; 10,328 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A two-connection limit is still too restrictive for this command and reduces steady-state throughput, so keep the default CUDA connection count.
+
+- Idea: metrics log frequency 1 with CUDA_DEVICE_MAX_CONNECTIONS=4
+  Current best source commit: 77272fc4
+  Source: CUDA stream scheduling bracket after `CUDA_DEVICE_MAX_CONNECTIONS=1` and `=2` were slower
+  Expected mechanism: Use a moderate four-connection limit. This may preserve more GEMM/collective concurrency than `=2` while still reducing launch-order jitter versus the default connection count.
+  Supporting evidence: The `=2` run was clean but too slow, so the only plausible remaining upside on this axis is a less restrictive queue cap. If `=4` also regresses, the default CUDA connection count should remain closed.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=4` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is no effect or another overlap regression.
