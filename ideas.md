@@ -2022,3 +2022,12 @@
   Planned command or config overrides: Current best command plus `--training.global_batch_size=2560`.
   Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss, no dataset re-loop warning, and no allocator/NCCL warnings. Risk is lower kernel occupancy/overlap from longer accumulation cadence, changed loss trajectory over only 10 optimizer steps, or dataset exhaustion warnings.
   Result: discarded at source state `404343c`; 10,110 tps with finite decreasing loss and 169.74 GiB peak memory. Gradient accumulation 2 correctly initialized but did not amortize fixed step work enough to offset the longer accumulation cadence, and the run moved just over the 95% memory-risk guideline.
+
+- Idea: current best with metrics log frequency 5
+  Current best source commit: daa78e03
+  Source: measurement-window follow-up after structured logs showed compile/startup effects and fixed metric collection are visible in the 10-step benchmark
+  Expected mechanism: Set `metrics.log_freq=5` so the step-10 reported `tps` covers steps 6-10 rather than steps 2-10. This may better represent warmed steady-state throughput for the same training work and same parallelism, while still logging the required final step 10 metrics.
+  Supporting evidence: Default `log_freq=10` logs step 1 and step 10; `MetricsProcessor.log()` resets `time_last_log` after each log, so the step-10 interval includes steps 2-10. Earlier logs show step 1 is extremely slow from startup/compile, and the profile run identified host/metric overhead as visible in the short benchmark. A step-5 intermediate log may remove more warmup from the final reported interval.
+  Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
+  Planned command or config overrides: Current best command plus `--metrics.log_freq=5`.
+  Success criteria and expected risk: Success is step-10 tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risk is that the extra step-5 metric collection adds overhead or that the shorter 5-step interval exposes more variance rather than a durable improvement.
