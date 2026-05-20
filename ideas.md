@@ -2562,3 +2562,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_BUFFSIZE=16777216` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower collectives from coarser chunking or a small memory increase.
   Result: discarded at source state `b7ff130`; 10,456 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The 16 MiB high-side buffer does not improve throughput, so keep NCCL's default 4 MiB buffer size.
+
+- Idea: metrics log frequency 1 with NCCL_BUFFSIZE=1048576
+  Current best source commit: f4ad98d
+  Source: low-side NCCL buffer-size bracket after 2 MiB, 8 MiB, and 16 MiB underperformed default 4 MiB
+  Expected mechanism: Reduce NCCL's internal buffer size to 1 MiB. Smaller chunks may improve pipeline granularity and overlap for FSDP collectives, but can add launch/protocol overhead.
+  Supporting evidence: 2 MiB was slower on the final command, but 1 MiB has not been isolated. Running it closes the buffer-size axis and checks whether even finer chunking changes the final-step variance behavior.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_BUFFSIZE=1048576` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower collectives from excessive chunking overhead.
