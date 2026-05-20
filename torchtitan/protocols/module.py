@@ -102,14 +102,36 @@ class Module(nn.Module, Configurable):
             )
 
     def _init_self_parameters(self) -> None:
-        """Default: initialize every direct parameter via ``_init_param``.
+        """Initialize this module's own direct parameters.
 
-        Subclasses such as ``Conv2d`` / ``LayerNorm`` / ``GroupNorm``
-        override this to fall back to ``reset_parameters`` when no
-        ``param_init`` is set.
+        Resolution order:
+
+        1. If ``param_init`` is set, use per-parameter dict lookup via
+           ``_init_param``.
+        2. Otherwise, fall back to ``reset_parameters()`` if it is
+           available on ``self`` (typically inherited from the
+           underlying ``nn`` class, but a subclass override is also
+           honored). This is the standard PyTorch convention used by
+           ``nn.Linear``, ``nn.LayerNorm``, ``nn.Conv2d``, etc.
+        3. Otherwise, raise if there are any own parameters.
         """
-        for name, param in self.named_parameters(recurse=False):
-            self._init_param(name, param)
+        if self._param_init is not None:
+            for name, param in self.named_parameters(recurse=False):
+                self._init_param(name, param)
+            return
+
+        reset = getattr(self, "reset_parameters", None)
+        if callable(reset):
+            reset()
+            return
+
+        own_param_names = [name for name, _ in self.named_parameters(recurse=False)]
+        if own_param_names:
+            raise ValueError(
+                f"{type(self).__name__} has parameters {own_param_names} "
+                "but neither param_init nor reset_parameters is available. "
+                "Set param_init on the Config or define reset_parameters."
+            )
 
     def _init_param(self, name: str, param: nn.Parameter) -> None:
         """Initialize a single parameter via dict lookup in ``_param_init``.
