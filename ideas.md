@@ -2822,3 +2822,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a completed 10-step run with finite overall-decreasing loss and a trace under the dump folder. Risk is profiler overhead; do not compare profiled tps directly against unprofiled candidates.
   Result: kept as profile evidence at source state `15db2e9`; the profiled 10-step run completed with finite overall-decreasing loss and produced rank traces under `run289.../profiling/traces/iteration_10`. Trace summary shows a nearly fully busy GPU active span with NCCL `RING_LL` reduce-scatter and all-gather kernels taking substantial time, so the next search should focus on LL collective behavior or reducing FSDP collective cost rather than dataloader or launch idle.
+
+- Idea: metrics log frequency 1 with NCCL_LL_BUFFSIZE=1048576
+  Current best source commit: fe0ffbdb
+  Source: profile-driven NCCL LL collective tuning after run289 showed large `RING_LL` reduce-scatter and all-gather kernels
+  Expected mechanism: Reduce the LL protocol buffer size to 1 MiB. Smaller LL chunks may improve overlap smoothness between FSDP ring collectives and compiled GEMM kernels when GPUs are already nearly fully busy; if default chunks are too coarse, this can reduce exposed collective stalls at the cost of more chunk bookkeeping.
+  Supporting evidence: Run289's trace shows active-step GPU busy union about 1.96s over a 1.97s span, with rank 0 spending about 830 ms in `ncclDevKernel_ReduceScatter_Sum_f32_RING_LL` and 423 ms in `ncclDevKernel_AllGather_RING_LL`; rank 7 shows about 959 ms reduce-scatter and 577 ms all-gather. Global `NCCL_BUFFSIZE` values were already rejected, but `NCCL_LL_BUFFSIZE` targets the actual LL protocol kernels observed in the profile.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_LL_BUFFSIZE=1048576` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives from extra LL chunk overhead if the default buffer size is already balancing bandwidth and overlap.
