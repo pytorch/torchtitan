@@ -1231,3 +1231,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Exact run129 command with a new dump folder.
   Success criteria and expected risk: Keep the high-priority NCCL env knob only if the rerun remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings.
+  Result: discarded at source state `e487191`; 9,705 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. The high-priority NCCL stream result was variance, so keep the default ProcessGroupNCCL stream priority.
