@@ -3428,3 +3428,24 @@ Interpretation:
 
 - Backward-only prefetch still regresses after zero-CTA.
 - Forward prefetch remains part of the durable source; restore bidirectional one-module layer-to-layer plus `lm_head` endpoint prefetch.
+
+## Experiment 136: SDPA Zero-CTA Seq128 Local Batch 160 With NCCL_NTHREADS=128
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NCCL_NTHREADS=128 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run136-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-nthreads128-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,953, below the zero-CTA durable command.
+- Step 10 MFU: 37.27%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.42274 at step 1 to 4.85043 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Lowering NCCL worker threads to 128 regresses throughput.
+- Keep default NCCL thread count with `NCCL_CTA_POLICY=2`.

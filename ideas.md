@@ -1291,3 +1291,13 @@
   Planned source/config changes: None; keep durable bidirectional one-module prefetch.
   Planned command or config overrides: Current durable zero-CTA command plus `NCCL_NTHREADS=128`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower collectives from too little NCCL parallelism.
+  Result: discarded at source state `8336481`; 9,953 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Reducing NCCL worker threads slows this workload.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with NCCL_MAX_NCHANNELS=16
+  Current best source commit: 3d045b1
+  Source: NCCL channel-count follow-up after zero-CTA validated and smaller NCCL thread blocks regressed
+  Expected mechanism: `NCCL_MAX_NCHANNELS=16` caps collective channel parallelism. If the default uses too many channels for overlap with GEMM-heavy FSDP training, a moderate cap may reduce NCCL resource pressure while retaining enough communication bandwidth.
+  Supporting evidence: Zero-CTA improved by changing collective execution pressure, while `NCCL_NTHREADS=128` went too far and slowed communication. A channel cap is a different, moderate pressure-control knob.
+  Planned source/config changes: None; keep durable bidirectional one-module prefetch.
+  Planned command or config overrides: Current durable zero-CTA command plus `NCCL_MAX_NCHANNELS=16`.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is under-channeling reduce-scatter/all-gather and lowering bandwidth.
