@@ -1481,3 +1481,13 @@
   Planned source/config changes: Keep the async-unshard source from run154.
   Planned command or config overrides: Current zero-CTA chunks=6 command with `--training.local_batch_size=162`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, finite decreasing loss, no allocator/OOM/NCCL warnings, and memory near or below the 95% risk line. Risk is the same scheduling slowdown dominating or memory pressure returning.
+  Result: discarded at source state `f0d3965`; 9,955 tps with finite decreasing loss and 169.57 GiB peak memory. The extra batch worsens throughput, so async unshard should not be used for the durable path.
+
+- Idea: SDPA zero-CTA loss chunks 6 with NCCL_ALGO=Tree
+  Current best source commit: 3a1ed15
+  Source: NCCL algorithm follow-up after protocol and custom allocator paths failed
+  Expected mechanism: Forcing `NCCL_ALGO=Tree` changes NCCL collective algorithm selection while leaving the default LL protocol available. If the FSDP all-gather/reduce-scatter payloads are latency-sensitive on this 8xB200 topology, tree collectives may reduce communication time versus the profiled ring kernels.
+  Supporting evidence: The durable profile still has about 1.45s in NCCL and showed ring LL kernels. Protocol forcing was bad, but algorithm selection is a distinct communication knob and has not been tested.
+  Planned source/config changes: Restore default unshard path, default FSDP comm allocation, and no symmetric-memory calls.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2 NCCL_ALGO=Tree` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no NCCL/OOM/allocator warnings. Risk is slower collectives because ring is usually strong intra-node.

@@ -3847,3 +3847,26 @@ Interpretation:
 - Async unshard avoids the teardown problems from custom FSDP communication allocators and lowers memory by about 1.3 GiB.
 - At the durable batch160 shape, the changed unshard scheduling is slower than the default.
 - Run one batch-scale follow-up to see whether the memory headroom can pay for the scheduling cost; otherwise restore the default unshard path.
+
+## Experiment 155: SDPA Zero-CTA Loss Chunks 6 With FSDP Async Unshard And Local Batch 162
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=162 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run155-sdpa-async-unshard-prefetch-seq128-lbs162-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,955, below the durable chunks=6 command and below async-unshard batch160.
+- Step 10 MFU: 37.28%.
+- Step 10 peak memory: 169.57 GiB, 95.08%.
+- Loss moved from 12.43743 at step 1 to 7.83394 at step 10; finite and decreasing.
+- No NCCL teardown warnings appeared.
+
+Interpretation:
+
+- Async unshard's memory headroom does not convert into a larger-batch win at local batch 162.
+- The batch increase also crosses the memory-risk line without improving throughput.
+- Restore the default unshard path and treat async unshard as discarded for this objective.
