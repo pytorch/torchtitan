@@ -628,6 +628,7 @@
   Planned source/config changes: None; use the current embedding-prefetch source.
   Planned command or config overrides: Exact run70 command with a new dump folder.
   Success criteria and expected risk: Keep if it beats 8,847 with finite decreasing loss; otherwise record as diagnostic variance while preserving the best measured source if it remains close.
+  Result: discarded at source state `d876c83`; 4,790 tps and loss increased from 12.23535 to 15.69855.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
