@@ -2502,3 +2502,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_CHECKS_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if checks are not on the hot path, or unsafe reduced diagnostics if an error occurs.
   Result: discarded at source state `9f6ef8f`; 10,446 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling NCCL checks is clean but slower, so keep the default checks behavior.
+
+- Idea: metrics log frequency 1 with TORCH_NCCL_BLOCKING_WAIT=1
+  Current best source commit: c3326dea
+  Source: c10d progress-semantics probe after monitoring/checking toggles did not improve throughput
+  Expected mechanism: Enable blocking wait for ProcessGroupNCCL work handles. This changes host-side progress and watchdog behavior; if the current run pays noticeable watchdog/progress overhead or launch skew, blocking wait may reduce host jitter, but it may also reduce async overlap.
+  Supporting evidence: Disabling Torch NCCL monitoring and NCCL checks did not help. This is the remaining distinct PyTorch ProcessGroupNCCL behavior knob visible in the local source; it is command-only and should not change model math or tensor placements.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_BLOCKING_WAIT=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL/runtime warnings. Risk is slower execution if blocking waits reduce communication/computation overlap, or incompatibility with any async work path.
