@@ -2070,3 +2070,24 @@ Interpretation:
 
 - The embedding-prefetch source has produced one best run and two losing reruns. Treat run70 as the best measured valid result, but do not assume the source is robustly faster than the simpler run59 prefetch source.
 - Before adding more changes on top of embedding-prefetch, prefer either profiling the simpler robust source again or testing ideas that can be applied cleanly to both source variants.
+
+## Experiment 73: Separate `tok_embeddings` Wrap Without Endpoint Prefetch
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run73-flex-separate-tok-embeddings-no-endpoint-prefetch-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic discard; it did not beat run70.
+- Step 10 `tps`: 8,836, below run70's 8,847 but just above the older run59 8,835 best.
+- Step 10 MFU: 36.92%.
+- Step 10 peak memory: 167.77 GiB, 94.07%.
+- Loss moved from 12.38486 at step 1 to 10.19661 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Separately wrapping `tok_embeddings` without endpoint prefetch is more stable-looking than the full endpoint-prefetch source and keeps the lower memory profile, but it has not beaten the best measured run70.
+- Run one exact rerun of this source before deciding whether to keep it as the practical best candidate or restore the full endpoint-prefetch source.
