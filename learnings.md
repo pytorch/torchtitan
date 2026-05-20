@@ -2574,3 +2574,30 @@ Interpretation:
 
 - The seq128 best remains mixed compute/communication bound; attention is not the primary target.
 - Reduce-scatter is the main communication cost. Since BF16 gradient reductions failed training sanity, the next safer communication probe is a seq128-specific prefetch-schedule retest rather than lower-precision reductions.
+
+## Experiment 97: Forward-Only FSDP Prefetch At Seq128 Batch160
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run97-flex-forward-only-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Removed all `set_modules_to_backward_prefetch` calls.
+- Kept the forward prefetch chain from each transformer block to the next block and from the final block to `lm_head`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,164, below run84's 9,709.
+- Step 10 MFU: 34.32%.
+- Step 10 peak memory: 168.08 GiB, 94.24%.
+- Loss moved from 12.56727 at step 1 to 8.96717 at step 10; finite and decreasing.
+- A small external process under 1 GiB was visible on one GPU; no large-allocation contamination was present.
+
+Interpretation:
+
+- Removing backward prefetch does not help the seq128 shape despite the reduce-scatter-heavy profile.
+- Restore the one-module bidirectional prefetch schedule. The next communication experiments need to reduce payload or change topology without removing this overlap.

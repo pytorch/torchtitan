@@ -843,6 +843,7 @@
   Planned source/config changes: In `parallelize_qwen3()`, keep the forward prefetch chain through `lm_head`, but remove `set_modules_to_backward_prefetch` calls.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss. Risk is repeating the older regression if backward prefetch is still needed for parameter all-gather overlap.
+  Result: discarded at source state `a364689`; 9,164 tps with finite decreasing loss and 168.08 GiB peak memory. Backward prefetch remains necessary at seq128.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
