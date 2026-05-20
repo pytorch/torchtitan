@@ -2152,3 +2152,12 @@
   Planned command or config overrides: Current best `metrics.log_freq=1` command unchanged.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is memory crossing the 95% guideline because `lm_head` full parameters remain resident through backward.
   Result: discarded at source state `08ea81d`; 10,509 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Keeping only `lm_head` unresharded does not reduce reported final-step time enough to beat the current best.
+
+- Idea: exact current best rerun after lm_head restore
+  Current best source commit: 61c26093
+  Source: source-restore validation after discarding the `lm_head` no-reshard candidate
+  Expected mechanism: This is a measurement validation run, not a new optimization. Repeat the exact current-best command to verify the restored source is back in the validated throughput band.
+  Supporting evidence: The source edit was reverted manually after run222. A clean exact run protects against accidental source drift before continuing.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command from run215.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and in the expected current-best band. If it exceeds 10,625, treat it as a new measured peak for the same command.
