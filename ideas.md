@@ -2512,3 +2512,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_BLOCKING_WAIT=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL/runtime warnings. Risk is slower execution if blocking waits reduce communication/computation overlap, or incompatibility with any async work path.
   Result: discarded at source state `380e2d4`; 10,518 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Blocking wait is clean but does not beat the durable command's measured peak, so keep default ProcessGroupNCCL wait behavior.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_DISABLE=1
+  Current best source commit: 4325daad
+  Source: extreme NCCL transport-path ablation after P2P level and PXN toggles regressed
+  Expected mechanism: Disable NCCL direct peer-to-peer transport. If the default P2P path is unexpectedly causing tail latency or registration overhead on this single-node B200/NVLink setup, forcing non-P2P transport could improve consistency; more likely, it will show that P2P is required for bandwidth.
+  Supporting evidence: `NCCL_P2P_LEVEL=NVL` and `NCCL_PXN_DISABLE=1` were clean but slower, so transport path selection has been partially bracketed. Full P2P disable has not been tested and closes the extreme end of this axis.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_DISABLE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is a large communication regression because FSDP collectives likely depend on P2P/NVLink bandwidth.
