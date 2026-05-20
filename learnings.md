@@ -2796,3 +2796,25 @@ Interpretation:
 
 - Local batch 240 is too aggressive for broad FP8 despite the batch160 memory headroom.
 - The crash looks memory-pressure related rather than externally contaminated. If continuing this branch, use a lower intermediate batch size.
+
+## Experiment 106: Broad FP8 SDPA Seq128 Local Batch 200
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=200 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run106-sdpa-fp8-rowwise-no-filter-prefetch-seq128-lbs200-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,888, below the plain SDPA best.
+- Step 10 MFU: N/A in the log.
+- Step 10 peak memory: 154.89 GiB, 86.85%.
+- Loss moved from 12.35104 at step 1 to 5.72002 at step 10; finite and decreasing.
+- Runtime emitted the known `FSDPFloat8Linear` view warning.
+
+Interpretation:
+
+- Increasing broad-FP8 local batch from 160 to 200 improves throughput and still leaves memory headroom, but does not beat plain SDPA.
+- One higher midpoint is justified before restoring, because batch240 crashed and batch200 is still well below the memory-risk line.
