@@ -1361,3 +1361,13 @@
   Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
   Planned command or config overrides: Current durable zero-CTA command plus `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is higher memory or same variance behavior as chunks=4.
+  Result: tentative keep at source state `3a1ed15`; 10,288 tps, 38.53% MFU, 169.10 GiB peak memory, and loss decreased from 12.48805 to 7.31813. This is a large measured win; validate with an exact rerun before promoting.
+
+- Idea: exact rerun of SDPA zero-CTA loss num_chunks 6
+  Current best source commit: 3a1ed15
+  Source: validation follow-up after run143 produced a new measured best
+  Expected mechanism: Repeating the exact chunks=6 command checks whether the loss-loop reduction is durable or another short-run variance win.
+  Supporting evidence: Chunks=4 and several command-only changes produced single-run wins that failed reruns, but run143's 10,288 tps margin is much larger than those prior tiny gains.
+  Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
+  Planned command or config overrides: Exact run143 command with a new dump folder.
+  Success criteria and expected risk: Promote chunks=6 only if the rerun remains above 10,023 tps with finite decreasing loss and no allocator/OOM warnings; above 10,060 would validate it as the new measured best family.

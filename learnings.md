@@ -3576,3 +3576,24 @@ Interpretation:
 
 - Full AC leaves large memory headroom, but recomputation dominates and larger batch does not recover throughput.
 - Do not pursue full AC for this short-sequence objective; restore the no-AC durable source.
+
+## Experiment 143: SDPA Zero-CTA Seq128 Local Batch 160 With Loss Num Chunks 6
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run143-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Step 10 `tps`: 10,288, above all prior runs.
+- Step 10 MFU: 38.53%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.48805 at step 1 to 7.31813 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Loss chunks 6 appears to reduce loss-loop overhead enough to beat the zero-CTA durable command without crossing the memory-risk line.
+- Validate with an exact rerun before promotion because chunks 4 failed validation earlier.
