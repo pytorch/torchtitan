@@ -6691,3 +6691,25 @@ Interpretation:
 
 - Increasing NVLink P2P chunk size to 1 MiB is valid but does not improve over the durable measured peak.
 - Keep NCCL's default 512 KiB NVLink P2P chunk size. The result is in the normal clean band but does not explain or exceed the best exact-run sample.
+
+## Experiment 280: Metrics Log Frequency 1 With NCCL_P2P_NVL_CHUNKSIZE=262144
+
+Command:
+
+```bash
+NCCL_P2P_NVL_CHUNKSIZE=262144 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run280-nccl-p2p-nvl-chunksize256k-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,445, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.11%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.49840 at step 1 to 6.77574 at step 10; finite and overall decreasing, although step 9 rose from step 8.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or P2P warning appeared.
+
+Interpretation:
+
+- Reducing NVLink P2P chunk size to 256 KiB is slower than the durable command.
+- The immediate NVLink P2P chunk-size bracket is closed: both 256 KiB and 1 MiB are below the peak, so keep NCCL's default 512 KiB setting.
