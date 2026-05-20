@@ -2861,3 +2861,24 @@ Interpretation:
 
 - SDPA does not shift the constant-token shape optimum upward to seq256.
 - Keep seq128/local-batch-160 as the current best shape; if retesting shapes under SDPA, check the lower-sequence side or exact nearby points rather than larger sequences.
+
+## Experiment 109: SDPA Seq96 Local Batch 213 Constant-Token Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=96 --training.local_batch_size=213 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run109-sdpa-prefetch-seq96-lbs213-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,933, below run99's 10,005.
+- Step 10 MFU: 37.16%.
+- Step 10 peak memory: 168.34 GiB, 94.38%.
+- Loss moved from 12.41545 at step 1 to 8.03092 at step 10; finite and decreasing.
+
+Interpretation:
+
+- SDPA also does not shift the constant-token shape optimum downward to seq96.
+- The best shape remains seq128/local-batch-160 for the current SDPA source.
