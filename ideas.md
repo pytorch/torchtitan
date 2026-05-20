@@ -2192,3 +2192,12 @@
   Planned command or config overrides: Current best command with `NCCL_CTA_POLICY=1`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or lower throughput if policy 2 is the only beneficial scheduling mode.
   Result: discarded at source state `f0e7f2d`; 10,471 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Policy 1 is slower than policy 2, so keep `NCCL_CTA_POLICY=2`.
+
+- Idea: metrics log frequency 1 with DataLoader prefetch factor 3
+  Current best source commit: 8fc90466
+  Source: DataLoader bracket completion after the final-step reporting objective changed
+  Expected mechanism: Set `dataloader.prefetch_factor=3` with the existing two persistent workers. This may smooth CPU batch availability slightly better than prefetch 2 without the larger queueing/memory behavior that made prefetch 4 slower.
+  Supporting evidence: Previous current-command DataLoader tests found prefetch 1 and 4 slower than 2, but prefetch 3 was never isolated. Run219 spans show fetching is small, so expected upside is low; this is a cheap final bracket.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current best command with `--dataloader.prefetch_factor=3`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no DataLoader warnings. Risk is no measurable effect or slower host scheduling.
