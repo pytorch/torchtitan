@@ -2049,3 +2049,24 @@ Result:
 Interpretation:
 
 - The embedding-prefetch source is not yet confirmed stable by rerun. Run70 remains the best measured valid result, but the next decision should account for this variance before layering on more source changes.
+
+## Experiment 72: Second Exact Rerun Of Embedding-Prefetch Best
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run72-rerun2-flex-prefetch-separate-tok-embeddings-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,524, below the 8,847 run70 result and below the older 8,835/8,829 one-module prefetch measurements.
+- Step 10 MFU: 35.62%.
+- Step 10 peak memory: 167.77 GiB, 94.07%.
+- Loss moved from 12.35065 at step 1 to 9.50858 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The embedding-prefetch source has produced one best run and two losing reruns. Treat run70 as the best measured valid result, but do not assume the source is robustly faster than the simpler run59 prefetch source.
+- Before adding more changes on top of embedding-prefetch, prefer either profiling the simpler robust source again or testing ideas that can be applied cleanly to both source variants.
