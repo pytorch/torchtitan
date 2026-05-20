@@ -915,6 +915,15 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no memory regression. Risks are slower small-linear conversion overhead or loss instability from broader FP8 coverage.
   Result: discarded at source state `61c48ce`; 9,547 tps with finite decreasing loss and 128.96 GiB peak memory. Slower at batch160, but the large memory reduction creates batch-scaling headroom.
 
+- Idea: broad FP8 SDPA seq128 with local batch 240
+  Current best source commit: 846907b
+  Source: memory-headroom follow-up after broad FP8 reduced peak memory to 128.96 GiB
+  Expected mechanism: Broad FP8 is slower at batch160 but saves enough memory to increase local batch by 50%. The larger batch may amortize FP8 and launch overhead and improve normalized tps while staying below the memory cliff.
+  Supporting evidence: Run104 used only 72.31% peak memory and had finite decreasing loss. The current best batch160 source is near 94.52%, so broad FP8 has substantial activation headroom to spend.
+  Planned source/config changes: None; keep SDPA plus broad FP8 rowwise converter without auto-filter.
+  Planned command or config overrides: Run104 command shape with `--training.local_batch_size=240`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and peak memory below the 95% risk line. Risks are FP8 overhead still dominating, new memory cliff behavior, or loss instability from the larger batch.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
