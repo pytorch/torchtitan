@@ -360,7 +360,7 @@ _current_phase_override: ContextVar[str | None] = ContextVar(
     "_current_phase_override", default=None
 )
 
-# Global flag indicating that NumericsDebugger has armed capture.
+# Global flag indicating that ActivationCaptureProfiler has armed capture.
 #
 # Checked by GraphTrainer._maybe_get_fqn_interpreter() to decide whether to
 # route traced graph replay through FQNInterpreter (which populates
@@ -820,13 +820,13 @@ class DebugModeTracer:
                 producer_map[tid] = key
 
 
-class NumericsDebugger:
-    """Captures per-op activations on a designated training step.
+class ActivationCaptureProfiler:
+    """Profiler-driven companion that captures per-op activations on a designated step.
 
     Designed to be driven by :class:`Profiler` via its ``step()`` method,
-    which is called *after* each training step.  To capture step N the
-    debugger arms the tracer after step N-1 completes and dumps after
-    step N completes.
+    which is called *after* each training step.  To capture step N this
+    profiler arms ``DebugModeTracer`` after step N-1 completes and dumps
+    after step N completes.
 
     Args:
         enabled: Whether numerics capture is active.
@@ -852,7 +852,7 @@ class NumericsDebugger:
         self._tracer: DebugModeTracer | None = None
         self._captures: dict[str, CapturedActivation] | None = None
 
-    def __enter__(self) -> "NumericsDebugger":
+    def __enter__(self) -> "ActivationCaptureProfiler":
         if self._enabled and self._capture_step == 1:
             self._setup()
         return self

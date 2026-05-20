@@ -302,8 +302,8 @@ other tests.
 
 ### Numerics Debugging
 
-For investigating numerics divergence, see
-[`agent_tooling/numerics_debugging/CLAUDE.md`](../../../../agent_tooling/numerics_debugging/CLAUDE.md).
+For investigating numerics divergence, use the `numerics_debugging` skill at
+[`.claude/skills/numerics_debugging/SKILL.md`](../../../../.claude/skills/numerics_debugging/SKILL.md).
 
 ### Async Tensor Parallel (micro-pipeline TP)
 
