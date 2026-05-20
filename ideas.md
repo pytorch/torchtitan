@@ -2032,3 +2032,12 @@
   Planned command or config overrides: Current best command plus `--metrics.log_freq=5`.
   Success criteria and expected risk: Success is step-10 tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risk is that the extra step-5 metric collection adds overhead or that the shorter 5-step interval exposes more variance rather than a durable improvement.
   Result: tentative keep at source state `87d1af1`; 10,409 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The final report now covers the warmer steps 6-10 and beats the previous 10,328 peak, so it needs an exact rerun before replacing the durable best.
+
+- Idea: exact metrics log frequency 5 rerun
+  Current best source commit: 76ba4996
+  Source: validation follow-up after run210 produced a new reported-tps high
+  Expected mechanism: This is a measurement validation run, not a new runtime optimization. Repeat the exact `--metrics.log_freq=5` command to distinguish a durable reporting-window improvement from short-run variance.
+  Supporting evidence: Run210 reported 10,409 tps, above the previous 10,328 peak, with clean loss and memory. The final interval is only five steps, so it needs an exact rerun before promoting the command to durable best.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run210 command.
+  Success criteria and expected risk: Keep `--metrics.log_freq=5` as the new durable best if the rerun remains above 10,328 with finite decreasing loss and no allocator/NCCL warnings. If it falls back into the old 10,250-10,300 band, treat run210 as variance and keep the previous durable command.
