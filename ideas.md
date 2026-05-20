@@ -2081,3 +2081,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact run214 command.
   Success criteria and expected risk: Keep `--metrics.log_freq=1` as the new durable best if the rerun remains above 10,504 with finite overall-decreasing loss and no allocator/NCCL warnings. Otherwise keep `--metrics.log_freq=2`.
+  Result: kept at source state `45a3de3`; 10,625 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This validates `--metrics.log_freq=1` as the new durable best and closes the log-frequency bracket.
