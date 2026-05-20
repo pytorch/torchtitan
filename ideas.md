@@ -2542,3 +2542,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `799390b`; 10,505 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The durable command remains healthy but did not resample the run242 high.
+
+- Idea: two-module FSDP prefetch window
+  Current best source commit: 132f4339
+  Source: source-level overlap probe after command-only NCCL transport and scheduling knobs plateaued
+  Expected mechanism: Expand explicit FSDP prefetch lists from one wrapped module to the next two wrapped modules in both forward and backward order. This may start all-gathers earlier and hide more communication behind compiled transformer-block compute, especially on steps where the one-module prefetch chain leaves tail stalls.
+  Supporting evidence: The durable source uses an explicit one-module bidirectional prefetch chain through `lm_head`. The transformer backend supports multi-module prefetch lists for more complex layouts, and run242's severe late-step stalls suggest there may still be overlap variance to reduce.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, change the prefetch setup so each layer forward-prefetches up to the next two modules, including `lm_head` near the end, and each layer or `lm_head` backward-prefetches up to the previous two layers.
+  Planned command or config overrides: Use the exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and no warnings. Risk is higher memory from earlier all-gathers; sustained peak above roughly 95% or OOM should discard the candidate.
