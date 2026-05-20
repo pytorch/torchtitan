@@ -2931,3 +2931,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROGRESS_APPENDOP_FREQ=16` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is delayed pickup of newly posted proxy ops or no effect if this workload is not proxy-progress limited.
+  Result: discarded at source state `a785be7`; 10,576 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The high-side append-op frequency is a valid high-band sample but still below the measured peak, so keep the default unless a later bracket shows the lower-frequency direction is useful.
