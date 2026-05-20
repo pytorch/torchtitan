@@ -2722,3 +2722,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_NVL_CHUNKSIZE=1048576` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap from coarser P2P chunks.
   Result: discarded at source state `6d8a0a6`; 10,536 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The larger 1 MiB NVLink P2P chunk is clean but below the durable peak, so keep the default 512 KiB chunk size.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_NVL_CHUNKSIZE=262144
+  Current best source commit: b5c1b69e
+  Source: low-side NVLink P2P chunk-size bracket after 1 MiB was clean but below peak
+  Expected mechanism: Reduce the NVLink P2P chunk size from the NCCL default 512 KiB to 256 KiB. Smaller chunks may improve overlap between ring communication and compiled transformer compute, but can add protocol and launch overhead.
+  Supporting evidence: The 1 MiB high-side probe was clean but below peak. A low-side probe closes the immediate chunk-size bracket and checks whether overlap granularity rather than transfer overhead is the limiting factor.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_NVL_CHUNKSIZE=262144` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives from excessive chunking overhead.
