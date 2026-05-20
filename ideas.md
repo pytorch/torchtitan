@@ -662,6 +662,15 @@
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risks are slower dynamic quantization overhead, memory pressure, or short-run loss regression.
   Result: crashed before step metrics at source state `a0de7be`; supported `mxfp8_rceil` hits `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded` during compile.
 
+- Idea: OMP_NUM_THREADS=2 on robust prefetch baseline
+  Current best source commit: 7c1c351
+  Source: runtime overhead follow-up after source-level communication and quantization variants plateaued
+  Expected mechanism: `torchrun` defaults each rank to `OMP_NUM_THREADS=1` when the variable is unset. Giving each rank two OpenMP threads may reduce CPU-side overhead around compiled regions, dataloader/token work, optimizer bookkeeping, or communication launch scheduling without changing model math or memory layout.
+  Supporting evidence: The robust prefetch source is near the memory limit and source-level attempts to reduce communication or GEMM time have mostly regressed or crashed. This is a command-only test with low implementation risk, and the logs show `torchrun` explicitly setting OMP to 1 in prior runs.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Prefix the exact robust prefetch command with `OMP_NUM_THREADS=2`, keeping `--training.steps=10`, compile, BF16 dtype, local batch size 5, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risk is CPU oversubscription or no measurable effect.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
