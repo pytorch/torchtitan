@@ -1942,3 +1942,12 @@
   Planned command or config overrides: Current best two-worker command plus `--debug.no-enable-structured-logging`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,301 if rerun-worthy, with finite decreasing loss and no loss of required console metrics. Risk is no measurable effect because step logging is sparse.
   Result: discarded at source state `2eeafe1`; 9,690 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The log confirmed structured logging was disabled, but removing JSONL did not improve the 10-step run.
+
+- Idea: profile refreshed current-best SDPA two-worker command
+  Current best source commit: b7ddcb2e
+  Source: profiler/roofline refresh after recent command and backend probes regressed
+  Expected mechanism: This is a diagnostic run, not a throughput candidate. Profiling the durable current-best command should refresh the kernel and collective breakdown after the latest environment state, so the next optimization targets the observed bottleneck rather than another blind knob.
+  Supporting evidence: The last current-best profile was run184; subsequent tests closed OMP, batch-size, Float8, attention backend, and logging axes without finding a durable improvement.
+  Planned source/config changes: None; keep durable SDPA source.
+  Planned command or config overrides: Current best two-worker command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is a complete 10-step profile with finite decreasing loss and a usable trace. The profiled tps is diagnostic only and should not be compared directly to unprofiled candidates.
