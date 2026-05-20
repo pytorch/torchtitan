@@ -3073,6 +3073,15 @@
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
   Result: kept as new measured peak at source state `f87c8ce`; 10,658 tps, 39.91% MFU, finite overall-decreasing loss, and unchanged 169.10 GiB peak memory. The durable source recovered cleanly after the final-norm source restore and slightly exceeded the previous run242 peak.
 
+- Idea: exact current best with TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=1
+  Current best source commit: 5eb183a
+  Source: untried PyTorch ProcessGroupNCCL registration path after NCCL-local registration toggles and algorithm knobs closed below the durable command
+  Expected mechanism: Enable ProcessGroupNCCL allocator hooks so tensors are registered and deregistered on NCCL communicators at allocation/free time. If the current FSDP all-gather/reduce-scatter path pays repeated registration overhead or misses a reusable registration path, this may reduce collective overhead; if the hook adds allocator overhead or duplicates NCCL's existing local registration behavior, it should regress.
+  Supporting evidence: Run316 still shows substantial FSDP collective time, while `NCCL_LOCAL_REGISTER=0`, `NCCL_MULTI_SEGMENT_REGISTER=0`, `NCCL_GRAPH_REGISTER=0`, and `NCCL_CUMEM_HOST_ENABLE=0` all tested NCCL-side registration behavior. This PyTorch allocator-hook path is a separate ProcessGroupNCCL mechanism exposed in the local source and has not been isolated.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=1` and keep `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss, or a clean high-band sample indicating lower registration overhead. Risk is slower allocation/free paths, extra memory registration overhead, or no effect if FSDP tensors are already on the fast registration path.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
