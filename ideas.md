@@ -2112,3 +2112,12 @@
   Planned command or config overrides: Current best command with `--training.local_batch_size=161`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is the known odd-batch shape slowdown or memory crossing the 95% risk line.
   Result: discarded at source state `bc777c9`; 10,465 tps with finite overall-decreasing loss and 170.00 GiB peak memory, 95.32%. Batch161 remains slower and now crosses the memory-risk guideline.
+
+- Idea: profile current best with metrics log frequency 1
+  Current best source commit: 6e72f8d2
+  Source: diagnostic refresh after the measurement-window change produced a new durable best
+  Expected mechanism: This is a profiling run, not a throughput candidate. Profile the current best command with `metrics.log_freq=1` to refresh the kernel, collective, and trace-span breakdown under the command that now defines the best reported tps.
+  Supporting evidence: The previous profile predates the log-frequency change and several command retests. Structured spans still show step 10 dominated by forward/backward and metric collection, but a refreshed Kineto trace is needed before choosing another source-level parallelism change.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is a complete 10-step profile with finite overall-decreasing loss and a usable trace. The profiled tps is diagnostic only and should not replace the unprofiled best.
