@@ -72,7 +72,7 @@ def parallelize_qwen3(
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
         param_dtype=getattr(torch, training.mixed_precision_param),
-        reduce_dtype=torch.bfloat16,
+        reduce_dtype=getattr(torch, training.mixed_precision_reduce),
     )
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         parallelism.fsdp_reshard_after_forward,

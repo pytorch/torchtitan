@@ -1963,3 +1963,25 @@ Retry interpretation:
 
 - Forward prefetch is also necessary. Both asymmetric variants lose to the one-module bidirectional prefetch policy.
 - Restore the bidirectional prefetch schedule and stop pursuing narrower prefetch removals for now.
+
+## Experiment 68: BF16 FSDP Reduce Dtype
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run68-flex-prefetch-bf16-reduce-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,612, below the 8,835 current best.
+- Step 10 MFU: 35.98%.
+- Step 10 peak memory: 163.18 GiB, 91.49%.
+- Loss moved from 12.51039 at step 1 to 12.52511 at step 10; finite but increasing.
+- `grad_norm` printed as 0.0000 at both logged steps.
+
+Interpretation:
+
+- BF16 FSDP reductions reduce memory, but they break the short-run training sanity signal and do not improve throughput.
+- Restore FP32 reduce dtype from `training.mixed_precision_reduce`; do not pursue lower-precision gradient reductions without a numerics-focused redesign.

@@ -598,6 +598,7 @@
   Planned source/config changes: In Qwen3 `parallelize_qwen3()`, keep `param_dtype` from `training.mixed_precision_param` but set `MixedPrecisionPolicy(reduce_dtype=torch.bfloat16)` for this candidate only. Keep the run59 one-module prefetch schedule unchanged.
   Planned command or config overrides: Exact current best command with a new dump folder.
   Success criteria and expected risk: Success is tps above 8,835 with finite decreasing loss. Risks are short-run loss regression from BF16 gradient reductions or no speedup if NCCL is already overlapped enough that reduced payload does not affect step time.
+  Result: discarded at source state `f67bbcb`; 8,612 tps, loss increased from 12.51039 to 12.52511, and grad_norm printed as 0.0000 at both logged steps.
 
 - Idea: HSDP 2x4 on prefetch flex best
   Current best source commit: 7c1c351
