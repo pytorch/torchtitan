@@ -2292,3 +2292,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_LAUNCH_MODE=GROUP` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower launches if the default mode is already optimal.
   Result: discarded at source state `56341e6`; 10,510 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Group launch mode is clean but slower than the default launch mode on this command.
+
+- Idea: metrics log frequency 1 with TORCH_NCCL_HIGH_PRIORITY=1
+  Current best source commit: 2b3ac1da
+  Source: high-priority stream retest after the objective shifted to final-step `metrics.log_freq=1`
+  Expected mechanism: Run NCCL collectives on a high-priority CUDA stream. This can improve overlap latency for FSDP all-gather/reduce-scatter if collectives are waiting behind compiled GEMM work, and the final-step reporting window may reward lower tail latency differently than earlier multi-step windows.
+  Supporting evidence: High-priority NCCL was tested earlier on an older command stack and did not validate, but the current best now includes loss chunks 6, two persistent DataLoader workers, and `metrics.log_freq=1`. NCCL remains the second-largest profile bucket.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `TORCH_NCCL_HIGH_PRIORITY=1` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse GEMM/collective contention or no effect if stream priority is already optimal.
