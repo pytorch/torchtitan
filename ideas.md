@@ -2041,3 +2041,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact run210 command.
   Success criteria and expected risk: Keep `--metrics.log_freq=5` as the new durable best if the rerun remains above 10,328 with finite decreasing loss and no allocator/NCCL warnings. If it falls back into the old 10,250-10,300 band, treat run210 as variance and keep the previous durable command.
+  Result: kept at source state `63c8faa`; 10,421 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This validates the run210 high and makes `--metrics.log_freq=5` the durable best command.
