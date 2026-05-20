@@ -7351,3 +7351,25 @@ Interpretation:
 
 - `NCCL_NVLS_CHUNKSIZE=65536` is valid but below the durable peak.
 - Combined with run307, the NVLS chunk-size bracket is closed; keep NCCL's default 128 KiB chunk size.
+
+## Experiment 309: Metrics Log Frequency 1 With NCCL_NVLS_NCHANNELS=16
+
+Command:
+
+```bash
+NCCL_NVLS_NCHANNELS=16 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run309-nccl-nvls-nchannels16-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,546, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.49%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.32275 at step 1 to 6.81929 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_NVLS_NCHANNELS=16` is valid but below the durable peak.
+- Lowering NVLS channel count does not recover enough compute/communication overlap to win; bracket the high side before closing this axis.

@@ -3021,3 +3021,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_NCHANNELS=16` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower all-gather/reduce-scatter if fewer NVLS channels underutilize NVLink/NVSwitch bandwidth or no effect if NVLS is not selected.
+  Result: discarded at source state `95b3f29`; 10,546 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Fewer NVLS channels are valid but below the durable peak, so do not lower this count.
