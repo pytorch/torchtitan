@@ -2561,3 +2561,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_BUFFSIZE=16777216` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower collectives from coarser chunking or a small memory increase.
+  Result: discarded at source state `b7ff130`; 10,456 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The 16 MiB high-side buffer does not improve throughput, so keep NCCL's default 4 MiB buffer size.
