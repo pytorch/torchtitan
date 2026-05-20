@@ -422,8 +422,7 @@ class CheckpointManager(Configurable):
             }
         )
 
-        # ----------------- Loading & Saving Policy ------------------
-
+        # Loading & Saving Policy
         self.load_only = config.load_only
         self.exclude_from_loading = config.exclude_from_loading
         self.initial_load_path = config.initial_load_path
@@ -436,15 +435,13 @@ class CheckpointManager(Configurable):
         self.last_save_in_hf = config.last_save_in_hf
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
 
-        # Validation for HF conversion
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
             raise ValueError(
                 "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
             )
 
-        # ------------ Async & Distributed Infrastructure ------------
-
+        # Async & Distributed Infrastructure
         try:
             self.async_mode = AsyncMode(config.async_mode)
         except ValueError as e:
@@ -460,8 +457,7 @@ class CheckpointManager(Configurable):
         self.staging_future: Future | None = None
         self.save_future: Future | None = None
 
-        # ----------------- Retention Policy (Purge) -----------------
-
+        # Retention Policy (Purge)
         self.keep_latest_k = config.keep_latest_k
         self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
@@ -533,8 +529,7 @@ class CheckpointManager(Configurable):
 
         checkpoint_save_id = checkpoint_id
 
-        # ------------------- HF Format Adaptation -------------------
-
+        # HF Format Conversion
         if to_hf:
             assert self.sd_adapter is not None, "sd_adapter is required for to_hf=True"
             state_dict = self.sd_adapter.to_hf(state_dict)
@@ -561,8 +556,7 @@ class CheckpointManager(Configurable):
 
             checkpoint_save_id = None  # storage_writer handles the path
 
-        # -------------------- Execution Dispatch --------------------
-
+        # Execution Dispatch
         if async_mode == AsyncMode.DISABLED:
             ret = dcp.save(
                 state_dict,
@@ -586,8 +580,7 @@ class CheckpointManager(Configurable):
                 async_stager=async_stager,
             )
 
-        # --------------------- Post-Processing ----------------------
-
+        # Post-Processing
         if to_hf and fqn_to_index_mapping:
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
@@ -690,8 +683,7 @@ class CheckpointManager(Configurable):
 
         checkpoint_id = self._create_checkpoint_id(curr_step)
 
-        # ------------------ Specialized Last Step -------------------
-
+        # Specialized Last Step
         if last_step:
             self._save_last_step(curr_step)
             logger.info(
@@ -699,8 +691,7 @@ class CheckpointManager(Configurable):
             )
             return True
 
-        # -------------------- Execution Dispatch --------------------
-
+        # Execution Dispatch
         states = self._flattened_model_states_sd()
 
         if self.async_mode != AsyncMode.DISABLED:
@@ -758,8 +749,7 @@ class CheckpointManager(Configurable):
                 enable_garbage_collection=True,
             )
 
-        # -------------------- Cleanup & Logging ---------------------
-
+        # Cleanup & Logging
         self._purge_stale_checkpoints()
 
         logger.info(
@@ -789,8 +779,7 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return False
 
-        # ---------------- Checkpoint Path Resolution ----------------
-
+        # Checkpoint Path Resolution
         model_only = False
         from_hf = False
         from_quantized = False
@@ -864,8 +853,7 @@ class CheckpointManager(Configurable):
                     f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                 )
 
-        # -------------------- Checkpoint Loading --------------------
-
+        # Checkpoint Loading
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin_t = time.monotonic()
 
