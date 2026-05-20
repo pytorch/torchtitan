@@ -58,11 +58,20 @@ logger = logging.getLogger(__name__)
 
 
 class GRPOLoss(Configurable):
-    """Clipped GRPO surrogate loss with per-sample ratio.
+    """Per-token clipped surrogate loss for GRPO.
 
-    Identifies samples by contiguous runs of 1s in ``response_mask``,
-    computes per-sample mean response logprob, exponentiates to get
-    the importance sampling ratio, then applies PPO clipping.
+    Computes the PPO-style clipped objective at the token level::
+
+        ratio_t = exp(policy_logprob_t - ref_logprob_t)     # π_θ / π_old
+        clipped_t = clamp(ratio_t, 1 - ε, 1 + ε)
+        loss_t = -min(ratio_t * A_t, clipped_t * A_t)
+
+    The final scalar loss is the sum of per-token losses over response
+    tokens (where ``response_mask == 1``), divided by
+    ``global_valid_tokens`` (total response tokens across all
+    microbatches and DP ranks).  This normalization ensures that
+    gradient accumulation across microbatches produces the same
+    result as a single large-batch forward pass.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -76,79 +85,53 @@ class GRPOLoss(Configurable):
     def __call__(
         self,
         policy_logprobs: torch.Tensor,
+        ref_logprobs: torch.Tensor,
         response_mask: torch.Tensor,
         advantages: torch.Tensor,
         global_valid_tokens: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Per-sample GRPO clipped surrogate on packed [B, L] tensors.
+        """Compute per-token GRPO clipped surrogate loss.
 
-        Each contiguous run of 1s in ``response_mask`` is one sample's
-        response. Per-sample mean response logprob is exponentiated to
-        get the ratio, then clipped.
+        Args:
+            policy_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
+            ref_logprobs: [B, L] log π_old(a_t | s_t) from the sampling policy.
+            response_mask: [B, L] 1.0 for response tokens, 0.0 for prompt/padding.
+            advantages: [B, L] per-token advantages (0.0 for prompt/padding).
+            global_valid_tokens: total response tokens across all microbatches
+                and DP ranks; used as the loss denominator so gradient
+                accumulation is equivalent to a single large-batch step.
+
+        Returns:
+            (loss, metrics) where loss is a scalar tensor and metrics is a
+            dict of floats for logging.
         """
-        B, L = policy_logprobs.shape
-
-        per_sample_ratios: list[torch.Tensor] = []
-        per_sample_advantages: list[torch.Tensor] = []
-        per_sample_response_lens: list[int] = []
-
-        for b in range(B):
-            mask_row = response_mask[b]
-            response_start = -1
-            for i in range(L):
-                if mask_row[i] == 1 and response_start < 0:
-                    response_start = i
-                elif mask_row[i] == 0 and response_start >= 0:
-                    n = i - response_start
-                    per_sample_ratios.append(
-                        torch.exp(policy_logprobs[b, response_start:i].mean())
-                    )
-                    per_sample_advantages.append(advantages[b, response_start:i].mean())
-                    per_sample_response_lens.append(n)
-                    response_start = -1
-            if response_start >= 0:
-                n = L - response_start
-                per_sample_ratios.append(
-                    torch.exp(policy_logprobs[b, response_start:L].mean())
-                )
-                per_sample_advantages.append(advantages[b, response_start:L].mean())
-                per_sample_response_lens.append(n)
-
-        if not per_sample_ratios:
-            zero = policy_logprobs.new_zeros(())
-            return zero, {"loss": 0.0, "ratio_mean": 0.0, "ratio_clipped_frac": 0.0}
-
-        ratio = torch.stack(per_sample_ratios)
-        sample_advantages = torch.stack(per_sample_advantages)
-        response_lens = torch.tensor(
-            per_sample_response_lens,
-            device=ratio.device,
-            dtype=ratio.dtype,
-        )
+        # Per-token importance sampling ratio: π_θ / π_old
+        log_ratio = policy_logprobs - ref_logprobs
+        ratio = torch.exp(log_ratio)
 
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
-        sample_pg_losses = -torch.min(
-            ratio * sample_advantages, clipped_ratio * sample_advantages
-        )
+        token_pg_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
-        denom = max(global_valid_tokens, 1)
-        pg_loss = (sample_pg_losses * response_lens).sum() / denom
+        # Mask to response tokens and normalize by global token count
+        masked_loss = token_pg_loss * response_mask
+        loss_denominator = max(global_valid_tokens, 1)
+        loss = masked_loss.sum() / loss_denominator
 
         with torch.no_grad():
-            total_response = response_lens.sum()
-            local_denom = max(int(total_response.item()), 1)
+            masked_ratio = ratio * response_mask
+            local_valid = max(int(response_mask.sum().item()), 1)
             metrics = {
-                "loss": pg_loss.item(),
-                "ratio_mean": (ratio * response_lens).sum().item() / local_denom,
+                "loss": loss.item(),
+                "ratio_mean": masked_ratio.sum().item() / local_valid,
                 "ratio_clipped_frac": (
-                    ((torch.abs(ratio - clipped_ratio) > 1e-6).float() * response_lens)
-                    .sum()
-                    .item()
-                    / local_denom
-                ),
+                    (torch.abs(ratio - clipped_ratio) > 1e-6).float() * response_mask
+                )
+                .sum()
+                .item()
+                / local_valid,
             }
 
-        return pg_loss, metrics
+        return loss, metrics
 
 
 class Provisioner:

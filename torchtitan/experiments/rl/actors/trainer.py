@@ -370,6 +370,7 @@ class PolicyTrainer(Actor, Configurable):
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
                 policy_logprobs=policy_logprobs,
+                ref_logprobs=ref_logprobs,
                 response_mask=response_mask,
                 advantages=advantages,
                 global_valid_tokens=int(num_global_valid_tokens.item()),
