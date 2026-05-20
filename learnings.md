@@ -7103,3 +7103,25 @@ Interpretation:
 
 - `NCCL_P2P_SCHEDULE_GROUP_SIZE=1` is valid but slower than the durable command.
 - The slow step 2 and sub-peak final throughput suggest finer P2P scheduling adds overhead or does not improve NCCL collective overlap for this workload. Keep the default P2P schedule group size.
+
+## Experiment 298: Metrics Log Frequency 1 With NCCL_P2P_SCHEDULE_GROUP_SIZE=8
+
+Command:
+
+```bash
+NCCL_P2P_SCHEDULE_GROUP_SIZE=8 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run298-nccl-p2p-schedule-group-size8-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,450, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.13%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.29459 at step 1 to 5.47503 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_P2P_SCHEDULE_GROUP_SIZE=8` is valid but slower than the durable command.
+- Combined with run297 group size 1, this closes the immediate P2P schedule-group axis; keep the default.

@@ -2911,3 +2911,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_SCHEDULE_GROUP_SIZE=8` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap if coarser groups reduce communication/compute interleaving.
+  Result: discarded at source state `710556f`; 10,450 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Coarser P2P schedule grouping is also slower, so close this axis and keep the default group size.
