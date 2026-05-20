@@ -5822,3 +5822,25 @@ Interpretation:
 
 - Limiting CUDA device connections to 2 is clean but slower.
 - Keep the default CUDA connection count; the earlier `=1` result and this moderate `=2` result both indicate queue limiting hurts this FSDP/GEMM overlap pattern.
+
+## Experiment 241: Metrics Log Frequency 1 With CUDA_DEVICE_MAX_CONNECTIONS=4
+
+Command:
+
+```bash
+CUDA_DEVICE_MAX_CONNECTIONS=4 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run241-cuda-device-max-connections4-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,377, below the run215 10,625 measured peak.
+- Step 10 MFU: 38.86%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.39485 at step 1 to 5.61999 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Limiting CUDA device connections to 4 is also slower.
+- Keep default CUDA connection count; queue limiting does not improve overlap for the current DP-only FSDP command.

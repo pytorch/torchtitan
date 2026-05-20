@@ -2341,3 +2341,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=4` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is no effect or another overlap regression.
+  Result: discarded at source state `1437003`; 10,377 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A four-connection limit still underperforms the default, so keep default CUDA stream queue behavior.
