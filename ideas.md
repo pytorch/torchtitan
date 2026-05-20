@@ -1761,3 +1761,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--dataloader.num_workers=3 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is CPU contention between the 24 DataLoader workers and training ranks.
+  Result: discarded at source state `f0480d5`; 10,254 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Two workers remains the validated DataLoader setting.
+
+- Idea: profile current best SDPA zero-CTA loss chunks 6 with two DataLoader workers
+  Current best source commit: 40032d1
+  Source: bottleneck refresh after DataLoader worker tuning changed the durable command
+  Expected mechanism: Profiling the current best identifies whether remaining time is still GEMM/NCCL dominated or whether host/input overhead remains visible after two DataLoader workers.
+  Supporting evidence: The last profile predates the DataLoader-worker improvement. Further blind sweeps are low yield without refreshing the bottleneck mix.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Diagnostic run only; must still run 10 steps and maintain finite decreasing loss. Commit the run log but not generated profile traces.

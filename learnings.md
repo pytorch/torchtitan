@@ -4446,3 +4446,25 @@ Interpretation:
 
 - Pinned memory is clean but does not beat the validated two-worker command.
 - Keep unpinned host tensors for this workload; test three workers once to close the worker-count bracket.
+
+## Experiment 183: Three DataLoader Workers
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=3 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run183-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker3-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,254, below the two-worker command.
+- Step 10 MFU: 38.40%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.37759 at step 1 to 7.00421 at step 10; finite and decreasing.
+- No dataset re-loop or DataLoader worker warning appeared.
+
+Interpretation:
+
+- Three workers are slower than two workers.
+- DataLoader worker count is bracketed: use two workers, persistent workers, and prefetch factor 2.
