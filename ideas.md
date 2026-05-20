@@ -863,6 +863,7 @@
   Planned source/config changes: In `qwen3_14b()`, change `model_registry("14B", attn_backend="flex")` to `attn_backend="sdpa"`. Keep converters absent and the robust bidirectional prefetch source unchanged.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss. Risks are lower attention efficiency, changed compile graph quality, or memory regression.
+  Result: kept at source state `846907b`; 10,005 tps, 37.47% MFU, 168.57 GiB peak memory, and finite decreasing loss.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

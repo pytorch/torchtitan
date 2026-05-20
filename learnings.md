@@ -2623,3 +2623,30 @@ Interpretation:
 
 - No-reshard remains closed for this source line. Even a 10% smaller seq128 batch crosses the memory cliff and destroys throughput.
 - The seq128 profile's all-gather bucket is not worth attacking through retained parameter residency unless a separate memory-saving source change appears first.
+
+## Experiment 99: SDPA Attention Backend At Seq128 Batch160
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run99-sdpa-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Changed Qwen3 14B `model_registry` from `attn_backend="flex"` to `attn_backend="sdpa"`.
+- Kept no converters and the robust bidirectional FSDP prefetch source.
+
+Result:
+
+- Status: keep; new best.
+- Step 10 `tps`: 10,005, above run84's 9,709.
+- Step 10 MFU: 37.47%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.55243 at step 1 to 5.63276 at step 10; finite and decreasing.
+
+Interpretation:
+
+- At the seq128/local-batch-160 workload shape, SDPA is faster than flex despite flex being better at the original 4096-token shape.
+- The current best source is now SDPA attention, no converters, compile enabled, BF16 training dtype, seq128/local-batch-160, no flight recorder, and one-module bidirectional FSDP prefetch.
+- Next step should be an exact rerun to validate the 10,005 tps result before layering further changes.
