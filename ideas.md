@@ -2282,3 +2282,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_MIN_CTAS=32` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is reduced GEMM overlap or worse collective scheduling if the default occupancy is already optimal.
   Result: discarded at source state `0a1bb59`; 10,574 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A stronger CTA floor is clean but still below the validated peak, so keep the default NCCL CTA count with only `NCCL_CTA_POLICY=2`.
+
+- Idea: metrics log frequency 1 with NCCL_LAUNCH_MODE=GROUP
+  Current best source commit: 1911a3b8
+  Source: NCCL launch-order probe after algorithm, CTA, channel, buffer, and cuMem knobs did not beat the current best
+  Expected mechanism: Force NCCL grouped launch ordering. If per-rank collective launch skew or launch-mode selection contributes to the exposed FSDP communication time, grouped launch may improve consistency or overlap for the final warmed step.
+  Supporting evidence: TorchTitan's batch-invariant mode sets `NCCL_LAUNCH_MODE=GROUP` for deterministic collective launch ordering, which makes it a meaningful NCCL behavior knob. It has not been isolated on the current `metrics.log_freq=1` performance command.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_LAUNCH_MODE=GROUP` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower launches if the default mode is already optimal.
