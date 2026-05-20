@@ -2612,3 +2612,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `e630d0b`; 10,357 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command can still sample low after the event-cache probe, so run267's 10,607 was not enough evidence to change defaults.
+
+- Idea: metrics log frequency 1 with NCCL_IB_DISABLE=1
+  Current best source commit: a6be129
+  Source: single-node network transport guard after P2P/NVLink path was confirmed necessary
+  Expected mechanism: Disable NCCL InfiniBand transport. On this single-node B200/NVLink workload it should be a no-op for steady-state collectives, but it may avoid network plugin probing or any accidental fallback path if NCCL considers NIC transport.
+  Supporting evidence: Full P2P disable was a severe regression, confirming GPU P2P/NVLink is needed. SHM and protocol pins did not help. `NCCL_IB_DISABLE=1` has not been isolated and is a command-only way to confirm no IB/network path contributes to the final-step variance.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_IB_DISABLE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower fallback if NCCL unexpectedly needed IB for part of the topology.
