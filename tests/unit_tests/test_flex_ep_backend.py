@@ -36,36 +36,6 @@ class _FakeEPMesh:
         return self._group
 
 
-def _allow_cpu_ep_workspace(monkeypatch):
-    def fake_allocate_workspace_storage(
-        *,
-        nvl_buffer_size,
-        device,
-        ep_size,
-        ep_rank,
-        ep_group,
-    ):
-        del ep_group
-        assert ep_size > 1
-        raw = torch.empty(nvl_buffer_size, device=device, dtype=torch.uint8)
-        raw.zero_()
-        peer_buffers = (raw,) * ep_size
-        # A single pointer selects PyTorch's local reference kernels while the
-        # router/workspace shape still follows EP>1.
-        buffers_cuda_ptrs = torch.tensor(
-            [peer_buffers[ep_rank].data_ptr()],
-            dtype=torch.int64,
-            device=device,
-        )
-        return raw, peer_buffers, buffers_cuda_ptrs
-
-    monkeypatch.setattr(
-        flex_ep_mod,
-        "_allocate_workspace_storage",
-        fake_allocate_workspace_storage,
-    )
-
-
 def test_make_experts_config_flex_ep():
     experts_config = make_experts_config(
         dim=16,
@@ -229,7 +199,7 @@ def test_flex_ep_router_requires_multi_rank_ep_mesh(ep_mesh):
             dim=8,
             num_experts=4,
             top_k=2,
-            device=torch.device("cpu"),
+            device=torch.device("cuda"),
             ep_mesh=ep_mesh,
         )
 
@@ -328,122 +298,32 @@ def test_nvl_shared_buffer_accepts_larger_buffer_and_rejects_too_small():
         )
 
 
-def test_flex_ep_capacity_guard_reports_capacity_without_balanced_requirement():
-    local_experts_start = torch.tensor([0, 128, 384], dtype=torch.int64)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flex_ep_weighted_sum_matches_reference_on_cuda():
+    try:
+        flex_ep_mod._register_ep_backend_ops()
+    except (ImportError, RuntimeError) as exc:
+        pytest.skip(str(exc))
 
-    with pytest.raises(ValueError) as exc_info:
-        flex_ep_mod._validate_flex_ep_capacity(
-            local_experts_start,
-            max_recv_tokens=256,
-            capacity_factor=0.5,
-        )
-    message = str(exc_info.value)
-    assert "Received 384 local expert tokens" in message
-    assert "Receive workspace capacity is 256" in message
-    assert "increase the FlexEP capacity factor" in message
-    assert "requires balanced routing" not in message
-
-
-def test_flex_ep_workspace_cache_and_views_include_capacity_factor(monkeypatch):
-    _allow_cpu_ep_workspace(monkeypatch)
-    ep_mesh = _FakeEPMesh()
-    kwargs = {
-        "max_tokens": 256,
-        "dim": 8,
-        "num_experts": 4,
-        "top_k": 2,
-        "device": torch.device("cpu"),
-        "ep_mesh": ep_mesh,
-    }
-
-    router1 = flex_ep_mod.FlexEPRouter.create(**kwargs, capacity_factor=1.0)
-    router2 = flex_ep_mod.FlexEPRouter.create(**kwargs, capacity_factor=0.5)
-    router3 = flex_ep_mod.FlexEPRouter.create(**kwargs, capacity_factor=1.0)
-
-    assert router1.workspace is router3.workspace
-    assert router1.workspace is not router2.workspace
-
-    view1 = router1.workspace.view(
-        max_tokens=kwargs["max_tokens"],
-        dim=kwargs["dim"],
-        num_experts=kwargs["num_experts"],
-        top_k=kwargs["top_k"],
-        capacity_factor=1.0,
+    device = torch.device("cuda")
+    y_partial = torch.randn(
+        3,
+        2,
+        4,
+        device=device,
+        dtype=torch.bfloat16,
+        requires_grad=True,
     )
-    view2 = router1.workspace.view(
-        max_tokens=kwargs["max_tokens"],
-        dim=kwargs["dim"],
-        num_experts=kwargs["num_experts"],
-        top_k=kwargs["top_k"],
-        capacity_factor=0.5,
+    top_scores = torch.randn(
+        3,
+        2,
+        device=device,
+        dtype=torch.float32,
+        requires_grad=True,
     )
-
-    assert view1 is not view2
-    assert view1.dispatch_recv_buffer.shape[0] != view2.dispatch_recv_buffer.shape[0]
-
-
-def test_flex_ep_zfill_offsets_are_contiguous(monkeypatch):
-    import torch._higher_order_ops.flex_ep  # noqa: F401
-
-    _allow_cpu_ep_workspace(monkeypatch)
-    zfill_calls = []
-
-    def fake_zfill(input, begin_ofs, end_ofs, max_values_per_batch):
-        zfill_calls.append((begin_ofs.is_contiguous(), end_ofs.is_contiguous()))
-        del begin_ofs, end_ofs, max_values_per_batch
-        return input
-
-    monkeypatch.setattr(torch.ops._flex_ep, "zfill_ranges_inplace", fake_zfill)
-    router = flex_ep_mod.FlexEPRouter.create(
-        max_tokens=5,
-        dim=8,
-        num_experts=4,
-        top_k=2,
-        device=torch.device("cpu"),
-        ep_mesh=_FakeEPMesh(),
-    )
-    build_dispatch_plan_fn, dispatch_fn = router.router_fns[:2]
-    x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
-    topk_idx = torch.tensor(
-        [
-            [0, 1],
-            [1, 2],
-            [2, 3],
-            [3, 0],
-            [1, 3],
-        ],
-        dtype=torch.int64,
-    )
-
-    plan = build_dispatch_plan_fn(topk_idx, router.router_operands)
-    dispatch_fn(x_expanded, plan, router.router_operands)
-
-    assert zfill_calls
-    assert all(begin and end for begin, end in zfill_calls)
-
-
-def test_flex_ep_barrier_wait_no_clone_returns_alias_on_cpu_fallback():
-    flex_ep_mod._ensure_flex_ep_imported()
-    input_tensor = torch.ones(4, dtype=torch.float32)
-    cuda_ptrs = torch.empty(1, dtype=torch.int64)
-    expected = torch.zeros(1, dtype=torch.int32)
-
-    out = torch.ops._flex_ep.barrier_wait_no_clone(
-        input_tensor,
-        cuda_ptrs,
-        0,
-        expected,
-    )
-
-    assert out.data_ptr() == input_tensor.data_ptr()
-
-
-def test_flex_ep_weighted_sum_matches_reference_on_cpu():
-    y_partial = torch.randn(3, 2, 4, dtype=torch.bfloat16, requires_grad=True)
-    top_scores = torch.randn(3, 2, dtype=torch.float32, requires_grad=True)
     y_partial_ref = y_partial.detach().clone().requires_grad_()
     top_scores_ref = top_scores.detach().clone().requires_grad_()
-    grad = torch.randn(3, 4, dtype=torch.bfloat16)
+    grad = torch.randn(3, 4, device=device, dtype=torch.bfloat16)
 
     out = flex_ep_mod.flex_ep_weighted_sum(y_partial, top_scores)
     ref = (
@@ -460,100 +340,6 @@ def test_flex_ep_weighted_sum_matches_reference_on_cpu():
     torch.testing.assert_close(out, ref)
     torch.testing.assert_close(y_partial.grad, y_partial_ref.grad)
     torch.testing.assert_close(top_scores.grad, top_scores_ref.grad)
-
-
-def test_flex_ep_offset_ops_cpu_fallbacks_match_full_reference():
-    flex_ep_mod._ensure_flex_ep_imported()
-    y1 = torch.randn(5, 8, dtype=torch.bfloat16)
-    dy2 = torch.randn(5, 4, dtype=torch.bfloat16)
-    token_end = torch.tensor([2], dtype=torch.int64)
-
-    out = torch.ops._flex_ep.swiglu_forward_with_offsets(y1, token_end)
-    gate, up = y1.chunk(2, dim=-1)
-    ref = torch.nn.functional.silu(gate) * up
-    torch.testing.assert_close(out, ref)
-
-    dy1 = torch.ops._flex_ep.swiglu_backward_with_offsets(dy2, y1, token_end)
-    sig = torch.sigmoid(gate)
-    ref_dgate = dy2 * up * sig * (1 + gate * (1 - sig))
-    ref_dup = dy2 * torch.nn.functional.silu(gate)
-    torch.testing.assert_close(dy1, torch.cat((ref_dgate, ref_dup), dim=-1))
-
-    cloned = torch.ops._flex_ep.clone_valid_prefix(y1, token_end)
-    torch.testing.assert_close(cloned, y1)
-
-
-def test_flex_ep_combine_does_not_zero_capacity_tail(monkeypatch):
-    flex_ep_mod._ensure_flex_ep_imported()
-    _allow_cpu_ep_workspace(monkeypatch)
-    router = flex_ep_mod.FlexEPRouter.create(
-        max_tokens=5,
-        dim=8,
-        num_experts=4,
-        top_k=2,
-        device=torch.device("cpu"),
-        ep_mesh=_FakeEPMesh(),
-    )
-    build_dispatch_plan_fn, dispatch_fn, combine_fn, _, dispatch_bwd_fn = (
-        router.router_fns
-    )
-    x_expanded = torch.randn(5, 2, 8, dtype=torch.bfloat16)
-    topk_idx = torch.tensor(
-        [
-            [0, 1],
-            [1, 2],
-            [2, 3],
-            [3, 0],
-            [1, 3],
-        ],
-        dtype=torch.int64,
-    )
-    plan = build_dispatch_plan_fn(topk_idx, router.router_operands)
-    recv_x = dispatch_fn(x_expanded, plan, router.router_operands)
-    local_experts_start = plan.local_experts_start
-    token_end = int(local_experts_start[-1].item())
-    assert token_end < recv_x.shape[0]
-
-    sentinel = torch.tensor(-7.0, dtype=recv_x.dtype)
-    calls = []
-
-    def fake_router_combine(
-        send_tokens,
-        send_scale_factors,
-        send_weights,
-        expert_begin_offset_per_ep,
-        token_send_end,
-        send_origin_global_token_id,
-        buffers_cuda_ptrs,
-        combine_recv_buffer,
-        combine_recv_scale_factors,
-        combine_recv_weights,
-        *args,
-    ):
-        del (
-            send_scale_factors,
-            send_weights,
-            expert_begin_offset_per_ep,
-            send_origin_global_token_id,
-            buffers_cuda_ptrs,
-            args,
-        )
-        assert int(token_send_end.item()) == token_end
-        assert torch.all(send_tokens[token_end:] == sentinel).item()
-        calls.append(send_tokens.data_ptr())
-        return combine_recv_buffer, combine_recv_scale_factors, combine_recv_weights
-
-    monkeypatch.setattr(torch.ops._flex_ep, "router_combine", fake_router_combine)
-
-    y3 = torch.full_like(recv_x, -7.0)
-    combine_fn(y3, plan, router.router_operands)
-
-    dx_recv = torch.full_like(recv_x, -7.0)
-    dispatch_bwd_fn(dx_recv, plan, router.router_operands)
-
-    assert len(calls) == 2
-    assert torch.all(y3[token_end:] == sentinel).item()
-    assert torch.all(dx_recv[token_end:] == sentinel).item()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

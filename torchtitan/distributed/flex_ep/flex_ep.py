@@ -956,8 +956,7 @@ def _register_ep_backend_ops() -> None:
             if not 0 <= ep_rank < ep_size:
                 raise ValueError(f"ep_rank must be in [0, {ep_size}), got {ep_rank}.")
             if (
-                all_expert_counts.device.type != "cuda"
-                or all_expert_counts.dtype != torch.int64
+                all_expert_counts.dtype != torch.int64
                 or not all_expert_counts.is_contiguous()
                 or not _is_power_of_2(ep_size)
                 or not _is_power_of_2(local_experts)
@@ -1058,11 +1057,7 @@ def _register_ep_backend_ops() -> None:
                     torch.empty_like(topk_idx, dtype=torch.int32),
                     torch.empty_like(topk_idx, dtype=torch.int64),
                 )
-            if (
-                topk_idx.device.type != "cuda"
-                or not topk_idx.is_contiguous()
-                or not _is_power_of_2(num_experts)
-            ):
+            if not topk_idx.is_contiguous() or not _is_power_of_2(num_experts):
                 return _compute_dest_offsets_reference(topk_idx, recv_ofs, ep_size)
 
             dest_ranks = torch.div(
@@ -1781,18 +1776,10 @@ def _validate_flex_ep_capacity(
         f"Receive workspace capacity is {max_recv_tokens}; increase the FlexEP "
         f"capacity factor (currently {capacity_factor}) up to 1.0."
     )
-    if local_experts_start.is_cuda:
-        # Avoid a host sync in the hot path. The CPU branch below keeps the
-        # precise ValueError message for unit tests and non-CUDA callers.
-        torch._assert_async(  # type: ignore[attr-defined]
-            local_experts_start[-1] <= max_recv_tokens,
-            error_msg,
-        )
-        return
-
-    num_recv_tokens = int(local_experts_start[-1].item())
-    if num_recv_tokens > max_recv_tokens:
-        raise ValueError(f"{error_msg} Received {num_recv_tokens} local expert tokens.")
+    torch._assert_async(  # type: ignore[attr-defined]
+        local_experts_start[-1] <= max_recv_tokens,
+        error_msg,
+    )
 
 
 def _compute_dispatch_recv_weights_numel(
@@ -2371,17 +2358,6 @@ def _router_barrier(
     return dependency
 
 
-def _weighted_sum_reference(
-    y_partial: torch.Tensor,
-    top_scores: torch.Tensor,
-) -> torch.Tensor:
-    return (
-        (y_partial.to(torch.float32) * top_scores.to(torch.float32).unsqueeze(-1))
-        .sum(dim=1)
-        .to(y_partial.dtype)
-    )
-
-
 class _FlexEPWeightedSum(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -2390,21 +2366,11 @@ class _FlexEPWeightedSum(torch.autograd.Function):
         y_partial: torch.Tensor,
         top_scores: torch.Tensor,
     ) -> torch.Tensor:
-        if (
-            y_partial.is_cuda
-            and top_scores.is_cuda
-            and y_partial.dtype == torch.bfloat16
-            and top_scores.dtype == torch.float32
-            and y_partial.is_contiguous()
-            and top_scores.is_contiguous()
-        ):
-            _require_ep_backend_ops()
-            out = torch.ops.inductor.flex_ep_weighted_sum_forward(
-                y_partial,
-                top_scores,
-            )
-        else:
-            out = _weighted_sum_reference(y_partial, top_scores)
+        _require_ep_backend_ops()
+        out = torch.ops.inductor.flex_ep_weighted_sum_forward(
+            y_partial,
+            top_scores,
+        )
         ctx.save_for_backward(y_partial.clone(), top_scores)
         return out
 
@@ -2416,30 +2382,12 @@ class _FlexEPWeightedSum(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         y_partial, top_scores = ctx.saved_tensors
         grad_out = grad_out.contiguous()
-        if (
-            grad_out.is_cuda
-            and y_partial.is_cuda
-            and top_scores.is_cuda
-            and grad_out.dtype == torch.bfloat16
-            and y_partial.dtype == torch.bfloat16
-            and top_scores.dtype == torch.float32
-            and y_partial.is_contiguous()
-            and top_scores.is_contiguous()
-        ):
-            _require_ep_backend_ops()
-            return torch.ops.inductor.flex_ep_weighted_sum_backward(
-                grad_out,
-                y_partial,
-                top_scores,
-            )
-        grad_out_fp32 = grad_out.to(torch.float32)
-        top_scores_fp32 = top_scores.to(torch.float32)
-        y_partial_fp32 = y_partial.to(torch.float32)
-        grad_y_partial = (
-            grad_out_fp32.unsqueeze(1) * top_scores_fp32.unsqueeze(-1)
-        ).to(y_partial.dtype)
-        grad_top_scores = (grad_out_fp32.unsqueeze(1) * y_partial_fp32).sum(dim=-1)
-        return grad_y_partial, grad_top_scores
+        _require_ep_backend_ops()
+        return torch.ops.inductor.flex_ep_weighted_sum_backward(
+            grad_out,
+            y_partial,
+            top_scores,
+        )
 
 
 def flex_ep_weighted_sum(
