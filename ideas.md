@@ -3093,6 +3093,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator/OOM warnings. Risk is high memory or OOM because chunks 4 already reached about 171.5 GiB in earlier runs.
   Result: discarded at source state `214a3df`; 10,287 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Fewer, larger loss chunks are slower; keep `--loss.num_chunks=6`.
 
+- Idea: exact current best with NCCL_P2P_DIRECT_DISABLE=1
+  Current best source commit: 2b4f811
+  Source: untried NCCL P2P direct-access path after P2P read/write direction, P2P CUDA memcpy, P2P LL threshold, P2P scheduling, and P2P NVL chunk-size probes closed below the durable command
+  Expected mechanism: Disable NCCL's direct P2P access path. If direct P2P path selection interferes with ring-LL overlap or consumes resources poorly on this single-node B200 topology, disabling it may improve the FSDP all-gather/reduce-scatter path. If direct P2P is the intended fast path, this should regress.
+  Supporting evidence: Run316 still shows dominant `RING_LL` reduce-scatter/all-gather kernels. The local NCCL library exposes `NCCL_P2P_DIRECT_DISABLE`, and no current ledger entry has isolated it, while several neighboring P2P knobs have already been rejected.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_DIRECT_DISABLE=1` and keep `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no NCCL warnings. Risk is slower P2P collectives or initialization failure if direct P2P is required for this topology.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
