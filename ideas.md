@@ -1282,3 +1282,12 @@
   Planned command or config overrides: Current durable zero-CTA command with seq128/local_batch160.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is losing forward all-gather overlap again.
   Result: discarded at source state `7488049`; 9,700 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Forward prefetch remains necessary; restore bidirectional one-module prefetch.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with NCCL_NTHREADS=128
+  Current best source commit: 3d045b1
+  Source: NCCL occupancy follow-up after zero-CTA validated but high-priority and prefetch interactions failed
+  Expected mechanism: `NCCL_NTHREADS=128` reduces NCCL worker threads per block compared with larger defaults, which may reduce collective SM pressure and improve overlap with compiled transformer GEMMs while retaining zero-CTA scheduling.
+  Supporting evidence: The workload remains GEMM plus NCCL heavy, and zero-CTA improved throughput by changing NCCL execution pressure without changing memory. `NCCL_NTHREADS` is a standard NCCL env knob surfaced in PyTorch logging.
+  Planned source/config changes: None; keep durable bidirectional one-module prefetch.
+  Planned command or config overrides: Current durable zero-CTA command plus `NCCL_NTHREADS=128`.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower collectives from too little NCCL parallelism.
