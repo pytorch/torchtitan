@@ -153,7 +153,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # Integration Test Cases for gpt-oss
-        # TODO: re-enable rocm test after fixing compile with .view(-1, dim)
+        # TODO: re-enable compile after fixing
+        # https://github.com/pytorch/torchtitan/issues/3409
         OverrideDefinitions(
             [
                 [
@@ -161,13 +162,12 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
-                    "--compile.enable",
+                    # "--compile.enable",
                 ],
             ],
             "Gpt-oss FSDP+TP+EP+compile",
             "gpt_oss_fsdp+tp+ep+compile",
             ngpu=8,
-            skip_rocm_test=True,
         ),
     ]
 
