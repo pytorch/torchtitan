@@ -1171,3 +1171,4 @@
   Planned source/config changes: None; keep backward-only prefetch source for this validation run.
   Planned command or config overrides: Exact run123 command with a new dump folder.
   Success criteria and expected risk: Keep backward-only source if the rerun remains above 10,005 tps with finite decreasing loss. If it falls below, restore bidirectional prefetch as the durable source.
+  Result: discarded at source state `1b3518d`; 9,728 tps with finite decreasing loss and 168.57 GiB peak memory. Backward-only prefetch does not validate, so restore one-module bidirectional prefetch.
