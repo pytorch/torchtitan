@@ -326,6 +326,17 @@ def is_cudagraph_compatible(gm: torch.fx.GraphModule) -> bool:
       The expected workflow is to apply regional_inductor first to compile
       flex_attention regions, then apply cudagraph.
     """
+    # ``full_inductor_compilation_pass`` collapses the FX graph into one
+    # opaque ``standalone_compile_inner`` node, hiding ops the per-node
+    # scan below would otherwise catch. That pass stashes its pre-collapse
+    # verdict in ``gm.meta``; honor it.
+    if gm.meta.get("cudagraph_compatible") is False:
+        logger.warning(
+            "Skipping cudagraph: gm.meta['cudagraph_compatible'] is False "
+            "(set by full_inductor_compilation_pass before the collapse)."
+        )
+        return False
+
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
