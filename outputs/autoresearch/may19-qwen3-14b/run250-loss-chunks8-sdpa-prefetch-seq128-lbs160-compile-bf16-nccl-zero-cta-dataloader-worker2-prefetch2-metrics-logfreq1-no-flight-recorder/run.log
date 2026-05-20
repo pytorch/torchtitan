@@ -1,0 +1,56 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run250-loss-chunks8-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder
+W0520 04:27:28.758000 1648267 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0520 04:27:28.758000 1648267 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0520 04:27:28.758000 1648267 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0520 04:27:28.758000 1648267 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0520 04:27:36.317000 1648706 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-20 04:27:36,996 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-20 04:27:37,051 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run250-loss-chunks8-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/structured_logs/training.global_rank_0.20260520-042737-C3T0E6.jsonl
+[rank0]:[titan] 2026-05-20 04:27:38,158 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-20 04:27:38,160 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-20 04:27:38,167 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-20 04:27:38,168 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-20 04:27:41,252 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-20 04:27:41,256 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-20 04:27:41,281 - root - INFO - Building qwen3 14B
+[rank0]:[titan] 2026-05-20 04:27:41,361 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-20 04:27:41,607 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-20 04:27:41,607 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-20 04:27:41,607 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-20 04:27:41,623 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-20 04:27:41,701 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-20 04:27:42,194 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-20 04:27:42,195 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-20 04:27:42,197 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-20 04:27:42,197 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-20 04:27:42,213 - root - INFO - Trainer is initialized with local batch size 160, global batch size 1280, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-20 04:27:42,214 - root - INFO - Training starts at step 1
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-20 04:27:57,981 - root - INFO - [31mstep:  1  [32mloss: 12.50121  [38;2;180;60;0mgrad_norm: 25.0000  [38;2;54;234;195mmemory: 160.60GiB(90.05%)  [34mtps: 1,251  [36mtflops: 105.38  [35mmfu: 4.68%[39m
+[rank0]:[titan] 2026-05-20 04:27:57,982 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:[titan] 2026-05-20 04:28:00,105 - root - INFO - [31mstep:  2  [32mloss: 11.19118  [38;2;180;60;0mgrad_norm: 42.5000  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 9,646  [36mtflops: 812.78  [35mmfu: 36.12%[39m
+[rank0]:[titan] 2026-05-20 04:28:02,211 - root - INFO - [31mstep:  3  [32mloss: 13.59377  [38;2;180;60;0mgrad_norm: 41.7500  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 9,722  [36mtflops: 819.17  [35mmfu: 36.41%[39m
+[rank0]:[titan] 2026-05-20 04:28:04,309 - root - INFO - [31mstep:  4  [32mloss: 14.37187  [38;2;180;60;0mgrad_norm: 42.2500  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 9,767  [36mtflops: 822.94  [35mmfu: 36.58%[39m
+[rank0]:[titan] 2026-05-20 04:28:06,384 - root - INFO - [31mstep:  5  [32mloss: 12.62637  [38;2;180;60;0mgrad_norm: 46.0000  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 9,870  [36mtflops: 831.58  [35mmfu: 36.96%[39m
+[rank0]:[titan] 2026-05-20 04:28:08,430 - root - INFO - [31mstep:  6  [32mloss:  9.92326  [38;2;180;60;0mgrad_norm: 24.8750  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 10,009  [36mtflops: 843.30  [35mmfu: 37.48%[39m
+[rank0]:[titan] 2026-05-20 04:28:10,470 - root - INFO - [31mstep:  7  [32mloss:  9.34896  [38;2;180;60;0mgrad_norm: 60.5000  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 10,043  [36mtflops: 846.23  [35mmfu: 37.61%[39m
+[rank0]:[titan] 2026-05-20 04:28:12,480 - root - INFO - [31mstep:  8  [32mloss:  7.83368  [38;2;180;60;0mgrad_norm: 44.5000  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 10,190  [36mtflops: 858.60  [35mmfu: 38.16%[39m
+[rank0]:[titan] 2026-05-20 04:28:14,478 - root - INFO - [31mstep:  9  [32mloss:  7.63979  [38;2;180;60;0mgrad_norm: 34.5000  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 10,249  [36mtflops: 863.59  [35mmfu: 38.38%[39m
+[rank0]:[titan] 2026-05-20 04:28:16,487 - root - INFO - [31mstep: 10  [32mloss:  7.00543  [38;2;180;60;0mgrad_norm: 24.5000  [38;2;54;234;195mmemory: 168.57GiB(94.52%)  [34mtps: 10,195  [36mtflops: 858.99  [35mmfu: 38.18%[39m
+[rank0]:[titan] 2026-05-20 04:28:16,488 - root - INFO - Sleeping 2 seconds for other ranks to complete
+[rank0]:[titan] 2026-05-20 04:28:18,488 - root - INFO - Training completed
+[rank0]:[titan] 2026-05-20 04:28:20,225 - root - INFO - Process group destroyed

@@ -2431,3 +2431,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Use the exact current-best command with `--loss.num_chunks=8` instead of 6.
   Success criteria and expected risk: Success is step-10 tps above 10,650, or comparable tps with a meaningful memory drop that can be converted into a follow-up batch-size test. Risk is lower throughput from extra loss chunk overhead with no memory benefit.
+  Result: discarded at source state `7b0ccbf`; 10,195 tps with finite overall-decreasing loss and 168.57 GiB peak memory. The 0.53 GiB memory reduction is too small to offset the loss-path overhead or justify a larger-batch follow-up.

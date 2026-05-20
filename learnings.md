@@ -6026,3 +6026,25 @@ Interpretation:
 
 - Raising NCCL worker threads to 512 is clean but slower than default thread-block sizing.
 - The low-side `NCCL_NTHREADS=128` and high-side `NCCL_NTHREADS=512` brackets both underperform, so keep default NCCL thread-block sizing with only `NCCL_CTA_POLICY=2`.
+
+## Experiment 250: Metrics Log Frequency 1 With Loss Chunks 8
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run250-loss-chunks8-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,195, below the run242 10,650 measured peak and below the current-best calibration band.
+- Step 10 MFU: 38.18%.
+- Step 10 peak memory: 168.57 GiB, 94.52%, about 0.53 GiB below the chunks-6 command.
+- Loss moved from 12.50121 at step 1 to 7.00543 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Increasing loss chunks to 8 reduces peak memory slightly but costs too much throughput from extra chunked `lm_head`/loss work.
+- The small 0.53 GiB memory reduction is not enough to justify a larger-batch follow-up because the overhead is far larger than the expected token-count gain from a one-sample local-batch increase.
