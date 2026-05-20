@@ -20,10 +20,6 @@ tlp ()
 }
 
 
-
-# graph_trainer_llama3_debugmodel
-    # --compile.disable_passes cudagraph_pass \
-
 # --- Llama3 debugmodel (FSDP only) ---
 # NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel tlp ./run_train.sh \
 #     --compile.mode aot_fx_trace \
@@ -55,10 +51,10 @@ COMMON_FLAGS="\
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
-    --training.steps 10 \
+    --training.steps 20 \
     --dataloader.dataset c4_test \
     --compile.debug_graph_passes \
-    --compile.disable_passes cudagraph_pass \
+    --compile.disable_passes ''\
     --profiler.enable_profiling \
     --profiler.profile_freq 10 \
     --dump_folder $PROFILE_DIR \
@@ -87,7 +83,7 @@ fi
 #     --parallelism.data_parallel_shard_degree=4 \
 #     --parallelism.tensor_parallel_degree=2 \
 #     --parallelism.expert_parallel_degree=4 \
-#     --training.steps 10 \
+#     --training.steps 20 \
 #     --dataloader.dataset c4_test \
 #     --compile.debug_graph_passes \
 #     --profiler.enable_profiling \
