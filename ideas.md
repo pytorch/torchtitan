@@ -1411,3 +1411,13 @@
   Planned source/config changes: Edit `qwen3_14b()` in `torchtitan/models/qwen3/config_registry.py` to import `Float8LinearConverter` and pass the prior `converters=[Float8LinearConverter.Config(recipe_name="rowwise", filter_fqns=["auto_filter_small_kn"], model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is FP8 conversion overhead still dominating or loss sanity degradation.
+  Result: discarded at source state `f45b25d`; 10,122 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. FP8 rowwise auto-filter remains slower than plain BF16 GEMMs for this short-sequence command; restore plain SDPA config.
+
+- Idea: SDPA zero-CTA loss chunks 6 with NCCL_PROTO=Simple
+  Current best source commit: 3a1ed15
+  Source: communication protocol follow-up after current profile still showed 1.45s NCCL kernels using RING_LL
+  Expected mechanism: `NCCL_PROTO=Simple` forces NCCL's Simple protocol instead of the profiled LL kernels. For the FSDP all-gather/reduce-scatter payload sizes, Simple may provide better bandwidth even if it has higher latency.
+  Supporting evidence: The rank0 profile showed `ncclDevKernel_ReduceScatter_Sum_f32_RING_LL` and `ncclDevKernel_AllGather_RING_LL` as the dominant NCCL kernels. Protocol is a single command-level NCCL knob.
+  Planned source/config changes: None; keep plain SDPA config, no converters, no AC.
+  Planned command or config overrides: Current durable command plus `NCCL_PROTO=Simple`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication if LL is already optimal for these collectives.

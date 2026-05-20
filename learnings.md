@@ -3693,3 +3693,24 @@ Interpretation:
 - Chunks=6 made loss kernels negligible; the current durable command is now dominated by GEMM and NCCL.
 - Zero-CTA reduced but did not eliminate NCCL cost compared with the older SDPA profile.
 - Further progress likely needs GEMM-side changes, communication overlap/layout changes, or another validated command-level compiler/communication interaction.
+
+## Experiment 148: SDPA Zero-CTA Loss Chunks 6 With FP8 Rowwise Auto-Filter Converter
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run148-sdpa-fp8-rowwise-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,122, below plain BF16 chunks=6.
+- Step 10 MFU: 37.90%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.32246 at step 1 to 5.40882 at step 10; finite and decreasing.
+
+Interpretation:
+
+- FP8 rowwise auto-filter remains slower than plain BF16 GEMMs on this short-sequence command.
+- Do not pursue FP8 rowwise for the current durable path; restore plain SDPA config.
