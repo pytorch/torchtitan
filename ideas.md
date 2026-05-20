@@ -2802,3 +2802,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LEGACY_CUDA_REGISTER=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower or unsupported registration behavior if the newer default path is already optimal on this CUDA/NCCL stack.
   Result: discarded at source state `458dcc6`; 10,493 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing legacy CUDA registration is clean but below the durable peak, so keep NCCL's default registration path.
+
+- Idea: metrics log frequency 1 with NCCL_SINGLE_PROC_MEM_REG_ENABLE=1
+  Current best source commit: 27901ac1
+  Source: installed NCCL library string scan after registration-path probes showed no win but the build exposes one more memory-registration toggle
+  Expected mechanism: Enable NCCL's single-process memory registration fast path. If colocated ranks or shared process-local CUDA allocations can reuse registration state, this might reduce registration overhead around repeated FSDP collective buffers. If the path only applies to true single-process communicators, the run should act as a no-op calibration.
+  Supporting evidence: `strings` on `/home/avenkataraman/github/pytorch/build/nccl/lib/libnccl.so.2.29.7` shows `NCCL_SINGLE_PROC_MEM_REG_ENABLE`. The recent registration-family probes were all valid, so this is a low-blast-radius way to close the remaining supported registration knob before moving to riskier P2P epoch or unpack-channel probes.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_SINGLE_PROC_MEM_REG_ENABLE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect, slower registration bookkeeping, or an unsupported path warning.
