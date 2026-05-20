@@ -2952,3 +2952,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `5cd4fa`; 10,600 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is a strong exact durable-command sample but still below the run242 measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_LL_THRESHOLD=0
+  Current best source commit: 12cbdcaf
+  Source: remaining exposed NCCL P2P protocol threshold after direct P2P direction, P2P chunk size, and P2P schedule grouping probes were all below peak
+  Expected mechanism: Set the P2P LL threshold to 0, effectively avoiding the low-latency P2P path for tiny P2P tasks. If ring collective setup or proxy-side P2P work is paying unnecessary LL overhead, this can reduce scheduling friction. If the FSDP collectives do not use this path or LL is beneficial, it should no-op or regress.
+  Supporting evidence: The active NCCL build exposes `NCCL_P2P_LL_THRESHOLD` with default 16384 in `enqueue.cc`. Run289 showed dominant `RING_LL` collectives, while transport and scheduling probes have not improved peak; this is a narrow remaining protocol boundary, not a broad transport disable.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_LL_THRESHOLD=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect if collectives bypass this P2P threshold, or slower communication if the LL path is useful.
