@@ -84,33 +84,18 @@ def parallelize_qwen3(
         "reshard_after_forward": reshard_after_forward,
     }
 
-    endpoints = [model.tok_embeddings, model.norm]
-    for endpoint in endpoints:
-        if endpoint is not None:
-            fully_shard(endpoint, **fsdp_config)
-
     layers = list(model.layers.values())
     for layer in layers:
         fully_shard(layer, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
     if layers:
-        if model.tok_embeddings is not None:
-            model.tok_embeddings.set_modules_to_forward_prefetch([layers[0]])
         for layer, next_layer in zip(layers, layers[1:]):
             layer.set_modules_to_forward_prefetch([next_layer])
-        if model.norm is not None:
-            layers[-1].set_modules_to_forward_prefetch([model.norm])
-            model.norm.set_modules_to_forward_prefetch([model.lm_head])
-            model.lm_head.set_modules_to_backward_prefetch([model.norm])
-            model.norm.set_modules_to_backward_prefetch([layers[-1]])
-        else:
-            layers[-1].set_modules_to_forward_prefetch([model.lm_head])
-            model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
+        layers[-1].set_modules_to_forward_prefetch([model.lm_head])
+        model.lm_head.set_modules_to_backward_prefetch([layers[-1]])
         for layer, prev_layer in zip(reversed(layers[1:]), reversed(layers[:-1])):
             layer.set_modules_to_backward_prefetch([prev_layer])
-        if model.tok_embeddings is not None:
-            layers[0].set_modules_to_backward_prefetch([model.tok_embeddings])
 
     disable_fsdp_gradient_division(model)
     logger.info(
