@@ -2411,3 +2411,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `NCCL_PXN_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect, slower transport setup, or worse collective routing if PXN was useful.
+  Result: discarded at source state `2b6d84f`; 10,489 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling PXN is clean but slower than default NCCL transport behavior, so keep PXN/default auto transport enabled.
