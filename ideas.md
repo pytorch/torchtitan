@@ -650,6 +650,7 @@
   Planned source/config changes: Inside `qwen3_14b()`, add a local import of `MXFP8LinearConverter` and pass `converters=[MXFP8LinearConverter.Config(recipe_name="mxfp8_cublas", model_compile_enabled=True)]` to `model_registry("14B", attn_backend="flex", ...)`. Keep the restored transformer-block/lm_head FSDP prefetch source unchanged.
   Planned command or config overrides: Exact robust prefetch command with compile, BF16 dtype, local batch size 5, and no flight recorder.
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risks are converter/runtime incompatibility, slower dynamic quantization overhead, higher memory, or a short-run loss regression.
+  Result: crashed before step metrics at source state `e84866a`; installed torchao rejects `mxfp8_cublas` with `ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe`.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

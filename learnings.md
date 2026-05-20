@@ -2112,3 +2112,22 @@ Interpretation:
 
 - The separate `tok_embeddings` wrap without endpoint prefetch is not stable enough to keep. It now has one near-best decreasing run and one lower-throughput increasing-loss rerun.
 - Restore away from this variant before testing additional ideas. The best measured source is still run70, but the more robust practical baseline remains the run59/run62 transformer-block/lm_head prefetch source.
+
+## Experiment 75: MXFP8 Cublas Converter On Robust Prefetch Baseline
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run75-flex-prefetch-mxfp8-cublas-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash before step metrics.
+- The installed torchao `MXFP8TrainingRecipe` enum rejected `mxfp8_cublas`: `ValueError: 'mxfp8_cublas' is not a valid MXFP8TrainingRecipe`.
+- GPU state after failure was clear; this was not an external-allocation contamination issue.
+
+Interpretation:
+
+- TorchTitan docs mention `mxfp8_cublas`, but this local torchao build only exposes `mxfp8_rceil`, `mxfp8_rceil_wgrad_with_hp`, and `mxfp8_emulated_rceil`.
+- Treat `mxfp8_cublas` as unavailable on this stack. A separate run with supported `mxfp8_rceil` is the next MXFP8 test if continuing the GEMM-focused path.
