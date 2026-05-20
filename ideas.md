@@ -2801,3 +2801,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LEGACY_CUDA_REGISTER=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower or unsupported registration behavior if the newer default path is already optimal on this CUDA/NCCL stack.
+  Result: discarded at source state `458dcc6`; 10,493 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing legacy CUDA registration is clean but below the durable peak, so keep NCCL's default registration path.

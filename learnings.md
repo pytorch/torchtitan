@@ -6845,3 +6845,25 @@ Interpretation:
 
 - The default direct P2P command runs normally after the invalid memcpy P2P timeout and cleanup.
 - This is the strongest recent exact rerun after run265 but still below run242's measured peak, so the durable command remains unchanged.
+
+## Experiment 287: Metrics Log Frequency 1 With NCCL_LEGACY_CUDA_REGISTER=1
+
+Command:
+
+```bash
+NCCL_LEGACY_CUDA_REGISTER=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run287-nccl-legacy-cuda-register-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,493, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.29%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.54941 at step 1 to 5.73064 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_LEGACY_CUDA_REGISTER=1` is valid on this NCCL 2.29.7 / CUDA 13.1 stack but slower than the durable command.
+- Registration-path alternatives are now consistently below peak: disabling local registration, multi-segment registration, graph registration, cuMem host allocation, and forcing legacy CUDA registration all reduce or fail to improve reported step-10 throughput. Keep the default NCCL registration path unless a future profile shows a new registration-specific bottleneck.
