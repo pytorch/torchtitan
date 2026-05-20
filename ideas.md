@@ -1812,3 +1812,13 @@
   Planned command or config overrides: Current best command with `--dataloader.prefetch_factor=1`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no DataLoader warnings. Risk is under-prefetching and reintroducing host input stalls.
   Result: discarded at source state `bbc67c4`; 9,969 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Prefetch factor 1 underfeeds the two-worker input pipeline; keep prefetch factor 2.
+
+- Idea: two DataLoader workers without persistent_workers
+  Current best source commit: 252ff080
+  Source: DataLoader flag isolation after worker count and prefetch depth were bracketed
+  Expected mechanism: Two workers with prefetch factor 2 may retain the input-pipeline overlap even without persistent workers. Removing persistence could reduce worker lifecycle bookkeeping or leave throughput unchanged, clarifying which part of the DataLoader command matters.
+  Supporting evidence: `persistent_workers` is only valid with worker processes and has not been isolated from `num_workers=2` plus `prefetch_factor=2`.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command without `--dataloader.persistent_workers`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no DataLoader warnings. Risk is slower startup/iteration behavior if persistent workers are required for the short 10-step run.
+  Result: discarded at source state `252ff08`; 10,255 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Persistent workers are part of the validated DataLoader setting.
