@@ -1351,3 +1351,4 @@
   Planned source/config changes: Keep the AC source from run141.
   Planned command or config overrides: Current zero-CTA AC command with `--training.local_batch_size=640`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is recomputation dominating or tiny c4_test dataset re-looping.
+  Result: discarded at source state `6432543`; 8,754 tps with finite decreasing loss, 75.22 GiB peak memory, and a dataset re-loop warning. Full AC does not recover throughput even at 4x batch, so restore the no-AC durable source.

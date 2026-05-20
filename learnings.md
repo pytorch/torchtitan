@@ -3554,3 +3554,25 @@ Interpretation:
 
 - Applying full AC is functionally correct and dramatically reduces peak memory, but same-batch throughput is too slow.
 - The memory drop is large enough to test a larger AC batch before deciding whether to restore the no-AC durable source.
+
+## Experiment 142: SDPA Zero-CTA Full AC Seq128 Local Batch 640
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=640 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run142-sdpa-prefetch-seq128-lbs640-compile-bf16-nccl-zero-cta-full-ac-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,754, below the no-AC zero-CTA durable command.
+- Step 10 MFU: 32.78%.
+- Step 10 peak memory: 75.22 GiB, 42.18%.
+- Loss moved from 12.39917 at step 1 to 6.23047 at step 10; finite and decreasing.
+- Runtime warned that `c4_test` was re-looped.
+
+Interpretation:
+
+- Full AC leaves large memory headroom, but recomputation dominates and larger batch does not recover throughput.
+- Do not pursue full AC for this short-sequence objective; restore the no-AC durable source.
