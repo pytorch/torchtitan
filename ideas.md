@@ -3042,6 +3042,15 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
   Result: kept as calibration at source state `7d0c769`; 10,445 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command remains healthy but current variance is low after algorithm-probe closure.
+
+- Idea: profile exact current best after algorithm and runtime closure
+  Current best source commit: e9083fc
+  Source: profiler refresh after nearby source, runtime, optimizer, DataLoader, compile, and NCCL algorithm knobs have mostly closed below the durable peak
+  Expected mechanism: Collect a current Kineto trace for the exact durable command to identify whether the remaining bottleneck is still GEMM plus FSDP collectives, whether late-step stalls have shifted, and whether a new source/config axis is justified. Profiling is diagnostic; its tps is not compared directly against unprofiled runs.
+  Supporting evidence: The last detailed profile was run289 before the final NVLS/PAT algorithm probes and several exact low samples. The durable source has not changed, but a fresh trace can show whether current low-band samples are still dominated by the same kernel mix or by a different host/collective stall.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with profiler enabled: `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is a completed 10-step run with finite overall-decreasing loss, generated profiler traces, and enough kernel/step data to choose a next experiment. Risk is only profiler overhead; do not rank this run's tps against unprofiled results.
   Result: kept as calibration at source state `5ebe5ba`; 10,416 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command remains healthy but this sample is below the recent high band.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
