@@ -2342,3 +2342,12 @@
   Planned command or config overrides: Prefix the current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=4` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is no effect or another overlap regression.
   Result: discarded at source state `1437003`; 10,377 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A four-connection limit still underperforms the default, so keep default CUDA stream queue behavior.
+
+- Idea: exact current best rerun after NCCL and CUDA scheduling probes
+  Current best source commit: d8734bfc
+  Source: variance calibration after CGA cluster, high channel floor, and CUDA connection limits all underperformed
+  Expected mechanism: This is a measurement run, not a new optimization knob. Repeat the exact current-best command to verify the source and environment remain healthy and to see whether the high-variance final-step window samples above the 10,625 measured peak.
+  Supporting evidence: Recent candidates were clean but below peak, and exact reruns of the current command have varied from about 10,446 to 10,594 tps after the 10,625 peak. A fresh exact run helps distinguish environment drift from candidate regressions before taking another source-level step.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command from run215.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,625, record the new measured peak for the same durable command. Risk is only short-window variance.
