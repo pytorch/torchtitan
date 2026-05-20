@@ -2132,3 +2132,12 @@
   Planned command or config overrides: Prefix the current best command with `TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss, unchanged-safe memory, and no Inductor/runtime warnings. Risk is longer compile, no effect, or a repeat of the earlier allocator/performance regression if coordinate descent changes memory behavior.
   Result: discarded at source state `9b04a30`; 10,482 tps with finite overall-decreasing loss but 171.42 GiB peak memory, 96.12%. Coordinate descent alone is slower than the best and pushes memory above the risk line.
+
+- Idea: exact current best rerun after logfreq1 follow-ups
+  Current best source commit: e4bd43f4
+  Source: variance calibration after several command-only logging, batch, profile, and compiler probes
+  Expected mechanism: This is a measurement run, not a new optimization. Repeat the exact validated current-best command to recalibrate short-window variance for `metrics.log_freq=1` before choosing another risky source/config change.
+  Supporting evidence: Run215 validated 10,625 tps, while later nearby command probes ranged from 10,410 to 10,550. A fresh exact run can either reinforce the durable best or reveal a new variance high on the same command.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command from run215.
+  Success criteria and expected risk: Keep as calibration if finite and clean. If it exceeds 10,625, treat it as the new measured peak for the same durable command.
