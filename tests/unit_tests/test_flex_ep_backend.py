@@ -266,14 +266,17 @@ def test_flex_ep_routing_uses_factor_capacity():
 
     assert capacity == expected_capacity
     assert half_capacity == expected_half_factor_capacity
-    assert (
-        flex_ep_mod._compute_dispatch_recv_weights_numel(
-            max_tokens,
-            capacity,
-            top_k,
+    tensor_shapes = {
+        name: shape
+        for name, shape, _dtype in flex_ep_mod.NvlSharedBuffer.tensors_shapes_and_dtypes(
+            max_tokens=max_tokens,
+            dim=16,
+            ep_size=ep_size,
+            num_experts=num_experts,
+            top_k=top_k,
         )
-        == capacity
-    )
+    }
+    assert tensor_shapes["dispatch_recv_weights"] == (capacity,)
 
 
 def test_nvl_shared_buffer_accepts_larger_buffer_and_rejects_too_small():
@@ -295,6 +298,30 @@ def test_nvl_shared_buffer_accepts_larger_buffer_and_rejects_too_small():
             torch.empty(exact_size - 1, dtype=torch.uint8),
             **kwargs,
         )
+
+
+def test_flex_ep_barrier_counter_starts_at_offset_zero():
+    raw = torch.empty(1024, dtype=torch.uint8)
+    barrier_counter = raw[: 16 * torch.int32.itemsize].view(torch.int32)
+
+    assert barrier_counter.data_ptr() == raw.data_ptr()
+    assert barrier_counter.shape == (16,)
+    assert barrier_counter.dtype == torch.int32
+
+    kwargs = {
+        "max_tokens": 16,
+        "dim": 8,
+        "ep_size": 2,
+        "num_experts": 4,
+        "top_k": 2,
+    }
+    exact_size = flex_ep_mod.NvlSharedBuffer.get_buffer_size_bytes(**kwargs)
+    view = flex_ep_mod.NvlSharedBuffer.view_from_buffer(
+        torch.empty(exact_size, dtype=torch.uint8),
+        **kwargs,
+    )
+
+    assert view.offset_of("barrier_counter") == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

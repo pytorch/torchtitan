@@ -198,7 +198,7 @@ class FlexGroupedExperts(Module):
         # CUDA buffers are available.
         self.ep_mesh: DeviceMesh | None = None
         self._router: Any | None = None
-        self._router_shape: tuple[int, int, float] | None = None
+        self._router_shape: tuple[int, int] | None = None
 
     def _get_or_create_router(self, x: torch.Tensor) -> Any:
         if x.device.type != "cuda":
@@ -208,10 +208,14 @@ class FlexGroupedExperts(Module):
         router_shape = (
             x.shape[0],
             x.shape[1],
-            self.flex_ep_capacity_factor,
         )
-        if self._router is not None and self._router_shape == router_shape:
-            return self._router
+        if self._router is not None:
+            assert self._router.capacity_factor == self.flex_ep_capacity_factor, (
+                "FlexGroupedExperts flex_ep_capacity_factor must not change after "
+                "the FlexEP router is created."
+            )
+            if self._router_shape == router_shape:
+                return self._router
 
         from torchtitan.distributed.flex_ep import FlexEPRouter
 
