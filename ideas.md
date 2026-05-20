@@ -2371,3 +2371,4 @@
   Planned source/config changes: Edit only `torchtitan/models/qwen3/parallelize.py` to `fully_shard(model.tok_embeddings, **fsdp_config)` before layer wrapping, set embedding forward prefetch to the first layer, and set the first layer backward prefetch to the embedding.
   Planned command or config overrides: Exact current-best command.
   Success criteria and expected risk: Success is step-10 tps above the 10,650 measured peak or clearly above the current-best calibration band with finite overall-decreasing loss and no FSDP warnings. Risk is extra all-gather overhead, changed prefetch ordering, or root/child FSDP interaction regressions.
+  Result: discarded at source state `b97a281`; 10,457 tps, 39.16% MFU, and 169.06 GiB peak memory with finite overall-decreasing loss. The separate embedding wrapper saves only about 0.04 GiB and does not improve throughput, so restore the DP-only source without separate embedding FSDP.
