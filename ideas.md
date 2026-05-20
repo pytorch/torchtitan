@@ -3042,3 +3042,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
   Result: kept as calibration at source state `5ebe5ba`; 10,416 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command remains healthy but this sample is below the recent high band.
+
+- Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
+  Current best source commit: 3c77e96b
+  Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
+  Expected mechanism: Prefer NVLS where NCCL supports it while allowing Ring fallback for collectives such as initialization broadcasts that broke when `NCCL_ALGO=Tree` was forced globally. If FSDP all-gather or reduce-scatter can use NVLS/NVLS_TREE but the automatic tuner is choosing ring, this may improve collective bandwidth or reduce exposed communication time. If auto selection is already best, it should regress.
+  Supporting evidence: `NCCL_ALGO=Ring` was valid but below peak, and the run289 profile showed `RING_LL` kernels. Prior `NCCL_NVLS_ENABLE` checks were much earlier in the stack; an ordered algorithm list is a more direct current-stack test than chunk or channel knobs.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=NVLS,Ring` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL initialization failure if the algorithm list is too restrictive or slower throughput if NVLS is selected for unsuitable collectives.
