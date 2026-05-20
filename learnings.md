@@ -2542,3 +2542,35 @@ Interpretation:
 
 - Endpoint prefetch recovers much of the no-endpoint embedding-wrap throughput, but it fails the finite decreasing loss criterion.
 - Abandon the separate-embedding branch for the seq128 best shape and restore the simpler robust prefetch source.
+
+## Experiment 96: Profile Seq128 Local Batch 160 Best
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run96-profile-flex-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic profile completed.
+- Profiled step 10 `tps`: 8,533; not used for ranking.
+- Step 10 MFU: 31.96%.
+- Step 10 peak memory: 168.08 GiB, 94.24%.
+- Loss moved from 12.51324 at step 1 to 5.45812 at step 10; finite and decreasing.
+- Traces were generated under `outputs/autoresearch/may19-qwen3-14b/run96-profile-flex-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder/profiling/traces/iteration_10/`.
+
+Rank0 trace summary:
+
+- GPU kernel time: about 4.58 s.
+- GEMM kernels: about 2.18 s.
+- NCCL kernels: about 1.67 s.
+- Flex-attention kernels: about 0.32 s.
+- Other kernels: about 0.41 s.
+- Largest kernel family: `ncclDevKernel_ReduceScatter_Sum_f32_RING_LL`, about 1.16 s across 68 events.
+- All-gather kernels were about 0.50 s.
+
+Interpretation:
+
+- The seq128 best remains mixed compute/communication bound; attention is not the primary target.
+- Reduce-scatter is the main communication cost. Since BF16 gradient reductions failed training sanity, the next safer communication probe is a seq128-specific prefetch-schedule retest rather than lower-precision reductions.

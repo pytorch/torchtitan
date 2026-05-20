@@ -833,6 +833,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Run84 command shape plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is generating traces and extracting a rank0 bottleneck summary. Profiled tps is diagnostic only and should not replace unprofiled ranking.
+  Result: completed at source state `af857e4`; profiled step 10 was 8,533 tps. Rank0 trace shows about 4.58 s GPU kernel time: 2.18 s GEMM, 1.67 s NCCL, 0.32 s flex attention, with reduce-scatter the largest single kernel bucket.
 
 - Idea: forward-only FSDP prefetch at seq128 batch160
   Current best source commit: 03d00df
