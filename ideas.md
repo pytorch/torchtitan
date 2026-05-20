@@ -714,6 +714,15 @@
   Success criteria and expected risk: Success is tps above 9,579 with finite decreasing loss and no external-allocation contamination. Risks are lower FlexAttention/GEMM efficiency, larger batch overhead, or a short-run loss trend failure.
   Result: kept at source state `b980f65`; 9,599 tps with finite decreasing loss, a small improvement over run82 at the same per-step token count.
 
+- Idea: constant-token shorter sequence shape, seq_len 128 and local batch 160
+  Current best source commit: b980f65
+  Source: follow-up to run83 plateau
+  Expected mechanism: Seq256 still improved slightly, so seq128 tests whether reducing attention work further can overcome smaller-tile and larger-batch overhead. This should reveal whether the constant-token sequence-shape curve has peaked.
+  Supporting evidence: Run83 beat run82 by only 20 tps, indicating the benefit is flattening but not yet negative. Peak memory remained stable and loss was healthy.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run83 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Success is tps above 9,599 with finite decreasing loss and no external-allocation contamination. Risks are small-sequence kernel inefficiency, high batch/collation overhead, or loss trend noise.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
