@@ -7505,3 +7505,33 @@ Interpretation:
 
 - The exact durable command remains healthy after explicit algorithm probes, but the current sample is low.
 - Run312-run315 together support closing the immediate `NCCL_ALGO` axis and moving back to source/config scheduling or a new runtime axis rather than treating recent lower samples as a durable source regression.
+
+## Experiment 316: Profile Exact Current Best After Algorithm Preference Closure
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run316-profile-after-nccl-algorithm-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as diagnostic.
+- Step 10 `tps`: 10,527 under profiler; do not rank directly against unprofiled runs.
+- Step 10 MFU: 39.42%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.41045 at step 1 to 6.87414 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- Trace files were generated under `outputs/autoresearch/may19-qwen3-14b/run316-profile-after-nccl-algorithm-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/profiling/traces/iteration_10/`.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Trace summary:
+
+- The profiled active step was around 1.94s on all ranks, and GPU kernel busy union was also about 1.93s on all ranks. The run is GPU busy rather than host idle or DataLoader limited.
+- Rank 0 kernel bucket time was roughly 1.61s GEMM, 0.55s reduce-scatter, 0.47s all-gather, 0.15s Triton other, and 0.10s other kernels.
+- Rank 6 and rank 7 still show the largest summed NCCL time, especially reduce-scatter, but their busy union is similar to other ranks because the collectives overlap with compute.
+- Top kernels remain SM100 GEMMs plus `ncclDevKernel_ReduceScatter_Sum_f32_RING_LL` and `ncclDevKernel_AllGather_RING_LL`.
+
+Interpretation:
+
+- The post-algorithm-probe profile matches the earlier bottleneck model: compiled GEMMs dominate, while FSDP ring-LL reduce-scatter/all-gather is substantial and mostly overlapped.
+- Explicit `NCCL_ALGO` preferences did not help, and the trace does not show a new host-side or input-pipeline bottleneck. Continue with narrower source/config scheduling or untried low-risk runtime axes rather than more algorithm-list overrides.

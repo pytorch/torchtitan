@@ -3051,7 +3051,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command with profiler enabled: `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a completed 10-step run with finite overall-decreasing loss, generated profiler traces, and enough kernel/step data to choose a next experiment. Risk is only profiler overhead; do not rank this run's tps against unprofiled results.
-  Result: kept as calibration at source state `5ebe5ba`; 10,416 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command remains healthy but this sample is below the recent high band.
+  Result: kept as diagnostic at source state `3dc1138`; profiler completed with 10,527 tps at step 10, 39.42% MFU, finite overall-decreasing loss, unchanged 169.10 GiB peak memory, and traces under `outputs/autoresearch/may19-qwen3-14b/run316-profile-after-nccl-algorithm-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/profiling/traces/iteration_10/`. The current bottleneck picture remains GEMM plus overlapped FSDP ring-LL reduce-scatter/all-gather rather than host or DataLoader idle.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
