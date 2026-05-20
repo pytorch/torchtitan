@@ -733,6 +733,7 @@
   Planned command or config overrides: Run84 command shape with `--training.seq_len=64 --training.local_batch_size=320`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no external-allocation contamination. Risks are worse attention kernel efficiency, Python/dataloader overhead from large batch count, or invalid short-sequence loss behavior.
   Attempt: run85 at source state `4a37041` was invalid; VLLM workers appeared during the run and held about 98 GiB on GPUs 2-5 at OOM time.
+  Retry result: discarded at source state `0970dd8`; 9,265 tps with finite decreasing loss, below the seq128/batch160 best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

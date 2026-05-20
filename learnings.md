@@ -2322,3 +2322,22 @@ Result:
 Interpretation:
 
 - Retry the exact same command after the VLLM workers clear and the node remains clear for a stable window.
+
+Retry command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=64 --training.local_batch_size=320 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run86-retry-flex-prefetch-seq64-lbs320-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Retry result:
+
+- Status: discard.
+- Step 10 `tps`: 9,265, below run84's 9,709.
+- Step 10 MFU: 34.63%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.42349 at step 1 to 7.90156 at step 10; finite and decreasing.
+
+Retry interpretation:
+
+- The constant-token sequence-shape sweep turns over between seq128 and seq64. Keep seq128/local-batch-160 as the best measured shape for this line.
+- The regression is large enough that testing seq32/local-batch-640 is not a high-priority next step unless the goal is to map the full curve.
