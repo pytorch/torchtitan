@@ -2451,3 +2451,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_DMABUF_ENABLE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if NCCL was not using DMA-BUF, or slower IPC/collective setup if DMA-BUF is beneficial.
+  Result: discarded at source state `c671468`; 10,452 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling DMA-BUF is clean but below the durable command's high band, so keep NCCL default DMA-BUF behavior.
