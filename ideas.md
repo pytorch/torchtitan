@@ -3153,6 +3153,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no new compiler/FSDP warnings. Risk is slower throughput from losing fusion across RMSNorm/residual boundaries or a compile failure if submodule fullgraph capture handles module boundaries worse than block capture.
   Result: discarded at source state `4bb42b6`; 10,479 tps with finite overall-decreasing loss and 167.98 GiB peak memory. Finer attention/FFN compile granularity reduces memory versus the durable source but slows throughput, so restore block-level compile.
 
+- Idea: final SDPA stack with Inductor GEMM max autotune only
+  Current best source commit: b6d229b
+  Source: compiler-flag follow-up after source-level compile granularity reduced memory but slowed throughput
+  Expected mechanism: Enable only `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` on the durable block-level compile source. This targets the profile-dominant GEMM bucket without enabling the broader `TORCHINDUCTOR_MAX_AUTOTUNE=1` bundle or coordinate descent that previously caused allocator pressure and a large throughput regression.
+  Supporting evidence: Run316 showed GEMM as the largest kernel bucket. The earlier GEMM-only autotune run was on the old long-sequence flex-attention branch, while the current durable SDPA seq128 stack has different shapes, batch size, loss chunking, DataLoader settings, and NCCL policy. Local CUTE/CUTLASS dependencies are unavailable, so this tests Inductor's available GEMM autotune path rather than a CUTE backend.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1` and keep `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and memory not materially above 169.10 GiB. Risk is longer compile, allocator pressure, or selecting slower GEMM variants as in earlier broader autotune probes.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
