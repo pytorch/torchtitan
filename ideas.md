@@ -2261,3 +2261,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `NCCL_ALGO=Ring` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower collectives if auto-selection was already better than all-Ring.
+  Result: discarded at source state `ad7fe20`; 10,580 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The run had severe transient slowdowns at steps 8 and 9 despite no NCCL warnings, so forcing Ring is not better than NCCL auto-selection.
