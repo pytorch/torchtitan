@@ -2322,3 +2322,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_MIN_NCHANNELS=32` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse GEMM overlap, extra launch overhead, or NCCL ignoring/capping the request.
   Result: discarded at source state `e8d2173`; 10,497 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Raising the minimum channel count to 32 does not beat NCCL's default channel selection, so close the forced channel-count direction for now.
+
+- Idea: metrics log frequency 1 with CUDA_DEVICE_MAX_CONNECTIONS=2
+  Current best source commit: 141d7fb7
+  Source: CUDA stream scheduling follow-up after `CUDA_DEVICE_MAX_CONNECTIONS=1` was too restrictive on an earlier command stack
+  Expected mechanism: Limit each process to two CUDA work queues. This may reduce launch-order jitter and improve overlap between FSDP collectives and compiled GEMMs without the full serialization risk of `CUDA_DEVICE_MAX_CONNECTIONS=1`.
+  Supporting evidence: Recent NCCL-specific knobs have not improved the current best, suggesting the remaining communication exposure may be about stream scheduling and overlap rather than collective kernel parameters. The prior `=1` result closes only the most restrictive setting, not a moderate queue limit.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=2` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is worse overlap or lower GEMM concurrency if queue limiting is still too restrictive.
