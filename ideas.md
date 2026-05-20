@@ -1972,3 +1972,12 @@
   Planned command or config overrides: Current best two-worker command with `NCCL_BUFFSIZE=8388608` in the environment, alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,328 or a result above the 10,301 rerun threshold that warrants exact validation, with finite decreasing loss and no NCCL warnings. Risk is worse overlap if larger slices monopolize resources or if the default 4 MiB buffer is already optimal.
   Result: discarded at source state `68f7e79`; 10,256 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Increasing NCCL buffer size to 8 MiB is clean but slower than the validated current-best command.
+
+- Idea: Float8 broad linear converter with local_batch_size=200 on current command
+  Current best source commit: 4d764dc8
+  Source: memory-headroom conversion after run198 showed Float8 saves about 39 GiB but slows batch160
+  Expected mechanism: Broad `Float8LinearConverter` lowers the current command's peak memory from 169.10 GiB to about 129.86 GiB at local batch 160. Raising local batch size to 200 may amortize dynamic quantization and launch overhead enough to beat the BF16 command while staying below the memory-risk line.
+  Supporting evidence: Run198 on the current command stack showed Float8 batch160 is clean but slower. Older broad-FP8 batch200 improved over broad-FP8 batch160 and fit at 154.9 GiB, but it predated the current loss-chunks, zero-CTA, and two-worker DataLoader settings. This is the direct test of whether the Float8 memory savings can now be converted into throughput.
+  Planned source/config changes: Edit only `qwen3_14b()` to pass `converters=[Float8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
+  Planned command or config overrides: Current best two-worker command with `--training.local_batch_size=200`.
+  Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risks are the known `FSDPFloat8Linear` view warning, slower quantization overhead, memory pressure around the loss path, or the same batch-scaling regression seen at broad-FP8 batch220.
