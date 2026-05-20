@@ -1561,3 +1561,13 @@
   Planned source/config changes: Keep root forward-only FSDP prefetch source unchanged.
   Planned command or config overrides: Exact run162 command with a new dump folder.
   Success criteria and expected risk: Promote only if the rerun stays above the durable rerun threshold of 10,258 tps with finite decreasing loss and no warnings; otherwise restore the durable schedule.
+  Result: discarded at source state `26a5589`; 9,406 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The root forward-only result was variance; restore the durable prefetch schedule.
+
+- Idea: SDPA zero-CTA loss chunks 6 with AdamW weight_decay=0
+  Current best source commit: 3a1ed15
+  Source: optimizer-side command follow-up after communication/prefetch variants failed validation
+  Expected mechanism: Setting `--optimizer.weight_decay=0.0` may reduce fused AdamW work in the optimizer step and slightly change memory traffic, while preserving the same model/data/parallelism workload and keeping optimizer selection in the allowed search space.
+  Supporting evidence: Optimizer time is small in the profile, so expected upside is limited, but optimizer config is explicitly editable and `foreach` optimizer was already tested while weight decay itself has not been isolated.
+  Planned source/config changes: Restore durable prefetch source.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, and `--optimizer.weight_decay=0.0`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no optimizer/runtime warnings. Risk is no speed impact or altered short-run optimization dynamics.

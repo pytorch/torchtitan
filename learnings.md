@@ -4017,3 +4017,25 @@ Interpretation:
 
 - Root forward-only prefetch is the first root-endpoint variant to beat the current measured best, but the margin is tiny.
 - Validate with an exact rerun before promoting; if it fails validation, restore the durable schedule.
+
+## Experiment 163: Exact Rerun Of SDPA Zero-CTA Loss Chunks 6 With Root Forward-Only FSDP Prefetch
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run163-rerun-sdpa-root-forward-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,406, far below the durable chunks=6 command.
+- Step 10 MFU: 35.22%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.35325 at step 1 to 5.51688 at step 10; finite and decreasing.
+- No FSDP/runtime warnings appeared.
+
+Interpretation:
+
+- Root forward-only prefetch does not validate; run162 was timing variance.
+- Restore the durable prefetch schedule and do not pursue root endpoint prefetch further.
