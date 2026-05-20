@@ -3131,6 +3131,7 @@
   Planned source/config changes: Reapply root FSDP `reshard_after_forward=False` in `torchtitan/models/qwen3/parallelize.py`; leave transformer layers and `lm_head` unchanged.
   Planned command or config overrides: Exact current-best command but set `--training.local_batch_size=162`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and peak memory not materially above the durable command. Risk is slower execution if batch162 does not improve utilization or memory returns above the preferred envelope.
+  Result: discarded at source state `b69040e`; 10,553 tps with finite overall-decreasing loss and 168.94 GiB peak memory. The root no-reshard memory saving keeps batch162 below the durable memory peak, but the larger batch does not beat the durable command.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
