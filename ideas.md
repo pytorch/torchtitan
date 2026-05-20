@@ -1641,3 +1641,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--training.seq_len=120 --training.local_batch_size=170 --loss.num_chunks=6` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss, no dataset re-loop warning, and memory below the risk line. Risk is reduced matmul efficiency or higher memory from the larger batch.
+  Result: discarded at source state `342907f`; 9,968 tps with finite decreasing loss and 168.00 GiB peak memory. Seq120 is still slower than the durable seq128 command.
+
+- Idea: SDPA zero-CTA loss chunks 6 with seq136 local batch 150
+  Current best source commit: 3a1ed15
+  Source: longer-side shape retest after shorter seq96 and seq120 regressed
+  Expected mechanism: Sequence length 136 with local batch 150 keeps tokens close to the durable command while moving to the longer side of seq128. It may improve GEMM efficiency or communication/loss balance relative to shorter shapes while using slightly less batch.
+  Supporting evidence: Prior longer-shape tests were before the zero-CTA+chunks6 durable command. Since shorter retests regressed, one nearby longer point can close the local shape bracket.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--training.seq_len=136 --training.local_batch_size=150 --loss.num_chunks=6` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and memory below the risk line. Risk is uneven chunks and lower batch reducing throughput.

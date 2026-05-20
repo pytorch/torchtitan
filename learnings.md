@@ -4187,3 +4187,24 @@ Interpretation:
 
 - Seq96 remains much slower even after zero-CTA and chunks6 changed the command balance.
 - Continue shape retesting only near seq128; shorter sequence lengths lose too much GEMM efficiency.
+
+## Experiment 171: SDPA Zero-CTA Loss Chunks 6 With Seq120 Local Batch 170
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=120 --training.local_batch_size=170 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run171-sdpa-prefetch-seq120-lbs170-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,968, below the durable seq128 chunks=6 command.
+- Step 10 MFU: 37.32%.
+- Step 10 peak memory: 168.00 GiB, 94.20%.
+- Loss moved from 12.44914 at step 1 to 5.45174 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Seq120 lowers memory but still loses too much throughput versus seq128.
+- Test one nearby longer-side point before closing local shape retesting.
