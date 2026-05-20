@@ -955,6 +955,15 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and peak memory below the 95% risk line. Risk is repeating the flex result where seq256 was slower.
   Result: discarded at source state `8512bac`; 9,925 tps with finite decreasing loss and 168.57 GiB peak memory, below the SDPA seq128 best.
 
+- Idea: SDPA seq96 constant-token shape
+  Current best source commit: 846907b
+  Source: lower-sequence shape retest after SDPA attention replaced flex as the best backend
+  Expected mechanism: Seq96/local-batch-213 keeps per-rank tokens near the seq128 best while testing whether SDPA's short-sequence behavior favors more examples per rank.
+  Supporting evidence: Under flex, seq96 was slower than seq128. SDPA changed the attention kernel and reduced attention cost, so the lower-side midpoint should be retested once.
+  Planned source/config changes: None; use plain SDPA, no converters, bidirectional prefetch.
+  Planned command or config overrides: Run99 command shape with `--training.seq_len=96 --training.local_batch_size=213`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and peak memory below the 95% risk line. Risk is lower kernel efficiency from non-power-of-two sequence length or larger batch-count overhead.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
