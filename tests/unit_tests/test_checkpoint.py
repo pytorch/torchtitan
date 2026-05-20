@@ -789,7 +789,7 @@ class TestConfigPostInit(unittest.TestCase):
         # keep_latest_k range checks
         with self.assertRaisesRegex(ValueError, "cannot be negative"):
             CheckpointManager.Config(keep_latest_k=-1)
-        with self.assertRaisesRegex(ValueError, "cannot be 1"):
+        with self.assertRaisesRegex(ValueError, "at least 2 checkpoint replicas"):
             CheckpointManager.Config(keep_latest_k=1)
 
     def test_path_normalization(self):
@@ -834,19 +834,13 @@ class TestConfigPostInit(unittest.TestCase):
     def test_warnings(self, mock_logger):
         """Test that logical redundancies trigger warnings but don't crash."""
 
-        # 1. Path missing step suffix
-        CheckpointManager.Config(initial_load_path="/path/without/step")
-        mock_logger.warning.assert_any_call(
-            "initial_load_path '/path/without/step' missing step suffix (e.g. step-100)."
-        )
-
-        # 2. Redundant load_only vs first_step
+        # Redundant load_only vs first_step
         CheckpointManager.Config(load_only=True, enable_first_step_checkpoint=True)
         mock_logger.warning.assert_any_call(
             "checkpoint.load_only is True; enable_first_step_checkpoint will be ignored."
         )
 
-        # 3. model_only=True without a path
+        # model_only=True without a path
         CheckpointManager.Config(initial_load_model_only=True, initial_load_path=None)
         mock_logger.warning.assert_any_call(
             "initial_load_model_only=True has no effect without an initial_load_path."

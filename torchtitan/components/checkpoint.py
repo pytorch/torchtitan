@@ -351,10 +351,6 @@ class CheckpointManager(Configurable):
                     raise ValueError(
                         f"initial_load_path must be absolute: {self.initial_load_path}"
                     )
-                if not re.search(r"step[-_]\d+/?$", self.initial_load_path):
-                    logger.warning(
-                        f"initial_load_path '{self.initial_load_path}' missing step suffix (e.g. step-100)."
-                    )
 
             # 3. Dependency Assertions (Field B requires Field A)
             if self.initial_load_in_hf and not (
