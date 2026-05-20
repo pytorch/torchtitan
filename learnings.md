@@ -4039,3 +4039,24 @@ Interpretation:
 
 - Root forward-only prefetch does not validate; run162 was timing variance.
 - Restore the durable prefetch schedule and do not pursue root endpoint prefetch further.
+
+## Experiment 164: SDPA Zero-CTA Loss Chunks 6 With AdamW Weight Decay 0
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --optimizer.weight_decay=0.0 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run164-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-weight-decay0-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Step 10 `tps`: 10,268, slightly above the durable chunks=6 rerun but below the prior measured best.
+- Step 10 MFU: 38.45%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.50446 at step 1 to 6.05751 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Removing AdamW weight decay is at most a tiny throughput improvement; the margin is too small to trust without validation.
+- Run an exact rerun before changing the durable command.

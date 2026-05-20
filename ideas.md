@@ -1571,3 +1571,13 @@
   Planned source/config changes: Restore durable prefetch source.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, and `--optimizer.weight_decay=0.0`.
   Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no optimizer/runtime warnings. Risk is no speed impact or altered short-run optimization dynamics.
+  Result: tentative keep at source state `f7a4454`; 10,268 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This is only 10 tps above the durable rerun, so validate with an exact rerun before promoting.
+
+- Idea: exact rerun of SDPA zero-CTA loss chunks 6 with AdamW weight_decay=0
+  Current best source commit: f7a4454
+  Source: validation follow-up after run164 produced a tiny optimizer-config win
+  Expected mechanism: Repeat the exact command to check whether removing AdamW weight decay is a real improvement or short-run variance.
+  Supporting evidence: Optimizer time is small, and many tiny wins have failed exact reruns.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Exact run164 command with a new dump folder.
+  Success criteria and expected risk: Keep only if the rerun remains above 10,258 tps with finite decreasing loss and no warnings; otherwise discard the optimizer weight decay change.
