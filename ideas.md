@@ -2402,3 +2402,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_P2P_LEVEL=NVL` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if auto already chooses NVLink, or slower initialization/collectives if the forced level is too restrictive.
   Result: discarded at source state `cfbca39`; 10,505 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing NVLink P2P level is clean but slower than NCCL auto transport selection, so keep the default P2P level.
+
+- Idea: metrics log frequency 1 with NCCL_PXN_DISABLE=1
+  Current best source commit: da564fcf
+  Source: NCCL transport path follow-up after forcing P2P level to NVL regressed
+  Expected mechanism: Disable NCCL PXN pathing. If NCCL auto transport is introducing proxy routing or extra path-selection overhead on this single-node B200 setup, disabling PXN may reduce collective tail latency without changing channel, CTA, protocol, or tensor shapes.
+  Supporting evidence: The workload is single-node and uses exposed FSDP collectives. `NCCL_P2P_LEVEL=NVL` did not help, but PXN is a separate transport feature that may still affect auto-selected paths.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_PXN_DISABLE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect, slower transport setup, or worse collective routing if PXN was useful.
