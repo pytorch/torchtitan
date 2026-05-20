@@ -114,7 +114,7 @@ def dense_counter_placement() -> NamedPlacement:
 # ---------------------------------------------------------------------------
 
 
-def router_gate_config() -> ShardingConfig:
+def router_gate_config(*, has_bias: bool = False) -> ShardingConfig:
     """Router gate: R@tp weight, R@tp activations.
 
     The gate's weight is replicated on TP. Computation is replicated.
@@ -122,11 +122,14 @@ def router_gate_config() -> ShardingConfig:
     local_spmd boundary), so the gate's weight grad is naturally P@tp
     and gets allreduced by FSDP post-backward (or convert(I,R) hook).
     """
+    state_shardings = {"weight": dense_param_placement(tp=spmd.I)}
+    state_tp_ir = {"weight"}
+    if has_bias:
+        state_shardings["bias"] = dense_param_placement(tp=spmd.I)
+        state_tp_ir.add("bias")
     return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.I),
-        },
-        state_tp_ir={"weight"},
+        state_shardings=state_shardings,
+        state_tp_ir=state_tp_ir,
     )
 
 
@@ -218,6 +221,11 @@ def routed_expert_tp_config(
             name: dense_param_placement(tp=tp_placement)
             for name, tp_placement in expert_param_layout.items()
         },
+        state_tp_ir={
+            name
+            for name, tp_placement in expert_param_layout.items()
+            if name.endswith("bias") and tp_placement is spmd.I
+        },
     )
 
 
@@ -241,6 +249,8 @@ def set_moe_sharding_config(
     enable_tp: bool,
     enable_ep: bool,
     enable_sp: bool,
+    expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType] | None = None,
+    router_has_bias: bool = False,
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
 
@@ -250,9 +260,14 @@ def set_moe_sharding_config(
     - ``moe.experts``: sparse-family EP (S(0)@ep) when EP enabled,
       dense-family TP when EP disabled.
     """
+    if expert_param_layout is None:
+        expert_param_layout = {"w1": spmd.S(1), "w2": spmd.S(2), "w3": spmd.S(1)}
+
     if enable_tp:
         moe_cfg.sharding_config = moe_wrapper_config(enable_sp=enable_sp)
-        moe_cfg.router.gate.sharding_config = router_gate_config()
+        moe_cfg.router.gate.sharding_config = router_gate_config(
+            has_bias=router_has_bias
+        )
 
         if getattr(moe_cfg, "shared_experts", None) is not None:
             moe_cfg.shared_experts.w1.sharding_config = shared_expert_colwise_config()
@@ -260,7 +275,9 @@ def set_moe_sharding_config(
             moe_cfg.shared_experts.w3.sharding_config = shared_expert_colwise_config()
     else:
         moe_cfg.sharding_config = moe_wrapper_state_config()
-        moe_cfg.router.gate.sharding_config = router_gate_config()
+        moe_cfg.router.gate.sharding_config = router_gate_config(
+            has_bias=router_has_bias
+        )
 
         if getattr(moe_cfg, "shared_experts", None) is not None:
             moe_cfg.shared_experts.w1.sharding_config = shared_expert_state_config()
@@ -268,14 +285,13 @@ def set_moe_sharding_config(
             moe_cfg.shared_experts.w3.sharding_config = shared_expert_state_config()
 
     if enable_ep:
-        expert_params = ["w1", "w2", "w3"]
         moe_cfg.experts.sharding_config = routed_expert_ep_config(
-            expert_params,
+            list(expert_param_layout),
             enable_tp=enable_tp,
         )
     elif enable_tp:
-        moe_cfg.experts.sharding_config = routed_expert_tp_config(
-            {"w1": spmd.S(1), "w2": spmd.S(2), "w3": spmd.S(1)}
-        )
+        moe_cfg.experts.sharding_config = routed_expert_tp_config(expert_param_layout)
     else:
-        moe_cfg.experts.sharding_config = routed_expert_state_config(["w1", "w2", "w3"])
+        moe_cfg.experts.sharding_config = routed_expert_state_config(
+            list(expert_param_layout)
+        )

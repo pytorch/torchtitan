@@ -6,7 +6,7 @@
 
 from typing import TYPE_CHECKING
 
-from torch.distributed.tensor import Placement, Replicate, Shard
+import spmd_types as spmd
 
 from torchtitan.models.common.attention import GQAttention
 
@@ -19,6 +19,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
 )
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
@@ -29,24 +30,34 @@ def set_qwen3_sharding_config(
     config: "Qwen3Model.Config",
     *,
     loss_parallel: bool,
+    enable_tp: bool,
     enable_sp: bool,
+    enable_ep: bool,
+    chunked_loss: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Qwen3 sub-configs.
-
-    No-op when TP is not enabled.
-    """
+    """Fill ``sharding_config`` on all Qwen3 sub-configs."""
 
     set_decoder_sharding_config(
-        config, loss_parallel=loss_parallel, enable_sp=enable_sp
+        config,
+        loss_parallel=loss_parallel,
+        enable_sp=enable_sp,
+        chunked_loss=chunked_loss,
     )
     for layer_cfg in config.layers:
-        _set_qwen3_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_qwen3_layer_sharding(
+            layer_cfg,
+            enable_tp=enable_tp,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
 
 
 def _set_qwen3_layer_sharding(
     layer_cfg: "Qwen3TransformerBlock.Config",
     *,
+    enable_tp: bool,
     enable_sp: bool,
+    enable_ep: bool,
 ) -> None:
     """Set sharding on one Qwen3 transformer layer."""
     attention = layer_cfg.attention
@@ -55,7 +66,7 @@ def _set_qwen3_layer_sharding(
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
-    attn_x_placement: Placement = Shard(1) if enable_sp else Replicate()
+    attn_x_placement = spmd.S(1) if enable_sp else spmd.I
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(attention.inner_attention)
@@ -63,16 +74,24 @@ def _set_qwen3_layer_sharding(
     # QK norms: shard on head dim (dim=2) — independent of SP.
     if attention.qk_norm is not None:
         attention.qk_norm.sharding_config = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=Replicate())},
-            in_src_shardings={"input": dense_activation_placement(tp=Shard(2))},
-            in_dst_shardings={"input": dense_activation_placement(tp=Shard(2))},
-            out_dst_shardings=dense_activation_placement(tp=Shard(2)),
+            state_shardings={"weight": dense_param_placement(tp=spmd.I)},
+            state_tp_ir={"weight"},
+            in_src_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+            in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(2))},
+            out_dst_shardings=dense_activation_placement(tp=spmd.S(2)),
         )
 
-    # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
             attn_x_placement=attn_x_placement,
+            enable_sp=enable_sp,
+        )
+
+    if layer_cfg.moe is not None:
+        set_moe_sharding_config(
+            layer_cfg.moe,
+            enable_tp=enable_tp,
+            enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
