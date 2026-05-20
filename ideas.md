@@ -1150,3 +1150,5 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Current durable best command plus `--debug.enable_structured_logging=false`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no measurable effect or a run-variance regression.
+  Result: first attempt invalid at source state `a76ddfd` because the parser rejected `--debug.enable_structured_logging=false`; the accepted negation form is `--debug.no-enable-structured-logging`.
+  Result: discarded on valid retry at source state `a76ddfd`; 9,582 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Disabling structured logging regresses under the current SDPA best.

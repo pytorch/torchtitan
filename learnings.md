@@ -3119,3 +3119,39 @@ Interpretation:
 
 - Foreach AdamW does not improve optimizer overhead or memory at this shape.
 - Keep default fused AdamW; optimizer implementation knobs tested so far regress.
+
+## Experiment 121: Structured Logging Disabled Invalid Syntax
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --debug.enable_structured_logging=false --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run121-sdpa-prefetch-seq128-lbs160-compile-bf16-structured-logging-off-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: invalid.
+- The parser rejected `false` as an unrecognized option.
+- Correct syntax is `--debug.no-enable-structured-logging`.
+
+## Experiment 122: SDPA Seq128 Local Batch 160 With Structured Logging Disabled
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --debug.no-enable-structured-logging --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run122-sdpa-prefetch-seq128-lbs160-compile-bf16-structured-logging-off-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- The log confirmed structured logging was disabled.
+- Step 10 `tps`: 9,582, below run99's 10,005.
+- Step 10 MFU: 35.88%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.41546 at step 1 to 7.41367 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Disabling structured logging does not help this SDPA path and may perturb timing unfavorably.
+- Keep structured logging enabled for current best comparisons.
