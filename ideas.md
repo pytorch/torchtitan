@@ -2462,3 +2462,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `OMP_NUM_THREADS=2` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is CPU oversubscription or another variance-only result.
   Result: discarded at source state `60155ea`; 10,505 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. OMP=2 is a healthy run but remains below the measured peak, so keep torchrun's default one OpenMP thread per rank.
+
+- Idea: metrics log frequency 1 with OMP_NUM_THREADS=4
+  Current best source commit: 8e469eab
+  Source: host-side scheduling high-side bracket after OMP=2 was clean but below peak
+  Expected mechanism: Use four OpenMP threads per rank. If the remaining host overhead is from CPU work that scales with a few more threads, OMP=4 may improve launch/input/optimizer scheduling more than OMP=2; if not, it will close the high-side CPU-thread bracket.
+  Supporting evidence: The machine has 384 logical CPUs, so four OpenMP threads for eight ranks is not a global CPU oversubscription risk. OMP=2 was clean at 10,505 tps but not a win, leaving one plausible larger setting before keeping torchrun's default.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `OMP_NUM_THREADS=4` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is lower GPU overlap or more host scheduling jitter from extra CPU threads.
