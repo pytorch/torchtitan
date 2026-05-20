@@ -2651,3 +2651,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_COMM_BLOCKING=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower execution from reduced overlap or a no-op if NCCL ignores the variable.
+  Result: discarded at source state `9fe6a05`; 10,537 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. NCCL communicator blocking is valid but below the durable measured peak, so keep default NCCL communicator progress behavior.
