@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.qwen3.model import Qwen3Model
@@ -314,6 +315,8 @@ class Qwen3VLModel(Qwen3Model):
         # --- Compute interleaved MRoPE cos/sin from position IDs ---
 
         freqs_cis = self.freqs_cis
+        if isinstance(freqs_cis, DTensor):
+            freqs_cis = freqs_cis.to_local()
         head_dim = freqs_cis.shape[-1] // 2
         cos_cache = freqs_cis[:, :head_dim]
         sin_cache = freqs_cis[:, head_dim:]
