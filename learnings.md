@@ -7015,3 +7015,25 @@ Interpretation:
 
 - Spending the run292 memory reduction on local batch size 162 recovers some throughput versus the source-only suffix no-reshard probe, but not enough to beat the durable command.
 - The memory level is also above the preferred envelope, so this combination is too risky for a sub-peak result. Restore durable source and keep local batch size 160.
+
+## Experiment 294: Exact Current Best Rerun After Suffix No-Reshard Probes
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run294-rerun-after-suffix-no-reshard-probes-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,568, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.58%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.33218 at step 1 to 6.64657 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The durable source recovered cleanly after the suffix no-reshard source probes and restoration.
+- The exact command remains in the normal recent high band, but it did not exceed the run242 measured peak. Continue searching outside the suffix no-reshard path.
