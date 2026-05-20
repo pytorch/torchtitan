@@ -2215,3 +2215,26 @@ Stable-clear retry interpretation:
 - The shorter-sequence, larger-batch shape improves reported tokens/sec materially while staying under the 95% memory-risk line.
 - This is a valid kept result under the program's configurable training settings, but it is a workload-shape change and should be tracked separately from the original 4096-token-context source/layout comparisons.
 - Next useful follow-up is a neighboring constant-token shape, such as seq_len 1024 and local batch 20, if the goal is purely reported tps under allowed training-shape tuning.
+
+## Experiment 81: Constant-Token Seq1024 Local Batch 20 Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=1024 --training.local_batch_size=20 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run81-flex-prefetch-seq1024-lbs20-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep; new best measured reported `tps`.
+- Step 10 `tps`: 9,394, above run80's 9,198.
+- Step 10 MFU: 36.10%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.24531 at step 1 to 5.67367 at step 10; finite and decreasing.
+- Per-step tokens match the 4096x5 and 2048x10 runs: 8 ranks * local batch 20 * seq_len 1024 = 163,840 tokens/step.
+
+Interpretation:
+
+- The constant-token sequence-shape trend continues: shorter context and larger local batch gives higher reported tps at the same token count per step.
+- Peak memory is unchanged from run80, suggesting the loss/logit and dense-token dimensions dominate memory more than the attention sequence dimension at these shapes.
+- Next follow-up is seq_len 512 with local batch 40, again as a workload-shape tuning result rather than a 4096-context layout comparison.

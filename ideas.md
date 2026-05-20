@@ -692,6 +692,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Run80 command shape with `--training.seq_len=1024 --training.local_batch_size=20`.
   Success criteria and expected risk: Success is tps above 9,198 with finite decreasing loss and no external-allocation contamination. Risks are worse GPU efficiency from smaller attention tiles, dataloader/collation overhead from larger batch count, or memory pressure in logits/loss despite constant token count.
+  Result: kept at source state `218caa7`; 9,394 tps with finite decreasing loss, improving on run80 while preserving the same per-step token count.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
