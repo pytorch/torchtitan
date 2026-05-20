@@ -4800,3 +4800,30 @@ Interpretation:
 
 - The small batch increase converts memory headroom into only moderate throughput, not enough to beat the validated batch160 command.
 - Batch160 remains the better operating point because batch162 is both slower than the best sample and materially closer to OOM.
+
+## Experiment 198: Float8 Linear Converter
+
+Source change:
+
+- Added `Float8LinearConverter.Config(model_compile_enabled=True)` to the Qwen3 14B `model_registry(...)` converters list.
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run198-float8-linear-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard; source should be restored to the non-Float8 best.
+- Step 10 `tps`: 9,940, below the validated two-worker command.
+- Step 10 MFU: N/A; TorchTitan did not report MFU for the quantized candidate.
+- Step 10 peak memory: 129.86 GiB, 72.81%, much lower than the BF16 command.
+- Loss moved from 12.61432 at step 1 to 6.05497 at step 10; finite and decreasing.
+- The run logged `Float8 training active with recipe rowwise` and `Swapped to Float8Linear layers`.
+- The run also logged an FSDP2 warning that `FSDPFloat8Linear` returned a view tensor whose in-place users may skip pre-backward hooks.
+
+Interpretation:
+
+- Float8 conversion saves substantial memory but slows the current batch160 short-sequence command.
+- The warning makes this unattractive as a correctness-sensitive default even before considering throughput. The memory savings could only matter in a separate coupled idea that increases batch size or changes layout, but the converter alone is not a keeper.

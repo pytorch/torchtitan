@@ -1911,3 +1911,4 @@
   Planned source/config changes: Edit only `qwen3_14b()` to pass `converters=[Float8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
   Planned command or config overrides: Current best two-worker command unchanged.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no float8/Dynamo/runtime warnings that invalidate the run. Risk is slower conversion, compile incompatibility, FP8 numerical degradation, or lower MFU accounting if quantized kernels are not reflected the same way.
+  Result: discarded at source state `4614050`; 9,940 tps with finite decreasing loss and 129.86 GiB peak memory, but below the durable best. MFU was reported as N/A and the run logged an FSDPFloat8Linear view warning, so the memory reduction is not worth keeping for the current throughput objective.
