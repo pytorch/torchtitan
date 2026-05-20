@@ -7439,3 +7439,25 @@ Interpretation:
 
 - `NCCL_ALGO=NVLS,Ring` is valid but below the durable peak.
 - The automatic NCCL algorithm selection remains better for the current FSDP all-gather/reduce-scatter pattern than explicitly preferring NVLS with Ring fallback.
+
+## Experiment 313: Metrics Log Frequency 1 With NCCL_ALGO=NVLSTree,Ring
+
+Command:
+
+```bash
+NCCL_ALGO=NVLSTree,Ring NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run313-nccl-algo-nvlstree-ring-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,529, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.43%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.49386 at step 1 to 6.79543 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `NCCL_ALGO=NVLSTree,Ring` is valid but below the durable peak.
+- Combined with run312, explicit NVLS-family algorithm preference does not beat NCCL's automatic algorithm selection for this current durable command. Continue away from algorithm-list overrides unless a later profile shows a different collective mix.

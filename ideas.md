@@ -3061,3 +3061,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_ALGO=NVLSTree,Ring` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is NCCL rejecting the algorithm list, selecting a slower algorithm, or no effect if NVLSTree is not used for the dominant collectives.
+  Result: discarded at source state `b57e3c1`; 10,529 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. `NVLSTree,Ring` is valid but below peak, so close the explicit NVLS-family algorithm preference tests and keep NCCL automatic selection.
