@@ -3133,6 +3133,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and peak memory not materially above the durable command. Risk is slower execution if batch162 does not improve utilization or memory returns above the preferred envelope.
   Result: discarded at source state `b69040e`; 10,553 tps with finite overall-decreasing loss and 168.94 GiB peak memory. The root no-reshard memory saving keeps batch162 below the durable memory peak, but the larger batch does not beat the durable command.
 
+- Idea: exact current best rerun after root no-reshard source restore
+  Current best source commit: b7e5be6
+  Source: calibration after restoring durable source from the discarded root no-reshard and root no-reshard batch162 probes
+  Expected mechanism: Repeat the exact durable command to verify the root FSDP source restore recovered the known behavior and to sample current variance after source edits.
+  Supporting evidence: Run323 and run324 were valid but slower source candidates. Previous restore calibrations catch source drift and sometimes sample the high band.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,658, record it as the new measured peak. Risk is only short-window variance.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
