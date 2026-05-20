@@ -3022,3 +3022,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_NCHANNELS=16` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is slower all-gather/reduce-scatter if fewer NVLS channels underutilize NVLink/NVSwitch bandwidth or no effect if NVLS is not selected.
   Result: discarded at source state `95b3f29`; 10,546 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Fewer NVLS channels are valid but below the durable peak, so do not lower this count.
+
+- Idea: metrics log frequency 1 with NCCL_NVLS_NCHANNELS=32
+  Current best source commit: c6086e5f
+  Source: high-side bracket after `NCCL_NVLS_NCHANNELS=16` was valid but below peak
+  Expected mechanism: Increase NVLS channel count to 32. If the current FSDP collectives are bandwidth-limited and the default single-node Blackwell channel count leaves NVLS underfilled, more channels may improve all-gather/reduce-scatter throughput. If communication CTA pressure is already high, it should regress.
+  Supporting evidence: Run309 showed lowering channel count was not a win. Testing the high side closes whether the useful direction is more NVLS parallelism rather than less.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_NVLS_NCHANNELS=32` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a clean high-band sample with finite overall-decreasing loss. Risk is worse compute overlap from extra communication channels or no effect if NVLS is not selected.
