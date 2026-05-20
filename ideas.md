@@ -2602,3 +2602,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `TORCH_NCCL_CUDA_EVENT_CACHE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is slower execution from event allocation overhead or no effect if the cache is not hot.
   Result: discarded at source state `b738b87`; 10,607 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is a strong sample but below the 10,650 measured peak, so keep the default CUDA event cache behavior.
+
+- Idea: exact current best rerun after CUDA event cache probe
+  Current best source commit: c81fc1d9
+  Source: variance calibration after `TORCH_NCCL_CUDA_EVENT_CACHE=0` sampled high but failed to beat the measured peak
+  Expected mechanism: Repeat the exact durable command. If the event-cache-disabled sample was just normal variance, an exact rerun should land in the same high band without changing the command; if not, it may fall back to the lower calibration band.
+  Supporting evidence: Run267 reached 10,607 tps but stayed below run242's 10,650 tps. Exact reruns have repeatedly sampled the top end of this objective, and this calibration avoids overfitting to a near-peak but lower command-only knob.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
