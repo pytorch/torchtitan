@@ -2792,3 +2792,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `c0080c4`; 10,586 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The environment recovered cleanly after the invalid P2P memcpy timeout, but this did not exceed the measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_LEGACY_CUDA_REGISTER=1
+  Current best source commit: 52b1efb8
+  Source: agent-generated registration-path probe after local, graph, multi-segment, and cuMem host registration toggles were clean but below peak
+  Expected mechanism: Force NCCL's legacy CUDA registration path while keeping default P2P, cuMem device allocation, local registration, and graph registration enabled. If the current stack's newer registration path adds overhead or interacts poorly with expandable allocator segments, the legacy path may reduce registration bookkeeping for the repeated FSDP all-gather and reduce-scatter buffers.
+  Supporting evidence: Registration-related probes have been valid but clustered below the durable peak: `NCCL_LOCAL_REGISTER=0` reached 10,525 tps, `NCCL_MULTI_SEGMENT_REGISTER=0` reached 10,530 tps, `NCCL_GRAPH_REGISTER=0` reached 10,526 tps, and `NCCL_CUMEM_HOST_ENABLE=0` reached 10,415 tps. This is a narrower alternate registration path rather than another disable-all probe.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_LEGACY_CUDA_REGISTER=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower or unsupported registration behavior if the newer default path is already optimal on this CUDA/NCCL stack.
