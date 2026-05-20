@@ -2121,3 +2121,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a complete 10-step profile with finite overall-decreasing loss and a usable trace. The profiled tps is diagnostic only and should not replace the unprofiled best.
+  Result: diagnostic profile completed at source state `b943d52`; profiled step 10 reported 10,404 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Rank0 trace showed kernel time still led by GEMMs around 1,630 ms and NCCL around 996 ms, with smaller Triton and attention buckets.

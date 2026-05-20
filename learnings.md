@@ -5318,3 +5318,32 @@ Interpretation:
 - Batch161 remains a poor shape even under `metrics.log_freq=1`.
 - The extra tokens do not convert into higher reported final-step tps, and memory crosses the 95% risk guideline.
 - Keep local batch size 160; do not retest larger BF16 batches without a real memory-reduction change.
+
+## Experiment 219: Profile Current Best With Metrics Log Frequency 1
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run219-profile-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic profile; do not compare profiled tps against unprofiled candidates.
+- Step 10 `tps`: 10,404 under profiler overhead.
+- Step 10 MFU: 38.96%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.44558 at step 1 to 5.43703 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Rank0 trace summary:
+
+- Total kernel time bucketed by name: GEMM about 1,630 ms, NCCL about 996 ms, Triton about 152 ms, other pointwise/copy/optimizer about 87 ms, other kernels about 63 ms.
+- Largest kernels/ops: NCCL reduce-scatter about 540 ms, NCCL all-gather about 454 ms, and nvjet GEMM kernels totaling about 1.63 s.
+- Attention remains small: flash attention forward/backward kernels are far below GEMM and NCCL time.
+- Structured spans still show step 10 dominated by forward/backward and metric collection under `metrics.log_freq=1`.
+
+Interpretation:
+
+- The useful runtime target is still GEMM throughput plus FSDP collective exposure; data loading and attention backend work remain low priority.
+- Since max-autotune plus coordinate descent previously regressed badly, the only remaining compiler-kernel knob worth a narrow check is coordinate descent without max autotune. It directly targets generated Triton/GEMM-adjacent kernels with less memory/autotune disruption than the earlier max-autotune bundle.
