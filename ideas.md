@@ -2291,3 +2291,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `NCCL_LAUNCH_MODE=GROUP` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or slower launches if the default mode is already optimal.
+  Result: discarded at source state `56341e6`; 10,510 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Group launch mode is clean but slower than the default launch mode on this command.
