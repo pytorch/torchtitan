@@ -2472,3 +2472,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `OMP_NUM_THREADS=4` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is lower GPU overlap or more host scheduling jitter from extra CPU threads.
   Result: discarded at source state `d7b7611`; 10,443 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Extra OpenMP threads do not improve the final `metrics.log_freq=1` command, so keep torchrun's default one thread per rank.
+
+- Idea: metrics log frequency 1 with CUDA_DEVICE_MAX_CONNECTIONS=16
+  Current best source commit: c560936b
+  Source: CUDA launch/overlap high-side bracket after restrictive connection caps regressed
+  Expected mechanism: Increase CUDA device work queues to 16. Prior tests with `CUDA_DEVICE_MAX_CONNECTIONS=2` and `=4` were slower, indicating queue restriction hurts overlap; a higher-side setting may improve concurrent launch scheduling between compiled GEMMs and FSDP collectives if the default queue count is conservative.
+  Supporting evidence: The current profile remains GEMM plus NCCL heavy, and recent NCCL-specific knobs did not improve overlap. No checked-in result has tested a high-side CUDA connection count on the final SDPA/logfreq1 command.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `CUDA_DEVICE_MAX_CONNECTIONS=16` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no warnings. Risk is no effect if the runtime caps/ignores the value, or more launch jitter from excess queues.
