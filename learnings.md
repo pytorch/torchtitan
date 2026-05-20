@@ -6292,3 +6292,29 @@ Interpretation:
 
 - The unchanged durable command is still healthy after the transport-closure probes.
 - This sample remains in the normal 10.4k-10.5k band; run242 remains the high-variance measured peak at 10,650 tps.
+
+## Experiment 262: Two-Module FSDP Prefetch Window
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run262-two-module-fsdp-prefetch-window-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- `torchtitan/models/qwen3/parallelize.py` changed the explicit FSDP prefetch setup from a one-module bidirectional chain to a two-module window.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,445, below the run242 10,650 measured peak and below recent exact reruns.
+- Step 10 MFU: 39.12%.
+- Step 10 peak memory: 170.33 GiB, 95.50%, above the rough 95% memory target.
+- Loss moved from 12.37855 at step 1 to 4.37059 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Prefetching two modules ahead increases memory by about 1.23 GiB over the durable one-module chain and does not improve throughput.
+- The one-module forward/backward prefetch chain is the better point for this memory budget; deeper prefetch consumes the remaining headroom without reducing tail latency.
