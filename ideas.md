@@ -1764,10 +1764,11 @@
   Result: discarded at source state `f0480d5`; 10,254 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Two workers remains the validated DataLoader setting.
 
 - Idea: profile current best SDPA zero-CTA loss chunks 6 with two DataLoader workers
-  Current best source commit: 40032d1
+  Current best source commit: b130c481
   Source: bottleneck refresh after DataLoader worker tuning changed the durable command
   Expected mechanism: Profiling the current best identifies whether remaining time is still GEMM/NCCL dominated or whether host/input overhead remains visible after two DataLoader workers.
   Supporting evidence: The last profile predates the DataLoader-worker improvement. Further blind sweeps are low yield without refreshing the bottleneck mix.
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current best command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Diagnostic run only; must still run 10 steps and maintain finite decreasing loss. Commit the run log but not generated profile traces.
+  Result: diagnostic discard at source state `b130c481`; 9,566 tps under profiler overhead with finite decreasing loss and unchanged 169.10 GiB peak memory. Rank0 trace shows the current best remains dominated by compiled GEMM work and FSDP collectives: kernel totals were ~2.16s nvjet, ~1.43s NCCL, ~0.21s Triton, and ~0.09s flash attention. The top NCCL kernels were reduce-scatter (~1.01s) and all-gather (~0.42s). Host input is no longer the obvious primary bottleneck after the two-worker DataLoader setting.

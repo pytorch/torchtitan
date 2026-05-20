@@ -4468,3 +4468,36 @@ Interpretation:
 
 - Three workers are slower than two workers.
 - DataLoader worker count is bracketed: use two workers, persistent workers, and prefetch factor 2.
+
+## Experiment 184: Profile Current Best Two-Worker DataLoader Command
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run184-profile-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 > run.log 2>&1
+```
+
+Result:
+
+- Status: diagnostic discard; profiler overhead makes throughput non-comparable.
+- Step 10 `tps`: 9,566.
+- Step 10 MFU: 35.82%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.36048 at step 1 to 7.07337 at step 10; finite and decreasing.
+- No dataset re-loop, DataLoader worker warning, OOM, traceback, or NCCL warning appeared.
+
+Rank0 trace notes:
+
+- Kernel total: 4,105.81 ms.
+- NCCL kernels: 1,430.90 ms, led by reduce-scatter at 1,006.17 ms over 66 kernels and all-gather at 420.54 ms over 111 kernels.
+- nvjet GEMM kernels: 2,155.60 ms.
+- Triton kernels: 205.36 ms.
+- Flash attention kernels: 93.95 ms.
+- Other kernels: 220.01 ms.
+- The largest CPU-visible waits were `cudaStreamSynchronize` and profiler step accounting; the CUDA kernel mix is still dominated by model GEMMs plus FSDP communication.
+
+Interpretation:
+
+- The two-worker DataLoader improvement did not change the core bottleneck: remaining time is still mostly transformer GEMMs and FSDP reduce-scatter/all-gather.
+- Attention is too small at seq128 to be a promising near-term target.
+- Further search should focus on reducing collective cost, changing FSDP scheduling, or removing avoidable synchronization/metric work if a legal CLI/config knob exists.
