@@ -102,11 +102,11 @@ class Module(nn.Module, Configurable):
             )
 
     def _init_self_parameters(self) -> None:
-        """Initialize this module's own parameters via ``_init_param``.
+        """Default: initialize every direct parameter via ``_init_param``.
 
-        Subclasses wrapping ``nn.Module`` classes with ``reset_parameters``
-        (e.g. Conv2d, LayerNorm) override this to call ``reset_parameters``
-        when no custom ``param_init`` is provided.
+        Subclasses such as ``Conv2d`` / ``LayerNorm`` / ``GroupNorm``
+        override this to fall back to ``reset_parameters`` when no
+        ``param_init`` is set.
         """
         for name, param in self.named_parameters(recurse=False):
             self._init_param(name, param)
@@ -295,14 +295,6 @@ class Module(nn.Module, Configurable):
         if sharding_config.local_map is None:
             return fn
 
-        if sharding_config.local_input_grad_placements is not None:
-            raise ValueError(
-                f"{type(self).__name__}: local_map and "
-                "local_input_grad_placements cannot coexist. "
-                "Use LocalMapConfig.in_grad_placements for modules "
-                "wrapped with local_map."
-            )
-
         lm = sharding_config.local_map
         in_dst = sharding_config.in_dst_shardings or {}
         pos_args = self._cache_pos_arg_names()
@@ -380,16 +372,14 @@ class Module(nn.Module, Configurable):
 
         in_dst_shardings = sharding_config.in_dst_shardings or {}
         in_src_shardings = sharding_config.in_src_shardings or {}
-        in_grad_shardings = sharding_config.local_input_grad_placements or {}
 
         for name, value in new_kwargs.items():
             if not isinstance(value, torch.Tensor):
                 continue
             src_named_placements = in_src_shardings.get(name)
             dst_named_placements = in_dst_shardings.get(name)
-            grad_named_placements = in_grad_shardings.get(name)
             mesh = parallel_dims.resolve_shared_mesh(
-                [src_named_placements, dst_named_placements, grad_named_placements]
+                [src_named_placements, dst_named_placements]
             )
             if mesh is None:
                 continue
@@ -399,15 +389,11 @@ class Module(nn.Module, Configurable):
 
             if not isinstance(value, DTensor) and src_named_placements is not None:
                 layout = resolve_placements(src_named_placements, mesh)
-                grad_placements: tuple | None = None
-                if grad_named_placements is not None:
-                    grad_placements = resolve_placements(grad_named_placements, mesh)
                 value = DTensor.from_local(
                     value,
                     mesh,
                     layout,
                     run_check=False,
-                    grad_placements=grad_placements,
                 )
 
             if dst_named_placements is not None and isinstance(value, DTensor):
@@ -433,10 +419,7 @@ class Module(nn.Module, Configurable):
         assert sharding_config is not None
 
         out_named_placements = sharding_config.out_dst_shardings
-        out_grad_named_placements = sharding_config.local_output_grad_placements
-        mesh = parallel_dims.resolve_shared_mesh(
-            [out_named_placements, out_grad_named_placements]
-        )
+        mesh = parallel_dims.resolve_shared_mesh([out_named_placements])
         if mesh is None:
             return outputs
 
@@ -445,14 +428,6 @@ class Module(nn.Module, Configurable):
             if isinstance(outputs, DTensor) and outputs.placements != desired:
                 outputs = outputs.redistribute(placements=desired, async_op=True)
 
-        # Unwrap DTensor output to local tensor with the declared backward
-        # gradient placement. Mirrors NoParallel(local_output_grad_placements
-        # =...): the module returns a local tensor; in backward, the
-        # upstream local d_output is wrapped back as a DTensor with the
-        # declared placement (e.g. Partial to skip a downstream all-reduce).
-        if out_grad_named_placements is not None and isinstance(outputs, DTensor):
-            grad_placements = resolve_placements(out_grad_named_placements, mesh)
-            outputs = outputs.to_local(grad_placements=grad_placements)
         return outputs
 
 

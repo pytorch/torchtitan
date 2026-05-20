@@ -27,6 +27,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import _build_pipeline_schedule
+from torchtitan.models.common.nn_modules import Identity
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -227,10 +228,7 @@ def pipeline_module_split(
                         setattr(model, module_name, ModuleList())
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
-                # Replace with Identity
-                from torchtitan.models.common.nn_modules import Identity
-
-                setattr(model, module_name, Identity())
+                setattr(model, module_name, Identity.Config().build())
 
         stage = PipelineStage(
             model,
