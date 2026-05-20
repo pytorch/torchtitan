@@ -1901,3 +1901,4 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current best command with `--training.local_batch_size=162` instead of 160.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator warnings. If peak memory is above roughly 95% without a clear throughput win, discard as memory-risky. Risk is OOM or allocator pressure because the current command is already close to full memory.
+  Result: discarded at source state `3cdc4e9`; 10,311 tps with finite decreasing loss, but below the 10,328 best and with 170.88 GiB peak memory, 95.81%. The extra batch size consumes the remaining memory headroom without improving throughput enough to justify the risk.

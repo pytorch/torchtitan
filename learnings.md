@@ -4778,3 +4778,25 @@ Interpretation:
 
 - The 10,336 tps OMP=2 result did not validate under exact rerun.
 - Keep the durable two-worker command without an explicit OMP override.
+
+## Experiment 197: Local Batch Size 162
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=162 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run197-sdpa-prefetch-seq128-lbs162-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,311, below the 10,328 best.
+- Step 10 MFU: 38.61%.
+- Step 10 peak memory: 170.88 GiB, 95.81%, above the memory-risk line.
+- Loss moved from 12.41224 at step 1 to 6.85446 at step 10; finite and decreasing.
+- No allocator retry, mapping failure, OOM, traceback, or NCCL warning appeared.
+
+Interpretation:
+
+- The small batch increase converts memory headroom into only moderate throughput, not enough to beat the validated batch160 command.
+- Batch160 remains the better operating point because batch162 is both slower than the best sample and materially closer to OOM.
