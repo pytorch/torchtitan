@@ -3281,3 +3281,24 @@ Interpretation:
 
 - Inductor cudagraph capture is incompatible with this compiled FSDP training path as currently written.
 - Do not retry cudagraphs unless the model invocation is changed to mark cudagraph step boundaries or clone outputs, which is outside this narrow optimization loop.
+
+## Experiment 129: SDPA Seq128 Local Batch 160 With NCCL High-Priority Stream
+
+Command:
+
+```bash
+TORCH_NCCL_HIGH_PRIORITY=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run129-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-high-priority-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Step 10 `tps`: 10,010, narrowly above run99's 10,005.
+- Step 10 MFU: 37.49%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.39558 at step 1 to 6.14831 at step 10; finite and decreasing.
+
+Interpretation:
+
+- `TORCH_NCCL_HIGH_PRIORITY=1` is memory-neutral and may slightly improve communication overlap for the SDPA shape.
+- The margin is only 5 tps, so it needs an exact rerun before replacing the durable command.

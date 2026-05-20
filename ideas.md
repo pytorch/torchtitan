@@ -1221,3 +1221,13 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Prefix the current durable best command with `TORCH_NCCL_HIGH_PRIORITY=1`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is no measurable effect or worse stream scheduling.
+  Result: tentative keep at source state `1ab3413`; 10,010 tps, 37.49% MFU, 168.57 GiB peak memory, and loss decreased from 12.39558 to 6.14831. The margin over run99 is tiny, so validate with an exact rerun before promoting this env knob.
+
+- Idea: exact rerun of SDPA NCCL high-priority stream
+  Current best source commit: 1ab3413
+  Source: validation follow-up after run129 narrowly beat the durable SDPA best
+  Expected mechanism: Repeating the exact high-priority NCCL command checks whether the 5 tps gain is durable or short-run variance.
+  Supporting evidence: Multiple tiny wins in this search failed exact reruns; run129 is correct and memory-neutral, but the improvement is below the observed spread between repeated 10-step runs.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Exact run129 command with a new dump folder.
+  Success criteria and expected risk: Keep the high-priority NCCL env knob only if the rerun remains above 10,005 tps with finite decreasing loss and no allocator/OOM warnings.
