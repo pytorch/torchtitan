@@ -2923,3 +2923,25 @@ Interpretation:
 
 - Compiling only the model increases memory enough to cross the loss-backward cliff at the current best batch160 shape.
 - Keep full compile scope for the current SDPA best; do not retry model-only compile at batch160.
+
+## Experiment 112: SDPA Seq128 Local Batch 160 With TORCH_NCCL_AVOID_RECORD_STREAMS
+
+Command:
+
+```bash
+TORCH_NCCL_AVOID_RECORD_STREAMS=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run112-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-avoid-record-streams-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,999, below run99's 10,005.
+- Step 10 MFU: 37.44%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.38544 at step 1 to 5.72231 at step 10; finite and decreasing.
+- Runtime warned that `TORCH_NCCL_AVOID_RECORD_STREAMS` is already the default.
+
+Interpretation:
+
+- Explicit record-stream avoidance does not improve throughput or memory for this build.
+- Treat the knob as exhausted; the runtime already uses that behavior.

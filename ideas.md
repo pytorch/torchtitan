@@ -1060,3 +1060,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
   Planned command or config overrides: Prefix the current best command with `TORCH_NCCL_AVOID_RECORD_STREAMS=1`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no effect because the doc specifically targets TP, or a small slowdown if the reference-holding path changes allocator timing unfavorably.
+  Result: discarded at source state `bb74797`; 9,999 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. The log reports `TORCH_NCCL_AVOID_RECORD_STREAMS` is already the default, so this env var is effectively a no-op for the current build.
