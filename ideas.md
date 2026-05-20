@@ -1061,3 +1061,12 @@
   Planned command or config overrides: Prefix the current best command with `TORCH_NCCL_AVOID_RECORD_STREAMS=1`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no effect because the doc specifically targets TP, or a small slowdown if the reference-holding path changes allocator timing unfavorably.
   Result: discarded at source state `bb74797`; 9,999 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. The log reports `TORCH_NCCL_AVOID_RECORD_STREAMS` is already the default, so this env var is effectively a no-op for the current build.
+
+- Idea: SDPA seq128 local batch 160 with gradient accumulation 2
+  Current best source commit: 846907b
+  Source: optimizer-overhead amortization follow-up after SDPA/NCCL plateau
+  Expected mechanism: Raising `training.global_batch_size` to 2560 makes each training step process two local microbatches per rank before the optimizer step. Per-microbatch GPU memory should stay near the current batch160 peak, while optimizer, scheduler, metric, and step-level overheads are amortized over twice as many tokens.
+  Supporting evidence: The trainer computes `gradient_accumulation_steps = global_batch_size // (local_batch_size * batch_degree)` and moves each microbatch to GPU sequentially. The current profile is dominated by fwd/bwd work, but even a small optimizer/step overhead reduction could clear the 10,005 tps best by a narrow margin.
+  Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
+  Planned command or config overrides: Current best command plus `--training.global_batch_size=2560`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no improvement because FSDP communication still occurs per microbatch, longer wall time per 10-step candidate, or a different short-run loss path from the larger effective global batch.
