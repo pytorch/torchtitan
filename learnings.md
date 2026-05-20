@@ -5294,3 +5294,27 @@ Interpretation:
 
 - Removing color formatting does not improve the final single-step reported tps.
 - Keep the default colored console logging with structured logging enabled; the best logging setting remains `metrics.log_freq=1` only.
+
+## Experiment 218: Metrics Log Frequency 1 With Local Batch Size 161
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=161 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run218-sdpa-prefetch-seq128-lbs161-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,465, below the validated local batch 160 best.
+- Step 10 MFU: 39.19%.
+- Step 10 peak memory: 170.00 GiB, 95.32%.
+- Trainer initialized global batch size 1288, confirming local batch 161 applied.
+- Loss moved from 12.27944 at step 1 to 5.50756 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Batch161 remains a poor shape even under `metrics.log_freq=1`.
+- The extra tokens do not convert into higher reported final-step tps, and memory crosses the 95% risk guideline.
+- Keep local batch size 160; do not retest larger BF16 batches without a real memory-reduction change.

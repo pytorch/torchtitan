@@ -2111,3 +2111,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command with `--training.local_batch_size=161`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is the known odd-batch shape slowdown or memory crossing the 95% risk line.
+  Result: discarded at source state `bc777c9`; 10,465 tps with finite overall-decreasing loss and 170.00 GiB peak memory, 95.32%. Batch161 remains slower and now crosses the memory-risk guideline.
