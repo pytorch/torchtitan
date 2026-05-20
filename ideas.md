@@ -2092,3 +2092,12 @@
   Planned command or config overrides: Current best command plus `--debug.no-enable-structured-logging`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is the prior regression repeats or the flag changes structured trace behavior in a way that slows execution.
   Result: discarded at source state `3d1561d`; 10,410 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The log confirmed structured logging was disabled, but it remains slower than the structured logging path even when metrics log every step.
+
+- Idea: metrics log frequency 1 with color printing disabled
+  Current best source commit: 905450ad
+  Source: logging-overhead follow-up after `metrics.log_freq=1` made console formatting run every step
+  Expected mechanism: Add `--metrics.disable_color_printing` to the current best command. This keeps structured logging enabled while replacing ANSI color strings with empty strings in console metric formatting, which may shave a small amount of host-side per-step overhead from the final reported interval.
+  Supporting evidence: `log_freq=1` makes `MetricsProcessor.log()` build and emit the colored console metric line every step. Structured logging disabled was slower, so this isolates the smaller color-formatting component without changing structured trace behavior.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current best command plus `--metrics.disable_color_printing`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is no measurable effect or a repeat of earlier color-printing-disabled regressions from older command stacks.
