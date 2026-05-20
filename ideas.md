@@ -2412,3 +2412,12 @@
   Planned command or config overrides: Prefix the current-best command with `NCCL_PXN_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect, slower transport setup, or worse collective routing if PXN was useful.
   Result: discarded at source state `2b6d84f`; 10,489 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling PXN is clean but slower than default NCCL transport behavior, so keep PXN/default auto transport enabled.
+
+- Idea: metrics log frequency 1 with NCCL_NTHREADS=512
+  Current best source commit: c9dfa24b
+  Source: NCCL occupancy bracket after transport-path probes did not improve the current SDPA command
+  Expected mechanism: Raise NCCL worker threads per block to 512 while keeping `NCCL_CTA_POLICY=2`. The earlier `NCCL_NTHREADS=128` run underfed collectives, so the opposite direction tests whether fatter NCCL blocks shorten exposed reduce-scatter/all-gather time enough to offset any extra SM contention with compiled GEMMs.
+  Supporting evidence: The current SDPA profile remains GEMM plus NCCL heavy, and recent channel, CTA, launch, stream-priority, and transport path probes all regressed. This is a distinct high-side occupancy bracket from the already rejected low-thread setting.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_NTHREADS=512` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower overlap if larger NCCL blocks steal too many SM resources from GEMMs, or NCCL ignoring/capping the setting.
