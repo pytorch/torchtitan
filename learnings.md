@@ -6471,3 +6471,25 @@ Interpretation:
 
 - `NCCL_IB_DISABLE=1` is not a harmless single-node guard on this stack; NCCL still requires a NET plugin to initialize this process group path.
 - Do not use IB-disable for this workload. The valid transport path depends on the default network/plugin initialization even though steady-state collectives rely on direct GPU P2P/NVLink.
+
+## Experiment 270: Exact Current Best Rerun After Invalid IB-Disable Probe
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run270-rerun-after-invalid-ib-disable-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,507, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.35%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.30471 at step 1 to 6.91863 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The exact durable command runs normally after the invalid `NCCL_IB_DISABLE=1` crash.
+- The node and default NCCL initialization path are healthy; continue using default network/plugin initialization.
