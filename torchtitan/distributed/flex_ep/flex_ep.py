@@ -1986,16 +1986,8 @@ class NvlSharedBuffer:
         return getattr(self, name).data_ptr() - self.raw.data_ptr()
 
 
-_WorkspaceCacheKey = tuple[str, int | None, int | None, int, int, float]
+_WorkspaceCacheKey = tuple[int, int, int, float]
 _FLEX_EP_WORKSPACE_CACHE: dict[_WorkspaceCacheKey, "FlexEPWorkspace"] = {}
-
-
-def _device_cache_key(device: torch.device) -> tuple[str, int | None]:
-    device = torch.device(device)
-    device_index = device.index
-    if device.type == "cuda" and device_index is None:
-        device_index = torch.cuda.current_device()
-    return device.type, device_index
 
 
 def _require_expert_parallel_mesh(
@@ -2021,7 +2013,6 @@ def _clear_flex_ep_workspace_cache() -> None:
 
 @dataclass
 class FlexEPWorkspace:
-    device: torch.device
     ep_rank: int
     ep_size: int
     raw: torch.Tensor
@@ -2039,7 +2030,6 @@ class FlexEPWorkspace:
         dim: int,
         num_experts: int,
         top_k: int,
-        device: torch.device,
         ep_size: int,
         ep_rank: int,
         ep_group: Any,
@@ -2058,11 +2048,7 @@ class FlexEPWorkspace:
         if not 0 <= ep_rank < ep_size:
             raise ValueError(f"ep_rank ({ep_rank}) must be in [0, {ep_size}).")
         ep_group_key = id(ep_group)
-        device = torch.device(device)
-        device_type, device_index = _device_cache_key(device)
         cache_key = (
-            device_type,
-            device_index,
             ep_group_key,
             ep_rank,
             ep_size,
@@ -2087,7 +2073,6 @@ class FlexEPWorkspace:
                 num_experts=num_experts,
                 top_k=top_k,
                 capacity_factor=capacity_factor,
-                device=device,
                 ep_group=ep_group,
             )
             _FLEX_EP_WORKSPACE_CACHE[cache_key] = workspace
@@ -2115,18 +2100,15 @@ class FlexEPWorkspace:
         num_experts: int,
         top_k: int,
         capacity_factor: float,
-        device: torch.device,
         ep_group: Any,
     ) -> "FlexEPWorkspace":
         raw, peer_buffers, buffers_cuda_ptrs = _allocate_workspace_storage(
             nvl_buffer_size=nvl_buffer_size,
-            device=device,
             ep_size=ep_size,
             ep_rank=ep_rank,
             ep_group=ep_group,
         )
         workspace = cls(
-            device=device,
             ep_rank=ep_rank,
             ep_size=ep_size,
             raw=raw,
@@ -2156,7 +2138,6 @@ class FlexEPWorkspace:
     ) -> None:
         raw, peer_buffers, buffers_cuda_ptrs = _allocate_workspace_storage(
             nvl_buffer_size=nvl_buffer_size,
-            device=self.device,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
             ep_group=ep_group,
@@ -2197,7 +2178,7 @@ class FlexEPWorkspace:
             "ep_size=%s max_tokens=%s dim=%s num_experts=%s top_k=%s "
             "local_experts=%s capacity_factor=%s max_recv_tokens=%s",
             nvl_buffer_size,
-            self.device,
+            self.raw.device,
             self.ep_rank,
             self.ep_size,
             max_tokens,
@@ -2244,7 +2225,6 @@ class FlexEPWorkspace:
 def _allocate_workspace_storage(
     *,
     nvl_buffer_size: int,
-    device: torch.device,
     ep_size: int,
     ep_rank: int,
     ep_group: Any,
@@ -2254,8 +2234,6 @@ def _allocate_workspace_storage(
             "FlexGroupedExperts requires expert parallelism "
             "(expert_parallel_degree > 1)."
         )
-    if device.type != "cuda":
-        raise ValueError(f"FlexGroupedExperts EP>1 requires CUDA tensors, got {device}.")
     _require_ep_backend_ops()
     try:
         import torch.distributed as dist
@@ -2271,7 +2249,7 @@ def _allocate_workspace_storage(
     raw_storage = symm_mem.empty(
         _align_up(nvl_buffer_size, allocation_dtype.itemsize)
         // allocation_dtype.itemsize,
-        device=device,
+        device="cuda",
         dtype=allocation_dtype,
     )
     raw = raw_storage.view(torch.uint8)[:nvl_buffer_size]
@@ -2303,7 +2281,7 @@ def _allocate_workspace_storage(
     buffers_cuda_ptrs = torch.tensor(
         [peer_buffer.data_ptr() for peer_buffer in peer_buffers],
         dtype=torch.int64,
-        device=device,
+        device=raw.device,
     )
     if ep_size > 1:
         _router_barrier(
@@ -2449,7 +2427,6 @@ class FlexEPRouter:
         dim: int,
         num_experts: int,
         top_k: int,
-        device: torch.device,
         ep_mesh: DeviceMesh,
         capacity_factor: float = 1.0,
     ) -> "FlexEPRouter":
@@ -2461,7 +2438,6 @@ class FlexEPRouter:
             dim=dim,
             num_experts=num_experts,
             top_k=top_k,
-            device=device,
             ep_size=ep_size,
             ep_rank=ep_rank,
             ep_group=ep_group,

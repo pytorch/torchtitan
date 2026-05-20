@@ -236,7 +236,6 @@ class FlexGroupedExperts(Module):
                 dim=x.shape[1],
                 num_experts=self.num_experts,
                 top_k=self.top_k,
-                device=x.device,
                 ep_mesh=self.ep_mesh,
                 capacity_factor=self.flex_ep_capacity_factor,
             )

@@ -199,7 +199,6 @@ def test_flex_ep_router_requires_multi_rank_ep_mesh(ep_mesh):
             dim=8,
             num_experts=4,
             top_k=2,
-            device=torch.device("cuda"),
             ep_mesh=ep_mesh,
         )
 
