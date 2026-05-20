@@ -2242,3 +2242,12 @@
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite, clean, and source logs show `dp_shard=8` with TP disabled. If it exceeds 10,625 tps, record the new measured peak for the same durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `e12ce86`; 10,446 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The log confirmed `dp_shard=8`, `tp=1`, and the baseline Qwen3 FSDP path, so the TP2 restore is healthy; run215 remains the measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_CUMEM_ENABLE=0
+  Current best source commit: 3bfb8057
+  Source: communication-allocation follow-up after common NCCL channel, CTA, protocol, buffer-size, NVLS, and TP/HSDP layout probes did not beat the DP-only best
+  Expected mechanism: Disable NCCL's cuMem allocation path for communicator buffers with `NCCL_CUMEM_ENABLE=0`. This may change NCCL buffer placement, registration overhead, and interaction with CUDA expandable segments enough to improve FSDP all-gather/reduce-scatter overlap without changing tensor shapes, FSDP policy, batch size, or model math.
+  Supporting evidence: Run219 still shows NCCL as the second-largest kernel bucket, while explicit channel/CTA/protocol/buffer knobs have mostly regressed. This is a distinct allocator-path knob from the previously tested NCCL scheduling knobs and is command-only.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_CUMEM_ENABLE=0` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is lower communication bandwidth, NCCL ignoring the variable, or allocator regressions.
