@@ -2521,3 +2521,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is a large communication regression because FSDP collectives likely depend on P2P/NVLink bandwidth.
+  Result: discarded at source state `1f944c3`; 8,170 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling P2P severely reduces throughput, confirming the default direct P2P/NVLink path is necessary.
