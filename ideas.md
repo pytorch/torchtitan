@@ -1051,3 +1051,12 @@
   Planned command or config overrides: Current best command plus `--compile.components '["model"]'`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is model-only compile OOM or slowdown; an earlier long-sequence model-only compile attempt failed under a different source/shape, so use the stable-clear check before running.
   Result: valid crash at source state `39f6d75`; OOM during loss backward before step 1 after stable-clear GPU check. The process reached about 177.65 GiB per GPU and failed on a 1.45 GiB allocation, so model-only compile is not viable at batch160.
+
+- Idea: SDPA seq128 local batch 160 with TORCH_NCCL_AVOID_RECORD_STREAMS
+  Current best source commit: 846907b
+  Source: NCCL/memory-reuse follow-up after SDPA profile
+  Expected mechanism: Setting `TORCH_NCCL_AVOID_RECORD_STREAMS=1` lets the process group hold tensor references until wait instead of using allocator `record_stream` events, which can reduce temporary memory stacking for async collectives. If FSDP collectives benefit similarly to the documented TP case, this may reduce allocator pressure or improve overlap at the current NCCL-heavy SDPA point.
+  Supporting evidence: Run102 showed NCCL at about 1.69s of rank0 GPU kernel time, with reduce-scatter the largest collective cost. The environment variable is currently unset, and the best shape is close to the memory-risk line.
+  Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
+  Planned command or config overrides: Prefix the current best command with `TORCH_NCCL_AVOID_RECORD_STREAMS=1`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no effect because the doc specifically targets TP, or a small slowdown if the reference-holding path changes allocator timing unfavorably.
