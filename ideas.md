@@ -2392,3 +2392,12 @@
   Planned command or config overrides: Prefix the current-best command with `TORCH_NCCL_ENABLE_MONITORING=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no process-group warnings. Risk is no effect, ignored environment variable, or weaker failure monitoring without speed benefit.
   Result: discarded at source state `0c3762a`; 10,530 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling Torch NCCL monitoring is clean but does not beat the current-best calibration band, so keep default monitoring behavior.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_LEVEL=NVL
+  Current best source commit: 0500dc1b
+  Source: topology path probe after NCCL kernel-shape and process-group overhead knobs regressed
+  Expected mechanism: Force NCCL peer-to-peer transport selection to NVLink. On the single-node B200 topology, this may avoid any conservative or mixed P2P path choices in auto selection for FSDP all-gather/reduce-scatter collectives.
+  Supporting evidence: The workload is single-node with B200 GPUs and NCCL collectives remain exposed in profiles. Prior NVLS and channel/CTA knobs did not help, but P2P path selection is a distinct NCCL transport decision.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_P2P_LEVEL=NVL` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if auto already chooses NVLink, or slower initialization/collectives if the forced level is too restrictive.
