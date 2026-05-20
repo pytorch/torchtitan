@@ -4,7 +4,7 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 ## Quick start
 
-- Requirements `transformers==4.57.1`
+- Requirements `transformers==5.3.0`
 
 - Config: `torchtitan/experiments/transformers_modeling_backend/config_registry.py`
 ```diff
@@ -34,7 +34,8 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
         - `kyutai/helium-1-preview-2b`
         - `allenai/OLMo-7B-hf`
         - `mistralai/Ministral-8B-Instruct-2410`
-    - MoE (upcoming)
+    - MoE
+        - `Qwen/Qwen3-30B-A3B`
 
 ## Known issues to address later
 
@@ -43,7 +44,6 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 ## Further work
 
-- Missing `build_optimizers_with_moe_load_balancing` support for MoE
-- Missing TP/PP/EP supports for MoE
+- Missing PP support for MoE
 - Load HF weights
 - Add LORA support

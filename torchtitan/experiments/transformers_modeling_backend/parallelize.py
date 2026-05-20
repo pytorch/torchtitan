@@ -8,11 +8,18 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import (
+    distribute_tensor,
+    DTensor,
+    Partial,
+    Replicate,
+    Shard,
+)
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -25,12 +32,127 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.sharding import NamedPlacement, resolve_placements
+from torchtitan.protocols.types import MeshAxisName
+
+EP = MeshAxisName.EP
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.experiments.transformers_modeling_backend.compile import (
+    apply_compile_sparse,
+)
+from torchtitan.experiments.transformers_modeling_backend.token_dispatcher import (
+    HFTokenDispatcher,
+)
 from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.tools.logging import logger
+
+# ---------------------------------------------------------------------------
+# Config-based sharding for HF modules
+# ---------------------------------------------------------------------------
+
+
+def shard_module_states(
+    module: nn.Module,
+    state_shardings: dict[str, NamedPlacement],
+    parallel_dims: ParallelDims,
+) -> None:
+    """Apply declarative state shardings to any ``nn.Module``.
+
+    Mirrors ``Module._shard_states`` from the titan protocol but works on
+    plain ``nn.Module`` subclasses (e.g. HF transformers modules) that
+    don't implement the ``Module`` protocol.
+
+    Unlike ``Module._shard_states``, undeclared params are left unsharded
+    rather than raising — HF modules may carry params we don't need to
+    distribute.
+    """
+    for mod in [module, *module.children()]:
+        for name, param in list(mod.named_parameters(recurse=False)):
+            named_placements = state_shardings.get(name)
+            if named_placements is None:
+                continue
+            mesh = parallel_dims.resolve_mesh(named_placements.keys())
+            if mesh is None:
+                continue
+            placements = resolve_placements(named_placements, mesh)
+            if isinstance(param, DTensor):
+                continue
+            mod.register_parameter(
+                name,
+                nn.Parameter(
+                    distribute_tensor(param, mesh, list(placements)),
+                    requires_grad=param.requires_grad,
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Gate and expert hooks for DTensor → local conversion
+# ---------------------------------------------------------------------------
+
+
+def _make_moe_to_local_pre_hook(grad_placements):
+    """Create a pre-hook that converts DTensor input to local.
+
+    Args:
+        grad_placements: Gradient placements for to_local(). Use
+            (Partial(),) for TP-only (output is partial sum from
+            TP-sharded experts), (Shard(1),) for EP+TP (each TP rank
+            processes its local shard independently through EP).
+    """
+
+    def hook(module, args):
+        hidden_states = args[0]
+        if isinstance(hidden_states, DTensor):
+            # clone() is needed because to_local() returns a view from a
+            # custom autograd Function (_ToTorchTensorBackward). Some HF
+            # models apply in-place ops which autograd forbids on custom
+            # Function views.
+            return (hidden_states.to_local(grad_placements=grad_placements).clone(),)
+        return None
+
+    return hook
+
+
+def _experts_to_local_pre_hook(module, args):
+    """Convert DTensor expert params to local for the HF for-loop.
+
+    FSDP (and EP via distribute_tensor) makes expert params DTensors.
+    The original HF Experts.forward uses these params in a for-loop
+    with F.linear and index_add_ which can't handle DTensors. Native
+    titan solves this with to_local() inside GroupedExperts.forward;
+    we use __dict__ shadowing since we don't modify the HF forward.
+
+    Python checks instance __dict__ before nn.Module's __getattr__
+    (which accesses _parameters), so self.gate_up_proj in the forward
+    finds the local tensor instead of the DTensor parameter.
+    """
+    gate_up = module.gate_up_proj
+    down = module.down_proj
+    if isinstance(gate_up, DTensor):
+        module.__dict__["gate_up_proj"] = gate_up.to_local()
+        module.__dict__["down_proj"] = down.to_local()
+        module._saved_num_experts = module.num_experts
+        module.num_experts = module.__dict__["gate_up_proj"].shape[0]
+    return None
+
+
+def _experts_restore_post_hook(module, args, output):
+    """Restore DTensor expert params and num_experts after the HF forward."""
+    for key in ("gate_up_proj", "down_proj"):
+        module.__dict__.pop(key, None)
+    if hasattr(module, "_saved_num_experts"):
+        module.num_experts = module._saved_num_experts
+        del module._saved_num_experts
+    return output
+
+
+# ---------------------------------------------------------------------------
+# Main parallelization entry point
+# ---------------------------------------------------------------------------
 
 
 def parallelize_hf_transformers(
@@ -68,6 +190,14 @@ def parallelize_hf_transformers(
         )
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        apply_moe_sharding(
+            model,
+            parallel_dims=parallel_dims,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+        )
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -77,22 +207,37 @@ def parallelize_hf_transformers(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        has_moe = any(getattr(b, "moe_enabled", False) for b in model.layers)
+        if has_moe:
+            apply_compile_sparse(model, compile_config)
+        else:
+            apply_compile(model, compile_config)
 
-    dp_mesh_dim_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-    apply_fsdp(
-        model,
-        parallel_dims.get_mesh(dp_mesh_dim_names),
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        pp_enabled=parallel_dims.pp_enabled,
-        cpu_offload=training.enable_cpu_offload,
-        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-    )
+    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+        # apply FSDP or HSDP, potentially with Context Parallel
+        if parallel_dims.dp_replicate_enabled:
+            dp_mesh_dim_names = ("dp_replicate", "fsdp")
+        else:
+            dp_mesh_dim_names = ("fsdp",)
 
-    logger.info("Applied fully_shard to the model")
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+
+        apply_fsdp(
+            model,
+            parallel_dims.get_mesh(list(dp_mesh_dim_names)),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallel_dims.ep,
+            dp_mod_ep_mesh=edp_mesh,
+        )
 
     if training.enable_cpu_offload:
         logger.info("Applied CPU Offloading to the model")
@@ -101,7 +246,22 @@ def parallelize_hf_transformers(
         model.set_cp_mesh(parallel_dims.get_mesh("cp"))
         logger.info("Applied Context Parallel to the model")
 
+    # Register experts_to_local hooks AFTER apply_fsdp so they fire after
+    # FSDP unshard. Native titan does to_local() inside GroupedExperts.forward;
+    # we use __dict__ shadowing hooks since we don't modify the HF forward.
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        for transformer_block in model.layers:
+            if getattr(transformer_block, "moe_enabled", False):
+                experts = transformer_block.mlp.experts
+                experts.register_forward_pre_hook(_experts_to_local_pre_hook)
+                experts.register_forward_hook(_experts_restore_post_hook, prepend=True)
+
     return model
+
+
+# ---------------------------------------------------------------------------
+# TP for non-MoE layers + gate handling for MoE layers
+# ---------------------------------------------------------------------------
 
 
 def apply_non_moe_tp(
@@ -194,6 +354,32 @@ def apply_non_moe_tp(
                 sequence_dim=2, use_local_output=True
             )
 
+        # GLM-5 DSA (Dense Sparse Attention) indexer: its inputs arrive as
+        # plain tensors (from upstream NoParallel/to_local), but after FSDP
+        # unshard its weights become DTensors — causing mixed tensor errors.
+        # Shadow DTensor params with local copies via __dict__ on each
+        # sub-module, same pattern as experts_to_local hooks.
+        # The indexer is @torch.no_grad so no grad concerns.
+        if hasattr(transformer_block.self_attn, "indexer"):
+            indexer = transformer_block.self_attn.indexer
+
+            # The indexer's inputs (hidden_states, q_resid) are
+            # DTensor(Replicate) from PrepareModuleInput on self_attn,
+            # but its weights are plain Parameters (FSDP manages them at
+            # block level). Convert DTensor inputs to local so F.linear
+            # doesn't hit mixed DTensor/Tensor errors.
+            def _indexer_to_local_pre_hook(module, args):
+                def _to_local(x):
+                    if isinstance(x, DTensor):
+                        return x.to_local()
+                    if isinstance(x, tuple):
+                        return tuple(_to_local(v) for v in x)
+                    return x
+
+                return tuple(_to_local(a) for a in args)
+
+            indexer.register_forward_pre_hook(_indexer_to_local_pre_hook)
+
         if not transformer_block.moe_enabled:
             mlp_plan = {
                 "mlp": PrepareModuleInput(
@@ -215,6 +401,8 @@ def apply_non_moe_tp(
             )
             mlp_plan[f"mlp.{down_proj_name}"] = RowwiseParallel(output_layouts=Shard(1))
             layer_plan.update(mlp_plan)
+        # MoE layers: no mlp plan here. All MoE parallelism
+        # (EP, TP, boundary handling) is in apply_moe_sharding.
 
         # Some models like Phi-2 don't have post_attention_layernorm
         if not hasattr(transformer_block, "post_attention_layernorm"):
@@ -229,6 +417,148 @@ def apply_non_moe_tp(
     logger.info("Applied Tensor Parallelism to the model")
 
 
+# ---------------------------------------------------------------------------
+# MoE parallelism: EP and TP-only
+# ---------------------------------------------------------------------------
+
+
+def apply_moe_sharding(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+    tp_mesh: DeviceMesh | None = None,
+    ep_mesh: DeviceMesh | None = None,
+):
+    """Apply Expert Parallelism and/or Tensor Parallelism to MoE layers.
+
+    Shards MoE sub-module states using declarative ``NamedPlacement`` specs
+    (from ``sharding.py``) via ``shard_module_states``, and registers
+    HF-specific hooks for dispatch/combine and DTensor↔local conversion.
+
+    Args:
+        model: The model with MoE layers.
+        parallel_dims: Parallel dimensions for mesh resolution.
+        tp_mesh: TP device mesh for gate replication and expert TP sharding.
+        ep_mesh: EP device mesh for expert EP sharding and dispatch/combine.
+    """
+    from torchtitan.experiments.transformers_modeling_backend.sharding import (
+        expert_ep_shardings,
+        expert_tp_shardings,
+        gate_shardings,
+    )
+
+    assert tp_mesh is not None or ep_mesh is not None
+
+    for transformer_block in model.layers:
+        if not getattr(transformer_block, "moe_enabled", False):
+            continue
+
+        moe_block = transformer_block.mlp
+        experts = moe_block.experts
+        gate = getattr(moe_block, "gate", None) or getattr(moe_block, "router", None)
+
+        # --- EP: shard experts on dim 0, register dispatch/combine ---
+        if ep_mesh is not None:
+            top_k = getattr(moe_block, "top_k", None) or getattr(
+                moe_block, "num_experts_per_tok", 1
+            )
+            experts.token_dispatcher = HFTokenDispatcher.Config(
+                num_experts=experts.num_experts,
+                top_k=top_k,
+            ).build()
+
+            shard_module_states(experts, expert_ep_shardings(), parallel_dims)
+
+            ep_size = ep_mesh.size()
+            experts.token_dispatcher.ep_group = ep_mesh.get_group()
+            experts.token_dispatcher.ep_size = ep_size
+            experts.token_dispatcher.num_local_experts = experts.num_experts // ep_size
+            experts.register_forward_pre_hook(
+                lambda mod, args: mod.token_dispatcher.dispatch(*args)
+            )
+            experts.register_forward_hook(
+                lambda mod, args, output: mod.token_dispatcher.combine(output)
+            )
+
+        # --- TP: shard states, replicate gate, register boundary hooks ---
+        if tp_mesh is not None:
+            # Expert TP sharding (TP-only, not EP+TP)
+            if ep_mesh is None:
+                shard_module_states(experts, expert_tp_shardings(), parallel_dims)
+
+            # Gate: replicate weights, wrap input as DTensor, output to local
+            shard_module_states(gate, gate_shardings(), parallel_dims)
+            parallelize_module(gate, tp_mesh, NoParallel(use_local_output=True))
+
+            # Shadow DTensor gate buffers with local copies so
+            # route_tokens_to_experts (which accesses buffers outside the
+            # gate forward) doesn't hit mixed DTensor/Tensor errors.
+            def _gate_buffers_to_local(gate_mod):
+                def pre_hook(module, args):
+                    for name, buf in gate_mod.named_buffers(recurse=False):
+                        if isinstance(buf, DTensor):
+                            gate_mod.__dict__[name] = buf.to_local()
+
+                return pre_hook
+
+            moe_block.register_forward_pre_hook(_gate_buffers_to_local(gate))
+
+            # Shared experts: ColwiseParallel/RowwiseParallel TP sharding
+            for shared_name in ("shared_expert", "shared_experts"):
+                shared = getattr(moe_block, shared_name, None)
+                if shared is not None:
+                    shared_plan = {}
+                    for name in ("gate_proj", "up_proj"):
+                        if hasattr(shared, name):
+                            shared_plan[name] = ColwiseParallel()
+                    if hasattr(shared, "down_proj"):
+                        shared_plan["down_proj"] = RowwiseParallel(
+                            output_layouts=Partial()
+                        )
+                    if shared_plan:
+                        parallelize_module(shared, tp_mesh, shared_plan)
+
+            # Shared expert gate: replicate on TP mesh
+            shared_gate = getattr(moe_block, "shared_expert_gate", None)
+            if shared_gate is not None:
+                parallelize_module(
+                    shared_gate, tp_mesh, NoParallel(use_local_output=True)
+                )
+
+            # MoE block TP boundary
+            if ep_mesh is None:
+                # TP-only: all-gather input, reduce-scatter output
+                parallelize_module(
+                    moe_block,
+                    tp_mesh,
+                    PrepareModuleInputOutput(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                        use_local_input=False,
+                        output_layouts=(Partial(),),
+                        desired_output_layouts=(Shard(1),),
+                    ),
+                )
+                moe_block.register_forward_pre_hook(
+                    _make_moe_to_local_pre_hook((Partial(),))
+                )
+            else:
+                # EP+TP: each TP rank processes its SP shard through EP
+                moe_block.register_forward_pre_hook(
+                    _make_moe_to_local_pre_hook((Shard(1),))
+                )
+
+        # NOTE: experts_to_local hooks are registered in
+        # parallelize_hf_transformers AFTER apply_fsdp, to ensure they
+        # fire after FSDP unshard. See _experts_to_local_pre_hook docstring.
+
+    logger.info("Applied MoE parallelism to the model")
+
+
+# ---------------------------------------------------------------------------
+# FSDP
+# ---------------------------------------------------------------------------
+
+
 def apply_fsdp(
     model: nn.Module,
     dp_mesh: DeviceMesh,
@@ -239,24 +569,27 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     dp_mod_ep_mesh: DeviceMesh | None = None,
-    gradient_divide_factor: int | None = None,
 ):
-    """
-    Apply data parallelism (via FSDP2) to the model.
+    """Apply data parallelism (via FSDP2) to the model.
+
+    When EP is enabled (``ep_degree > 1``), uses flat FSDP with
+    ``shard_placement_fn`` to route expert params to ``dp_mod_ep_mesh``
+    and other params to ``dp_mesh`` within a single ``fully_shard`` call
+    per transformer block — matching native titan's approach and avoiding
+    nested FSDP hooks that cause SAC op-count mismatches during recompute.
 
     Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-
+        model: The model to apply data parallelism to.
+        dp_mesh: The device mesh for data parallelism (FSDP or HSDP).
+        param_dtype: Data type for model parameters.
+        reduce_dtype: Data type for gradient reduction.
+        pp_enabled: Whether pipeline parallelism is enabled.
+        cpu_offload: Whether to offload model parameters to CPU.
+        reshard_after_forward_policy: Resharding policy after forward pass.
+            "default", "always", or "never".
+        ep_degree: Expert parallelism degree (1 = no EP).
+        dp_mod_ep_mesh: DP mesh for expert params when EP is enabled.
+            Required when ``ep_degree > 1``.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -279,40 +612,69 @@ def apply_fsdp(
         )
 
     for transformer_block in model.layers:
-        # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
-        # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining dp_mod_ep_mesh
+        # NOTE: When EP is enabled, we use shard_placement_fn to route
+        # expert params to dp_mod_ep_mesh and other params to dp_mesh,
+        # all within a single fully_shard call (flat FSDP, no nesting).
+        # This avoids nested FSDP hooks on the experts module which
+        # cause SAC op-count mismatches during recompute.
         if (
             hasattr(transformer_block, "moe_enabled")
             and transformer_block.moe_enabled
             and ep_degree > 1
         ):
-            fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-            moe_block = transformer_block.mlp
-            # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
-            #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
-            #       causes inefficiency, so we choose to do FSDP sharding on dim-1.
-            #       Even when EP is not used, we may still want to shard the experts
-            #       on non-0 dim. For now it may not be worth the complexity to support
-            #       shard_placement_fn on the outer TransformerBlock-level FSDP.
-            _experts_shard_placement_fn = None
-            assert dp_mod_ep_mesh is not None
-            if dp_mod_ep_mesh.size() * ep_degree > moe_block.experts.num_experts:
-                _experts_shard_placement_fn = lambda param: Shard(1)
-
-            fully_shard(
-                moe_block.experts,
-                **fsdp_mod_ep_config,
-                reshard_after_forward=reshard_after_forward,
-                shard_placement_fn=_experts_shard_placement_fn,
+            from torch.distributed.fsdp._fully_shard._fsdp_common import (
+                FSDPMeshInfo,
+                HSDPMeshInfo,
+                ShardPlacementResult,
             )
 
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
+            assert dp_mod_ep_mesh is not None
+            experts = transformer_block.mlp.experts
+            expert_params = set(experts.parameters())
+            num_local_experts = experts.num_experts // ep_degree
+
+            if dp_mod_ep_mesh.size() > num_local_experts:
+                expert_shard_placement = Shard(1)
+            else:
+                expert_shard_placement = Shard(0)
+
+            def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
+                if mesh.ndim == 1:
+                    return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
+                if mesh.ndim == 2:
+                    return HSDPMeshInfo(
+                        mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
+                    )
+                raise ValueError(f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh.")
+
+            edp_mesh_info = _get_fsdp_mesh_info(dp_mod_ep_mesh)
+            dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+
+            def _shard_placement_fn(
+                param: nn.Parameter,
+                _expert_params: set = expert_params,
+                _expert_placement: Shard = expert_shard_placement,
+                _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
+                _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
+            ) -> ShardPlacementResult:
+                if param in _expert_params:
+                    return ShardPlacementResult(
+                        placement=_expert_placement, mesh_info=_edp_mesh_info
+                    )
+                return ShardPlacementResult(placement=Shard(0), mesh_info=_dp_mesh_info)
+
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+                shard_placement_fn=_shard_placement_fn,
+            )
+        else:
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
@@ -329,7 +691,10 @@ def apply_fsdp(
     disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
-    # in EP could interfere with implicit prefetching in FSDP
+    # in EP could interfere with implicit prefetching in FSDP.
+    # With flat FSDP (no nested experts group), prefetching targets
+    # transformer blocks only — expert params are part of the block's
+    # FSDPState and prefetched together with the block.
     if ep_degree == 1:
         return
 
@@ -344,14 +709,7 @@ def apply_fsdp(
         transformer_blocks, next_transformer_blocks
     ):
         if next_transformer_block is not None:
-            if next_transformer_block.moe_enabled:
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block, next_transformer_block.mlp.experts]
-                )
-            else:
-                transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block]
-                )
+            transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
         elif model.norm is not None and model.lm_head is not None:
             transformer_block.set_modules_to_forward_prefetch(
                 [model.norm, model.lm_head]
@@ -372,13 +730,6 @@ def apply_fsdp(
         reversed_transformer_blocks, prev_transformer_blocks
     ):
         if prev_transformer_block is not None:
-            if prev_transformer_block.moe_enabled:
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block, prev_transformer_block.mlp.experts]
-                )
-            else:
-                transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block]
-                )
+            transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
         elif model.tok_embeddings is not None:
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
