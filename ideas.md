@@ -2052,3 +2052,12 @@
   Planned command or config overrides: Current best command with `--metrics.log_freq=2` instead of `--metrics.log_freq=5`.
   Success criteria and expected risk: Success is step-10 tps above 10,421 with finite decreasing loss and no allocator/NCCL warnings. Risk is that metric collection overhead over only two steps dominates and lowers reported `tps`, or that the shorter window is too variance-sensitive.
   Result: tentative keep at source state `832d165`; 10,490 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The final two-step report beats `log_freq=5`, but the short interval and noisier intermediate losses require an exact rerun before promoting it.
+
+- Idea: exact metrics log frequency 2 rerun
+  Current best source commit: ebe2d3f5
+  Source: validation follow-up after run212 produced a new reported-tps high
+  Expected mechanism: Repeat the exact `--metrics.log_freq=2` command to check whether the final two-step reported interval stays above the validated `log_freq=5` command and the run212 high is not just short-window variance.
+  Supporting evidence: Run212 reported 10,490 tps at step 10 with clean memory and no runtime warnings, but only two steps contribute to the final interval.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run212 command.
+  Success criteria and expected risk: Keep `--metrics.log_freq=2` as the new durable best if the rerun remains above 10,421 with finite overall-decreasing loss and no allocator/NCCL warnings. Otherwise keep `--metrics.log_freq=5`.
