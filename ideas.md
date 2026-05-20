@@ -1892,3 +1892,12 @@
   Planned command or config overrides: Exact run195 command with a new dump folder.
   Success criteria and expected risk: Promote only if the rerun remains above 10,301 and preferably above 10,328, with finite decreasing loss and no DataLoader warnings. Otherwise treat run195 as variance and keep the prior command.
   Result: discarded at source state `767a4b4`; 10,259 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The exact rerun fell below both the no-OMP 10,301 rerun and the 10,328 validated peak, so run195 was normal timing variance rather than a durable CPU-threading improvement.
+
+- Idea: current best with local_batch_size=162
+  Current best source commit: 19cba76a
+  Source: memory-headroom conversion after host-input and OMP axes were bracketed
+  Expected mechanism: The validated command peaks at 169.10 GiB, about 94.81% of the 178.35 GiB B200 memory. Raising local batch size slightly from 160 to 162 may improve useful work per optimizer step and GPU occupancy while staying close enough to the memory target to avoid immediate OOM.
+  Supporting evidence: The best profile remains dominated by GEMM and NCCL rather than data loading, and memory is just below the risky line. A very small batch increase is the most direct way to test whether the residual memory headroom can become more tokens/sec without changing source layout.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command with `--training.local_batch_size=162` instead of 160.
+  Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator warnings. If peak memory is above roughly 95% without a clear throughput win, discard as memory-risky. Risk is OOM or allocator pressure because the current command is already close to full memory.
