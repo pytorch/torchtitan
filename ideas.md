@@ -1272,3 +1272,12 @@
   Planned command or config overrides: Current durable zero-CTA command with `--training.local_batch_size=161`.
   Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is the earlier batch161 slowdown returning or memory moving above the 95% risk line.
   Result: discarded at source state `4440eb3`; 9,669 tps with finite decreasing loss and 169.20 GiB peak memory. Batch161 remains a bad shape even with zero-CTA.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with backward-only FSDP prefetch
+  Current best source commit: 3d045b1
+  Source: source-level interaction test after zero-CTA validated
+  Expected mechanism: Zero-CTA may reduce NCCL SM contention enough that forward prefetch is less valuable, while removing forward prefetch can reduce early all-gather pressure and still retain backward prefetch overlap.
+  Supporting evidence: Backward-only prefetch once produced a 10,021 tps run but failed exact validation under default CTA policy. Zero-CTA changes the collective scheduling profile and has now validated, so the prefetch-direction tradeoff deserves one isolated retest.
+  Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to remove the two `set_modules_to_forward_prefetch` calls while keeping `lm_head` and layer backward prefetch.
+  Planned command or config overrides: Current durable zero-CTA command with seq128/local_batch160.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is losing forward all-gather overlap again.
