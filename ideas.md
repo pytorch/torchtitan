@@ -3103,6 +3103,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no NCCL warnings. Risk is slower P2P collectives or initialization failure if direct P2P is required for this topology.
   Result: discarded at source state `becb1a1`; 10,618 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling NCCL direct P2P is valid but below peak, so keep the default direct P2P path.
 
+- Idea: exact current best rerun after P2P and loss-chunk closure
+  Current best source commit: 6f04204
+  Source: calibration after the PyTorch allocator hook, loss chunks 3, and NCCL P2P direct-disable probes all failed to beat the durable command
+  Expected mechanism: Repeat the exact durable command to measure current variance after several no-source runtime probes. The durable command's exact reruns have produced the highest measured samples, including the current 10,658 tps peak.
+  Supporting evidence: Run319 and run320 were clear regressions, while run321 sampled high but still below peak. An exact calibration distinguishes ongoing environment variance from real candidate regressions before trying lower-confidence NCCL graph/runtime-connect flags.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,658, record it as the new measured peak. Risk is only short-window variance.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
