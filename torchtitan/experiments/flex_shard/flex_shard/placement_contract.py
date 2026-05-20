@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
+    import torch.nn as nn
     from torch.distributed.device_mesh import DeviceMesh
 
     from .bucket_storage import ParamInfo
@@ -132,6 +133,23 @@ class Placement(ABC):
         nbytes = info.local_numel * info.dtype.itemsize
         byte_view = byte_storage[info.byte_offset : info.byte_offset + nbytes]
         return byte_view.view(info.dtype).view(info.local_shape)
+
+    def uses_bucket_param_infos(self) -> bool:
+        """Return whether this placement needs bucket-level storage planning."""
+        return False
+
+    def create_bucket_param_infos(
+        self,
+        named_params: list[tuple[str, nn.Parameter]],
+        param_placements: dict[str, tuple[Placement, ...]],
+        mesh: DeviceMesh,
+    ) -> tuple[dict[str, ParamInfo], int] | None:
+        """Optionally create ParamInfo for a whole bucket at once.
+
+        Placements with bucket-global storage requirements can override this
+        method. Returning ``None`` keeps the default per-parameter storage path.
+        """
+        return None
 
     def prepare_unshard_bucket(
         self,
