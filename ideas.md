@@ -3041,6 +3041,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
+  Result: kept as new measured peak at source state `f87c8ce`; 10,658 tps, 39.91% MFU, finite overall-decreasing loss, and unchanged 169.10 GiB peak memory. The durable source recovered cleanly after the final-norm source restore and slightly exceeded the previous run242 peak.
   Result: kept as calibration at source state `7d0c769`; 10,445 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command remains healthy but current variance is low after algorithm-probe closure.
 
 - Idea: profile exact current best after algorithm and runtime closure
