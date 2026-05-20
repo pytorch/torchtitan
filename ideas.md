@@ -2401,3 +2401,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `NCCL_P2P_LEVEL=NVL` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if auto already chooses NVLink, or slower initialization/collectives if the forced level is too restrictive.
+  Result: discarded at source state `cfbca39`; 10,505 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing NVLink P2P level is clean but slower than NCCL auto transport selection, so keep the default P2P level.
