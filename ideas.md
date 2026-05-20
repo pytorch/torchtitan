@@ -2742,3 +2742,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_MULTI_SEGMENT_REGISTER=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower collectives if multi-segment registration is important for direct P2P/NVLink access.
   Result: discarded at source state `3a969da`; 10,530 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling multi-segment registration is valid but below the durable peak, so keep NCCL's default multi-segment registration behavior.
+
+- Idea: metrics log frequency 1 with NCCL_GRAPH_REGISTER=0
+  Current best source commit: 401fbd4c
+  Source: local NCCL registration-path closure after local and multi-segment registration probes
+  Expected mechanism: Disable NCCL graph registration while keeping normal local registration enabled. If torch.compile or NCCL persistent plans touch graph-registration paths even without explicit CUDA graph capture, disabling it may reduce registration overhead; otherwise this should be a clean no-op calibration.
+  Supporting evidence: Local NCCL source defines `NCCL_PARAM(GraphRegister, "GRAPH_REGISTER", 1)` and uses it in collective registration when persistent graph plans are active. This registration knob has not been isolated, while `NCCL_LOCAL_REGISTER=0` and `NCCL_MULTI_SEGMENT_REGISTER=0` were both clean but below peak.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_GRAPH_REGISTER=0` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is no effect or slower execution if graph registration is used beneficially by compiled kernels or NCCL persistent plans.
