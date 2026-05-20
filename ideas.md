@@ -893,6 +893,7 @@
   Planned source/config changes: None; use the current SDPA attention, no-converter, bidirectional prefetch source.
   Planned command or config overrides: Run99 command shape plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is generating traces and extracting a rank0 bottleneck summary. Profiled tps is diagnostic only and should not replace unprofiled ranking.
+  Result: completed at source state `aed3b50`; profiled step 10 was 9,236 tps. Rank0 trace shows about 4.45 s GPU kernel time: 2.22 s GEMM, 1.69 s NCCL, 0.10 s attention, with reduce-scatter the largest single kernel bucket.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
