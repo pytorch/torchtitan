@@ -2281,3 +2281,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `NCCL_MIN_CTAS=32` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is reduced GEMM overlap or worse collective scheduling if the default occupancy is already optimal.
+  Result: discarded at source state `0a1bb59`; 10,574 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. A stronger CTA floor is clean but still below the validated peak, so keep the default NCCL CTA count with only `NCCL_CTA_POLICY=2`.
