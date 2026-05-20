@@ -40,8 +40,6 @@ tlp ()
 #     2>&1 | tee "$LOG_FILE"
 
 
-# torchx run --scheduler_args 'conda_fbpkg_id=torchtitan_conda_prod,localityConstraints=region;eag;gtn' mast.py:train --module_name graph_trainer.llama3 --config_name graph_trainer_llama3_8b --additional_folders /data/users/anshulsi/fbsource/fbcode/pytorch/torchtitan --twtask_bootstrap_script run_torchtitan.sh --name graph_trainer_llama3_8b_fsdp_baseline_daily_grandteton --h grandteton --nproc_per_node 8 --nodes 1 -- --training.steps=100 --training.local-batch-size 4 --training.seq-len 4096 --activation-checkpoint.mode selective --parallelism.data-parallel-shard-degree 8 --compile.mode aot_fx_trace --lr-scheduler.warmup-steps 20 --metrics.log-freq 10 --metrics.enable-tensorboard --checkpoint.interval 0 --validator.freq 0 --hf-assets-path /mnt/mffuse/Llama-3.1-8B
-
 # --- Llama3 8B (FSDP only, 8 GPUs) ---
 # Fused kernel workflow (single config, single command):
 #   FUSED_KERNEL_DIR=/tmp/kernels ./run_graph_trainer_llama3_8b.sh
@@ -53,7 +51,7 @@ if [ -n "${FUSED_KERNEL_DIR:-}" ]; then
 fi
 
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b tlp ./run_train.sh \
+COMMON_FLAGS="\
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=8 \
     --parallelism.tensor_parallel_degree=1 \
@@ -63,11 +61,24 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b tlp ./run_trai
     --compile.disable_passes cudagraph_pass \
     --profiler.enable_profiling \
     --profiler.profile_freq 10 \
-    --dump_folder "$PROFILE_DIR" \
+    --dump_folder $PROFILE_DIR \
     --debug.print-config \
     --compile.memory_policy=default \
-    $FUSED_KERNEL_FLAGS \
-    2>&1 | tee "$LOG_FILE"
+    $FUSED_KERNEL_FLAGS"
+
+if [ "${FAKE_BACKEND:-0}" = "1" ]; then
+    # Single GPU, no NCCL — collectives are no-ops.
+    # Useful for isolating compute time or running without 8 GPUs.
+    NGPU=8 LOCAL_RANK=0 python3 -m torchtitan.train \
+        --module graph_trainer.llama3 --config graph_trainer_llama3_8b \
+        --comm.mode=fake_backend \
+        $COMMON_FLAGS \
+        2>&1 | tee "$LOG_FILE"
+else
+    NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b tlp ./run_train.sh \
+        $COMMON_FLAGS \
+        2>&1 | tee "$LOG_FILE"
+fi
 
 # --- DeepSeek-v3 debugmodel EP (FSDP+TP+EP) ---
 # NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel_ep tlp ./run_train.sh \
