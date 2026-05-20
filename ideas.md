@@ -2762,3 +2762,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_CUMEM_HOST_ENABLE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower proxy/shm behavior or no effect if host cuMem buffers are not important for the steady-state collectives.
   Result: discarded at source state `1123580`; 10,415 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling cuMem host allocations is slower, so keep NCCL's default cuMem host behavior.
+
+- Idea: exact current best rerun after NCCL registration and cuMem probes
+  Current best source commit: 3a1ec7ba
+  Source: calibration after registration, graph-registration, P2P chunk-size, and cuMem host probes all failed to beat the durable command
+  Expected mechanism: Repeat the exact durable command. The recent micro-knobs are not improving the objective, while the exact command has historically produced the best measured tps.
+  Supporting evidence: Runs 279-283 were clean but all below 10,536 tps, and run278 exact rerun sampled low. Another exact rerun checks whether the node returns to the 10.55k-10.65k band.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
