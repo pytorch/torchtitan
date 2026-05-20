@@ -2861,3 +2861,4 @@
   Planned source/config changes: Reapply the run292 `parallelize.py` suffix no-reshard change for the last two transformer layers.
   Planned command or config overrides: Use the current-best command with `--training.local_batch_size=162` instead of 160, keeping `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and no OOM. Risk is that the larger batch loses convergence stability, exceeds the safe memory envelope, or fails to offset the slower no-reshard scheduling.
+  Result: discarded at source state `896b3ef`; 10,557 tps with finite overall-decreasing loss, but peak memory rose to 172.71 GiB (96.84%). The larger batch recovers some throughput versus run292 but remains below peak and above the preferred memory envelope, so restore durable source.

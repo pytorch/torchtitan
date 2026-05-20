@@ -6989,3 +6989,29 @@ Interpretation:
 
 - Disabling `reshard_after_forward` for the last two transformer layers did not OOM and unexpectedly reduced reported peak memory from 169.10 GiB to 167.57 GiB, but it also reduced throughput versus the durable command.
 - The lost overlap or altered FSDP scheduling outweighs the avoided suffix-layer all-gathers. Restore the durable source with all transformer layers using the normal shared `reshard_after_forward=True` config.
+
+## Experiment 293: Last Two No-Reshard Layers With Local Batch Size 162
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=162 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run293-last-two-layers-no-reshard-lbs162-sdpa-prefetch-seq128-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source change:
+
+- Reapplied the run292 `parallelize.py` suffix no-reshard change for the last two transformer layers.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,557, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.53%.
+- Step 10 peak memory: 172.71 GiB, 96.84%.
+- Loss moved from 12.39741 at step 1 to 5.76460 at step 10; finite and overall decreasing.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Spending the run292 memory reduction on local batch size 162 recovers some throughput versus the source-only suffix no-reshard probe, but not enough to beat the durable command.
+- The memory level is also above the preferred envelope, so this combination is too risky for a sub-peak result. Restore durable source and keep local batch size 160.
