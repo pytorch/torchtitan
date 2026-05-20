@@ -2151,3 +2151,4 @@
   Planned source/config changes: Edit `parallelize.py` to apply a copy of the FSDP config with `reshard_after_forward=False` only when wrapping `model.lm_head`.
   Planned command or config overrides: Current best `metrics.log_freq=1` command unchanged.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is memory crossing the 95% guideline because `lm_head` full parameters remain resident through backward.
+  Result: discarded at source state `08ea81d`; 10,509 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Keeping only `lm_head` unresharded does not reduce reported final-step time enough to beat the current best.
