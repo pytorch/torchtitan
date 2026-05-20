@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from concurrent.futures import Future
 from unittest import mock
 
 import torch
@@ -53,8 +54,13 @@ class FakeDataLoader(DataLoader):
 
 
 class DummyFuture:
-    def __init__(self):
-        self.result = mock.Mock()
+    def __new__(cls):
+        # Return a Mock that mimics Future instead of an instance of this class
+        # That allows isinstance(DummyFuture, Future) to pass
+        instance = mock.Mock(spec=Future)
+        instance.result = mock.Mock()
+
+        return instance
 
 
 def fake_async_save(*args, **kwargs):
@@ -93,21 +99,23 @@ class TestFTCheckpointManager(unittest.TestCase):
             "torch.distributed.new_group", return_value="pg"
         )
         self.patcher_group.start()
+        # Patch process group destruction
+        self.patcher_destroy = mock.patch("torch.distributed.destroy_process_group")
+        self.patcher_destroy.start()
 
     def tearDown(self):
         self.patcher_group.stop()
+        self.patcher_destroy.stop()
         shutil.rmtree(self.base_temp_dir)
         time.sleep(0.1)
 
     @mock.patch("torch.cuda.Stream")
-    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
     @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
-    def test_ft_async_save_calls_async_wait(
+    def test_ft_async_save_calls_maybe_wait_for_saving(
         self,
         mock_async_save,
-        mock_new_group,
         mock_cuda_stream,
     ):
         """
@@ -116,7 +124,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         config = FTCheckpointManager.Config(
             enable=True,
             async_mode="async",
-            folder="",
+            folder=self.test_folder,
             interval=1,
             keep_latest_k=0,
             last_save_model_only=False,
@@ -149,6 +157,8 @@ class TestFTCheckpointManager(unittest.TestCase):
         prev_future.result.assert_called_once()
         self.assertIsNotNone(manager.save_future)
         manager.save_future.result.assert_not_called()
+
+        manager.close()
 
 
 if __name__ == "__main__":
