@@ -129,7 +129,6 @@ def _common_setup(config):
     model = model_spec.parallelize_fn(
         model,
         parallel_dims=parallel_dims,
-        training=config.training,
         parallelism=parallelism,
         compile_config=compile_config,
         ac_config=config.activation_checkpoint,

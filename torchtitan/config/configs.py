@@ -104,6 +104,15 @@ class ParallelismConfig:
     only `data_parallel_shard_degree` can be negative. 1 means disabled.
     """
 
+    enable_fsdp_cpu_offload: bool = False
+    """Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP."""
+
+    fsdp_mixed_precision_param: Literal["bfloat16", "float32"] = "bfloat16"
+    """torch dtype for parameters when applying mixed precision via FSDP."""
+
+    fsdp_mixed_precision_reduce: Literal["float32"] = "float32"
+    """torch dtype for reductions when applying mixed precision via FSDP."""
+
     fsdp_reshard_after_forward: Literal["default", "always", "never"] = "default"
     """
     `reshard_after_forward` specifies the policy for applying `reshard_after_forward`

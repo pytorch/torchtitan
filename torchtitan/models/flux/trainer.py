@@ -103,7 +103,7 @@ class FluxTrainer(Trainer):
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
             parallel_dims=self.parallel_dims,
-            training=config.training,
+            parallelism=config.parallelism,
         )
 
         if config.validator.enable:
