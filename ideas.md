@@ -855,6 +855,15 @@
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no allocator retries. Risks are OOM from retained parameters or lower tps because all-gather savings do not offset the smaller batch.
   Result: discarded at source state `b7f0143`; 3,629 tps, 173.25 GiB peak memory, and 22 CUDA allocation retries. Loss was finite and decreasing, but allocator pressure dominates.
 
+- Idea: SDPA attention backend at seq128 batch160
+  Current best source commit: 03d00df
+  Source: attention-backend retest after the workload shape changed to short seq128
+  Expected mechanism: Flex attention won at the original 4096-token shape, but the seq128 profile shows attention is now a smaller bucket than GEMM or NCCL. SDPA may have less overhead for short sequences while preserving the same FSDP prefetch and batch shape.
+  Supporting evidence: Run96 shows only about 0.32 s rank0 flex-attention kernels in the profiled step. The previous attention-backend decision was made before the seq128 shape sweep and before the current prefetch+shape source line.
+  Planned source/config changes: In `qwen3_14b()`, change `model_registry("14B", attn_backend="flex")` to `attn_backend="sdpa"`. Keep converters absent and the robust bidirectional prefetch source unchanged.
+  Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
+  Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss. Risks are lower attention efficiency, changed compile graph quality, or memory regression.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
