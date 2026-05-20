@@ -2552,3 +2552,12 @@
   Planned command or config overrides: Use the exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and no warnings. Risk is higher memory from earlier all-gathers; sustained peak above roughly 95% or OOM should discard the candidate.
   Result: discarded at source state `a6883dd`; 10,445 tps with finite overall-decreasing loss but 170.33 GiB peak memory, 95.50%. The extra prefetch depth raises memory above the target and does not improve throughput, so restore the one-module prefetch chain.
+
+- Idea: metrics log frequency 1 with NCCL_BUFFSIZE=16777216
+  Current best source commit: 1861cddd
+  Source: high-side NCCL buffer-size bracket after default 4 MiB beat 2 MiB and 8 MiB
+  Expected mechanism: Increase NCCL's internal buffer size to 16 MiB. Larger buffers may reduce protocol chunking overhead for the large FSDP all-gather/reduce-scatter traffic, though they can also reduce pipeline granularity or increase memory pressure.
+  Supporting evidence: Earlier 2 MiB and 8 MiB buffer-size probes underperformed the default 4 MiB setting. The high side has not been closed on the final SDPA/logfreq1 command, and this is a command-only probe with no source risk.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_BUFFSIZE=16777216` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is slower collectives from coarser chunking or a small memory increase.
