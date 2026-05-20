@@ -84,8 +84,6 @@ def parallelize_qwen3(
         "reshard_after_forward": reshard_after_forward,
     }
 
-    if model.tok_embeddings is not None:
-        fully_shard(model.tok_embeddings, **fsdp_config)
     layers = list(model.layers.values())
     for layer in layers:
         fully_shard(layer, **fsdp_config)
