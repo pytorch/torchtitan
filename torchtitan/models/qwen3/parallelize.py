@@ -83,10 +83,13 @@ def parallelize_qwen3(
         "mp_policy": mp_policy,
         "reshard_after_forward": reshard_after_forward,
     }
+    layer_fsdp_config = dict(fsdp_config)
+    if reshard_after_forward is True and parallel_dims.dp_shard == 8:
+        layer_fsdp_config["reshard_after_forward"] = 4
 
     layers = list(model.layers.values())
     for layer in layers:
-        fully_shard(layer, **fsdp_config)
+        fully_shard(layer, **layer_fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
     if layers:

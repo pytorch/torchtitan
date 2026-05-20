@@ -1832,3 +1832,12 @@
   Planned command or config overrides: Exact current best command with two workers, persistent workers, prefetch factor 2, and a new dump folder.
   Success criteria and expected risk: Keep the command if it remains above the old durable threshold with finite decreasing loss. If it falls materially below 10,258, treat the DataLoader win as less stable and revisit the baseline command.
   Result: kept at source state `fbfd4d9`; 10,301 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This is below the 10,328 peak but above the old 10,258 durable threshold, so the two-worker persistent prefetch command remains the durable best.
+
+- Idea: transformer-layer FSDP partial reshard_after_forward=4
+  Current best source commit: cef124ed
+  Source: communication/memory middle-ground after full no-reshard OOMed or slowed and the profile still showed large all-gather/reduce-scatter time
+  Expected mechanism: PyTorch FSDP accepts an integer `reshard_after_forward` to reshard parameters to subgroups instead of fully sharding or fully retaining them. Setting transformer layers to `reshard_after_forward=4` on the 8-rank FSDP mesh may reduce backward all-gather volume/exposure while using less extra memory than `never`.
+  Supporting evidence: Whole-model no-reshard is too memory-heavy, but the current profile still shows ~0.42s all-gather and ~1.01s reduce-scatter kernels on rank0. Transformer-layer partial resharding is narrower than changing root or `lm_head`, and avoids `ChunkedCELoss` overwriting the `lm_head` runtime reshard policy.
+  Planned source/config changes: Edit `parallelize.py` so transformer layers use `reshard_after_forward=4` when the resolved policy is `True` on the 8-rank FSDP mesh; keep root and `lm_head` on the existing bool policy.
+  Planned command or config overrides: Current best two-worker DataLoader command.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no allocator/NCCL warnings. Risk is OOM or slower scheduling from extra parameter residency.
