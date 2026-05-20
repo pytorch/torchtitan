@@ -1581,3 +1581,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Exact run164 command with a new dump folder.
   Success criteria and expected risk: Keep only if the rerun remains above 10,258 tps with finite decreasing loss and no warnings; otherwise discard the optimizer weight decay change.
+  Result: discarded at source state `5607f0d`; 9,966 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Removing AdamW weight decay does not validate.
+
+- Idea: SDPA zero-CTA loss chunks 6 with fused Adam and weight_decay=0
+  Current best source commit: 3a1ed15
+  Source: adjacent optimizer-kernel variant after AdamW weight_decay=0 failed validation
+  Expected mechanism: Switching from fused AdamW to fused Adam with zero weight decay may select a slightly different optimizer kernel path without decoupled weight decay logic. The optimizer bucket is small, but this isolates the Adam-vs-AdamW implementation choice.
+  Supporting evidence: AdamW weight_decay=0 produced one tiny non-validating improvement. A different fused optimizer class may have a more consistent implementation path, and optimizer config is in scope.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, `--optimizer.name=Adam`, and `--optimizer.weight_decay=0.0`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, with finite decreasing loss and no optimizer/runtime warnings. Risk is no speed impact or worse short-run optimization dynamics.
