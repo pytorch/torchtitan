@@ -1891,3 +1891,4 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Exact run195 command with a new dump folder.
   Success criteria and expected risk: Promote only if the rerun remains above 10,301 and preferably above 10,328, with finite decreasing loss and no DataLoader warnings. Otherwise treat run195 as variance and keep the prior command.
+  Result: discarded at source state `767a4b4`; 10,259 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The exact rerun fell below both the no-OMP 10,301 rerun and the 10,328 validated peak, so run195 was normal timing variance rather than a durable CPU-threading improvement.

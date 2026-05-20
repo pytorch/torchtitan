@@ -4756,3 +4756,25 @@ Interpretation:
 
 - `OMP_NUM_THREADS=2` may slightly improve host-side scheduling, but the margin is well inside the observed 10-step variance.
 - Run an exact validation before promoting this environment knob.
+
+## Experiment 196: OMP_NUM_THREADS=2 Exact Rerun
+
+Command:
+
+```bash
+OMP_NUM_THREADS=2 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run196-rerun-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-omp2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,259, below both the no-OMP 10,301 rerun and the 10,328 validated peak.
+- Step 10 MFU: 38.42%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.33120 at step 1 to 5.54412 at step 10; finite and decreasing.
+- No dataset re-loop, DataLoader worker warning, OOM, traceback, or NCCL warning appeared.
+
+Interpretation:
+
+- The 10,336 tps OMP=2 result did not validate under exact rerun.
+- Keep the durable two-worker command without an explicit OMP override.
