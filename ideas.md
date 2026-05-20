@@ -883,6 +883,7 @@
   Planned source/config changes: None; use the current SDPA attention, no-converter, bidirectional prefetch source.
   Planned command or config overrides: Run99 command shape with `--training.local_batch_size=161`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator retries. Risk is crossing the memory-risk line for a negligible or negative throughput gain.
+  Result: discarded at source state `3337de3`; 9,646 tps with finite decreasing loss and 169.20 GiB peak memory, below the SDPA batch160 best.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

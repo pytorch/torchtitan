@@ -2671,3 +2671,24 @@ Interpretation:
 
 - The SDPA seq128 source line is robust across back-to-back runs.
 - Use SDPA attention as the current best source for subsequent batch, shape, or profile-guided refinements.
+
+## Experiment 101: SDPA Seq128 Local Batch 161
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=161 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run101-sdpa-prefetch-seq128-lbs161-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,646, below run99's 10,005 and run100's 9,982.
+- Step 10 MFU: 36.12%.
+- Step 10 peak memory: 169.20 GiB, 94.87%.
+- Loss moved from 12.47222 at step 1 to 7.01706 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The SDPA source does not benefit from increasing seq128 local batch above 160.
+- Keep seq128/local-batch-160 as the best practical SDPA shape unless a future source change materially reduces memory or scheduling overhead.
