@@ -361,6 +361,7 @@ def joint_transformer_block_bucketing_reordering_pass(
     module_bucket_plans: list[list[str] | str],
     insert_overlap_deps: bool = False,
     bucket_mode: BucketMode | None = None,
+    enable_fsdp_ag_rs_overlap: bool = False,
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
 
@@ -379,7 +380,14 @@ def joint_transformer_block_bucketing_reordering_pass(
             ``preserve_node_ordering`` after the topological sort.
         bucket_mode: bucket mode forwarded to the underlying bucketer;
             defaults to ``"custom_ops"`` via the parent class.
+        enable_fsdp_ag_rs_overlap: when ``True``, run ``overlap_fsdp_ag_rs_pass``
+            on ``gm`` before bucketing so that bucketed all-gathers inherit
+            the extra FSDP PG name and run on a separate CUDA stream from
+            reduce-scatters. No-op when the graph contains no FSDP
+            all-gathers.
     """
+    if enable_fsdp_ag_rs_overlap:
+        gm = overlap_fsdp_ag_rs_pass(gm, example_inputs)
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
