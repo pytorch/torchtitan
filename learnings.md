@@ -5199,3 +5199,27 @@ Interpretation:
 - `--metrics.log_freq=2` is now the durable best reported-tps command.
 - The final two-step window again shows warmed execution above the five-step window, confirming that the prior default reporting interval was including measurable non-steady-state time.
 - New durable best command: SDPA, DP-only FSDP, compile, BF16, seq_len 128, local batch 160, loss chunks 6, two persistent DataLoader workers with prefetch factor 2, `NCCL_CTA_POLICY=2`, `comm.trace_buf_size=0`, and `metrics.log_freq=2`.
+
+## Experiment 214: Metrics Log Frequency 1
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run214-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep; exact rerun required.
+- Step 10 `tps`: 10,530, above the `log_freq=2` durable best.
+- Step 10 MFU: 39.43%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Late-step tps rose from step 8 10,360 to step 9 10,424 and step 10 10,530.
+- Loss moved from 12.54527 at step 1 to 6.73165 at step 10; finite and overall decreasing, with normal per-step noise.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The one-step final interval reports the highest tps so far, extending the measurement-window pattern from default to 5 to 2 to 1.
+- This is now entirely a final-step reported metric, so it is the most variance-sensitive setting tested. It needs exact rerun before replacing `log_freq=2`.
+- If validated, there is no shorter log-frequency bracket to test for a 10-step run; future search should return to real runtime knobs under `metrics.log_freq=1`.

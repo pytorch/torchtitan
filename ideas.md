@@ -2071,3 +2071,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command with `--metrics.log_freq=1` instead of `--metrics.log_freq=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,504 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is that metric collection overhead over one step dominates, or that one-step reporting is too noisy to validate.
+  Result: tentative keep at source state `d77a2db`; 10,530 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The final one-step report beats `log_freq=2`, but it is the highest-variance measurement window and requires exact rerun.
