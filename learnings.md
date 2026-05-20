@@ -3639,3 +3639,24 @@ Interpretation:
 
 - Loss chunks 5 increases memory above the risk line and is slower than chunks 6.
 - Keep chunks 6 as the durable loss chunk setting.
+
+## Experiment 146: SDPA Zero-CTA Seq128 Local Batch 160 With Loss Num Chunks 7
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=7 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run146-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks7-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,179, below chunks=6.
+- Step 10 MFU: 38.12%.
+- Step 10 peak memory: 168.84 GiB, 94.67%.
+- Loss moved from 12.42338 at step 1 to 6.66385 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Loss chunks 7 is lower-memory than chunks 6, but slower.
+- Loss chunking is bracketed: chunks 6 is the durable choice; chunks 5 is too memory-heavy and slower, chunks 7 is lower-memory and slower, chunks 4 failed validation.

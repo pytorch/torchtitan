@@ -1391,3 +1391,13 @@
   Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
   Planned command or config overrides: Current durable zero-CTA command plus `--loss.num_chunks=7`.
   Success criteria and expected risk: Success is tps above 10,258 with finite decreasing loss and lower memory than chunks=6. Risk is simply adding overhead relative to chunks=6.
+  Result: discarded at source state `d9701ae`; 10,179 tps with finite decreasing loss and 168.84 GiB peak memory. Chunks=7 is safer on memory but slower than validated chunks=6.
+
+- Idea: profile current durable SDPA zero-CTA loss chunks 6 command
+  Current best source commit: 3a1ed15
+  Source: diagnostic after chunks=6 validated and neighboring loss chunks underperformed
+  Expected mechanism: A profiler run should identify whether the new durable command is still dominated by GEMM, NCCL, or loss/lm_head work, which guides the next source or command-level search direction.
+  Supporting evidence: The last SDPA profile was before zero-CTA and chunks=6. The optimization target changed materially, so the old profile may no longer reflect the current bottleneck split.
+  Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
+  Planned command or config overrides: Current durable command plus profiler flags `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: This is diagnostic; success is a completed 10-step run with finite decreasing loss and usable profile artifacts/logs. Profile overhead means tps is not compared to the best.
