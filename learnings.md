@@ -7652,3 +7652,25 @@ Interpretation:
 
 - `NCCL_P2P_DIRECT_DISABLE=1` is valid and samples fairly high, but it remains below the durable peak.
 - Keep NCCL's default direct P2P path. Combined with the prior P2P read/write, CUDA memcpy, LL threshold, scheduling, and NVL chunk probes, nearby P2P transport knobs are unlikely to be the next win.
+
+## Experiment 322: Exact Current Best Rerun After P2P and Loss-Chunk Closure
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run322-rerun-after-p2p-and-loss-closure-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,477, below the run318 10,658 measured peak.
+- Step 10 MFU: 39.23%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.59168 at step 1 to 6.33910 at step 10; finite and overall decreasing, although step 10 rose from step 8 and step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The exact durable command remains healthy after the recent runtime probes, but this sample is low.
+- The current measured peak stays run318 at 10,658 tps. Continue with new probes rather than treating run322 as a source or command regression.

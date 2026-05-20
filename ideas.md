@@ -3111,6 +3111,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,658, record it as the new measured peak. Risk is only short-window variance.
+  Result: kept as calibration at source state `ed6bce9`; 10,477 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The exact durable command remains healthy but this sample is below the current peak.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
