@@ -1731,3 +1731,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--dataloader.num_workers=4 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is CPU oversubscription from 32 workers across 8 ranks.
+  Result: discarded at source state `1ba4956`; 10,283 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Four workers are clean but slower than two workers, so keep two workers.
+
+- Idea: SDPA zero-CTA loss chunks 6 with two DataLoader workers and prefetch_factor=4
+  Current best source commit: 40032d1
+  Source: input-pipeline prefetch-depth bracket after two workers validated and four workers regressed
+  Expected mechanism: Keeping two workers but increasing prefetch depth to four batches may smooth host input jitter without adding more worker processes.
+  Supporting evidence: Two workers validated; four workers regressed, suggesting worker count is bracketed but queue depth has not been tested.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=4`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is extra queued host memory or no impact because the input queue is already deep enough.

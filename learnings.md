@@ -4380,3 +4380,25 @@ Interpretation:
 
 - Two persistent DataLoader workers with prefetching validate and become the current best input-pipeline setting.
 - Test four workers once to bracket CPU contention versus remaining input overlap.
+
+## Experiment 180: SDPA Zero-CTA Loss Chunks 6 With Four DataLoader Workers
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=4 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run180-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker4-prefetch2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,283, below the two-worker command.
+- Step 10 MFU: 38.51%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.39089 at step 1 to 5.31116 at step 10; finite and decreasing.
+- No dataset re-loop or DataLoader worker warning appeared.
+
+Interpretation:
+
+- Four workers are clean but slower than two workers.
+- Keep two workers and test prefetch depth once before closing the DataLoader axis.
