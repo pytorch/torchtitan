@@ -1381,3 +1381,13 @@
   Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
   Planned command or config overrides: Current durable zero-CTA command plus `--loss.num_chunks=5`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is crossing the memory-risk line or repeating chunks=4 instability.
+  Result: discarded at source state `0b7f7ce`; 10,146 tps with finite decreasing loss and 170.66 GiB peak memory. Chunks=5 is slower than chunks=6 and above the memory-risk line.
+
+- Idea: SDPA zero-CTA seq128 local batch 160 with loss num_chunks 7
+  Current best source commit: 3a1ed15
+  Source: local search around validated chunks=6 optimum
+  Expected mechanism: Chunks=7 trades a little more loss-loop overhead for lower memory than chunks=6. If chunks=6's improvement partly came from avoiding default chunk alignment rather than only fewer loops, chunks=7 may be competitive with slightly safer memory.
+  Supporting evidence: Chunks=5 is too memory-heavy and slower, while chunks=6 validates. Testing chunks=7 brackets the optimum on the lower-memory side before leaving loss chunking.
+  Planned source/config changes: None; keep durable no-AC bidirectional prefetch source.
+  Planned command or config overrides: Current durable zero-CTA command plus `--loss.num_chunks=7`.
+  Success criteria and expected risk: Success is tps above 10,258 with finite decreasing loss and lower memory than chunks=6. Risk is simply adding overhead relative to chunks=6.

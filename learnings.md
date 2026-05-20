@@ -3618,3 +3618,24 @@ Interpretation:
 
 - Loss chunks 6 validates as a durable improvement over the previous zero-CTA command.
 - Current durable command: SDPA attention, seq128/local_batch160, compile enabled, BF16 dtype, one-module bidirectional FSDP prefetch, `NCCL_CTA_POLICY=2`, and `--loss.num_chunks=6`.
+
+## Experiment 145: SDPA Zero-CTA Seq128 Local Batch 160 With Loss Num Chunks 5
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run145-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,146, below chunks=6.
+- Step 10 MFU: 38.00%.
+- Step 10 peak memory: 170.66 GiB, 95.69%.
+- Loss moved from 12.38694 at step 1 to 6.57435 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Loss chunks 5 increases memory above the risk line and is slower than chunks 6.
+- Keep chunks 6 as the durable loss chunk setting.
