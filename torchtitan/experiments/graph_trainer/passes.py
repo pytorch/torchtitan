@@ -347,20 +347,6 @@ def apply_graph_passes(
             log_graph_diff(before_snapshot, after_snapshot, pass_name)
     all_passes_elapsed = time.perf_counter() - all_passes_start
     logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
-    if debug:
-        from pathlib import Path
-        import tempfile
-
-        output_path = Path(tempfile.gettempdir()) / "final_graph_after_all_passes.txt"
-        output_path.write_text(
-            gm.print_readable(
-                print_output=False,
-                include_stride=True,
-                include_device=True,
-                expanded_def=True,
-            )
-        )
-        logger.info(f"Dumped final graph to {output_path}")
     return gm
 
 

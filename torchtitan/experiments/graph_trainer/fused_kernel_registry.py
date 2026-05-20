@@ -4,28 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Fused kernel pass: extract, replace, and optionally accelerate in one step.
+"""Fused kernel pass: extract fusible regions and replace with optimized kernels.
 
-Single-pass design:
-  1. Discover fusible regions in the FX graph (fqn-based segmentation)
-  2. Replace each region with a ``call_module`` wrapping the original subgraph
-     as a nested ``GraphModule`` (zero-overhead eager fallback)
-  3. Compute a stable hash for each region (ops + shapes)
-  4. If ``{fused_kernel_dir}/{hash}/kernel.py`` exists, swap the module's
-     forward to use the optimized kernel
-  5. If not, write ``problem.py`` for offline kernel generation
+Two-phase design with the same config:
 
-The hash ensures that the same region always maps to the same directory,
-regardless of extraction order or run-to-run variation.
+  Step 1 (no kernels): discovers fusible regions via a pluggable extractor,
+  writes ``problem.py`` for each unique region (keyed by stable hash).
+  No graph modification — zero overhead.
+
+  Step 3 (kernels exist): only replaces regions where ``benchmark.json``
+  proves a non-eager backend wins. Inserts ``call_function(kernel_fn)``
+  directly into the FX graph — no ``call_module`` wrapper.
 
 Usage:
-  # First run: extracts problems, trains with eager fallback
+  # Step 1: extract problems, train unchanged
   ./run_train.sh --compile.fused_kernel_dir /tmp/kernels
 
-  # Offline: generate kernels
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.generate
+  # Step 2: generate + benchmark (offline)
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.generate --dir /tmp/kernels
 
-  # Next run: same command, auto-picks up kernels
+  # Step 3: same command, auto-picks up proven kernels
   ./run_train.sh --compile.fused_kernel_dir /tmp/kernels
 """
 
@@ -421,10 +419,6 @@ def _filter_regions(
 
     return result, hash_counts
 
-
-# ---------------------------------------------------------------------------
-# Subgraph extraction → GraphModule
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Kernel loading + backend selection
