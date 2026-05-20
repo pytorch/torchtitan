@@ -2385,3 +2385,24 @@ Interpretation:
 
 - Seq128/local-batch-164 is below the batch-168 allocator-collapse point, but it is still over the 95% memory-risk line and slower than batch 160.
 - The useful seq128 batch-size maximum for this source is batch 160 unless a source change reduces activation or optimizer memory.
+
+## Experiment 89: Exact Seq128 Local Batch 160 Rerun
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run89-rerun-flex-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as validation; run84 remains the measured peak.
+- Step 10 `tps`: 9,676, within 0.4% of run84's 9,709.
+- Step 10 MFU: 36.23%.
+- Step 10 peak memory: 168.08 GiB, 94.24%.
+- Loss moved from 12.47278 at step 1 to 5.93355 at step 10; finite and decreasing.
+
+Interpretation:
+
+- The seq128/local-batch-160 shape is robust enough to keep as the best practical shape for this line.
+- Increasing seq128 batch above 160 trades away throughput and memory headroom, so the next experiments should either reduce memory at this shape or return to source-level throughput changes.
