@@ -1261,3 +1261,13 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Current zero-CTA command plus `TORCH_NCCL_HIGH_PRIORITY=1`.
   Success criteria and expected risk: Success is tps above 10,060 for a single measured improvement or above the validated 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is the high-priority stream regression repeating.
+  Result: discarded at source state `8f5be4c`; 10,020 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. High-priority stream does not improve on top of zero-CTA.
+
+- Idea: SDPA zero-CTA seq128 local batch 161
+  Current best source commit: 3d045b1
+  Source: batch-shape follow-up after zero-CTA validated as memory-neutral
+  Expected mechanism: Zero-CTA may reduce collective/compute contention enough that one extra sample per rank can increase total tokens per step and improve reported tps, while still staying near the memory target.
+  Supporting evidence: The default-CTA SDPA batch161 run regressed, but zero-CTA changed the communication profile and kept batch160 memory unchanged at 168.57 GiB. Batch161 is the smallest possible capacity increase and should remain below or near the memory-risk line.
+  Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
+  Planned command or config overrides: Current durable zero-CTA command with `--training.local_batch_size=161`.
+  Success criteria and expected risk: Success is tps above 10,060 for a new measured best or above 10,023 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is the earlier batch161 slowdown returning or memory moving above the 95% risk line.
