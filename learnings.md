@@ -3098,3 +3098,24 @@ Interpretation:
 
 - Removing the `lm_head` endpoint prefetch does not reduce peak memory and costs throughput.
 - Keep one-module bidirectional prefetch including the `lm_head` endpoint.
+
+## Experiment 120: SDPA Seq128 Local Batch 160 With Foreach AdamW
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --optimizer.implementation=foreach --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run120-sdpa-prefetch-seq128-lbs160-compile-bf16-foreach-optimizer-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 9,930, below run99's 10,005.
+- Step 10 MFU: 37.19%.
+- Step 10 peak memory: 168.57 GiB, 94.52%.
+- Loss moved from 12.31192 at step 1 to 6.75447 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Foreach AdamW does not improve optimizer overhead or memory at this shape.
+- Keep default fused AdamW; optimizer implementation knobs tested so far regress.

@@ -1140,3 +1140,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, one-module bidirectional prefetch.
   Planned command or config overrides: Current durable best command plus `--optimizer.implementation=foreach`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower optimizer step or higher memory than fused AdamW.
+  Result: discarded at source state `5b3e20c`; 9,930 tps with finite decreasing loss and unchanged 168.57 GiB peak memory. Keep default fused AdamW.
