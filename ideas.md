@@ -1161,3 +1161,4 @@
   Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to omit all `set_modules_to_forward_prefetch` calls while keeping one-module backward prefetch from `lm_head` and each layer to its previous layer.
   Planned command or config overrides: Current durable best command: SDPA seq128/local-batch160 with compile and BF16.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is slower forward all-gathers because forward prefetch was necessary for overlap.
+  Result: tentative keep at source state `efe8510`; 10,021 tps, 37.53% MFU, 168.57 GiB peak memory, and loss decreased from 12.57584 to 7.02875. Validate with an exact rerun before promoting over the one-module bidirectional best.
