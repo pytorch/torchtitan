@@ -5151,3 +5151,27 @@ Interpretation:
 - `--metrics.log_freq=5` validated as a durable improvement in TorchTitan-reported step-10 `tps` for this 10-step benchmark.
 - The model execution and memory footprint are unchanged from the prior current best; the improvement comes from using the final warmed five steps as the reported interval.
 - New durable best command: SDPA, DP-only FSDP, compile, BF16, seq_len 128, local batch 160, loss chunks 6, two persistent DataLoader workers with prefetch factor 2, `NCCL_CTA_POLICY=2`, `comm.trace_buf_size=0`, and `metrics.log_freq=5`.
+
+## Experiment 212: Metrics Log Frequency 2
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run212-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep; exact rerun required.
+- Step 10 `tps`: 10,490, above the `log_freq=5` durable best.
+- Step 10 MFU: 39.28%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Intermediate logged tps rose as the run warmed: step 4 10,056, step 6 10,303, step 8 10,445, step 10 10,490.
+- Loss moved from 12.27715 at step 1 to 7.24591 at step 10; finite and overall decreasing, though the shorter intervals show noisy intermediate values.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- `--metrics.log_freq=2` further narrows the final reporting window to steps 9-10 and produces a higher reported `tps` than `log_freq=5`.
+- The repeated intermediate logs also show warmup effects persisting through early intervals, supporting the measurement-window hypothesis.
+- Because the final interval only covers two steps, this is variance-sensitive and must be exact-rerun before replacing `log_freq=5` as durable best.

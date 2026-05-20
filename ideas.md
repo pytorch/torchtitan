@@ -2051,3 +2051,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command with `--metrics.log_freq=2` instead of `--metrics.log_freq=5`.
   Success criteria and expected risk: Success is step-10 tps above 10,421 with finite decreasing loss and no allocator/NCCL warnings. Risk is that metric collection overhead over only two steps dominates and lowers reported `tps`, or that the shorter window is too variance-sensitive.
+  Result: tentative keep at source state `832d165`; 10,490 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The final two-step report beats `log_freq=5`, but the short interval and noisier intermediate losses require an exact rerun before promoting it.
