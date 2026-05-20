@@ -32,7 +32,6 @@ from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
-from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -514,7 +513,7 @@ class VLLMGenerator(Actor, Configurable):
 
     @endpoint
     async def close(self) -> None:
-        """Release the vLLM engine and distributed state.
+        """Release the vLLM engine.
 
         vLLM's sync ``LLMEngine`` (what we use) has no public ``shutdown``
         method; only the async ``AsyncLLM`` does. We tear it down by
@@ -525,12 +524,11 @@ class VLLMGenerator(Actor, Configurable):
            multimodal-processor cache.
         2. ``engine_core.shutdown()`` — stops the model worker and the
            scheduler.
-        3. ``cleanup_dist_env_and_memory()`` — destroys NCCL / model-
-           parallel process groups, runs ``gc.collect``, empties the
-           accelerator cache.
 
-        Each step runs in a ``try/finally`` so a failure in one step
-        does not skip the next.
+        We intentionally skip ``cleanup_dist_env_and_memory()`` here:
+        with ``external_launcher``, vLLM reuses the process group that
+        Monarch created. Destroying it here would prevent Monarch's
+        ``mesh.stop()`` from completing its own collective teardown.
         """
         if self._engine is not None:
             renderer = getattr(self._engine, "renderer", None)
@@ -539,4 +537,3 @@ class VLLMGenerator(Actor, Configurable):
                     renderer.shutdown()
             finally:
                 self._engine.engine_core.shutdown()
-        cleanup_dist_env_and_memory()
