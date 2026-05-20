@@ -943,6 +943,7 @@
   Planned source/config changes: None; keep SDPA plus broad FP8 rowwise converter without auto-filter.
   Planned command or config overrides: Run104 command shape with `--training.local_batch_size=220`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator retries. Risks are entering the same allocator-pressure regime as batch240 or still missing the plain SDPA best.
+  Result: discarded at source state `041eef8`; 7,506 tps with finite decreasing loss and 168.72 GiB peak memory. Broad FP8 batch scaling does not beat plain SDPA.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

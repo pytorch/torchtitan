@@ -2818,3 +2818,25 @@ Interpretation:
 
 - Increasing broad-FP8 local batch from 160 to 200 improves throughput and still leaves memory headroom, but does not beat plain SDPA.
 - One higher midpoint is justified before restoring, because batch240 crashed and batch200 is still well below the memory-risk line.
+
+## Experiment 107: Broad FP8 SDPA Seq128 Local Batch 220
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=220 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run107-sdpa-fp8-rowwise-no-filter-prefetch-seq128-lbs220-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,506, far below the plain SDPA best.
+- Step 10 MFU: N/A in the log.
+- Step 10 peak memory: 168.72 GiB, 94.60%.
+- Loss moved from 12.44798 at step 1 to 6.12418 at step 10; finite and decreasing.
+- Runtime emitted the known `FSDPFloat8Linear` view warning.
+
+Interpretation:
+
+- Broad FP8 batch scaling is not viable: batch200 improves over batch160 but remains below plain SDPA, batch220 regresses sharply, and batch240 crashes.
+- Restore the no-converter SDPA source as the current best.
