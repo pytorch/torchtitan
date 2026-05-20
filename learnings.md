@@ -2945,3 +2945,25 @@ Interpretation:
 
 - Explicit record-stream avoidance does not improve throughput or memory for this build.
 - Treat the knob as exhausted; the runtime already uses that behavior.
+
+## Experiment 113: SDPA Seq128 Local Batch 160 With Gradient Accumulation 2
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --training.global_batch_size=2560 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run113-sdpa-prefetch-seq128-lbs160-gbs2560-gradacc2-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep.
+- Trainer confirmed gradient accumulation steps 2.
+- Step 10 `tps`: 10,006, narrowly above run99's 10,005.
+- Step 10 MFU: 37.47%.
+- Step 10 peak memory: 169.49 GiB, 95.03%.
+- Loss moved from 12.27569 at step 1 to 5.89456 at step 10; finite and decreasing.
+
+Interpretation:
+
+- Gradient accumulation 2 can very slightly improve reported tps by amortizing step-level overhead over more tokens.
+- The win is only 1 tps and peak memory is higher than the original best, so this needs an exact rerun before replacing the SDPA batch160 baseline as the durable best.

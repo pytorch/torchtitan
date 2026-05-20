@@ -1070,3 +1070,4 @@
   Planned source/config changes: None; keep plain SDPA, no converters, bidirectional FSDP prefetch.
   Planned command or config overrides: Current best command plus `--training.global_batch_size=2560`.
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is no improvement because FSDP communication still occurs per microbatch, longer wall time per 10-step candidate, or a different short-run loss path from the larger effective global batch.
+  Result: tentative keep at source state `3595c11`; 10,006 tps, 37.47% MFU, 169.49 GiB peak memory, and loss decreased from 12.27569 to 5.89456. The margin is only 1 tps over run99, so validate with an exact rerun before treating it as a durable best.
