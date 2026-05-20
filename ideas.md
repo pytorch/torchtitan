@@ -2012,3 +2012,12 @@
   Planned command or config overrides: Current best command with `NCCL_BUFFSIZE=2097152` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss and no NCCL warnings. Risk is lower collective bandwidth or extra internal chunking overhead.
   Result: discarded at source state `3dd87fe`; 10,244 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Smaller NCCL buffers are worse, so keep the default buffer size.
+
+- Idea: current best with gradient accumulation 2
+  Current best source commit: aa3218b5
+  Source: structured-metrics follow-up after run206 showed step-10 metrics collection is a large fixed cost in the reported interval
+  Expected mechanism: Set `training.global_batch_size=2560` while keeping local batch size 160 on 8 GPUs, producing gradient accumulation steps 2. This doubles useful tokens per optimizer/logged interval and may amortize fixed step-end work such as distributed metric collection and optimizer bookkeeping, while keeping per-microbatch activation memory close to the current best.
+  Supporting evidence: Run206 structured logs showed step 10 included about 770 ms in `collect_dist_metrics_end` and about 35 ms in `optim_end`, both fixed per optimizer/logged step. Earlier accumulation tests were negative on older command stacks, but the current best now has loss chunks 6, zero-CTA NCCL, and two persistent DataLoader workers, so this retest targets the measured fixed-cost component directly.
+  Planned source/config changes: None; keep restored plain SDPA DP-only FSDP source.
+  Planned command or config overrides: Current best command plus `--training.global_batch_size=2560`.
+  Success criteria and expected risk: Success is tps above 10,328 or above the 10,301 rerun threshold with finite decreasing loss, no dataset re-loop warning, and no allocator/NCCL warnings. Risk is lower kernel occupancy/overlap from longer accumulation cadence, changed loss trajectory over only 10 optimizer steps, or dataset exhaustion warnings.
