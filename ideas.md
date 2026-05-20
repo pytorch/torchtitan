@@ -3173,6 +3173,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no compile graph-break warnings that imply eager execution. Risk is slower throughput if graph breaks remove fusion or if the generated regions are equivalent but less optimized.
   Result: discarded at source state `ad640dd`; 10,535 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. `fullgraph=False` is valid but below the durable `fullgraph=True` block compile path, so restore shared `apply_compile()`.
 
+- Idea: force SDPA Flash attention backend
+  Current best source commit: a6aa83a
+  Source: attention-backend follow-up after FlexAttention FLASH/CUTE was blocked by missing libraries
+  Expected mechanism: Qwen3 `attn_backend="sdpa"` uses `ScaledDotProductAttention`, whose default priority is cuDNN attention, Flash attention, then math. For seq128 on B200, forcing SDPA to use Flash attention may reduce attention overhead or improve generated graph behavior without switching to the unavailable FlexAttention FLASH/CUTE path.
+  Supporting evidence: The current profile is dominated by GEMM and FSDP collectives, but attention remains on the critical path inside each block. `flex_flash` is blocked by missing `flash_attn.cute`, while SDPA Flash is a PyTorch-native backend and does not require editing common attention code if patched narrowly in Qwen parallelization before compile.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, set `ScaledDotProductAttention.sdpa_backends = [SDPBackend.FLASH_ATTENTION]` before compiling/wrapping the model.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is SDPA rejecting Flash for this shape/GQA path, falling back poorly, or slowing because cuDNN was already the better backend.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command

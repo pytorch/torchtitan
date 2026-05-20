@@ -12,6 +12,7 @@ command, model flavor, and cluster/system it is optimizing for.
 """
 
 import torch
+from torch.nn.attention import SDPBackend
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
 from torchtitan.config import (
@@ -26,6 +27,7 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
 
@@ -65,6 +67,9 @@ def parallelize_qwen3(
         raise NotImplementedError(
             "Qwen3 baseline FSDP bootstrap does not support CPU offload."
         )
+
+    ScaledDotProductAttention.sdpa_backends = [SDPBackend.FLASH_ATTENTION]
+    logger.info("Forced Qwen3 SDPA backend priority to Flash attention only")
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
