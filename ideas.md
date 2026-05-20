@@ -1701,3 +1701,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Exact run176 command with a new dump folder.
   Success criteria and expected risk: Promote only if the rerun stays above 10,258 tps with finite decreasing loss and no dataset worker warnings; otherwise discard the DataLoader worker prefetch change.
+  Result: kept at source state `bf29ae1`; 10,270 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. One DataLoader worker with persistent prefetch validates over the durable chunks6 rerun.
+
+- Idea: SDPA zero-CTA loss chunks 6 with two DataLoader workers and persistent prefetch
+  Current best source commit: 40032d1
+  Source: input-pipeline follow-up after one worker validated
+  Expected mechanism: Two workers may overlap tokenization/collation more consistently than one worker for the short-sequence, high-local-batch command, increasing reported tps if host input work is still visible.
+  Supporting evidence: Run176 and run177 validate that a single persistent worker is beneficial. The next nearest point is two workers with the same prefetch factor to test whether more host parallelism helps or adds overhead.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current durable command with `--dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
+  Success criteria and expected risk: Success is tps above 10,307 or above 10,270 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is multiprocessing overhead and extra CPU contention across 8 ranks.
