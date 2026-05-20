@@ -1952,3 +1952,12 @@
   Planned command or config overrides: Current best two-worker command plus `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a complete 10-step profile with finite decreasing loss and a usable trace. The profiled tps is diagnostic only and should not be compared directly to unprofiled candidates.
   Result: diagnostic profile completed at source state `2a15e78`; profiled step 10 reported 9,756 tps with finite decreasing loss and 169.10 GiB peak memory. Rank0 trace showed total kernel time 4,266.97 ms, with nvjet GEMMs 2,162.25 ms, NCCL 1,585.51 ms, Triton 204.31 ms, flash attention 94.24 ms, and chunk/split copy kernels 119.65 ms. Continue targeting GEMM/FSDP collective exposure rather than data loading, attention backend, or logging.
+
+- Idea: HSDP 2x4 for current best
+  Current best source commit: 06906219
+  Source: refreshed profile showing NCCL reduce-scatter/all-gather remains the second-largest kernel bucket
+  Expected mechanism: Use a 2D HSDP mesh with `dp_replicate=2` and `dp_shard=4`, wrapping Qwen3 with `fully_shard(..., mesh=["dp_replicate", "fsdp"])`. This halves the FSDP shard-group size from 8 to 4, which may reduce all-gather/reduce-scatter latency and improve overlap enough to offset replicated parameter/optimizer residency and any replica reduction.
+  Supporting evidence: Run202 rank0 trace showed NCCL at 1,585.51 ms, mostly reduce-scatter 1,037.15 ms and all-gather 546.22 ms. HSDP is a direct collective-shape test; earlier integer reshard attempts increased residency without changing the FSDP process-group shape.
+  Planned source/config changes: Edit `parallelize.py` to allow `dp_replicate>1` and select `parallel_dims.get_mesh(["dp_replicate", "fsdp"])` when the replicate axis is enabled.
+  Planned command or config overrides: Current best two-worker command plus `--parallelism.data_parallel_replicate_degree=2 --parallelism.data_parallel_shard_degree=4`.
+  Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no allocator/NCCL warnings. Risk is OOM or allocator pressure because HSDP doubles sharded state residency versus dp_shard=8.
