@@ -31,6 +31,7 @@ from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import (
@@ -130,6 +131,7 @@ def parallelize_llama(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
     logger.info("Applied fully_shard to the model")
@@ -150,6 +152,7 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
+    enable_symm_mem: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -312,6 +315,9 @@ def apply_fsdp(
             )
 
     fully_shard(model, **fsdp_config)
+
+    if enable_symm_mem:
+        enable_fsdp_symm_mem(model)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
