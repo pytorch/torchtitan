@@ -2251,3 +2251,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the current-best command with `NCCL_CUMEM_ENABLE=0` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL/allocator warnings. Risk is lower communication bandwidth, NCCL ignoring the variable, or allocator regressions.
+  Result: discarded at source state `c974d65`; 10,581 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling the NCCL cuMem allocation path is clean and near the current-best variance band, but it does not beat the validated 10,625 tps peak.
