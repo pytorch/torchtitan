@@ -2842,3 +2842,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_LL_BUFFSIZE=4194304` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap or no effect if 4 MiB equals the default LL buffer size on this build.
   Result: discarded at source state `bf9809b`; 10,583 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The 4 MiB high-side LL buffer sample is strong but still below the measured peak and exact durable reruns, so keep the default LL buffer size.
+
+- Idea: last two transformer layers with reshard_after_forward disabled
+  Current best source commit: 9581645b
+  Source: profile-driven FSDP collective reduction after run289 showed substantial all-gather and reduce-scatter time and LL buffer tuning did not beat the durable command
+  Expected mechanism: Disable FSDP `reshard_after_forward` only for the final two transformer layers. Those layers run nearest to backward, so retaining their unsharded parameters should avoid their backward all-gathers with much less memory than disabling resharding globally. This directly targets the profiled all-gather cost while trying to stay within the 169.10 GiB to 178.35 GiB memory headroom.
+  Supporting evidence: Run289 showed rank 0 about 423 ms in NCCL all-gather and rank 7 about 577 ms in all-gather during the profiled step. The 1 MiB and 4 MiB LL buffer probes did not improve peak throughput, so reducing all-gather volume for a small suffix of layers is the next narrower FSDP-side hypothesis.
+  Planned source/config changes: In `torchtitan/models/qwen3/parallelize.py`, wrap the last two transformer layers with the same FSDP config except `reshard_after_forward=False`; leave `lm_head` and root behavior unchanged.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 with finite overall-decreasing loss and peak memory not exceeding a risky level. Risk is OOM or slower overlap from extra live full parameters; if discarded, restore the durable source.

@@ -85,8 +85,16 @@ def parallelize_qwen3(
     }
 
     layers = list(model.layers.values())
-    for layer in layers:
-        fully_shard(layer, **fsdp_config)
+    no_reshard_suffix_layers = 2
+    first_no_reshard_idx = max(len(layers) - no_reshard_suffix_layers, 0)
+    for idx, layer in enumerate(layers):
+        layer_fsdp_config = fsdp_config
+        if idx >= first_no_reshard_idx:
+            layer_fsdp_config = {
+                **fsdp_config,
+                "reshard_after_forward": False,
+            }
+        fully_shard(layer, **layer_fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
     if layers:
@@ -99,9 +107,10 @@ def parallelize_qwen3(
 
     disable_fsdp_gradient_division(model)
     logger.info(
-        "Applied baseline Qwen3 FSDP with dp_shard=%s, reshard_after_forward=%s",
+        "Applied baseline Qwen3 FSDP with dp_shard=%s, reshard_after_forward=%s, no_reshard_suffix_layers=%s",
         parallel_dims.dp_shard,
         reshard_after_forward,
+        no_reshard_suffix_layers,
     )
 
     return model
