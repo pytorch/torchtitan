@@ -1,0 +1,56 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run268-rerun-after-cuda-event-cache-probe-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder
+W0520 05:27:10.923000 1796673 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0520 05:27:10.923000 1796673 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0520 05:27:10.923000 1796673 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0520 05:27:10.923000 1796673 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0520 05:27:17.224000 1797614 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-20 05:27:17,909 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-20 05:27:17,965 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run268-rerun-after-cuda-event-cache-probe-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/structured_logs/training.global_rank_0.20260520-052717-LP1TM8.jsonl
+[rank0]:[titan] 2026-05-20 05:27:19,393 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-20 05:27:19,395 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-20 05:27:19,402 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-20 05:27:19,403 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-20 05:27:23,556 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-20 05:27:23,561 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-20 05:27:23,589 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-20 05:27:23,669 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-20 05:27:23,844 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-20 05:27:23,844 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-20 05:27:23,845 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-20 05:27:23,860 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-20 05:27:23,938 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-20 05:27:24,441 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-20 05:27:24,441 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-20 05:27:24,443 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-20 05:27:24,443 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-20 05:27:24,460 - root - INFO - Trainer is initialized with local batch size 160, global batch size 1280, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-20 05:27:24,460 - root - INFO - Training starts at step 1
+[rank0]:[titan] 2026-05-20 05:27:37,804 - root - INFO - [31mstep:  1  [32mloss: 12.34467  [38;2;180;60;0mgrad_norm: 21.5000  [38;2;54;234;195mmemory: 160.86GiB(90.19%)  [34mtps: 1,467  [36mtflops: 123.60  [35mmfu: 5.49%[39m
+[rank0]:[titan] 2026-05-20 05:27:37,805 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-20 05:27:40,534 - root - INFO - [31mstep:  2  [32mloss: 11.58432  [38;2;180;60;0mgrad_norm: 69.0000  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 7,504  [36mtflops: 632.28  [35mmfu: 28.10%[39m
+[rank0]:[titan] 2026-05-20 05:27:42,606 - root - INFO - [31mstep:  3  [32mloss: 16.84510  [38;2;180;60;0mgrad_norm: 31.2500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 9,884  [36mtflops: 832.78  [35mmfu: 37.01%[39m
+[rank0]:[titan] 2026-05-20 05:27:44,636 - root - INFO - [31mstep:  4  [32mloss: 13.89548  [38;2;180;60;0mgrad_norm: 32.5000  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,093  [36mtflops: 850.37  [35mmfu: 37.79%[39m
+[rank0]:[titan] 2026-05-20 05:27:46,639 - root - INFO - [31mstep:  5  [32mloss: 14.49553  [38;2;180;60;0mgrad_norm: 45.5000  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,222  [36mtflops: 861.24  [35mmfu: 38.28%[39m
+[rank0]:[titan] 2026-05-20 05:27:48,629 - root - INFO - [31mstep:  6  [32mloss: 13.20163  [38;2;180;60;0mgrad_norm: 66.0000  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,296  [36mtflops: 867.51  [35mmfu: 38.56%[39m
+[rank0]:[titan] 2026-05-20 05:27:50,592 - root - INFO - [31mstep:  7  [32mloss: 10.64236  [38;2;180;60;0mgrad_norm: 60.7500  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,436  [36mtflops: 879.34  [35mmfu: 39.08%[39m
+[rank0]:[titan] 2026-05-20 05:27:52,552 - root - INFO - [31mstep:  8  [32mloss:  9.17841  [38;2;180;60;0mgrad_norm: 41.0000  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,447  [36mtflops: 880.22  [35mmfu: 39.12%[39m
+[rank0]:[titan] 2026-05-20 05:27:54,520 - root - INFO - [31mstep:  9  [32mloss:  7.85153  [38;2;180;60;0mgrad_norm: 32.5000  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,407  [36mtflops: 876.84  [35mmfu: 38.97%[39m
+[rank0]:[titan] 2026-05-20 05:27:56,498 - root - INFO - [31mstep: 10  [32mloss:  7.17210  [38;2;180;60;0mgrad_norm: 23.8750  [38;2;54;234;195mmemory: 169.10GiB(94.81%)  [34mtps: 10,357  [36mtflops: 872.62  [35mmfu: 38.78%[39m
+[rank0]:[titan] 2026-05-20 05:27:56,499 - root - INFO - Sleeping 2 seconds for other ranks to complete
+[rank0]:[titan] 2026-05-20 05:27:58,499 - root - INFO - Training completed
+[rank0]:[titan] 2026-05-20 05:28:01,825 - root - INFO - Process group destroyed

@@ -6428,3 +6428,26 @@ Interpretation:
 
 - Disabling the CUDA event cache is valid and samples high, but it does not beat the durable command's measured peak.
 - Because exact reruns also reach the 10.58k band and this run stays below 10,650, keep the default ProcessGroupNCCL CUDA event cache behavior.
+
+## Experiment 268: Exact Current Best Rerun After CUDA Event Cache Probe
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run268-rerun-after-cuda-event-cache-probe-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep as calibration.
+- Step 10 `tps`: 10,357, below the run242 10,650 measured peak and below run267.
+- Step 10 MFU: 38.78%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.34467 at step 1 to 7.17210 at step 10; finite and overall decreasing.
+- Step 2 had a transient 7,504 tps stall without a corresponding warning.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- The exact durable command still has wide final-step variance after the event-cache probe.
+- Run267's high-but-not-best sample is not enough to justify changing ProcessGroupNCCL's CUDA event cache default.
