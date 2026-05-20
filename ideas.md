@@ -1432,3 +1432,12 @@
   Planned command or config overrides: Current durable command plus `NCCL_PROTO=LL128`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is slower communication or NCCL ignoring/poorly handling forced LL128 for some collectives.
   Result: discarded at source state `b62ab62`; 10,131 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. LL128 is slower than NCCL's default LL protocol on this command.
+
+- Idea: SDPA zero-CTA loss chunks 6 with FSDP symmetric-memory communication
+  Current best source commit: 3a1ed15
+  Source: FSDP communication-buffer follow-up after protocol tuning failed
+  Expected mechanism: Calling `set_symm_mem_for_comm("NCCL")` on the FSDP modules enables symmetric-memory communication staging. With `NCCL_CTA_POLICY=2`, PyTorch documents that this can enable copy-engine or symmetric-kernel optimized all-gather paths.
+  Supporting evidence: The current profile still spends about 1.45s in NCCL, mostly reduce-scatter and all-gather. The FSDP API explicitly mentions zero-CTA as the required NCCL process group policy for copy-engine all-gather.
+  Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to call `set_symm_mem_for_comm("NCCL")` on each FSDP-wrapped layer, `lm_head`, and root model after `fully_shard`.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is unsupported symmetric-memory setup, slower communication, or extra memory pressure.
