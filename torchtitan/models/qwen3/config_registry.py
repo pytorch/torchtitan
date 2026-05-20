@@ -184,12 +184,21 @@ def qwen3_1_7b() -> Trainer.Config:
 
 
 def qwen3_14b() -> Trainer.Config:
+    from torchtitan.components.quantization import Float8LinearConverter
+
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry(
             "14B",
             attn_backend="sdpa",
+            converters=[
+                Float8LinearConverter.Config(
+                    recipe_name="rowwise",
+                    filter_fqns=["auto_filter_small_kn"],
+                    model_compile_enabled=True,
+                )
+            ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
