@@ -1711,3 +1711,13 @@
   Planned source/config changes: None; keep durable source.
   Planned command or config overrides: Current durable command with `--dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2`.
   Success criteria and expected risk: Success is tps above 10,307 or above 10,270 if rerun-worthy, with finite decreasing loss and no dataset worker warnings. Risk is multiprocessing overhead and extra CPU contention across 8 ranks.
+  Result: tentative keep at source state `f285605`; 10,290 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This is above the one-worker validation result but below the one-worker peak, so validate with an exact rerun.
+
+- Idea: exact rerun of SDPA zero-CTA loss chunks 6 with two DataLoader workers
+  Current best source commit: f285605
+  Source: validation follow-up after run178 produced a tentative two-worker input-pipeline win
+  Expected mechanism: Repeat the exact command to test whether two workers are durably better than the validated one-worker setting or just timing variance.
+  Supporting evidence: Run178 beats the one-worker validation by 20 tps but not the one-worker measured peak; exact rerun is required.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Exact run178 command with a new dump folder.
+  Success criteria and expected risk: Promote only if the rerun stays above 10,270 tps with finite decreasing loss and no dataset worker warnings; otherwise keep the one-worker setting.
