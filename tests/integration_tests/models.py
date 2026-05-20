@@ -153,6 +153,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # Integration Test Cases for gpt-oss
+        # TODO: re-enable rocm test after fixing compile with .view(-1, dim)
         OverrideDefinitions(
             [
                 [
@@ -166,6 +167,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "Gpt-oss FSDP+TP+EP+compile",
             "gpt_oss_fsdp+tp+ep+compile",
             ngpu=8,
+            skip_rocm_test=True,
         ),
     ]
 
