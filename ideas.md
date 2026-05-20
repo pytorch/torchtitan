@@ -1922,3 +1922,12 @@
   Planned command or config overrides: Current best two-worker command unchanged.
   Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no FlexAttention compile/runtime warnings. Risk is extra block-mask and FlexAttention compile overhead outweighing any attention-kernel win at seq_len=128.
   Result: crash at source state `a8d8ed2`; failed before step 1 in FlexAttention lowering because `BACKEND='FLASH'` requires the CUTE flash attention library, which is not available in this environment. Restore SDPA and do not retest `flex_flash` unless the library becomes available.
+
+- Idea: Qwen3 14B plain flex attention backend
+  Current best source commit: 71a79b4c
+  Source: follow-up after `flex_flash` failed for an environment-specific FLASH backend dependency
+  Expected mechanism: Plain `flex` uses FlexAttention without forcing the unavailable FLASH backend. It may still improve or clarify the block-mask attention path relative to SDPA at seq_len=128, while avoiding the CUTE dependency that crashed `flex_flash`.
+  Supporting evidence: `flex_flash` reached model build and failed only when lowering the FLASH backend. Qwen3 debug configs include flex backends, and `attn_backend` remains an allowed model-spec kwarg.
+  Planned source/config changes: Edit only `qwen3_14b()` to use `model_registry("14B", attn_backend="flex")`.
+  Planned command or config overrides: Current best two-worker command unchanged.
+  Success criteria and expected risk: Success is tps above 10,328 with finite decreasing loss and no FlexAttention compile/runtime warnings. Risk is slower block-mask construction or slower generic FlexAttention kernels than SDPA for this short-sequence workload.
