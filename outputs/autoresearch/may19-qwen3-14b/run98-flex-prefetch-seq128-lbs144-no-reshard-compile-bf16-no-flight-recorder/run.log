@@ -1,0 +1,73 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=144 --comm.trace_buf_size=0 --parallelism.fsdp_reshard_after_forward=never --dump_folder=outputs/autoresearch/may19-qwen3-14b/run98-flex-prefetch-seq128-lbs144-no-reshard-compile-bf16-no-flight-recorder
+W0519 19:22:01.947000 3643421 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0519 19:22:01.947000 3643421 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0519 19:22:01.947000 3643421 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0519 19:22:01.947000 3643421 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0519 19:22:08.351000 3646471 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-19 19:22:09,118 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-19 19:22:09,175 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run98-flex-prefetch-seq128-lbs144-no-reshard-compile-bf16-no-flight-recorder/structured_logs/training.global_rank_0.20260519-192209-SPUYJQ.jsonl
+[rank0]:[titan] 2026-05-19 19:22:10,433 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-19 19:22:10,434 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-19 19:22:10,442 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-19 19:22:10,442 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-19 19:22:14,820 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-19 19:22:14,824 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-19 19:22:14,848 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-19 19:22:14,927 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-19 19:22:15,090 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-19 19:22:15,090 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-19 19:22:15,090 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-19 19:22:15,107 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-19 19:22:15,181 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=False
+[rank0]:[titan] 2026-05-19 19:22:15,687 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-19 19:22:15,687 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-19 19:22:15,689 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-19 19:22:15,690 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-19 19:22:15,706 - root - INFO - Trainer is initialized with local batch size 144, global batch size 1152, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-19 19:22:15,706 - root - INFO - Training starts at step 1
+[rank0]:/home/avenkataraman/github/pytorch/torch/_inductor/fx_utils.py:157: UserWarning: Please add support for subgraph args to function flex_attention_backward!
+[rank0]:  warnings.warn(
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-19 19:22:38,262 - root - INFO - [31mstep:  1  [32mloss: 12.40089  [38;2;180;60;0mgrad_norm: 25.0000  [38;2;54;234;195mmemory: 172.32GiB(96.62%)  [34mtps: 795  [36mtflops: 67.02  [35mmfu: 2.98%[39m
+[rank0]:[titan] 2026-05-19 19:22:38,263 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:[rank0]:[W519 19:22:38.194214653 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 20578304, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:39.110396931 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 20578304, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:42.794108025 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 20578304, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:43.239726958 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 20578304, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:47.872714861 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:48.223718215 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:54.431244591 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:55.921420697 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:58.662593541 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:22:59.112370600 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:02.626226161 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:03.916978392 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:03.002772994 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:06.282556637 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:06.574897759 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:06.807789200 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:10.985196602 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:10.214579004 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:10.514365048 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:14.471920290 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:14.830584346 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[rank0]:[W519 19:23:15.138219701 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 18481152, total: 191503138816).
+[rank0]:[titan] 2026-05-19 19:23:23,975 - root - WARNING - 22 CUDA memory allocation retries.
+[rank0]:[titan] 2026-05-19 19:23:23,975 - root - INFO - [31mstep: 10  [32mloss: 10.89515  [38;2;180;60;0mgrad_norm: 25.3750  [38;2;54;234;195mmemory: 173.25GiB(97.14%)  [34mtps: 3,629  [36mtflops: 305.76  [35mmfu: 13.59%[39m
+[rank0]:[titan] 2026-05-19 19:23:23,976 - root - INFO - Sleeping 2 seconds for other ranks to complete
+[rank0]:[titan] 2026-05-19 19:23:25,976 - root - INFO - Training completed
+[rank0]:[titan] 2026-05-19 19:23:26,386 - root - INFO - Process group destroyed

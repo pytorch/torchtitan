@@ -853,6 +853,7 @@
   Planned source/config changes: None; use the restored bidirectional prefetch source.
   Planned command or config overrides: Run84 command shape with `--training.seq_len=128 --training.local_batch_size=144 --parallelism.fsdp_reshard_after_forward=never`.
   Success criteria and expected risk: Success is tps above 9,709 with finite decreasing loss and no allocator retries. Risks are OOM from retained parameters or lower tps because all-gather savings do not offset the smaller batch.
+  Result: discarded at source state `b7f0143`; 3,629 tps, 173.25 GiB peak memory, and 22 CUDA allocation retries. Loss was finite and decreasing, but allocator pressure dominates.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f

@@ -2601,3 +2601,25 @@ Interpretation:
 
 - Removing backward prefetch does not help the seq128 shape despite the reduce-scatter-heavy profile.
 - Restore the one-module bidirectional prefetch schedule. The next communication experiments need to reduce payload or change topology without removing this overlap.
+
+## Experiment 98: Seq128 Local Batch 144 With No FSDP Reshard After Forward
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=144 --comm.trace_buf_size=0 --parallelism.fsdp_reshard_after_forward=never --dump_folder=outputs/autoresearch/may19-qwen3-14b/run98-flex-prefetch-seq128-lbs144-no-reshard-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 3,629, far below run84's 9,709.
+- Step 10 MFU: 13.59%.
+- Step 10 peak memory: 173.25 GiB, 97.14%.
+- Loss moved from 12.40089 at step 1 to 10.89515 at step 10; finite and decreasing.
+- The run logged 22 CUDA memory allocation retries and repeated expandable-segment mapping OOM warnings.
+
+Interpretation:
+
+- No-reshard remains closed for this source line. Even a 10% smaller seq128 batch crosses the memory cliff and destroys throughput.
+- The seq128 profile's all-gather bucket is not worth attacking through retained parameter residency unless a separate memory-saving source change appears first.
