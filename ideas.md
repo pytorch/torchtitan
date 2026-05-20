@@ -2772,3 +2772,12 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the durable command. Risk is only short-window variance.
   Result: kept as calibration at source state `839898f`; 10,571 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This is a strong recent exact-command sample but still below run242's 10,650 measured peak.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_USE_CUDA_MEMCPY=1
+  Current best source commit: 731b2591
+  Source: local NCCL P2P transport check after direct P2P direction and chunk-size probes were below peak
+  Expected mechanism: Enable NCCL's CUDA memcpy path for P2P communication. Copy-engine P2P may reduce SM pressure and improve overlap with compiled transformer GEMMs, even if raw communication bandwidth is lower.
+  Supporting evidence: Local NCCL source defines `NCCL_PARAM(P2pUseCudaMemcpy, "P2P_USE_CUDA_MEMCPY", 0)`. Full `NCCL_P2P_DISABLE=1` was severely slower, but this keeps GPU P2P available while changing the transfer engine.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_USE_CUDA_MEMCPY=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is much slower communication if copy-engine P2P cannot match NCCL's default direct path.
