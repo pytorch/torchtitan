@@ -1,15 +1,18 @@
 #!/bin/bash
 # Benchmark fused kernels: compare baseline vs fused kernel training.
 #
-# Uses --comm.mode=fake_backend to replace all collectives with no-ops,
-# isolating pure compute time. Runs on a single GPU simulating 8.
-#
 # Usage:
+#   # Real distributed (8 GPUs):
 #   FUSED_KERNEL_DIR=/tmp/kernels ./run_benchmark_fused_kernels.sh
+#
+#   # Single GPU with fake_backend (no NCCL, requires FSDP-only / TP=1):
+#   FUSED_KERNEL_DIR=/tmp/kernels FAKE_BACKEND=1 ./run_benchmark_fused_kernels.sh
 
 STEPS=${STEPS:-20}
 NGPU=${NGPU:-8}
 PROFILE_DIR=${PROFILE_DIR:-~/tmp/fused_kernel_profiles}
+DP=${DP:-8}
+TP=${TP:-1}
 
 if [ -z "${FUSED_KERNEL_DIR:-}" ]; then
     echo "Usage: FUSED_KERNEL_DIR=/tmp/kernels ./run_benchmark_fused_kernels.sh"
@@ -30,25 +33,46 @@ run_bench() {
     echo "=========================================="
     local dump="$PROFILE_DIR/$trace_subdir"
     rm -rf "$dump"
-    NGPU=$NGPU torchrun --nproc_per_node=$NGPU --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
-        --local-ranks-filter 0 --role rank --tee 3 \
-        -m torchtitan.train \
-        --module graph_trainer.llama3 \
-        --config graph_trainer_llama3_8b \
-        --compile.mode aot_fx_trace \
-        --parallelism.data_parallel_shard_degree=4 \
-        --parallelism.tensor_parallel_degree=2 \
-        --training.steps $STEPS \
-        --dataloader.dataset c4_test \
-        \
-        --metrics.no-enable_tensorboard \
-        --comm.trace_buf_size=0 \
-        --compile.disable_passes custom_codegen_pass \
-        --profiler.enable_profiling \
-        --profiler.profile_freq 10 \
-        --dump_folder "$dump" \
-        "$@" \
-        > "$TMPLOG" 2>&1
+
+    if [ "${FAKE_BACKEND:-0}" = "1" ]; then
+        NGPU=$NGPU LOCAL_RANK=0 python3 -m torchtitan.train \
+            --module graph_trainer.llama3 \
+            --config graph_trainer_llama3_8b \
+            --compile.mode aot_fx_trace \
+            --parallelism.data_parallel_shard_degree=$DP \
+            --parallelism.tensor_parallel_degree=$TP \
+            --training.steps $STEPS \
+            --dataloader.dataset c4_test \
+            --compile.disable_passes custom_codegen_pass \
+            --metrics.no-enable_tensorboard \
+            --comm.trace_buf_size=0 \
+            --comm.mode=fake_backend \
+            --profiler.enable_profiling \
+            --profiler.profile_freq 10 \
+            --dump_folder "$dump" \
+            "$@" \
+            > "$TMPLOG" 2>&1
+    else
+        NGPU=$NGPU torchrun --nproc_per_node=$NGPU --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+            --local-ranks-filter 0 --role rank --tee 3 \
+            -m torchtitan.train \
+            --module graph_trainer.llama3 \
+            --config graph_trainer_llama3_8b \
+            --compile.mode aot_fx_trace \
+            --parallelism.data_parallel_shard_degree=$DP \
+            --parallelism.tensor_parallel_degree=$TP \
+            --training.steps $STEPS \
+            --dataloader.dataset c4_test \
+            --compile.disable_passes custom_codegen_pass \
+            --metrics.no-enable_tensorboard \
+            --comm.trace_buf_size=0 \
+            --profiler.enable_profiling \
+            --profiler.profile_freq 10 \
+            --dump_folder "$dump" \
+            "$@" \
+            > "$TMPLOG" 2>&1
+    fi
+
     grep -E "step:|Fused kernel|Dumping profiler" "$TMPLOG" || echo "  (no step output found)"
     local trace=$(find "$dump" -name "rank0_*" -type f 2>/dev/null | head -1)
     if [ -n "$trace" ]; then
@@ -67,7 +91,7 @@ for subdir in baseline fused; do
     TRACE_FILE=$(find "$PROFILE_DIR/$subdir" -name "rank0_*" -type f 2>/dev/null | head -1)
     if [ -n "$TRACE_FILE" ]; then
         echo "  Uploading $subdir: $TRACE_FILE"
-        python3 ~/local/fbsource/arvr/scripts/perfetto/share_trace.py "$TRACE_FILE" 2>&1 | grep -E "Perfetto UI|Manifold"
+        python3 ~/local/fbsource/arvr/scripts/perfetto/share_trace.py "$TRACE_FILE" 2>&1
     else
         echo "  $subdir: no trace found"
     fi
