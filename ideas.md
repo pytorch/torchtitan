@@ -1172,3 +1172,12 @@
   Planned command or config overrides: Exact run123 command with a new dump folder.
   Success criteria and expected risk: Keep backward-only source if the rerun remains above 10,005 tps with finite decreasing loss. If it falls below, restore bidirectional prefetch as the durable source.
   Result: discarded at source state `1b3518d`; 9,728 tps with finite decreasing loss and 168.57 GiB peak memory. Backward-only prefetch does not validate, so restore one-module bidirectional prefetch.
+
+- Idea: SDPA seq128 local batch 160 with loss num_chunks 4
+  Current best source commit: 846907b
+  Source: loss implementation chunking follow-up after compile and prefetch plateau
+  Expected mechanism: `ChunkedCELoss` defaults to 8 chunks. Reducing to 4 keeps the same mathematical loss but halves the number of lm_head/CE loop iterations and per-chunk backward calls, trading higher logits memory for lower overhead.
+  Supporting evidence: Model-only compile OOMed in the loss backward path, showing this region is memory-sensitive, but the best run still has roughly 9.8 GiB headroom below device capacity. A moderate 8-to-4 chunk reduction may fit and improve tps.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current durable best command plus `--loss.num_chunks=4`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and no allocator/OOM warnings. Risk is OOM or slower runtime if the larger chunks increase memory pressure more than they reduce loop overhead.
