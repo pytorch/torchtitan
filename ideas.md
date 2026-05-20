@@ -2142,3 +2142,12 @@
   Planned command or config overrides: Exact current-best command from run215.
   Success criteria and expected risk: Keep as calibration if finite and clean. If it exceeds 10,625, treat it as the new measured peak for the same durable command.
   Result: kept as calibration at source state `27165c5`; 10,594 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. This stays below the run215 peak but confirms the current-best command remains healthy.
+
+- Idea: keep lm_head unresharded after forward
+  Current best source commit: 8bb23ad9
+  Source: FSDP collective follow-up after run219 profile showed NCCL all-gather and reduce-scatter remain the second-largest kernel bucket
+  Expected mechanism: Use `reshard_after_forward=False` only for `model.lm_head` while keeping transformer layers and the root on the current reshard policy. The `lm_head` is the final large module before loss; keeping its parameters unsharded through backward may avoid a backward all-gather for that module and reduce exposed NCCL all-gather time.
+  Supporting evidence: Run219 rank0 trace showed about 454 ms in NCCL all-gather kernels and the current prefetch chain explicitly forwards from the last transformer layer to `lm_head` and backward-prefetches from `lm_head` to the last layer. This is narrower than whole-model no-reshard or transformer-layer partial reshard attempts.
+  Planned source/config changes: Edit `parallelize.py` to apply a copy of the FSDP config with `reshard_after_forward=False` only when wrapping `model.lm_head`.
+  Planned command or config overrides: Current best `metrics.log_freq=1` command unchanged.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no allocator/NCCL warnings. Risk is memory crossing the 95% guideline because `lm_head` full parameters remain resident through backward.
