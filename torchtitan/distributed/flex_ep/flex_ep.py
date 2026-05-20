@@ -1986,8 +1986,7 @@ class NvlSharedBuffer:
         return getattr(self, name).data_ptr() - self.raw.data_ptr()
 
 
-_WorkspaceCacheKey = tuple[int, int, int, float]
-_FLEX_EP_WORKSPACE_CACHE: dict[_WorkspaceCacheKey, "FlexEPWorkspace"] = {}
+_FLEX_EP_WORKSPACE_CACHE: dict[int, "FlexEPWorkspace"] = {}
 
 
 def _require_expert_parallel_mesh(
@@ -2035,25 +2034,7 @@ class FlexEPWorkspace:
         ep_group: Any,
         capacity_factor: float,
     ) -> "FlexEPWorkspace":
-        if ep_size <= 1:
-            raise ValueError(
-                "FlexGroupedExperts requires expert parallelism "
-                "(expert_parallel_degree > 1)."
-            )
-        if num_experts % ep_size != 0:
-            raise ValueError(
-                f"num_experts ({num_experts}) must be divisible by ep_size "
-                f"({ep_size})."
-            )
-        if not 0 <= ep_rank < ep_size:
-            raise ValueError(f"ep_rank ({ep_rank}) must be in [0, {ep_size}).")
-        ep_group_key = id(ep_group)
-        cache_key = (
-            ep_group_key,
-            ep_rank,
-            ep_size,
-            capacity_factor,
-        )
+        cache_key = id(ep_group)
         nvl_buffer_size = NvlSharedBuffer.get_buffer_size_bytes(
             max_tokens=max_tokens,
             dim=dim,
@@ -2283,13 +2264,12 @@ def _allocate_workspace_storage(
         dtype=torch.int64,
         device=raw.device,
     )
-    if ep_size > 1:
-        _router_barrier(
-            buffer.barrier_counter,
-            buffer.barrier_counter,
-            buffers_cuda_ptrs,
-            buffer.offset_of("barrier_counter"),
-        )
+    _router_barrier(
+        buffer.barrier_counter,
+        buffer.barrier_counter,
+        buffers_cuda_ptrs,
+        buffer.offset_of("barrier_counter"),
+    )
     return raw, peer_buffers, buffers_cuda_ptrs
 
 

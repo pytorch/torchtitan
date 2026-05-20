@@ -198,31 +198,16 @@ class FlexGroupedExperts(Module):
         # CUDA buffers are available.
         self.ep_mesh: DeviceMesh | None = None
         self._router: Any | None = None
-        self._router_shape: tuple[int, int, torch.device, int, int, float] | None = None
+        self._router_shape: tuple[int, int, float] | None = None
 
     def _get_or_create_router(self, x: torch.Tensor) -> Any:
-        if self.ep_mesh is None:
-            raise ValueError(
-                "FlexGroupedExperts requires expert parallelism "
-                "(expert_parallel_degree > 1)."
-            )
-        ep_size = self.ep_mesh.size()
-        if ep_size <= 1:
-            raise ValueError(
-                "FlexGroupedExperts requires expert parallelism "
-                "(expert_parallel_degree > 1)."
-            )
         if x.device.type != "cuda":
             raise ValueError(
                 f"FlexGroupedExperts requires CUDA tensors, got device={x.device}."
             )
-        ep_rank = self.ep_mesh.get_local_rank()
         router_shape = (
             x.shape[0],
             x.shape[1],
-            x.device,
-            ep_size,
-            ep_rank,
             self.flex_ep_capacity_factor,
         )
         if self._router is not None and self._router_shape == router_shape:
