@@ -18,7 +18,7 @@ class TestModuleInitStates(unittest.TestCase):
     """Tests for Module.init_states behavior."""
 
     def test_default_init_states_no_param_init_raises(self):
-        """Subclass with parameters but no param_init raises ValueError."""
+        """Subclass with own params but no param_init and no reset_parameters raises."""
 
         class SimpleModule(Module):
             def __init__(self):
@@ -28,6 +28,21 @@ class TestModuleInitStates(unittest.TestCase):
         m = SimpleModule()
         with self.assertRaises(ValueError):
             m.init_states()
+
+    def test_init_states_falls_back_to_reset_parameters(self):
+        """No param_init + reset_parameters available -> reset_parameters runs.
+
+        Wrappers like ``Linear``/``LayerNorm``/``Conv2d`` inherit
+        ``reset_parameters`` from their nn base; the base ``Module`` calls
+        it when no custom ``param_init`` is provided.
+        """
+        m = Linear.Config(in_features=4, out_features=8, bias=True).build()
+        nn.init.zeros_(m.weight)
+        nn.init.ones_(m.bias)
+        m.init_states()
+        # reset_parameters uses kaiming_uniform; result is non-zero, non-one.
+        self.assertFalse(torch.all(m.weight == 0))
+        self.assertFalse(torch.all(m.bias == 1))
 
     def test_init_states_auto_recurses(self):
         """init_states automatically recurses into Module children."""
