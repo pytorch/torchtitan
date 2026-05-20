@@ -1802,3 +1802,13 @@
   Planned command or config overrides: Current best command with `NCCL_CTA_POLICY=2 NCCL_MAX_CTAS=8`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no NCCL warnings. Risk is underfeeding NCCL and increasing exposed communication time.
   Result: discarded at source state `72c8249`; 10,047 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The lower CTA cap underfeeds NCCL/overlap and is worse than both default zero-CTA and `NCCL_MAX_CTAS=16`.
+
+- Idea: two-worker DataLoader command with prefetch_factor=1
+  Current best source commit: bbc67c42
+  Source: remaining DataLoader prefetch-depth bracket after prefetch factor 2 validated and factor 4 regressed
+  Expected mechanism: With two persistent workers, prefetching one batch per worker may provide enough input overlap while reducing queueing and multiprocessing overhead versus prefetch factor 2.
+  Supporting evidence: Worker count is the only validated positive axis after the current profile. Prefetch factor 4 regressed, but the lower factor 1 side has not been tested.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command with `--dataloader.prefetch_factor=1`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no DataLoader warnings. Risk is under-prefetching and reintroducing host input stalls.
+  Result: discarded at source state `bbc67c4`; 9,969 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Prefetch factor 1 underfeeds the two-worker input pipeline; keep prefetch factor 2.
