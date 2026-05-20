@@ -965,6 +965,15 @@
   Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss and peak memory below the 95% risk line. Risk is lower kernel efficiency from non-power-of-two sequence length or larger batch-count overhead.
   Result: discarded at source state `7e3de1d`; 9,933 tps with finite decreasing loss and 168.34 GiB peak memory, below the SDPA seq128 best.
 
+- Idea: SDPA seq128 shape with local batch 159
+  Current best source commit: 846907b
+  Source: lower-batch margin check after batch161 regressed and batch160 became the best
+  Expected mechanism: Local batch 159 slightly lowers memory pressure versus the best batch160 point. If the best is limited by near-cliff allocator or scheduling pressure, a one-batch reduction may improve normalized tps.
+  Supporting evidence: Batch161 regressed to 9,646 tps and 169.20 GiB. Batch160 is close to the memory-risk line at 168.57 GiB but validated near 10k tps. The lower neighbor has not been tested under SDPA.
+  Planned source/config changes: None; use plain SDPA, no converters, bidirectional prefetch.
+  Planned command or config overrides: Run99 command shape with `--training.local_batch_size=159`.
+  Success criteria and expected risk: Success is tps above 10,005 with finite decreasing loss. Risk is simply doing less work per step without reducing bottleneck time enough.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
