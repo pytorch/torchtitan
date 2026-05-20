@@ -3824,3 +3824,26 @@ Interpretation:
 - ProcessGroup-allocated comm buffers are not viable for this command: they increase memory far past the risk line and produce teardown warnings.
 - The custom FSDP communication allocation paths tried so far can improve or preserve throughput, but both symmetric memory and ProcessGroup allocation are unsafe at teardown on this stack.
 - Restore default FSDP comm buffer allocation before the next candidate.
+
+## Experiment 154: SDPA Zero-CTA Loss Chunks 6 With FSDP Async Unshard Op
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run154-sdpa-async-unshard-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,207, below the durable chunks=6 command.
+- Step 10 MFU: 38.22%.
+- Step 10 peak memory: 167.83 GiB, 94.10%.
+- Loss moved from 12.47213 at step 1 to 11.25700 at step 10; finite and decreasing.
+- No NCCL teardown warnings appeared.
+
+Interpretation:
+
+- Async unshard avoids the teardown problems from custom FSDP communication allocators and lowers memory by about 1.3 GiB.
+- At the durable batch160 shape, the changed unshard scheduling is slower than the default.
+- Run one batch-scale follow-up to see whether the memory headroom can pay for the scheduling cost; otherwise restore the default unshard path.

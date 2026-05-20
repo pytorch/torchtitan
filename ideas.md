@@ -1471,3 +1471,13 @@
   Planned source/config changes: Restore default FSDP comm allocation and no symmetric-memory calls, then call `_set_unshard_async_op(True)` on the FSDP-wrapped transformer layers, `lm_head`, and root model after `fully_shard`.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss, no allocator/OOM warnings, and no NCCL teardown warnings. Risk is a private FSDP knob regressing overlap or increasing memory.
+  Result: discarded at source state `ae8dfe2`; 10,207 tps with finite decreasing loss, 167.83 GiB peak memory, and no NCCL teardown warnings. Async unshard is safe and lowers memory versus the durable chunks=6 command, but it is slower at batch160.
+
+- Idea: SDPA zero-CTA loss chunks 6 with FSDP async unshard and local batch 162
+  Current best source commit: ae8dfe2
+  Source: memory-headroom follow-up after async unshard lowered peak memory at batch160
+  Expected mechanism: Async unshard regressed scheduling at batch160 but reduced peak memory by about 1.3 GiB. Increasing local batch from 160 to 162 may convert that headroom into more tokens per step and better GEMM utilization without crossing the memory-risk line as badly as the default batch162 run.
+  Supporting evidence: Run154 used 167.83 GiB versus 169.10 GiB for the durable chunks=6 command. Earlier default-source batch162 was memory-risky and slow, but async unshard changes the memory profile enough to justify one batch-scale check.
+  Planned source/config changes: Keep the async-unshard source from run154.
+  Planned command or config overrides: Current zero-CTA chunks=6 command with `--training.local_batch_size=162`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, finite decreasing loss, no allocator/OOM/NCCL warnings, and memory near or below the 95% risk line. Risk is the same scheduling slowdown dominating or memory pressure returning.
