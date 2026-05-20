@@ -2232,3 +2232,12 @@
   Planned command or config overrides: Current best command plus `--parallelism.tensor_parallel_degree=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no DTensor/FSDP/NCCL warnings. Risks are TP collectives dominating at seq_len 128, sharding-contract bugs, changed global batch semantics, or lower reported per-device tps after TP normalization.
   Result: discarded at source state `cb876244`; TP2/FSDP4 completed cleanly but reached only 9,323 tps, 34.91% MFU, and 100.35 GiB peak memory. Loss was finite and overall decreasing from 3.11665 to 1.76364, but the DTensor warning about sequential all-reduces across `fsdp` and `tp` confirms extra communication overhead, and the run is well below the 10,625 tps DP-only best.
+
+- Idea: exact current best rerun after TP2 restore
+  Current best source commit: 3797878f
+  Source: source-restore validation after discarding the TP2/FSDP4 source candidate
+  Expected mechanism: This is a calibration run, not a new runtime knob. Repeat the exact current-best command after restoring the DP-only source to verify no source drift remains and to collect another sample from the high-variance final-step `metrics.log_freq=1` window.
+  Supporting evidence: Run230 changed both `parallelize.py` and `sharding.py` and was then restored. Previous source-restore calibrations were clean but sometimes lower than run215; the current durable peak is still the same DP-only command at 10,625 tps.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command from run215.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and source logs show `dp_shard=8` with TP disabled. If it exceeds 10,625 tps, record the new measured peak for the same durable command. Risk is only short-window variance.
