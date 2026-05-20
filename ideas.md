@@ -1441,3 +1441,13 @@
   Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to call `set_symm_mem_for_comm("NCCL")` on each FSDP-wrapped layer, `lm_head`, and root model after `fully_shard`.
   Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
   Success criteria and expected risk: Success is tps above 10,288 for a new measured best or above 10,258 if rerun-worthy, with finite decreasing loss and no allocator/OOM warnings. Risk is unsupported symmetric-memory setup, slower communication, or extra memory pressure.
+  Result: unsafe discard at source state `d44fd22`; 10,360 tps with finite decreasing loss but 170.54 GiB peak memory and repeated NCCL `corrupted comm object detected` warnings while deregistering symmetric-memory windows after training. Do not keep all-module symmetric-memory communication as-is.
+
+- Idea: SDPA zero-CTA loss chunks 6 with layer-only FSDP symmetric-memory communication
+  Current best source commit: d44fd22
+  Source: narrower follow-up after all-module symmetric memory was fast but unsafe at teardown
+  Expected mechanism: Applying symmetric-memory communication only to transformer layer FSDP modules may keep the all-gather/reduce-scatter speedup where most communication occurs while avoiding root/lm_head window deregistration problems.
+  Supporting evidence: The all-module run reached 10,360 tps, indicating the mechanism can improve performance, but it produced NCCL corrupted-comm-object warnings and higher memory. Narrowing the application may remove the unsafe teardown path.
+  Planned source/config changes: Edit `torchtitan/models/qwen3/parallelize.py` to call `set_symm_mem_for_comm("NCCL")` only on `layers`, not `model.lm_head` or root `model`.
+  Planned command or config overrides: Current durable command with `NCCL_CTA_POLICY=2` and `--loss.num_chunks=6`.
+  Success criteria and expected risk: Success is tps above 10,288 or above 10,258 if rerun-worthy, finite decreasing loss, no NCCL corrupted-comm warnings, and memory not materially above chunks=6 baseline. Risk is losing the speedup or retaining symmetric-memory warnings.

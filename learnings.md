@@ -3756,3 +3756,25 @@ Interpretation:
 
 - Forcing LL128 is slower than NCCL's default LL protocol.
 - Leave NCCL protocol selection at the default with `NCCL_CTA_POLICY=2`.
+
+## Experiment 151: SDPA Zero-CTA Loss Chunks 6 With FSDP Symmetric-Memory Communication
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run151-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-fsdp-symm-mem-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: unsafe discard.
+- Step 10 `tps`: 10,360, above the current best.
+- Step 10 MFU: 38.79%.
+- Step 10 peak memory: 170.54 GiB, 95.62%.
+- Loss moved from 12.52671 at step 1 to 9.61625 at step 10; finite and decreasing.
+- After training completed, NCCL emitted repeated `corrupted comm object detected` warnings while deregistering symmetric-memory windows.
+
+Interpretation:
+
+- Symmetric-memory FSDP communication can improve throughput, but the all-module application is unsafe due to NCCL teardown warnings and higher memory.
+- Test a narrower layer-only application before deciding whether this path is viable.
