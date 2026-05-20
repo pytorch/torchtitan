@@ -2532,3 +2532,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_SHM_DISABLE=1` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss and no NCCL warnings. Risk is no effect if SHM is not used, or slower collectives if SHM carries useful intra-host traffic.
   Result: discarded at source state `f490ec5`; 10,469 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Disabling SHM is clean but below the durable command, so keep NCCL default shared-memory behavior.
+
+- Idea: exact current best rerun after NCCL transport closure
+  Current best source commit: 10b40b30
+  Source: variance calibration after P2P, PXN, DMA-BUF, checks, blocking-wait, and SHM probes failed to improve the command
+  Expected mechanism: Repeat the exact durable command with no new source or command changes. The final-step objective has shown high short-window variance, and exact reruns are the only experiments that have produced the current 10,650 tps measured peak.
+  Supporting evidence: Recent command-only transport/runtime knobs cluster around 10.4k-10.5k tps, while run242 reached 10,650 tps with the unchanged durable command. A fresh exact rerun distinguishes real regression from normal variance and may sample a new best.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak for the same durable command. Risk is only short-window variance.
