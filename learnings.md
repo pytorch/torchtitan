@@ -2282,3 +2282,25 @@ Interpretation:
 
 - The sequence-shape improvement is flattening: seq512 to seq256 only gained 20 tps.
 - The next shape, seq_len 128 with local batch 160, may identify the turnover point; risk of per-sample/batch overhead now looks higher than memory risk.
+
+## Experiment 84: Constant-Token Seq128 Local Batch 160 Shape
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run84-flex-prefetch-seq128-lbs160-compile-bf16-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: keep; new best measured reported `tps`.
+- Step 10 `tps`: 9,709, above run83's 9,599.
+- Step 10 MFU: 36.36%.
+- Step 10 peak memory: 168.96 GiB, 94.73%.
+- Loss moved from 12.44384 at step 1 to 6.64070 at step 10; finite and decreasing.
+- Per-step tokens remain 163,840: 8 ranks * local batch 160 * seq_len 128.
+
+Interpretation:
+
+- The constant-token shorter-sequence sweep still improves at seq128, and the gain increased again versus the seq512->seq256 step.
+- The next neighbor is seq_len 64 with local batch 320. At that point, batch/sample overhead and very small attention tiles are likely to dominate, but the measured trend still justifies one test.

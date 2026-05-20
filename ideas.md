@@ -722,6 +722,7 @@
   Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
   Planned command or config overrides: Run83 command shape with `--training.seq_len=128 --training.local_batch_size=160`.
   Success criteria and expected risk: Success is tps above 9,599 with finite decreasing loss and no external-allocation contamination. Risks are small-sequence kernel inefficiency, high batch/collation overhead, or loss trend noise.
+  Result: kept at source state `03d00df`; 9,709 tps with finite decreasing loss, improving on run83 at the same per-step token count.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
