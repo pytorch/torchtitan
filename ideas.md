@@ -1872,3 +1872,22 @@
   Planned command or config overrides: Current best command plus `--training.max_norm=1000000.0`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no nonfinite grad warnings. Risk is no performance effect because norm computation and foreach multiply still run, or worse loss behavior from much larger updates.
   Result: discarded at source state `20cc910`; 6,808 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. Avoiding clipping severely slows the run and does not improve the grad path; keep the default max norm.
+
+- Idea: current best with OMP_NUM_THREADS=2
+  Current best source commit: aa9ccb86
+  Source: CPU scheduling follow-up after DataLoader workers validated and tokenizer parallelism did not help
+  Expected mechanism: Explicitly setting `OMP_NUM_THREADS=2` prevents torchrun from forcing one OpenMP thread per rank. This may help CPU-side collation/tokenization or PyTorch host work without changing GPU kernels.
+  Supporting evidence: The validated DataLoader worker setting shows some host-input sensitivity. This is an isolated environment knob and can be discarded if CPU oversubscription hurts.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command with `OMP_NUM_THREADS=2` in the environment.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no DataLoader warnings. Risk is CPU oversubscription across 8 ranks plus 16 DataLoader workers.
+  Result: tentative keep at source state `aa9ccb8`; 10,336 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. This is a new measured high but only 8 tps above the previous peak, so validate with an exact rerun.
+
+- Idea: exact rerun of OMP_NUM_THREADS=2 current best
+  Current best source commit: aa9ccb86
+  Source: validation follow-up after run195 produced a tiny new measured high
+  Expected mechanism: Repeat the exact `OMP_NUM_THREADS=2` command to distinguish a real CPU scheduling improvement from normal timing variance.
+  Supporting evidence: Run195 beat the previous 10,328 peak by only 8 tps, while exact current-best reruns vary around 10,301.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Exact run195 command with a new dump folder.
+  Success criteria and expected risk: Promote only if the rerun remains above 10,301 and preferably above 10,328, with finite decreasing loss and no DataLoader warnings. Otherwise treat run195 as variance and keep the prior command.

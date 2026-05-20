@@ -4734,3 +4734,25 @@ Interpretation:
 
 - Avoiding actual gradient clipping does not remove the grad-norm cost that matters and badly regresses throughput.
 - Keep the default `training.max_norm=1.0`.
+
+## Experiment 195: OMP_NUM_THREADS=2
+
+Command:
+
+```bash
+OMP_NUM_THREADS=2 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run195-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-omp2-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: tentative keep; needs exact rerun.
+- Step 10 `tps`: 10,336, a new measured high by 8 tps.
+- Step 10 MFU: 38.71%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.31280 at step 1 to 6.01736 at step 10; finite and decreasing.
+- No dataset re-loop, DataLoader worker warning, OOM, traceback, or NCCL warning appeared.
+
+Interpretation:
+
+- `OMP_NUM_THREADS=2` may slightly improve host-side scheduling, but the margin is well inside the observed 10-step variance.
+- Run an exact validation before promoting this environment knob.
