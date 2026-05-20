@@ -2302,3 +2302,12 @@
   Planned command or config overrides: Prefix the current-best command with `TORCH_NCCL_HIGH_PRIORITY=1` alongside `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse GEMM/collective contention or no effect if stream priority is already optimal.
   Result: discarded at source state `394bb02`; 10,482 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. High-priority NCCL is slower than the default stream priority on the current final-step command, so keep the default stream behavior.
+
+- Idea: metrics log frequency 1 with NCCL_CGA_CLUSTER_SIZE=4
+  Current best source commit: cd78ef1c
+  Source: NCCL kernel-shape probe after CTA, channel, buffer, launch, stream-priority, algorithm, and cuMem knobs did not beat the current best
+  Expected mechanism: Force NCCL collective kernels to use a CGA cluster size of 4. On B200 with NCCL 2.29, collective kernel clustering can change occupancy, scheduling, and overlap with compiled GEMM work; a mid-size cluster may reduce exposed FSDP reduce-scatter/all-gather time without changing tensor shapes or FSDP policy.
+  Supporting evidence: The latest `metrics.log_freq=1` profile still showed NCCL as the second-largest kernel bucket behind GEMMs, while the best command remains DP-only FSDP with one-module prefetch. This is a distinct kernel-shape knob from CTA count and channel count.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the current-best command with `NCCL_CGA_CLUSTER_SIZE=4` alongside `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is worse collective occupancy, less GEMM overlap, or NCCL ignoring the variable on this build.
