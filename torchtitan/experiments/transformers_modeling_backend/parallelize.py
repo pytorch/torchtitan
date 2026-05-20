@@ -89,7 +89,6 @@ def shard_module_states(
             )
 
 
-
 # ---------------------------------------------------------------------------
 # Gate and expert hooks for DTensor → local conversion
 # ---------------------------------------------------------------------------
@@ -176,7 +175,9 @@ def parallelize_hf_transformers(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
+    assert (
+        training.seq_len % parallel_dims.seq_len_divisor == 0
+    ), f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
@@ -443,7 +444,6 @@ def apply_moe_sharding(
         expert_ep_shardings,
         expert_tp_shardings,
         gate_shardings,
-        shared_expert_shardings,
     )
 
     assert tp_mesh is not None or ep_mesh is not None
@@ -471,9 +471,7 @@ def apply_moe_sharding(
             ep_size = ep_mesh.size()
             experts.token_dispatcher.ep_group = ep_mesh.get_group()
             experts.token_dispatcher.ep_size = ep_size
-            experts.token_dispatcher.num_local_experts = (
-                experts.num_experts // ep_size
-            )
+            experts.token_dispatcher.num_local_experts = experts.num_experts // ep_size
             experts.register_forward_pre_hook(
                 lambda mod, args: mod.token_dispatcher.dispatch(*args)
             )

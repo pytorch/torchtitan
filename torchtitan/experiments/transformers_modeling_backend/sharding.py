@@ -15,7 +15,7 @@ rather than by the ``Module.parallelize`` protocol, since HF modules don't
 implement titan's ``Module`` protocol.
 """
 
-from torch.distributed.tensor import Partial, Placement, Replicate, Shard
+from torch.distributed.tensor import Replicate, Shard
 
 from torchtitan.protocols.sharding import NamedPlacement
 from torchtitan.protocols.types import MeshAxisName
