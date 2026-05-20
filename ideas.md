@@ -2932,3 +2932,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROGRESS_APPENDOP_FREQ=16` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is delayed pickup of newly posted proxy ops or no effect if this workload is not proxy-progress limited.
   Result: discarded at source state `a785be7`; 10,576 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The high-side append-op frequency is a valid high-band sample but still below the measured peak, so keep the default unless a later bracket shows the lower-frequency direction is useful.
+
+- Idea: metrics log frequency 1 with NCCL_PROGRESS_APPENDOP_FREQ=4
+  Current best source commit: 33184d89
+  Source: low-side bracket after `NCCL_PROGRESS_APPENDOP_FREQ=16` was valid, high-band, and showed a very slow step 2
+  Expected mechanism: Decrease the proxy progress append-op frequency from default 8 to 4, making the NCCL progress thread check for newly posted proxy ops more often. If run300's slow step 2 reflected delayed pickup of posted ops, earlier polling may improve early and steady-state FSDP collective scheduling. If the NCCL comment about too-frequent polling applies to this workload, it should regress.
+  Supporting evidence: Run300 reached 10,576 tps but had a step-2 tps of only 7,460, while later steps recovered. Bracketing the opposite direction distinguishes delayed posted-op pickup from ordinary variance and closes this proxy-progress axis.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_PROGRESS_APPENDOP_FREQ=4` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is extra proxy polling overhead or no effect if the collectives do not depend on this path.
