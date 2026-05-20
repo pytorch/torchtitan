@@ -1792,3 +1792,13 @@
   Planned command or config overrides: Current best command plus `--optimizer.implementation=fused_opt_states_bf16`.
   Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no optimizer warnings. Risk is repeating the previous failed validation and staying below the default fused AdamW state path.
   Result: discarded at source state `49bd1b0`; 10,263 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. BF16 optimizer states do not improve the two-worker DataLoader command.
+
+- Idea: two-worker DataLoader command with NCCL_MAX_CTAS=8
+  Current best source commit: 72c82490
+  Source: communication occupancy follow-up after the refreshed profile still showed ~1.43s rank0 NCCL kernels
+  Expected mechanism: `NCCL_MAX_CTAS=8` more aggressively caps NCCL kernel CTAs than the prior `NCCL_MAX_CTAS=16` test. With `NCCL_CTA_POLICY=2`, a lower cap may leave more SM capacity for overlapping transformer GEMMs while still allowing reduce-scatter/all-gather progress.
+  Supporting evidence: The current profile is still dominated by GEMM plus NCCL. The previous `NCCL_MAX_CTAS=16` run was below the then-durable command, but it did not test a stronger cap or the now-validated two-worker DataLoader command.
+  Planned source/config changes: None; keep durable source.
+  Planned command or config overrides: Current best command with `NCCL_CTA_POLICY=2 NCCL_MAX_CTAS=8`.
+  Success criteria and expected risk: Success is tps above 10,328 or above 10,290 if rerun-worthy, with finite decreasing loss and no NCCL warnings. Risk is underfeeding NCCL and increasing exposed communication time.
+  Result: discarded at source state `72c8249`; 10,047 tps with finite decreasing loss and unchanged 169.10 GiB peak memory. The lower CTA cap underfeeds NCCL/overlap and is worse than both default zero-CTA and `NCCL_MAX_CTAS=16`.
