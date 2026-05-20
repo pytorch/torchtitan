@@ -2131,3 +2131,22 @@ Interpretation:
 
 - TorchTitan docs mention `mxfp8_cublas`, but this local torchao build only exposes `mxfp8_rceil`, `mxfp8_rceil_wgrad_with_hp`, and `mxfp8_emulated_rceil`.
 - Treat `mxfp8_cublas` as unavailable on this stack. A separate run with supported `mxfp8_rceil` is the next MXFP8 test if continuing the GEMM-focused path.
+
+## Experiment 76: MXFP8 Rceil Converter On Robust Prefetch Baseline
+
+Command:
+
+```bash
+NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.local_batch_size=5 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run76-flex-prefetch-mxfp8-rceil-compile-bf16-lbs5-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: crash before step metrics.
+- The supported `mxfp8_rceil` recipe reached compile/runtime setup, then failed with `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded`.
+- GPU state after failure was clear; this was not external-allocation contamination.
+
+Interpretation:
+
+- MXFP8 is not currently a runnable compile-enabled path for this Qwen3 14B source on the installed PyTorch/torchao stack.
+- Restore the no-converter robust prefetch source. Further MXFP8 testing would require either a non-compile diagnostic that is unlikely to beat the current best, or broader stack/source changes outside the current high-probability search path.

@@ -660,6 +660,7 @@
   Planned source/config changes: Change only the MXFP8 converter recipe in `qwen3_14b()` from `mxfp8_cublas` to `mxfp8_rceil`; keep `attn_backend="flex"`, model compile enabled, and the robust transformer/lm_head FSDP prefetch source.
   Planned command or config overrides: Exact robust prefetch command with compile, BF16 dtype, local batch size 5, and no flight recorder.
   Success criteria and expected risk: Success is tps above 8,847 with finite decreasing loss, or above the robust 8,835/8,829 band with enough margin to warrant rerun. Risks are slower dynamic quantization overhead, memory pressure, or short-run loss regression.
+  Result: crashed before step metrics at source state `a0de7be`; supported `mxfp8_rceil` hits `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded` during compile.
 
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
