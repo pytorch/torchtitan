@@ -2692,3 +2692,12 @@
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_READ_ENABLE=0` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower P2P if NCCL's topology-selected read path is already optimal.
   Result: discarded at source state `cc3a65c`; 10,457 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Forcing write-based P2P is slower, so keep NCCL's topology-selected P2P read/write behavior.
+
+- Idea: metrics log frequency 1 with NCCL_P2P_READ_ENABLE=1
+  Current best source commit: 97671855
+  Source: complete the P2P read/write direction bracket after forced writes regressed
+  Expected mechanism: Force NCCL P2P transports to use reads. If the topology-selected default mixes reads and writes across peer paths, forcing reads may reduce variance or improve the NVLink-class path; if the default is already all-read for this topology, this should behave like an exact rerun.
+  Supporting evidence: `NCCL_P2P_READ_ENABLE=0` was clean but slower, while full P2P disable was severely slower. Testing the opposite forced direction closes this narrow P2P transport axis.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_READ_ENABLE=1` and `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower P2P if the topology-selected default intentionally uses writes for some edges.
