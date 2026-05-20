@@ -2721,3 +2721,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `NCCL_P2P_NVL_CHUNKSIZE=1048576` and `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is step-10 tps above 10,650 or a strong high-band sample with finite overall-decreasing loss. Risk is slower overlap from coarser P2P chunks.
+  Result: discarded at source state `6d8a0a6`; 10,536 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. The larger 1 MiB NVLink P2P chunk is clean but below the durable peak, so keep the default 512 KiB chunk size.

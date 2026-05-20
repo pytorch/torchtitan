@@ -6669,3 +6669,25 @@ Interpretation:
 
 - The exact durable command remains correct and stable after the P2P transport probes, but this sample landed in the low recent band.
 - Recent exact reruns still show high variance; no recent NCCL transport knob has beaten or explained the run242 high sample.
+
+## Experiment 279: Metrics Log Frequency 1 With NCCL_P2P_NVL_CHUNKSIZE=1048576
+
+Command:
+
+```bash
+NCCL_P2P_NVL_CHUNKSIZE=1048576 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run279-nccl-p2p-nvl-chunksize1m-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,536, below the run242 10,650 measured peak.
+- Step 10 MFU: 39.45%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.30586 at step 1 to 6.09081 at step 10; finite and overall decreasing, although step 10 rose from step 9.
+- No allocator retry, mapping failure, OOM, traceback, NCCL warning, DTensor warning, dataset re-loop, or P2P warning appeared.
+
+Interpretation:
+
+- Increasing NVLink P2P chunk size to 1 MiB is valid but does not improve over the durable measured peak.
+- Keep NCCL's default 512 KiB NVLink P2P chunk size. The result is in the normal clean band but does not explain or exceed the best exact-run sample.
