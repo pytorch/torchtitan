@@ -704,6 +704,15 @@
   Success criteria and expected risk: Success is tps above 9,394 with finite decreasing loss and no external-allocation contamination. Risks are lower kernel efficiency for small sequence tiles, higher batch overhead, or a loss sanity failure from the changed sample shape.
   Result: kept at source state `584fd1c`; 9,579 tps with finite decreasing loss, improving on run81 while preserving the same per-step token count.
 
+- Idea: constant-token shorter sequence shape, seq_len 256 and local batch 80
+  Current best source commit: 584fd1c
+  Source: follow-up to run82 sequence-shape win
+  Expected mechanism: Another halving of sequence length at constant tokens per step should reduce attention work, but may start losing efficiency from small sequence tiles and larger per-sample batch overhead. This identifies the next point in the reported-tps sequence-shape curve.
+  Supporting evidence: The constant-token sweep has improved from 9,198 to 9,394 to 9,579 as sequence length fell from 2048 to 1024 to 512, with stable peak memory and healthy loss.
+  Planned source/config changes: None; use the restored no-converter robust prefetch baseline.
+  Planned command or config overrides: Run82 command shape with `--training.seq_len=256 --training.local_batch_size=80`.
+  Success criteria and expected risk: Success is tps above 9,579 with finite decreasing loss and no external-allocation contamination. Risks are lower FlexAttention/GEMM efficiency, larger batch overhead, or a short-run loss trend failure.
+
 - Idea: flex attention best with fixed debug seed
   Current best source commit: 5801b0f
   Source: lower-priority diagnostic after noisy flex follow-ups
