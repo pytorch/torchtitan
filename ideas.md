@@ -2191,3 +2191,4 @@
   Planned source/config changes: None.
   Planned command or config overrides: Current best command with `NCCL_CTA_POLICY=1`.
   Success criteria and expected risk: Success is step-10 tps above 10,625 with finite overall-decreasing loss and no NCCL warnings. Risk is no effect or lower throughput if policy 2 is the only beneficial scheduling mode.
+  Result: discarded at source state `f0e7f2d`; 10,471 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. Policy 1 is slower than policy 2, so keep `NCCL_CTA_POLICY=2`.
