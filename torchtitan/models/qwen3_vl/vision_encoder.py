@@ -368,6 +368,50 @@ class PatchMerger(Module):
         return x
 
 
+class VisionInnerAttention(Module):
+    """qkv reshape + rope + flex_attention. The forward body runs on plain
+    local tensors so rope's plain ``rope_cache`` and flex_attention (whose
+    HOP autograd tracer is not DTensor-aware) compose with q/k/v.
+
+    The fused qkv tensor enters this Module so the (3, n_heads, head_dim)
+    reshape happens on the local tensor: a DTensor ``view`` would need to
+    split the TP-sharded ``Shard(-1)`` axis across a size-3 group dim,
+    which is not evenly divisible by TP.
+
+    Sharding (declared via ``LocalMapConfig`` in ``sharding.py``):
+    ``qkv`` enters as ``DTensor(Shard(-1))`` on TP; ``local_map`` unwraps
+    to a plain local with the heads dim already TP-sharded. The attention
+    output ``(N, L, n_heads, head_dim)`` re-wraps to ``DTensor(Shard(2))``,
+    which the caller reshapes into ``DTensor(Shard(-1))`` for the
+    downstream rowwise ``self.proj``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        head_dim: int
+        flex_attention: FlexAttention.Config = field(
+            default_factory=lambda: FlexAttention.Config()
+        )
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.head_dim = config.head_dim
+        self.flex_attention = config.flex_attention.build()
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        *,
+        rope_cache: torch.Tensor,
+        attention_mask: BlockMask,
+    ) -> torch.Tensor:
+        num_vision, max_num_patch, _ = qkv.shape
+        qkv = qkv.reshape(num_vision, max_num_patch, 3, -1, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)
+        q, k = apply_rotary_emb_cos_sin(q, k, rope_cache)
+        return self.flex_attention(q, k, v, attention_masks=attention_mask)
+
+
 class VisionAttention(Module):
     """Multi-head attention with FlexAttention for efficient batched processing."""
 
@@ -377,9 +421,7 @@ class VisionAttention(Module):
         n_heads: int
         qkv: Linear.Config
         proj: Linear.Config
-        flex_attention: FlexAttention.Config = field(
-            default_factory=lambda: FlexAttention.Config()
-        )
+        inner_attention: VisionInnerAttention.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -389,7 +431,7 @@ class VisionAttention(Module):
 
         self.qkv = config.qkv.build()
         self.proj = config.proj.build()
-        self.flex_attention = config.flex_attention.build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
@@ -410,16 +452,10 @@ class VisionAttention(Module):
         """
         num_vision, max_num_patch, _ = hidden_states.shape
 
-        qkv = self.qkv(hidden_states).reshape(
-            num_vision, max_num_patch, 3, -1, self.head_dim
+        qkv = self.qkv(hidden_states)
+        attn_output = self.inner_attention(
+            qkv, rope_cache=rope_cache, attention_mask=attention_mask
         )
-        q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(
-            0
-        )  # Each: (num_vision, max_num_patch, heads, head_dim)
-
-        q, k = apply_rotary_emb_cos_sin(q, k, rope_cache)
-
-        attn_output = self.flex_attention(q, k, v, attention_masks=attention_mask)
         attn_output = attn_output.reshape(num_vision, max_num_patch, -1)
         return self.proj(attn_output)
 
@@ -502,7 +538,6 @@ class Qwen3VLVisionEncoder(Module):
 
         out_hidden_size: int = 3584  # maps to LLM hidden size
         num_position_embeddings: int = 4096
-        layer_norm_eps: float = 1e-6
         rope_theta: float = 10000.0
 
         # DeepStack: layer indices for extracting intermediate visual features
@@ -523,6 +558,7 @@ class Qwen3VLVisionEncoder(Module):
         mlp_act_fn: "GELU.Config" = field(
             default_factory=lambda: GELU.Config(approximate="tanh")
         )
+        attn_inner_attention: "VisionInnerAttention.Config"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -563,6 +599,7 @@ class Qwen3VLVisionEncoder(Module):
                         n_heads=config.n_heads,
                         qkv=config.attn_qkv,
                         proj=config.attn_proj,
+                        inner_attention=config.attn_inner_attention,
                     ),
                     mlp=VisionMLP.Config(
                         fc1=config.mlp_fc1,
@@ -676,7 +713,6 @@ class Qwen3VLVisionEncoder(Module):
         learned_pos, rope_cache = self.compute_position_embeddings(
             grid_thw, max_num_patch
         )
-
         hidden_states = hidden_states + learned_pos
 
         mask_mod = get_vision_block_mask_mod(num_patch, max_num_patch)

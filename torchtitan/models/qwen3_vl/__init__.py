@@ -18,9 +18,8 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
-from torchtitan.models.common.nn_modules import LayerNorm
+from torchtitan.models.common.nn_modules import LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
-from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.models.utils import validate_converter_order
 
@@ -30,7 +29,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .model import Qwen3VLModel
 from .parallelize import parallelize_qwen3_vl
 from .state_dict_adapter import Qwen3VLStateDictAdapter
-from .vision_encoder import Qwen3VLVisionEncoder
+from .vision_encoder import Qwen3VLVisionEncoder, VisionInnerAttention
 
 __all__ = [
     "parallelize_qwen3_vl",
@@ -144,6 +143,7 @@ def _vl_vision_encoder_config(
             normalized_shape=dim,
             eps=layer_norm_eps,
         ),
+        attn_inner_attention=VisionInnerAttention.Config(head_dim=dim // n_heads),
         param_init=_POS_EMBED_INIT,
     )
 
