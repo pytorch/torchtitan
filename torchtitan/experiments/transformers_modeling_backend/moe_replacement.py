@@ -84,12 +84,23 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
+        # For GatedSharedExpert, temporarily swap to the inner FeedForward
+        # config so set_moe_sharding_config can access .w1/.w2/.w3 directly.
+        gated_shared = None
+        if isinstance(moe_config.shared_experts, GatedSharedExpert.Config):
+            gated_shared = moe_config.shared_experts
+            moe_config.shared_experts = gated_shared.ffn
+
         set_moe_sharding_config(
             moe_config,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout={"w1": Shard(1), "w2": Shard(2), "w3": Shard(1)},
         )
+
+        # Restore GatedSharedExpert config with sharding from inner FFN
+        if gated_shared is not None:
+            moe_config.shared_experts = gated_shared
 
         with torch.device("meta"):
             native_moe = moe_config.build()
