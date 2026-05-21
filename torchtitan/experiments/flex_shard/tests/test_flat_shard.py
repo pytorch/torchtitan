@@ -42,6 +42,7 @@ from torchtitan.experiments.flex_shard.example.shard import Shard
 from torchtitan.experiments.flex_shard.flex_shard.bucket_storage import (
     _assign_params_to_buckets,
     ParamInfo,
+    ShardedBucketStorage,
 )
 from torchtitan.experiments.flex_shard.flex_shard.utils import (
     _strip_checkpoint_wrapped_module_path,
@@ -463,6 +464,74 @@ class TestFlatShardCollectives(FSDPTestMultiThread):
 
         for full_param, (_, expected) in zip(result.full_params, params, strict=True):
             self.assertEqual(full_param, expected)
+
+    def test_bucket_storage_layout_is_rank_flat_and_used_for_unshard(self):
+        class TwoParamModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.a = nn.Parameter(torch.arange(2, dtype=torch.float32))
+                self.b = nn.Parameter(torch.arange(3, dtype=torch.float32).add(10))
+
+        mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))
+        module = TwoParamModule()
+        named_params = list(module.named_parameters())
+        expected_params = {
+            fqn: param.detach().clone() for fqn, param in named_params
+        }
+        placements = flat_shard_placements(named_params, mesh)
+        bucket_storage = ShardedBucketStorage.from_bucket(
+            module,
+            named_params,
+            placements,
+            mesh,
+            torch.device("cpu"),
+            BucketSpec(
+                ["*"],
+                placement_fn=flat_shard_placements,
+                reshard_after_forward=False,
+            ),
+        )
+
+        shard_numel = FlatShard._ceil_div(5, self.world_size)
+        self.assertEqual(
+            bucket_storage.total_bytes,
+            shard_numel * torch.float32.itemsize,
+        )
+        infos = bucket_storage.param_infos
+        self.assertIsNotNone(infos["a"].bucket_layout)
+        self.assertIs(infos["a"].bucket_layout, infos["b"].bucket_layout)
+        self.assertEqual(infos["a"].byte_offset, 0)
+        self.assertEqual(
+            infos["b"].byte_offset,
+            2 * torch.float32.itemsize if self.rank == 0 else 0,
+        )
+        if self.rank == 1:
+            self.assertEqual(
+                bucket_storage.byte_storage.view(torch.float32)[-1],
+                torch.tensor(0.0),
+            )
+
+        current_params = dict(module.named_parameters())
+        info_list = list(infos.values())
+        local_tensors = [current_params[info.fqn] for info in info_list]
+        placement = placements["a"][0]
+        prepared = placement.prepare_unshard_bucket(
+            local_tensors,
+            info_list,
+            mesh,
+            None,
+        )
+
+        self.assertEqual(prepared.buffers[0].numel(), shard_numel)
+        self.assertEqual(
+            prepared.buffers[0].untyped_storage().data_ptr(),
+            bucket_storage.byte_storage.untyped_storage().data_ptr(),
+        )
+        placement.run_prepared_unshard(prepared)
+        result = placement.finish_prepared_unshard(prepared)
+
+        for full_param, info in zip(result.full_params, info_list, strict=True):
+            self.assertEqual(full_param, expected_params[info.fqn])
 
     def test_unshard_and_reduce_grad_zero_padding_tail(self):
         mesh = init_device_mesh("cpu", (self.world_size,), mesh_dim_names=("fsdp",))

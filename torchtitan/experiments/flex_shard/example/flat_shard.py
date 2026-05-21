@@ -13,6 +13,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch._prims_common import make_contiguous_strides_for
 from typing_extensions import override
 
 from ..flex_shard.placement_contract import (
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 
 
 class FlatShard(Placement):
-    """FSDP1-style flat bucket sharding with explicit copy collectives."""
+    """FSDP1-style flat bucket sharding with rank-flat bucket storage."""
 
     @dataclass(frozen=True)
     class _UnshardState:
@@ -111,6 +112,10 @@ class FlatShard(Placement):
     def bucket_compatibility_key(self) -> object:
         return (type(self), self.bucket_key, self.total_numel)
 
+    @override
+    def uses_bucket_param_infos(self) -> bool:
+        return True
+
     @staticmethod
     def _ceil_div(numerator: int, denominator: int) -> int:
         if numerator < 0:
@@ -171,6 +176,187 @@ class FlatShard(Placement):
             )
         local_start, local_end = self._local_param_bounds(rank, world_size)
         return param.reshape(-1)[local_start:local_end]
+
+    @staticmethod
+    def _flat_shards_from_named_params(
+        named_params: list[tuple[str, nn.Parameter]],
+        param_placements: dict[str, tuple[Placement, ...]],
+    ) -> list[FlatShard]:
+        placements: list[FlatShard] = []
+        reference_key: object | None = None
+        reference_fqn: str | None = None
+        for fqn, param in named_params:
+            placements_for_param = param_placements[fqn]
+            if len(placements_for_param) != 1:
+                raise ValueError(
+                    "FlatShard bucket storage currently supports exactly one "
+                    f"placement per parameter, but {fqn!r} has "
+                    f"{len(placements_for_param)} placements."
+                )
+            placement = placements_for_param[0]
+            if not isinstance(placement, FlatShard):
+                raise ValueError(
+                    "FlatShard bucket storage requires FlatShard placements, "
+                    f"but {fqn!r} uses {placement!r}."
+                )
+            key = placement.bucket_compatibility_key()
+            if reference_key is None:
+                reference_key = key
+                reference_fqn = fqn
+            elif key != reference_key:
+                assert reference_fqn is not None
+                raise ValueError(
+                    "FlatShard bucket storage requires bucket-compatible "
+                    f"placements, but {reference_fqn!r} and {fqn!r} are "
+                    "incompatible."
+                )
+            if param.numel() != placement.param_numel:
+                raise ValueError(
+                    f"FlatShard placement for {fqn!r} has "
+                    f"param_numel={placement.param_numel}, but the parameter "
+                    f"has {param.numel()} elements."
+                )
+            placements.append(placement)
+
+        if placements:
+            total_numel = placements[0].total_numel
+            cursor = 0
+            for start, end, fqn in sorted(
+                (
+                    placement.param_start,
+                    placement.param_start + placement.param_numel,
+                    fqn,
+                )
+                for (fqn, _), placement in zip(
+                    named_params,
+                    placements,
+                    strict=True,
+                )
+            ):
+                if start != cursor:
+                    raise ValueError(
+                        "FlatShard placements must exactly cover the flat "
+                        "bucket without gaps or overlaps, but expected the "
+                        f"next interval to start at {cursor} and {fqn!r} "
+                        f"starts at {start}."
+                    )
+                cursor = end
+            if cursor != total_numel:
+                raise ValueError(
+                    "FlatShard placements must exactly cover the flat bucket, "
+                    f"but covered {cursor} elements and total_numel is "
+                    f"{total_numel}."
+                )
+        return placements
+
+    @override
+    def create_bucket_param_infos(
+        self,
+        named_params: list[tuple[str, nn.Parameter]],
+        param_placements: dict[str, tuple[Placement, ...]],
+        mesh: DeviceMesh,
+    ) -> tuple[dict[str, ParamInfo], int] | None:
+        from ..flex_shard.bucket_storage import (
+            BucketLayout,
+            BucketParamLayout,
+            ParamInfo,
+        )
+
+        if not named_params:
+            return {}, 0
+
+        placements = self._flat_shards_from_named_params(
+            named_params,
+            param_placements,
+        )
+        rank = mesh.get_local_rank()
+        world_size = mesh.size()
+        dtype = named_params[0][1].dtype
+        total_numel = placements[0].total_numel
+        shard_numel = self._ceil_div(total_numel, world_size)
+        padded_total_numel = shard_numel * world_size
+        rank_offsets = tuple(rank * shard_numel for rank in range(world_size))
+        rank_numels = tuple(shard_numel for _ in range(world_size))
+        rank_start = rank_offsets[rank]
+
+        param_layouts = {
+            fqn: BucketParamLayout(
+                param_offset=placement.param_start,
+                local_global_offset=placement.param_start
+                + placement._local_param_bounds(rank, world_size)[0],
+            )
+            for (fqn, _), placement in zip(
+                named_params,
+                placements,
+                strict=True,
+            )
+        }
+        bucket_layout = BucketLayout(
+            global_numel=padded_total_numel,
+            local_numel=shard_numel,
+            rank_offsets=rank_offsets,
+            rank_numels=rank_numels,
+            param_layouts=param_layouts,
+        )
+
+        param_infos: dict[str, ParamInfo] = {}
+        for (fqn, param), placement in zip(
+            named_params,
+            placements,
+            strict=True,
+        ):
+            if param.dtype != dtype:
+                raise ValueError(
+                    "FlatShard requires one dtype per bucket: "
+                    f"{named_params[0][0]!r} uses {dtype} but {fqn!r} uses "
+                    f"{param.dtype}."
+                )
+            local_start, local_end = placement._local_param_bounds(rank, world_size)
+            local_numel = local_end - local_start
+            byte_offset = (
+                (placement.param_start + local_start - rank_start) * dtype.itemsize
+                if local_numel > 0
+                else 0
+            )
+            param_infos[fqn] = ParamInfo(
+                fqn=fqn,
+                global_shape=param.shape,
+                global_stride=tuple(make_contiguous_strides_for(param.shape)),
+                dtype=dtype,
+                requires_grad=param.requires_grad,
+                placements=param_placements[fqn],
+                local_shape=torch.Size([local_numel]),
+                local_numel=local_numel,
+                byte_offset=byte_offset,
+                storage_nbytes=local_numel * dtype.itemsize,
+                global_numel=param.numel(),
+                bucket_layout=bucket_layout,
+            )
+
+        return param_infos, shard_numel * dtype.itemsize
+
+    @override
+    def copy_param_to_storage(
+        self,
+        byte_storage: torch.Tensor,
+        info: ParamInfo,
+        param: torch.Tensor,
+        rank: int,
+        world_size: int,
+    ) -> None:
+        bucket_layout = info.bucket_layout
+        if (
+            bucket_layout is not None
+            and next(iter(bucket_layout.param_layouts)) == info.fqn
+        ):
+            byte_storage.zero_()
+        super().copy_param_to_storage(
+            byte_storage,
+            info,
+            param,
+            rank,
+            world_size,
+        )
 
     @staticmethod
     def _flat_shards_from_infos(infos: list[ParamInfo]) -> list[FlatShard]:
@@ -296,6 +482,74 @@ class FlatShard(Placement):
             storage_offset=storage_offset,
         )
 
+    @staticmethod
+    def _try_make_bucket_storage_view(
+        tensors: list[torch.Tensor],
+        infos: list[ParamInfo],
+    ) -> torch.Tensor | None:
+        bucket_layout = infos[0].bucket_layout
+        if bucket_layout is None:
+            return None
+
+        local_bucket_numel = bucket_layout.local_numel
+        if local_bucket_numel == 0:
+            return tensors[0].new_empty(0)
+
+        bucket_storage: torch.UntypedStorage | None = None
+        bucket_storage_offset_bytes: int | None = None
+        bucket_tensor: torch.Tensor | None = None
+        for tensor, info in zip(tensors, infos, strict=True):
+            if info.bucket_layout != bucket_layout:
+                raise ValueError(
+                    "FlatShard expected every ParamInfo in a bucket to share "
+                    "the same bucket layout."
+                )
+            if tensor.dtype != tensors[0].dtype or tensor.device != tensors[0].device:
+                return None
+            if not tensor.is_contiguous():
+                return None
+            if info.byte_offset % tensor.element_size() != 0:
+                raise AssertionError(
+                    "FlatShard local bucket storage is not dtype-aligned."
+                )
+
+            storage = tensor.untyped_storage()
+            storage_offset_bytes = tensor.storage_offset() * tensor.element_size()
+            if storage_offset_bytes < info.byte_offset:
+                return None
+            candidate_bucket_offset_bytes = storage_offset_bytes - info.byte_offset
+            if bucket_storage is None:
+                bucket_storage = storage
+                bucket_storage_offset_bytes = candidate_bucket_offset_bytes
+                bucket_tensor = tensor
+            elif (
+                storage.data_ptr() != bucket_storage.data_ptr()
+                or candidate_bucket_offset_bytes != bucket_storage_offset_bytes
+            ):
+                return None
+
+        if (
+            bucket_storage is None
+            or bucket_storage_offset_bytes is None
+            or bucket_tensor is None
+        ):
+            return None
+        required_nbytes = (
+            bucket_storage_offset_bytes
+            + local_bucket_numel * bucket_tensor.element_size()
+        )
+        if bucket_storage.nbytes() < required_nbytes:
+            return None
+        if bucket_storage_offset_bytes % bucket_tensor.element_size() != 0:
+            raise AssertionError("FlatShard bucket storage is not dtype-aligned.")
+
+        return bucket_tensor.new_empty(0).set_(
+            bucket_storage,
+            bucket_storage_offset_bytes // bucket_tensor.element_size(),
+            (local_bucket_numel,),
+            (1,),
+        )
+
     def _make_all_gather_input(
         self,
         tensors: list[torch.Tensor],
@@ -308,6 +562,10 @@ class FlatShard(Placement):
         dtype: torch.dtype,
         device: torch.device,
     ) -> torch.Tensor:
+        bucket_storage_view = self._try_make_bucket_storage_view(tensors, infos)
+        if bucket_storage_view is not None:
+            return bucket_storage_view
+
         valid_numel = self._rank_valid_numel(total_numel, shard_numel, rank)
         if valid_numel == shard_numel:
             send_view = self._try_make_adjacent_flat_view(tensors, valid_numel)
