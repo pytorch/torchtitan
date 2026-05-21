@@ -124,14 +124,44 @@ _MODEL_CONFIGS = {
     ),
 }
 
+# Models that require AutoConfig.from_pretrained (remote config).
+# Keys are overrides applied after loading the pretrained config.
+_PRETRAINED_MODEL_CONFIGS = {
+    "glm4_moe": dict(
+        hf_model_id="zai-org/GLM-4.7",
+        overrides=dict(
+            num_hidden_layers=4,
+            use_cache=False,
+        ),
+    ),
+    "glm_moe_dsa": dict(
+        hf_model_id="zai-org/GLM-5",
+        overrides=dict(
+            num_hidden_layers=4,
+            use_cache=False,
+        ),
+    ),
+}
+
 
 def _create_hf_model(model_type: str):
     """Create a tiny HF MoE model for testing."""
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    kwargs = _MODEL_CONFIGS[model_type]
-    config = AutoConfig.for_model(**kwargs)
-    model = AutoModelForCausalLM.from_config(config)
+    if model_type in _MODEL_CONFIGS:
+        kwargs = _MODEL_CONFIGS[model_type]
+        config = AutoConfig.for_model(**kwargs)
+    elif model_type in _PRETRAINED_MODEL_CONFIGS:
+        entry = _PRETRAINED_MODEL_CONFIGS[model_type]
+        config = AutoConfig.from_pretrained(
+            entry["hf_model_id"], trust_remote_code=True
+        )
+        for k, v in entry["overrides"].items():
+            setattr(config, k, v)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+    model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     return model, config
 
 
@@ -216,7 +246,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
 
     # 1. Create HF model
     model, config = _create_hf_model(model_type)
-    model = model.to(device).eval()
+    model = model.to(device=device, dtype=torch.bfloat16).eval()
 
     # Find first MoE layer
     hf_moe_block = None
@@ -231,7 +261,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
 
     # 2. Forward through HF MoE block
     torch.manual_seed(seed)
-    x = torch.randn(2, 16, config.hidden_size, device=device)
+    x = torch.randn(2, 16, config.hidden_size, device=device, dtype=torch.bfloat16)
     hf_out = hf_moe_block(x)
     if isinstance(hf_out, tuple):
         hf_out = hf_out[0]
@@ -250,7 +280,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
 
     # 4. Transfer weights from HF to titan via state dict adapter
     _transfer_weights_via_adapter(hf_moe_block, titan_moe)
-    titan_moe.eval()
+    titan_moe = titan_moe.to(dtype=torch.bfloat16).eval()
 
     # 5. Forward through titan MoE
     tt_out = titan_moe(x)
@@ -269,11 +299,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Numerical equivalence: HF MoE vs titan MoE"
     )
+    all_models = list(_MODEL_CONFIGS.keys()) + list(_PRETRAINED_MODEL_CONFIGS.keys())
     parser.add_argument(
         "--models",
         nargs="*",
-        default=list(_MODEL_CONFIGS.keys()),
-        choices=list(_MODEL_CONFIGS.keys()),
+        default=all_models,
+        choices=all_models,
         help="Models to test (default: all)",
     )
     parser.add_argument(
