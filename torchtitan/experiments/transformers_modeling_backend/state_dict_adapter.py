@@ -69,7 +69,17 @@ _TITAN_TO_HF_PATTERNS = [
 def hf_to_titan_moe_state_dict(
     hf_state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """Convert HF MoE state dict keys/values to titan format."""
+    """Convert HF MoE state dict keys/values to titan format.
+
+    Handles fused ``gate_up_proj`` → ``w1``/``w3`` split, router and shared
+    expert key renames, and expert bias mapping. Non-MoE keys pass through.
+
+    Args:
+        hf_state_dict: State dict with HF-format keys.
+
+    Returns:
+        State dict with titan-format keys and split expert weights.
+    """
     titan_state_dict = {}
 
     for key, value in hf_state_dict.items():
@@ -99,7 +109,17 @@ def hf_to_titan_moe_state_dict(
 def titan_to_hf_moe_state_dict(
     titan_state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
-    """Convert titan MoE state dict keys/values to HF format."""
+    """Convert titan MoE state dict keys/values to HF format.
+
+    Inverse of ``hf_to_titan_moe_state_dict``. Fuses ``w1``/``w3`` back
+    into ``gate_up_proj`` and reverses all key renames.
+
+    Args:
+        titan_state_dict: State dict with titan-format keys.
+
+    Returns:
+        State dict with HF-format keys and fused expert weights.
+    """
     hf_state_dict = {}
 
     # Collect w1/w3 pairs for fusing back into gate_up_proj

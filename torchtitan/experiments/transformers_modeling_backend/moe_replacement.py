@@ -73,8 +73,12 @@ def build_and_swap_native_moe(
     1. Set sharding config on the MoE.Config (now that EP/TP is known)
     2. Build the native MoE module
     3. Initialize parameters and buffers
-    4. Swap into layer.mlp, set layer.moe for load-balancing hook
-    5. Call parallelize() to shard states and wire token dispatchers
+    4. Swap into ``layer.mlp``, set ``layer.moe`` for load-balancing hook
+
+    Args:
+        model: The HFTransformerModel with ``_native_moe_config`` stored on
+            each MoE-enabled layer (from ``prepare_native_moe_configs``).
+        parallel_dims: Parallel dimensions for EP/TP mesh resolution.
     """
     enable_ep = parallel_dims.ep_enabled
     enable_sp = parallel_dims.tp_enabled
@@ -126,7 +130,12 @@ def build_and_swap_native_moe(
 def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     """Extract MoE configuration from an HF MoE block.
 
-    Returns a dict with all parameters needed to build a native MoE.Config.
+    Args:
+        moe_block: The HF MoE block (e.g., ``Qwen3MoeSparseMoeBlock``).
+        config: The HF model config with MoE-related attributes.
+
+    Returns:
+        Dict with all parameters needed to build a native ``MoE.Config``.
     """
     gate = getattr(moe_block, "gate", None) or getattr(moe_block, "router", None)
     experts = moe_block.experts

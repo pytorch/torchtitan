@@ -51,6 +51,12 @@ def set_hf_sharding_configs(
     Root-level modules use ``_sharding_config`` (Module protocol).
     Per-layer modules use ``parallelize_module`` (legacy approach).
     MoE layers are skipped (already have ShardingConfig from native MoE).
+
+    Args:
+        model: The HFTransformerModel with Module-converted children.
+        parallel_dims: Parallel dimensions for mesh resolution.
+        enable_sp: Whether sequence parallelism is enabled (TP > 1).
+        enable_loss_parallel: Whether to shard lm_head output for loss parallel.
     """
     tp_mesh = parallel_dims.get_optional_mesh("tp")
     if tp_mesh is None:
