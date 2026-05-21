@@ -13,8 +13,7 @@ Each class uses diamond inheritance (``nn.X`` + ``Module``) so that:
   from ``Configurable.Config``.
 
 Each ``Config`` only exposes the fields that current callsites set;
-add more if a new callsite needs them. This matches the precedent set
-by ``Linear``, ``RMSNorm``, and ``Embedding``.
+add more if a new callsite needs them.
 """
 
 from dataclasses import dataclass
@@ -34,6 +33,9 @@ class Conv2d(nn.Conv2d, Module):
         kernel_size: int
         stride: int = 1
         padding: int = 0
+        # Matches the upstream ``nn.Conv2d`` default (differs from
+        # ``Linear.Config.bias``, which defaults to False).
+        bias: bool = True
 
     def __init__(self, config: Config):
         super().__init__(
@@ -42,7 +44,20 @@ class Conv2d(nn.Conv2d, Module):
             config.kernel_size,
             stride=config.stride,
             padding=config.padding,
+            bias=config.bias,
         )
+
+
+class Embedding(nn.Embedding, Module):
+    """Configurable nn.Embedding."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        num_embeddings: int
+        embedding_dim: int
+
+    def __init__(self, config: Config):
+        super().__init__(config.num_embeddings, config.embedding_dim)
 
 
 class GELU(nn.GELU, Module):
@@ -101,6 +116,40 @@ class LayerNorm(nn.LayerNorm, Module):
         )
 
 
+class Linear(nn.Linear, Module):
+    """Configurable nn.Linear."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        in_features: int
+        out_features: int
+        bias: bool = False
+
+    def __init__(self, config: Config):
+        super().__init__(
+            config.in_features,
+            config.out_features,
+            bias=config.bias,
+        )
+
+
+class RMSNorm(nn.RMSNorm, Module):
+    """Configurable nn.RMSNorm."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        normalized_shape: int
+        eps: float = 1e-5
+        elementwise_affine: bool = True
+
+    def __init__(self, config: Config):
+        super().__init__(
+            config.normalized_shape,
+            eps=config.eps,
+            elementwise_affine=config.elementwise_affine,
+        )
+
+
 class SiLU(nn.SiLU, Module):
     """Configurable nn.SiLU."""
 
@@ -114,9 +163,12 @@ class SiLU(nn.SiLU, Module):
 
 __all__ = [
     "Conv2d",
+    "Embedding",
     "GELU",
     "GroupNorm",
     "Identity",
     "LayerNorm",
+    "Linear",
+    "RMSNorm",
     "SiLU",
 ]

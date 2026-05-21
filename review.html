@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Code Review: [NOT READY][Module][Qwen3-VL] Config-based dense sharding for Qwen3-VL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a2e;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --accent: #3b82f6;
+    --green: #16a34a;
+    --green-bg: #f0fdf4;
+    --green-border: #bbf7d0;
+    --red: #dc2626;
+    --red-bg: #fef2f2;
+    --red-border: #fecaca;
+    --yellow: #ca8a04;
+    --yellow-bg: #fefce8;
+    --yellow-border: #fef08a;
+    --blue-bg: #eff6ff;
+    --blue-border: #bfdbfe;
+    --code-bg: #f8fafc;
+    --card-bg: #ffffff;
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--fg);
+    background: #f1f5f9;
+    line-height: 1.6;
+    padding: 2rem;
+  }
+
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  /* Header */
+  .header {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 2rem;
+    box-shadow: var(--card-shadow);
+    margin-bottom: 1.5rem;
+  }
+
+  .header h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+  }
+
+  .header .meta {
+    color: var(--muted);
+    font-size: 0.875rem;
+  }
+
+  /* Status badge */
+  .status {
+    display: inline-block;
+    padding: 0.375rem 1rem;
+    border-radius: 9999px;
+    font-weight: 600;
+    font-size: 0.875rem;
+    margin-top: 1rem;
+  }
+
+  .status.good {
+    background: var(--green-bg);
+    color: var(--green);
+    border: 1px solid var(--green-border);
+  }
+
+  .status.changes {
+    background: var(--red-bg);
+    color: var(--red);
+    border: 1px solid var(--red-border);
+  }
+
+  /* Section cards */
+  .section {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 1.5rem 2rem;
+    box-shadow: var(--card-shadow);
+    margin-bottom: 1.5rem;
+  }
+
+  .section h2 {
+    font-size: 1.125rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--border);
+  }
+
+  .section h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: 1.25rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .section p, .section li {
+    font-size: 0.9375rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .section ul, .section ol {
+    padding-left: 1.5rem;
+  }
+
+  /* Issue items */
+  .issue {
+    border-left: 3px solid var(--border);
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.75rem;
+    border-radius: 0 8px 8px 0;
+    background: var(--code-bg);
+  }
+
+  .issue.critical {
+    border-left-color: var(--red);
+  }
+
+  .issue.change-request {
+    border-left-color: #e85d04;
+  }
+
+  .issue.medium {
+    border-left-color: var(--yellow);
+  }
+
+  .issue.question {
+    border-left-color: #7c3aed;
+  }
+
+  .issue.nit {
+    border-left-color: var(--muted);
+  }
+
+  .issue.positive {
+    border-left-color: var(--green);
+  }
+
+  .issue .severity {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+    margin-bottom: 0.25rem;
+  }
+
+  .issue.critical .severity { color: var(--red); }
+  .issue.change-request .severity { color: #e85d04; }
+  .issue.medium .severity { color: var(--yellow); }
+  .issue.question .severity { color: #7c3aed; }
+  .issue.nit .severity { color: var(--muted); }
+
+  .issue .location {
+    font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas,
+                 monospace;
+    font-size: 0.8125rem;
+    color: var(--muted);
+    margin-bottom: 0.25rem;
+  }
+
+  .issue .description {
+    font-size: 0.9375rem;
+  }
+
+  /* Code blocks */
+  pre {
+    background: #1e293b;
+    color: #e2e8f0;
+    padding: 1rem 1.25rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas,
+                 monospace;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    margin: 0.75rem 0;
+  }
+
+  code {
+    font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas,
+                 monospace;
+    font-size: 0.9em;
+    background: #eef1f6;
+    padding: 0.125rem 0.375rem;
+    border-radius: 4px;
+  }
+
+  pre code {
+    background: none;
+    padding: 0;
+    border: none;
+    font-size: inherit;
+  }
+
+  /* Diff blocks */
+  .diff-add {
+    color: #4ade80;
+  }
+
+  .diff-del {
+    color: #f87171;
+  }
+
+  /* No-issues message */
+  .no-issues {
+    color: var(--muted);
+    font-style: italic;
+    padding: 0.5rem 0;
+  }
+
+  /* Footer */
+  .footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.75rem;
+    padding: 1rem 0;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <h1>[NOT READY][Module][Qwen3-VL] Config-based dense sharding for Qwen3-VL</h1>
+    <div class="meta">Commit 52bcb59a &middot; Chien-Chin Huang &middot; 2026-05-19 &middot; PR #3399 (round 3)</div>
+    <div class="status good">Good to land</div>
+  </div>
+
+  <div class="section">
+    <h2>Summary</h2>
+    <p>Converts the Qwen3-VL vision encoder submodules (<code>PatchEmbed</code>, <code>VisionRotaryEmbedding</code>, <code>PatchMerger</code>, <code>VisionAttention</code>, <code>VisionMLP</code>, <code>VisionTransformerBlock</code>, <code>Qwen3VLVisionEncoder</code>) to the <code>Module</code> protocol with proper <code>Config</code> subclasses. Adds <code>set_qwen3_vl_sharding_config</code> (with a private <code>_set_vision_encoder_sharding</code>) that fills both decoder dense and vision encoder sharding via <code>ShardingConfig</code> on Config instances. Deletes the legacy <code>_apply_tp_to_vision_encoder</code> helper and the now-unused <code>distribute_tensor</code>/<code>ColwiseParallel</code>/<code>RowwiseParallel</code>/<code>NoParallel</code> imports from <code>parallelize.py</code>. Wires <code>update_from_config</code> on <code>Qwen3VLModel.Config</code> to call <code>set_qwen3_vl_sharding_config</code>.</p>
+    <p>Round 3 adds an explicit "TP &gt; 1 with the vision encoder is unverified end-to-end" caveat in the public <code>set_qwen3_vl_sharding_config</code> docstring; FSDP-only is verified per MEMORY.md.</p>
+  </div>
+
+  <div class="section">
+    <h2>Analysis</h2>
+    <p><strong>Module protocol conversion (<code>vision_encoder.py</code>).</strong> All seven classes follow the same pattern: <code>@dataclass(kw_only=True, slots=True) class Config(Module.Config)</code> + <code>__init__(self, config: Config)</code> that builds child configs. The conversion matches the convention used by <code>Linear</code>, <code>RMSNorm</code>, <code>Embedding</code>, and the newly added <code>nn_modules.py</code> wrappers from PR7. The <code>PatchMerger</code> handling of the per-norm <code>normalized_shape</code> swap via <code>dataclasses.replace</code> preserves the shared <code>sharding_config</code> on the norm Config (shallow copy semantics are correct here because the placement dict is intentionally shared).</p>
+    <p><strong>Norm Config sharing across layers.</strong> <code>norm1=config.block_norm, norm2=config.block_norm</code> on every <code>VisionTransformerBlock</code> (line 571-572) intentionally shares one <code>LayerNorm.Config</code> instance, so a single <code>sharding_config</code> assignment in <code>_set_vision_encoder_sharding</code> propagates to all <code>n_layers * 2</code> norms. Same approach for <code>merger_norm</code> shared across <code>merger</code> + all <code>deepstack_merger_list</code> entries. Each <code>.build()</code> call constructs a fresh <code>LayerNorm</code> module so there's no module aliasing.</p>
+    <p><strong>Sharding placements (<code>sharding.py</code>).</strong> The vision encoder uses an all-<code>Replicate</code> activation discipline (no SP), with <code>colwise+rowwise</code> linear pairs that all-reduce back to <code>Replicate</code> at the pair boundary. The new <code>_vision_colwise_config</code> sensibly diverges from <code>decoder_sharding.colwise_config</code> by setting <code>out_dst_shardings=Replicate</code> (instead of <code>Shard(-1)</code>) because vision encoder activations are always <code>Replicate</code> between modules. <code>_replicate_output_rowwise_config</code> declares <code>in_src/in_dst=Shard(-1)</code> so DTensor inserts the chunk before the rowwise input. Norm weight/bias placements are <code>Replicate</code>, matching the standard plan. <code>pos_embed</code> is declared on the encoder-root <code>state_shardings</code> as <code>Replicate</code> on TP, mirroring the legacy plan.</p>
+    <p><strong>Equivalence to the deleted legacy plan.</strong> The new placement plan differs in one observable way: the legacy <code>attn.qkv</code> used <code>ColwiseParallel(use_local_output=True)</code> so <code>flex_attention</code> ran on the local heads on each rank; the new path forces an all-gather back to <code>Replicate</code> after <code>attn.qkv</code>, so attention runs on the full head set on every rank. Memory savings on the linear weights are preserved; compute on attention is redundant under TP. Both the parent and private docstrings flag this explicitly. Restoring heads-parallel attention would require a <code>local_map</code> on <code>VisionAttention</code> (analogous to <code>set_gqa_inner_attention_local_map</code> in <code>decoder_sharding.py</code>); marked as future work, acceptable scope decision.</p>
+    <p><strong>Parallelize flow (<code>parallelize.py</code>).</strong> Deleting <code>_apply_tp_to_vision_encoder</code> and routing through <code>model.parallelize(parallel_dims)</code> matches the unified dense-sharding flow from the rest of the stack. The unused TP imports were correctly cleaned up. The remaining <code>maybe_enable_async_tp</code> import is still used.</p>
+    <p><strong>__init__.py wiring.</strong> Adds <code>block_norm</code> and <code>merger_norm</code> as <code>LayerNorm.Config(normalized_shape=dim, eps=1e-6)</code>. The <code>merger_norm</code>'s <code>normalized_shape</code> is later swapped to <code>merged_hidden_size</code> for postshuffle DeepStack mergers inside <code>PatchMerger.__init__</code> via <code>dataclasses.replace</code>, which is the right pattern.</p>
+    <p><strong>TP &gt; 1 verification caveat.</strong> Round 3's added paragraph in <code>set_qwen3_vl_sharding_config</code> ("TP &gt; 1 with the vision encoder is unverified end-to-end") matches the MEMORY.md state (FSDP-only verified). Note this caveat lives in the parent (public) docstring rather than in <code>_set_vision_encoder_sharding</code> as the task description suggested. Either placement is defensible -- the public one is arguably more visible to callers in <code>update_from_config</code>.</p>
+  </div>
+
+  <div class="section">
+    <h2>Issues / Requested Changes</h2>
+
+    <div class="issue nit">
+      <div class="severity">Nit</div>
+      <div class="location">commit message (body)</div>
+      <div class="description">The commit body says "Rewrite parallelize_qwen3_vl: dense path uses model.parallelize(), MoE still uses legacy apply_moe_ep_tp." But neither the new nor the pre-commit <code>parallelize_qwen3_vl</code> calls <code>apply_moe_ep_tp</code> -- MoE EP/TP is already routed through <code>model.parallelize(parallel_dims)</code> from PR7. Consider dropping the "MoE still uses legacy apply_moe_ep_tp" clause to avoid misleading future readers.</div>
+    </div>
+
+    <div class="issue nit">
+      <div class="severity">Nit</div>
+      <div class="location">torchtitan/models/qwen3_vl/sharding.py:39-43, 71-75</div>
+      <div class="description">Both docstrings reference "legacy <code>_apply_tp_to_vision_encoder</code>" to describe the trade-off, but this commit deletes that helper. After this PR lands, future readers won't have anything to compare against. Per the MEMORY.md "comments describe present, not history" rule, consider rewording to describe the current behavior without the "differs from legacy" framing -- e.g., "<code>attn.qkv</code> output is all-gathered to Replicate, so flex_attention runs on the full head set on every rank. Heads-parallel attention would require a <code>local_map</code> on <code>VisionAttention</code>; see <code>set_gqa_inner_attention_local_map</code> for the pattern." Non-blocking.</div>
+    </div>
+
+    <div class="issue nit">
+      <div class="severity">Nit</div>
+      <div class="location">torchtitan/models/qwen3_vl/sharding.py:59</div>
+      <div class="description"><code>config.vision_encoder</code> is typed as <code>Qwen3VLVisionEncoder.Config</code> (not <code>| None</code>) on <code>Qwen3VLModel.Config</code> (model.py:56) and is always built unconditionally in <code>Qwen3VLModel.__init__</code>. The <code>if config.vision_encoder is not None:</code> guard is dead code. Either drop it or, if you want to keep defensive symmetry with the parallelize.py runtime checks, add a short comment explaining why. Non-blocking.</div>
+    </div>
+
+    <div class="issue nit">
+      <div class="severity">Nit</div>
+      <div class="location">torchtitan/models/qwen3_vl/__init__.py:120</div>
+      <div class="description">The local <code>layer_norm_eps = 1e-6</code> is referenced only twice in adjacent lines; you could inline the literal (matching the prior style for the qwen3 RMSNorm constants and the deleted inline usage in <code>VisionTransformerBlock</code>). Alternatively, expose it as a constant alongside <code>_EPS</code> at the top of the file. Either works; current state is fine. Non-blocking.</div>
+    </div>
+
+  </div>
+
+  <div class="section">
+    <h2>Commit / PR Description</h2>
+    <p>The four-bullet summary accurately describes the structural changes (module-protocol conversion, new sharding helper, parallelize.py rewrite, update_from_config wiring). One inaccuracy: the last clause of bullet 3 ("MoE still uses legacy apply_moe_ep_tp") is wrong -- MoE goes through <code>model.parallelize</code> in both the pre- and post-commit code (already the case in PR7). Recommend a one-line edit when amending.</p>
+    <p>Missing from the description (would be useful in the PR body, not a blocker): the explicit TP &gt; 1 verification caveat from the docstring, and a note that this PR deletes the legacy <code>_apply_tp_to_vision_encoder</code> entry point.</p>
+  </div>
+
+  <div class="section">
+    <h2>Things Done Well</h2>
+
+    <div class="issue positive">
+      <div class="description">Clean propagation of the Module protocol through the entire vision-encoder file. Each <code>Config</code> uses <code>kw_only=True, slots=True</code> and matches the field order of the prior positional/kwarg <code>__init__</code> signatures, making the conversion mechanical and reviewable.</div>
+    </div>
+
+    <div class="issue positive">
+      <div class="description">The <code>dataclasses.replace(config.norm, normalized_shape=norm_dim)</code> inside <code>PatchMerger.__init__</code> correctly handles the postshuffle norm dimension override without mutating the shared <code>merger_norm</code> Config instance, while still inheriting the assigned <code>sharding_config</code>.</div>
+    </div>
+
+    <div class="issue positive">
+      <div class="description">The new <code>_vision_colwise_config</code> / <code>_replicate_output_rowwise_config</code> helpers correctly reuse <code>dense_param_placement</code>/<code>dense_activation_placement</code> from <code>decoder_sharding.py</code>, keeping all dense-axis NamedPlacements consistent and avoiding a parallel definition.</div>
+    </div>
+
+    <div class="issue positive">
+      <div class="description">Round-3 docstring update explicitly calls out the TP &gt; 1 verification gap, which makes the FSDP-only-verified status visible to downstream callers in <code>update_from_config</code> and any future RL/eval integration.</div>
+    </div>
+
+    <div class="issue positive">
+      <div class="description">Stale TP imports (<code>distribute_tensor</code>, <code>Replicate</code>, <code>ColwiseParallel</code>, <code>parallelize_module</code>, <code>RowwiseParallel</code>, <code>NoParallel</code>) are removed from <code>parallelize.py</code> in the same commit -- no dead imports left behind.</div>
+    </div>
+
+  </div>
+
+  <div class="section">
+    <h2>Additional Context</h2>
+    <p>MEMORY.md ("Outstanding follow-ups") tracks "Real Qwen3-VL training verification under PR9" -- a 500-step run on the H100 box. The round-3 docstring honestly reflects this still-pending verification.</p>
+    <p>The integration test <code>qwen3_vl_moe_fsdp+tp+ep</code> (tests/integration_tests/models.py:142-153) exercises TP=2 on the MoE debugmodel, which does instantiate the vision encoder. That CI passing is a smoke check that the new sharding plan runs at TP=2, but the docstring's "unverified end-to-end" is still accurate because the test does not assert loss/numerics against a reference baseline.</p>
+  </div>
+
+  <div class="footer">
+    Generated by commit_review skill
+  </div>
+
+</div>
+</body>
+</html>
