@@ -18,7 +18,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -217,6 +216,3 @@ class GraphTrainer(Trainer):
 
     def close(self) -> None:
         super().close()
-
-        # See Note [explicit cudagraph teardown] in cudagraph.py
-        cudagraph_teardown()
