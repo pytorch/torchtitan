@@ -77,14 +77,14 @@ def parallelize_deepseekv3(
 
     # Read comm_backend from the model's token dispatcher config
     # (set by moe_comm_backend in model_registry / config factories).
+    from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 
     moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
-    comm_backend = (
-        getattr(moe_config.experts.token_dispatcher, "comm_backend", "standard")
-        if moe_config is not None
-        else "standard"
+    is_hybridep = moe_config is not None and isinstance(
+        moe_config.experts.token_dispatcher,
+        HybridEPTokenDispatcher.Config,
     )
-    if comm_backend == "hybridep":
+    if is_hybridep:
         from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -100,7 +100,7 @@ def parallelize_deepseekv3(
 
     # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
     # the common HybridEP buffer init into a shared utility.
-    if comm_backend == "hybridep" and parallel_dims.ep_enabled:
+    if is_hybridep and parallel_dims.ep_enabled:
         from torchtitan.distributed.deepep.hybridep import get_buffer
 
         ep_group = parallel_dims.get_mesh("ep").get_group()
