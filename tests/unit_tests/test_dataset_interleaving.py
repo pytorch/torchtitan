@@ -143,7 +143,13 @@ class TestInterleavedDatasetCheckpointing(unittest.TestCase):
         sd = InterleavedDataset([ds], [1.0], seed=0).state_dict()
         for key in ("rng_state", "sources"):
             self.assertIn(key, sd)
-        self.assertEqual(len(sd["sources"]), 1)
+        self.assertIsInstance(sd["sources"], dict)
+        self.assertEqual(set(sd["sources"].keys()), {0})
+
+    def test_state_dict_keys_multiple_sources(self):
+        ds_a, ds_b = _MockDataset([1]), _MockDataset([2])
+        sd = InterleavedDataset([ds_a, ds_b], [1.0, 1.0], seed=0).state_dict()
+        self.assertEqual(set(sd["sources"].keys()), {0, 1})
 
     def test_source_state_delegated_to_child(self):
         """sources[i] is exactly what child.state_dict() returns."""

@@ -26,17 +26,6 @@ from torch.utils.data import IterableDataset
 
 class InterleavedDataset(IterableDataset):
     """Randomly interleaves multiple IterableDatasets weighted by sampling probability.
-
-    At each step a source is drawn proportionally to its weight.
-
-    ``stopping_strategy`` controls when iteration ends:
-
-    - ``"on_first_exhausted"`` (default): stops as soon as any source raises
-      ``StopIteration``, defining a natural epoch boundary.
-    - ``"all_exhausted"``: an exhausted source is restarted and iteration
-      continues until every source has been exhausted at least once.
-
-    All sources must implement ``state_dict`` / ``load_state_dict``.
     Re-looping, infinite behaviour, and within-source shuffling are each
     source's responsibility.
     """
@@ -50,6 +39,19 @@ class InterleavedDataset(IterableDataset):
             "on_first_exhausted", "all_exhausted"
         ] = "on_first_exhausted",
     ) -> None:
+        """
+        Args:
+            datasets: Source datasets. Each must implement ``state_dict()``
+                and ``load_state_dict()``.
+            weights: Sampling weights (normalised internally). Controls the
+                relative likelihood of drawing from each source at each step.
+            seed: Seed for the interleaver RNG.
+            stopping_strategy: Controls when iteration ends.
+                ``"on_first_exhausted"`` (default) stops as soon as any source
+                raises ``StopIteration``, defining a natural epoch boundary.
+                ``"all_exhausted"`` restarts an exhausted source and continues
+                until every source has been exhausted at least once.
+        """
         if not datasets:
             raise ValueError("At least one dataset must be provided.")
         if len(datasets) != len(weights):
@@ -90,7 +92,12 @@ class InterleavedDataset(IterableDataset):
 
     @staticmethod
     def _add_source_idx(sample: Any, source_idx: int) -> Any:
-        """Attach source_idx to sample"""
+        """Attach source_idx (int) to a sample, based on its type:
+
+        * (input_dict, label) → ({**input_dict, "source_idx": i}, label)
+        * plain dict          → {**d, "source_idx": i}
+        * anything else           → returned unchanged (no source_idx injected)
+        """
         if (
             isinstance(sample, tuple)
             and len(sample) == 2
@@ -123,11 +130,11 @@ class InterleavedDataset(IterableDataset):
         """Snapshot of interleaver RNG and all source states."""
         return {
             "rng_state": self._rng.getstate(),
-            "sources": [ds.state_dict() for ds in self._datasets],
+            "sources": {i: ds.state_dict() for i, ds in enumerate(self._datasets)},
         }
 
     def load_state_dict(self, sd: dict[str, Any]) -> None:
         """Restore from *sd*."""
         self._rng.setstate(sd["rng_state"])
-        for ds, src_sd in zip(self._datasets, sd["sources"]):
-            ds.load_state_dict(src_sd)
+        for i, ds in enumerate(self._datasets):
+            ds.load_state_dict(sd["sources"][i])
