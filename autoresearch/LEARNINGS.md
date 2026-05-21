@@ -54,6 +54,27 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   dump and by `target.__name__` matching at pass-run time. Useful when writing
   any pass that touches communication.
 
+- **At FSDP=4 on NVLink, the Q/K/V AGs are bandwidth-bound, not launch-bound**
+  (Exp 4). Bucketing Q/K/V (3→1 AGs/layer, 64 launches saved/step) only moved
+  tps +0.7% — below noise threshold. The Q shard is 64 KB and dominates the
+  collective time; K/V are 4 KB each but ride along on the same NCCL link.
+  The cat+split surgery also adds CPU/launch overhead and (if not careful)
+  reshape-on-non-contiguous-strided-slice copies. Implication: launch-count
+  bucketing is only a clear win on truly tiny collectives (e.g. RMSNorm γ at
+  ≤4 KB per shard). Bandwidth-bound bucketing needs a *coalesced* collective
+  op (single launch, no cat/split overhead) to beat the current cost.
+
+- **FX `graph.inserting_after(n)` inserts in REVERSE topological order** when
+  multiple nodes are inserted with the same anchor. To insert a chain
+  A→B→C after n, do `inserting_after(n) ... A`, then `inserting_after(A) ... B`,
+  etc. Otherwise C appears before A in node order and crashes the runtime
+  even when `lint()` passes (lint only checks SSA, not collective dependencies).
+
+- **`numerics.log` passing does not guarantee benchmark runs cleanly.** The
+  bitwise-deterministic test uses a smaller config than the benchmark, so
+  some topo-order violations only surface at full scale. Always run BOTH the
+  numerics test AND the benchmark before declaring keep/discard.
+
 ## Tooling tips
 
 - **Dump the post-trace graph from a graph pass.** Register a temporary pass
