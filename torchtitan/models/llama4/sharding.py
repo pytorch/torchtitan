@@ -26,6 +26,7 @@ def set_llama4_sharding_config(
     *,
     loss_parallel: bool,
     enable_tp: bool,
+    enable_cp: bool,
     enable_sp: bool,
     enable_ep: bool,
     chunked_loss: bool,
@@ -42,6 +43,7 @@ def set_llama4_sharding_config(
         _set_llama4_layer_sharding(
             layer_cfg,
             enable_tp=enable_tp,
+            enable_cp=enable_cp,
             enable_sp=enable_sp,
             enable_ep=enable_ep,
         )
@@ -51,6 +53,7 @@ def _set_llama4_layer_sharding(
     layer_cfg: "Llama4TransformerBlock.Config",
     *,
     enable_tp: bool,
+    enable_cp: bool,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
@@ -80,6 +83,7 @@ def _set_llama4_layer_sharding(
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_tp=enable_tp,
+            enable_cp=enable_cp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
         )

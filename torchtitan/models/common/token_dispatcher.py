@@ -212,8 +212,27 @@ class LocalTokenDispatcher(Configurable):
             (num_tokens, dim) combined output with shared_experts added.
         """
         out = shared_experts(x) if shared_experts is not None else torch.zeros_like(x)
+        if spmd.is_type_checking() and spmd.has_local_type(routed_output):
+            mesh = current_mesh()
+            mesh_axis_names = spmd.current_mesh_names() or {}
+            routed_type = spmd.get_local_type(routed_output)
+            out_type = spmd.get_local_type(out) if spmd.has_local_type(out) else {}
+            if mesh is not None:
+                for axis_name, axis in mesh_axis_names.items():
+                    if routed_type.get(axis) is not spmd.P:
+                        continue
+                    src_type = out_type.get(axis, spmd.R)
+                    if src_type is spmd.P:
+                        continue
+                    out = spmd.reinterpret(
+                        out,
+                        mesh.get_group(axis_name),
+                        src=src_type,
+                        dst=spmd.P,
+                        expert_mode=True,
+                    )
         return spmd.local_map(
-            out_types=spmd.type_like(x),
+            out_types=spmd.type_like(routed_output),
             local_typecheck=True,
         )(self._scatter_local_expert_outputs)(
             out,

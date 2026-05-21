@@ -67,14 +67,11 @@ def sparse_param_placement() -> NamedPlacement:
 
 
 def moe_wrapper_config(*, enable_sp: bool) -> ShardingConfig:
-    """Sharding at the MoE wrapper boundary (dense mesh, TP axis).
+    """Sharding at the MoE wrapper boundary (dense mesh).
 
-    Input arrives at ``sp_layout`` (S(1) when SP, I otherwise).
-    Redistributed to R@tp (allgather when SP) for the body.
-    ``local_spmd`` converts R@tp DTensor to local tensor for the body.
-    Body output is P@tp (each TP rank holds a partial sum).
-    Redistributed to ``sp_layout`` (reduce-scatter when SP, allreduce
-    otherwise).
+    Input arrives at ``sp_layout`` on TP (S(1) when SP, I otherwise) and
+    S(1) on CP. ``local_spmd`` runs the body on each local token shard, which
+    keeps MoE's token flattening local under CP.
     """
     sp_tp = spmd.S(1) if enable_sp else spmd.I
     return ShardingConfig(
@@ -247,6 +244,7 @@ def set_moe_sharding_config(
     moe_cfg: "MoE.Config",
     *,
     enable_tp: bool,
+    enable_cp: bool = False,
     enable_ep: bool,
     enable_sp: bool,
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType] | None = None,
@@ -254,7 +252,7 @@ def set_moe_sharding_config(
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
 
-    - ``moe`` (wrapper): dense-family ``LocalSpmdConfig`` over TP.
+    - ``moe`` (wrapper): dense-family ``LocalSpmdConfig`` when TP or CP is enabled.
     - ``moe.router.gate``: R@tp weight with I→R convert hook.
     - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP with Partial flow.
     - ``moe.experts``: sparse-family EP (S(0)@ep) when EP enabled,
@@ -263,7 +261,7 @@ def set_moe_sharding_config(
     if expert_param_layout is None:
         expert_param_layout = {"w1": spmd.S(1), "w2": spmd.S(2), "w3": spmd.S(1)}
 
-    if enable_tp:
+    if enable_tp or enable_cp:
         moe_cfg.sharding_config = moe_wrapper_config(enable_sp=enable_sp)
         moe_cfg.router.gate.sharding_config = router_gate_config(
             has_bias=router_has_bias

@@ -57,9 +57,18 @@ class GroupedExperts(Module):
         """Raw expert computation without dispatch/combine."""
         x_type = spmd.type_like(x)
         count_type = spmd.type_like(num_tokens_per_expert)
+        out_type = x_type
+        mesh_axis_names = spmd.current_mesh_names()
+        if mesh_axis_names is not None and "tp" in mesh_axis_names:
+            local_type, partition_spec = (
+                x_type if isinstance(x_type, tuple) else (x_type, None)
+            )
+            local_type = dict(local_type)
+            local_type[mesh_axis_names["tp"]] = spmd.P
+            out_type = local_type, partition_spec
         return spmd.local_map(
             in_types=(x_type, count_type),
-            out_types=x_type,
+            out_types=out_type,
             local_typecheck=True,
         )(self._run_grouped_experts)(x, num_tokens_per_expert)
 
@@ -91,9 +100,24 @@ class GroupedExperts(Module):
         h = h * torch._grouped_mm(
             x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
         )
-        return torch._grouped_mm(
+        out = torch._grouped_mm(
             h, w2.bfloat16().transpose(-2, -1), offs=offsets
         ).type_as(x)
+        if spmd.is_type_checking():
+            mesh = current_mesh()
+            if (
+                mesh is not None
+                and mesh.mesh_dim_names is not None
+                and "tp" in mesh.mesh_dim_names
+            ):
+                out = spmd.reinterpret(
+                    out,
+                    mesh.get_group("tp"),
+                    src=spmd.V,
+                    dst=spmd.P,
+                    expert_mode=True,
+                )
+        return out
 
     def forward(
         self,
@@ -381,22 +405,24 @@ class MoE(Module):
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
             mesh = current_mesh()
-            tp_enabled = (
-                mesh is not None
-                and mesh.mesh_dim_names is not None
-                and "tp" in mesh.mesh_dim_names
-                and torch.distributed.get_world_size(mesh.get_group("tp")) > 1
-            )
-            if spmd.is_type_checking() and tp_enabled:
-                for axis_name in ("dp", "cp"):
-                    if axis_name in mesh.mesh_dim_names:
-                        num_tokens_per_expert = spmd.reinterpret(
-                            num_tokens_per_expert,
-                            mesh.get_group(axis_name),
-                            src=spmd.V,
-                            dst=spmd.P,
-                            expert_mode=True,
-                        )
+            if spmd.is_type_checking() and mesh is not None:
+                mesh_axis_names = spmd.current_mesh_names() or {}
+                if "cp" in mesh_axis_names:
+                    counter_partial_axes = ("dp", "cp")
+                elif "tp" in mesh_axis_names:
+                    counter_partial_axes = ("dp",)
+                else:
+                    counter_partial_axes = ()
+                for axis_name in counter_partial_axes:
+                    if axis_name not in mesh_axis_names:
+                        continue
+                    num_tokens_per_expert = spmd.reinterpret(
+                        num_tokens_per_expert,
+                        mesh.get_group(axis_name),
+                        src=spmd.V,
+                        dst=spmd.P,
+                        expert_mode=True,
+                    )
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         if (
