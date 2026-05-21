@@ -132,6 +132,12 @@ def set_determinism(
         )
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # use_deterministic_algorithms(True) enables fill_uninitialized_memory,
+        # which makes torch.empty() run a fill kernel. This kernel races with
+        # DeepEP comm streams, causing errors.
+        # This also prevents HF modeling from initializing ROPE (inv_freq) buffers to NaN.
+        # pyrefly: ignore [missing-attribute]
+        torch.utils.deterministic.fill_uninitialized_memory = False
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
