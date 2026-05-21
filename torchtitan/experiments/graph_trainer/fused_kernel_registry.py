@@ -37,7 +37,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import torch
 
@@ -258,11 +258,22 @@ def _build_region(comp: list[torch.fx.Node], norm_fqn: str = "") -> Region:
 
 
 class RegionExtractor(ABC):
-    """Base class for fusible region extractors."""
+    """Base class for fusible region extractors.
+
+    ``extract`` returns a (possibly transformed) graph and the regions
+    discovered in it.  For extractors that work on the original graph
+    (e.g. ``FqnRegionExtractor``), the returned graph is ``gm``
+    unchanged.  For extractors that decompose (e.g.
+    ``InductorRegionExtractor``), the returned graph is a decomposed
+    copy — the caller operates on it for replacement, problem
+    generation, and downstream passes.
+    """
 
     @abstractmethod
-    def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
-        """Discover all fusible regions in the graph."""
+    def extract(
+        self, gm: torch.fx.GraphModule
+    ) -> tuple[torch.fx.GraphModule, list[Region]]:
+        """Discover regions. Returns (work_gm, regions)."""
         ...
 
 
@@ -270,7 +281,9 @@ class FqnRegionExtractor(RegionExtractor):
     """Segments at module_fqn boundaries, splits connected components,
     filters by handcoded op lists."""
 
-    def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
+    def extract(
+        self, gm: torch.fx.GraphModule
+    ) -> tuple[torch.fx.GraphModule, list[Region]]:
         raw_regions: list[tuple[list[torch.fx.Node], str]] = []
         current: list[torch.fx.Node] = []
         current_fqn = ""
@@ -298,7 +311,7 @@ class FqnRegionExtractor(RegionExtractor):
                     continue
                 all_regions.append(_build_region(comp, norm_fqn))
 
-        return all_regions
+        return gm, all_regions
 
 
 class InductorRegionExtractor(RegionExtractor):
@@ -306,18 +319,155 @@ class InductorRegionExtractor(RegionExtractor):
     ``is_fusible_node`` to discover regions that match inductor's
     actual fusion decisions.
 
+    Uses ``from_node`` provenance tracking (via ``torch.fx.Interpreter``
+    + ``make_fx``) to map decomposed regions back to the original graph.
+    This allows replacement in the original graph while using inductor's
+    post-decomposition fusibility classification.
+
     Steps:
-      1. Decompose the graph (aten.t → aten.permute, etc.) using
-         inductor's ``select_decomp_table``
-      2. Classify each node as fusible/non-fusible via ``is_fusible_node``
-      3. Group consecutive fusible nodes (split at non-fusible boundaries)
-      4. Split disconnected components via union-find
+      1. Decompose the graph using ``Interpreter + make_fx`` with
+         ``preserve_node_meta`` — each decomposed node gets ``from_node``
+         pointing to its original source node.
+      2. Classify each decomposed node via ``is_fusible_node``
+      3. Group consecutive fusible nodes, split connected components
+      4. Map each decomposed region back to original nodes via ``from_node``
+      5. Return Regions with original-graph nodes (for replacement) and
+         decomposed nodes (for hash computation and problem generation)
     """
 
     def __init__(self, example_inputs: tuple | None = None):
         self.example_inputs = example_inputs
 
-    def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
+    def _decompose_with_provenance(
+        self, gm: torch.fx.GraphModule
+    ) -> torch.fx.GraphModule | None:
+        """Decompose the graph using Interpreter + make_fx.
+
+        The Interpreter walks the original graph node-by-node, calling
+        ``set_current_meta`` for each.  ``make_fx`` records the
+        (possibly decomposed) ops as a new graph.  Combined with
+        ``preserve_node_meta``, each new node's ``from_node`` points
+        back to its original source node.
+        """
+        if self.example_inputs is None:
+            return None
+        try:
+            from torch._inductor.decomposition import select_decomp_table
+            from torch._subclasses.fake_tensor import FakeTensor
+            from torch.fx.experimental.proxy_tensor import make_fx
+            from torch.fx.traceback import preserve_node_meta
+
+            decomp_table = dict(select_decomp_table())
+            # Exclude view/reshape/clone decompositions — the decomposed
+            # versions (torch._refs) are stricter about strides and fail
+            # on non-contiguous tensors that the original ops handle.
+            aten = torch.ops.aten
+            for op in (
+                aten.view.default, aten.view.dtype,
+                aten._unsafe_view.default,
+                aten.reshape.default,
+                aten.clone.default,
+                aten.t.default,
+                aten.permute.default,
+                aten.transpose.int,
+                aten.expand.default,
+                aten.slice.Tensor,
+                aten.select.int,
+                aten.unsqueeze.default,
+                aten.squeeze.dim, aten.squeeze.dims,
+            ):
+                decomp_table.pop(op, None)
+            fake_mode = None
+            for inp in self.example_inputs:
+                if isinstance(inp, FakeTensor):
+                    fake_mode = inp.fake_mode
+                    break
+            if fake_mode is None:
+                return None
+
+            interp = torch.fx.Interpreter(gm)
+            with fake_mode, preserve_node_meta():
+                work_gm = make_fx(
+                    lambda *a: interp.run(*a),
+                    decomposition_table=decomp_table,
+                    _allow_non_fake_inputs=True,
+                )(*self.example_inputs)
+
+            logger.info(
+                f"InductorRegionExtractor: decomposed "
+                f"{len(list(gm.graph.nodes))} → "
+                f"{len(list(work_gm.graph.nodes))} nodes (with from_node)"
+            )
+            return work_gm
+        except Exception as e:
+            logger.warning(f"InductorRegionExtractor: decomposition failed: {e}")
+            return None
+
+    @staticmethod
+    def _map_decomp_region_to_orig(
+        decomp_region: Region,
+        orig_node_map: dict[str, torch.fx.Node],
+    ) -> Region | None:
+        """Map a decomposed-graph Region back to original-graph nodes.
+
+        Uses ``from_node`` metadata on each decomposed node to find the
+        corresponding original node.  Includes bridging nodes (getitem,
+        view, etc.) between mapped nodes so the region is contiguous
+        in the original graph.
+
+        Returns a Region whose ``nodes`` are from the original graph
+        (for replacement) and whose ``decomp_nodes`` are from the
+        decomposed graph (for hashing and problem generation).
+
+        Returns None if the mapping fails.
+        """
+        # Collect original nodes via from_node provenance
+        orig_names_seen: set[str] = set()
+        orig_nodes_ordered: list[torch.fx.Node] = []
+        for dn in decomp_region.nodes:
+            from_node_list = dn.meta.get("from_node", [])
+            if not from_node_list:
+                continue
+            orig_name = from_node_list[0].name
+            if orig_name and orig_name not in orig_names_seen:
+                orig_node = orig_node_map.get(orig_name)
+                if orig_node is not None:
+                    orig_names_seen.add(orig_name)
+                    orig_nodes_ordered.append(orig_node)
+
+        if not orig_nodes_ordered:
+            return None
+
+        # Include bridging nodes: getitem/view nodes that sit between
+        # mapped nodes and connect them.  Decompositions like
+        # _fused_rms_norm produce getitem nodes in the original graph
+        # that are absorbed into the decomposed region but not directly
+        # mapped via from_node.
+        region_names = {n.name for n in orig_nodes_ordered}
+        changed = True
+        while changed:
+            changed = False
+            for n in orig_nodes_ordered:
+                for user in n.users:
+                    if user.name in region_names:
+                        continue
+                    if user.target is not operator.getitem:
+                        continue
+                    # Include getitem if ANY of its users is in the region
+                    if any(u.name in region_names for u in user.users):
+                        region_names.add(user.name)
+                        orig_nodes_ordered.append(user)
+                        changed = True
+
+        # Re-sort by graph position
+        node_order = {n: i for i, n in enumerate(n for n in orig_nodes_ordered[0].graph.nodes)}
+        orig_nodes_ordered.sort(key=lambda n: node_order.get(n, 0))
+
+        return _build_region(orig_nodes_ordered, decomp_region.norm_fqn)
+
+    def extract(
+        self, gm: torch.fx.GraphModule
+    ) -> tuple[torch.fx.GraphModule, list[Region]]:
         import time as _time
 
         try:
@@ -334,37 +484,19 @@ class InductorRegionExtractor(RegionExtractor):
 
         _t0 = _time.time()
 
-        # Step 1: Apply inductor decompositions
-        work_gm = gm
-        if self.example_inputs is not None:
-            try:
-                from torch._inductor.decomposition import select_decomp_table
-                from torch._subclasses.fake_tensor import FakeTensor
-                from torch.fx.experimental.proxy_tensor import make_fx
+        # Step 1: Decompose with from_node provenance tracking
+        work_gm = self._decompose_with_provenance(gm)
+        if work_gm is None:
+            work_gm = gm
 
-                decomp_table = select_decomp_table()
-                fake_mode = None
-                for inp in self.example_inputs:
-                    if isinstance(inp, FakeTensor):
-                        fake_mode = inp.fake_mode
-                        break
-
-                if fake_mode is not None:
-                    with fake_mode:
-                        work_gm = make_fx(
-                            gm,
-                            decomposition_table=decomp_table,
-                            _allow_non_fake_inputs=True,
-                        )(*self.example_inputs)
-                    logger.info(
-                        f"InductorRegionExtractor: decomposed "
-                        f"{len(list(gm.graph.nodes))} → "
-                        f"{len(list(work_gm.graph.nodes))} nodes"
-                    )
-            except Exception as e:
-                logger.warning(f"InductorRegionExtractor: decomposition failed: {e}")
-
+        has_provenance = work_gm is not gm
         n_nodes = len(list(work_gm.graph.nodes))
+
+        # Build name→node map for the original graph (for back-mapping)
+        orig_node_map: dict[str, torch.fx.Node] = {}
+        if has_provenance:
+            for n in gm.graph.nodes:
+                orig_node_map[n.name] = n
 
         # Step 2: Classify each node as fusible
         fusible_nodes: set[str] = set()
@@ -399,7 +531,7 @@ class InductorRegionExtractor(RegionExtractor):
             f"{len(partitions)} partitions in {_time.time()-_t0:.1f}s"
         )
 
-        # Step 4: Split disconnected components, filter
+        # Step 4: Split disconnected components, filter, map back
         all_regions: list[Region] = []
         for comp, norm_fqn in partitions:
             if all(is_view_node(n) or n.op != "call_function" for n in comp):
@@ -407,9 +539,19 @@ class InductorRegionExtractor(RegionExtractor):
             if any(_is_unfusable(n) for n in comp):
                 continue
             for connected in _split_connected(comp):
-                all_regions.append(_build_region(connected, norm_fqn))
+                decomp_region = _build_region(connected, norm_fqn)
+                if has_provenance:
+                    region = self._map_decomp_region_to_orig(
+                        decomp_region, orig_node_map
+                    )
+                    if region is not None:
+                        all_regions.append(region)
+                else:
+                    all_regions.append(decomp_region)
 
-        return all_regions
+        # Return original graph — replacement happens on it, and
+        # downstream passes (inductor compilation) handle decomposition.
+        return gm, all_regions
 
 
 class SchedulerRegionExtractor(RegionExtractor):
@@ -430,7 +572,9 @@ class SchedulerRegionExtractor(RegionExtractor):
     def __init__(self, example_inputs: tuple | None = None):
         self.example_inputs = example_inputs
 
-    def extract(self, gm: torch.fx.GraphModule) -> list[Region]:
+    def extract(
+        self, gm: torch.fx.GraphModule
+    ) -> tuple[torch.fx.GraphModule, list[Region]]:
         import time as _time
 
         try:
@@ -579,7 +723,7 @@ class SchedulerRegionExtractor(RegionExtractor):
             f"SchedulerRegionExtractor: captured {len(captured_regions)} regions "
             f"in {_time.time()-_t0:.1f}s"
         )
-        return captured_regions
+        return gm, captured_regions
 
 
 _EXTRACTORS: dict[str, type[RegionExtractor]] = {
@@ -653,6 +797,8 @@ def _try_compile(fn: Callable) -> Callable | None:
 def _select_best_backend(
     region_dir: Path,
     eager_fn: Callable | None = None,
+    *,
+    min_speedup: float = 1.1,
 ) -> tuple[Callable | None, str]:
     """Select the fastest backend from offline benchmark results.
 
@@ -678,14 +824,14 @@ def _select_best_backend(
 
     eager_ms = bench_data.get("eager_ms", float("inf"))
 
-    # Check triton
+    # Check triton (must beat eager by min_speedup threshold)
     triton_ms = bench_data.get("triton_ms", float("inf"))
-    if triton_fn is not None and triton_ms < eager_ms:
+    if triton_fn is not None and triton_ms * min_speedup < eager_ms:
         return triton_fn, "triton"
 
-    # Check compile (only if it beats eager AND triton)
+    # Check compile (must beat eager by min_speedup AND beat triton)
     compile_ms = bench_data.get("compile_ms", float("inf"))
-    if compile_ms < eager_ms and compile_ms < triton_ms:
+    if compile_ms * min_speedup < eager_ms and compile_ms < triton_ms:
         if eager_fn is not None:
             compiled_fn = _try_compile(eager_fn)
             if compiled_fn is not None:
@@ -835,11 +981,30 @@ def _replace_region_with_kernel(
     external_inputs = region.external_inputs
     output_nodes = region.output_nodes
 
-    first_node = nodes[0]
-    with graph.inserting_before(first_node):
-        call_node = graph.call_function(
-            kernel_fn, args=tuple(external_inputs)
-        )
+    # Find the correct insertion point: after all external inputs are
+    # defined, to avoid topological ordering violations.  For regions
+    # mapped from decomposed graphs, external inputs may include nodes
+    # that sit between (or after) the region's own nodes.
+    node_order = {n: i for i, n in enumerate(graph.nodes)}
+    latest_input_pos = max(
+        (node_order.get(inp, 0) for inp in external_inputs),
+        default=-1,
+    )
+    first_node_pos = node_order.get(nodes[0], 0)
+
+    if latest_input_pos >= first_node_pos and external_inputs:
+        # An external input is defined at or after the first region node.
+        # Insert after the latest input to satisfy topological order.
+        latest_input_node = max(external_inputs, key=lambda n: node_order.get(n, 0))
+        with graph.inserting_after(latest_input_node):
+            call_node = graph.call_function(
+                kernel_fn, args=tuple(external_inputs)
+            )
+    else:
+        with graph.inserting_before(nodes[0]):
+            call_node = graph.call_function(
+                kernel_fn, args=tuple(external_inputs)
+            )
 
         if len(output_nodes) == 1:
             call_node.meta = output_nodes[0].meta.copy()
@@ -849,13 +1014,15 @@ def _replace_region_with_kernel(
     if len(output_nodes) == 1:
         output_nodes[0].replace_all_uses_with(call_node)
     else:
-        with graph.inserting_after(call_node):
-            for out_idx, out_node in enumerate(output_nodes):
+        last = call_node
+        for out_idx, out_node in enumerate(output_nodes):
+            with graph.inserting_after(last):
                 gi = graph.call_function(
                     operator.getitem, args=(call_node, out_idx)
                 )
                 gi.meta = out_node.meta.copy()
-                out_node.replace_all_uses_with(gi)
+            out_node.replace_all_uses_with(gi)
+            last = gi
 
     for old in reversed(nodes):
         if not old.users:
@@ -906,9 +1073,10 @@ def fused_kernel_pass(
         )
         extractor_cls = FqnRegionExtractor
     if extractor_cls in (SchedulerRegionExtractor, InductorRegionExtractor):
-        all_regions = extractor_cls(example_inputs=example_inputs).extract(gm)
+        work_gm, all_regions = extractor_cls(example_inputs=example_inputs).extract(gm)
     else:
-        all_regions = extractor_cls().extract(gm)
+        work_gm, all_regions = extractor_cls().extract(gm)
+
     unique_regions, hash_counts = _filter_regions(
         all_regions, min_ops=min_ops, min_compute_ops=min_compute_ops,
         min_count=min_count,
@@ -916,12 +1084,12 @@ def fused_kernel_pass(
 
     if not unique_regions:
         logger.info("Fused kernel pass: no fusible regions found")
-        return gm
+        return work_gm
 
     valid_hashes = {_compute_region_hash(r) for r in unique_regions}
 
     # Collect ALL instances (not just unique) for replacement
-    node_order = {n: i for i, n in enumerate(gm.graph.nodes)}
+    node_order = {n: i for i, n in enumerate(work_gm.graph.nodes)}
     instances: list[tuple[int, str, Region]] = []
     for r in all_regions:
         h = _compute_region_hash(r)
@@ -964,17 +1132,33 @@ def fused_kernel_pass(
 
     # Only replace instances whose hash has a non-eager winner.
     # Inserts call_function(kernel_fn) directly — no call_module wrapper.
+    # Track live nodes — previous replacements may invalidate later regions.
     replaced = 0
+    skipped_invalid = 0
+    live_nodes: set[str] = {n.name for n in work_gm.graph.nodes}
     for pos, h, r in instances:
         if h not in hash_best:
             continue
+        if not all(n.name in live_nodes for n in r.nodes):
+            skipped_invalid += 1
+            continue
+        if not all(inp.name in live_nodes for inp in r.external_inputs):
+            skipped_invalid += 1
+            continue
         best_fn, _ = hash_best[h]
-        _replace_region_with_kernel(gm, r, best_fn)
+        _replace_region_with_kernel(work_gm, r, best_fn)
+        live_nodes = {n.name for n in work_gm.graph.nodes}
         replaced += 1
 
     if replaced > 0:
-        gm.graph.lint()
-        gm.recompile()
+        work_gm.graph.lint()
+        work_gm.recompile()
+
+    if skipped_invalid:
+        logger.info(
+            f"Fused kernel pass: skipped {skipped_invalid} regions "
+            f"(nodes invalidated by prior replacements)"
+        )
 
     backend_summary = ", ".join(f"{k}={v}" for k, v in sorted(backend_counts.items()))
     logger.info(
@@ -985,4 +1169,4 @@ def fused_kernel_pass(
         f"{problems_written} new problems written to {kdir}"
     )
 
-    return gm
+    return work_gm

@@ -39,8 +39,12 @@ before inductor compilation:
 
 1. **Discovers** fusible regions using a pluggable extractor:
    - `fqn` (default): segments at module_fqn boundaries + union-find
-   - `inductor`: uses inductor's `is_fusible_node` + `CapabilityBasedPartitioner`
-   Config: `--compile.fused_kernel_extractor fqn|inductor`
+   - `inductor`: applies inductor decompositions (via `Interpreter + make_fx`
+     with `preserve_node_meta` for `from_node` provenance tracking), then
+     classifies with `is_fusible_node`. Maps decomposed regions back to
+     original graph nodes via `from_node` for replacement.
+   - `scheduler`: hooks into inductor's post-fusion scheduler
+   Config: `--compile.fused_kernel_extractor fqn|inductor|scheduler`
 2. **Splits** disconnected components via union-find
 3. **Filters** unfusable ops: all `_c10d_functional.*`, `ao.*`,
    `bucketing.*` (collectives/offload), flash attention, embedding.
