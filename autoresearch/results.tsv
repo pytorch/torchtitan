@@ -2,3 +2,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-21T14:09:00	baseline	4161	49.0	keep	24.36	75	Run 1 baseline: Llama3 8B FSDP=4 TP=2 bs=1 8xH100; c4_test; construct_default_graph_passes returns empty list
 2026-05-21T23:14:27	bb516bc	4460	47.0	keep	26.12	81	remove_identity_views: peephole drop of 2006/3358 aten.view identity nodes (DTensor plumbing); +7.2% tps, -2.0 GiB
 2026-05-21T23:20:23	xxxxxxx	4432	47.0	discard	25.95	74	drop_unused_sdpa_outputs: removed 0 dead getitems; FX eliminate_dead_code already handles them post Exp 1
+2026-05-21T23:25:41	xxxxxxx	4371	47.0	discard	25.60	74	reorder_fsdp_all_gather_prefetch (Strategy A): moved 130/421 AGs by avg 3.5 slots; no cross-layer overlap; tps noise-level regression

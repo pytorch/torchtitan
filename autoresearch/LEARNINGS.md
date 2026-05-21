@@ -37,6 +37,23 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   When evaluating "remove dead outputs of op X" ideas, sanity-check against the
   post-DCE graph first; if it's gone, skip.
 
+- **Pure topological "move AG to earliest legal slot" does NOT prefetch** (Exp 3).
+  Each `all_gather_into_tensor` has its *input* — the `_to_copy(f32→bf16)` of
+  the sharded weight, plus surrounding views — produced layer-locally. So the
+  earliest legal slot for the AG is still *inside* the same layer, not above
+  the previous layer's wait. Moving 130/421 AGs by ~3.5 slots each made no
+  measurable difference (tps within noise). To actually overlap an AG with the
+  previous layer's compute, you'd need to hoist the AG's whole producer chain
+  (cast + view + AG) above the prior `wait_tensor`, which is a heavier
+  transformation. Mark this as `[~]` not `[x]` — Strategy B is still worth a
+  future attempt, but it's not a low-effort prefetch.
+
+- **Functional collective targets in the AOT FX graph** are
+  `torch.ops._c10d_functional.all_gather_into_tensor.default` (and
+  `reduce_scatter_tensor.default`, `wait_tensor.default`). Confirmed by graph
+  dump and by `target.__name__` matching at pass-run time. Useful when writing
+  any pass that touches communication.
+
 ## Tooling tips
 
 - **Dump the post-trace graph from a graph pass.** Register a temporary pass
