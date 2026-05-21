@@ -102,9 +102,6 @@ def build_and_swap_native_moe(
         layer.mlp = native_moe
         object.__setattr__(layer, "moe", native_moe)
 
-        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-            native_moe.parallelize(parallel_dims)
-
         del layer._native_moe_config
 
     logger.info("Built and swapped native MoE modules into the model")
@@ -139,8 +136,15 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     # Router scoring function
     score_func = _resolve_score_func(gate, config)
 
-    # Route normalization
-    route_norm = getattr(config, "norm_topk_prob", False)
+    # Route normalization: some models (Mixtral, Qwen3.5) always normalize
+    # but don't have a config flag. Detect by checking if norm_topk_prob is
+    # absent (meaning the router hardcodes normalization).
+    if hasattr(config, "norm_topk_prob"):
+        route_norm = config.norm_topk_prob
+    elif hasattr(gate, "norm_topk_prob"):
+        route_norm = gate.norm_topk_prob
+    else:
+        route_norm = True
 
     # Route scaling factor (DeepSeek V2/V3)
     route_scale = getattr(config, "routed_scaling_factor", 1.0)
