@@ -220,7 +220,7 @@ class FlatShard(Placement):
 
         if placements:
             total_numel = placements[0].total_numel
-            cursor = 0
+            covered_numel = 0
             for start, end, fqn in sorted(
                 (
                     placement.param_start,
@@ -233,18 +233,18 @@ class FlatShard(Placement):
                     strict=True,
                 )
             ):
-                if start != cursor:
+                if start != covered_numel:
                     raise ValueError(
                         "FlatShard placements must exactly cover the flat "
                         "bucket without gaps or overlaps, but expected the "
-                        f"next interval to start at {cursor} and {fqn!r} "
+                        f"next interval to start at {covered_numel} and {fqn!r} "
                         f"starts at {start}."
                     )
-                cursor = end
-            if cursor != total_numel:
+                covered_numel = end
+            if covered_numel != total_numel:
                 raise ValueError(
                     "FlatShard placements must exactly cover the flat bucket, "
-                    f"but covered {cursor} elements and total_numel is "
+                    f"but covered {covered_numel} elements and total_numel is "
                     f"{total_numel}."
                 )
         return placements
@@ -442,47 +442,6 @@ class FlatShard(Placement):
         return min(shard_numel, total_numel - rank_start)
 
     @staticmethod
-    def _try_make_adjacent_flat_view(
-        tensors: list[torch.Tensor],
-        numel: int,
-    ) -> torch.Tensor | None:
-        if numel == 0:
-            return None
-
-        flat_tensors: list[torch.Tensor] = []
-        for tensor in tensors:
-            if tensor.numel() == 0:
-                continue
-            if not tensor.is_contiguous():
-                return None
-            flat_tensors.append(tensor.view(-1))
-
-        if sum(tensor.numel() for tensor in flat_tensors) != numel:
-            return None
-        if not flat_tensors:
-            return None
-
-        first = flat_tensors[0]
-        storage_ptr = first.untyped_storage().data_ptr()
-        storage_offset = first.storage_offset()
-        next_offset = storage_offset
-        for tensor in flat_tensors:
-            if tensor.dtype != first.dtype or tensor.device != first.device:
-                return None
-            if tensor.untyped_storage().data_ptr() != storage_ptr:
-                return None
-            if tensor.storage_offset() != next_offset:
-                return None
-            next_offset += tensor.numel()
-
-        return torch.as_strided(
-            first,
-            size=(numel,),
-            stride=(1,),
-            storage_offset=storage_offset,
-        )
-
-    @staticmethod
     def _try_make_bucket_storage_view(
         tensors: list[torch.Tensor],
         infos: list[ParamInfo],
@@ -567,11 +526,6 @@ class FlatShard(Placement):
             return bucket_storage_view
 
         valid_numel = self._rank_valid_numel(total_numel, shard_numel, rank)
-        if valid_numel == shard_numel:
-            send_view = self._try_make_adjacent_flat_view(tensors, valid_numel)
-            if send_view is not None:
-                return send_view
-
         send_buf = torch.empty(shard_numel, dtype=dtype, device=device)
         self._copy_local_tensors_into_rank_shard(
             send_buf,

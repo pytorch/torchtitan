@@ -396,41 +396,6 @@ class TestFlatShardPlacement(TestCase):
         for full_param, (_, expected) in zip(result.full_params, params, strict=True):
             self.assertEqual(full_param, expected)
 
-    def test_prepare_unshard_reuses_adjacent_local_views_without_padding(self):
-        flat_storage = torch.arange(6, dtype=torch.float32)
-        params = [
-            ("a.weight", flat_storage[:2].clone()),
-            ("b.weight", flat_storage[2:].clone()),
-        ]
-        named_params = [(fqn, nn.Parameter(param.clone())) for fqn, param in params]
-
-        with single_rank_cpu_mesh() as mesh:
-            placements = flat_shard_placements(named_params, mesh)
-            infos = [
-                _make_param_info(fqn, param, placements[fqn][0])
-                for fqn, param in params
-            ]
-            local_tensors = [flat_storage[:2], flat_storage[2:]]
-            placement = placements["a.weight"][0]
-            prepared = placement.prepare_unshard_bucket(
-                local_tensors,
-                infos,
-                mesh,
-                None,
-            )
-
-            self.assertEqual(
-                prepared.buffers[0].untyped_storage().data_ptr(),
-                flat_storage.untyped_storage().data_ptr(),
-            )
-            self.assertEqual(prepared.buffers[0].storage_offset(), 0)
-            placement.run_prepared_unshard(prepared)
-            result = placement.finish_prepared_unshard(prepared)
-
-        for full_param, (_, expected) in zip(result.full_params, params, strict=True):
-            self.assertEqual(full_param, expected)
-
-
 class TestFlatShardCollectives(FSDPTestMultiThread):
     @property
     def world_size(self) -> int:
