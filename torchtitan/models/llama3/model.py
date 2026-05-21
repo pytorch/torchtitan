@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
+from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -85,13 +85,8 @@ class Llama3Model(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layers[0].attention.inner_attention, VarlenAttention.Config
-            ):
-                raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
-                )
+            if parallelism.context_parallel_degree > 1:
+                self.validate_context_parallel_attention()
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
@@ -114,11 +109,12 @@ class Llama3Model(Decoder):
             from torchtitan.models.llama3.sharding import set_llama3_sharding_config
             from torchtitan.components.loss import ChunkedCELoss
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_llama3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
-                chunked_loss=isinstance(trainer_config.loss, ChunkedCELoss.Config),
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(

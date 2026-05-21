@@ -33,6 +33,7 @@ from torchtitan.protocols.sharding import (
     NamedPlacement,
     ShardingConfig,
 )
+from torchtitan.protocols.types import MeshAxisName
 
 
 @contextmanager
