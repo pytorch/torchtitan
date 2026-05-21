@@ -350,12 +350,11 @@ class Module(nn.Module, Configurable):
             return spmd.reinterpret_mesh(t, resolved_reinterpret, inplace=True)
 
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
-            with set_current_mesh(mesh):
-                if _mesh_reinterpret and spmd.is_type_checking():
-                    args, kwargs = tree_map(_apply_mesh_reinterpret, (args, kwargs))
-                args, kwargs = self._shard_inputs(args, kwargs)
-                outputs = fn(*args, **kwargs)
-                return self._shard_outputs(outputs)
+            if _mesh_reinterpret and spmd.is_type_checking():
+                args, kwargs = tree_map(_apply_mesh_reinterpret, (args, kwargs))
+            args, kwargs = self._shard_inputs(args, kwargs)
+            outputs = fn(*args, **kwargs)
+            return self._shard_outputs(outputs)
 
         self.forward = with_redistribution
 
