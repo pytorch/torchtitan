@@ -69,8 +69,14 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallelism.full_dtensor:
-        raise NotImplementedError("full_dtensor is not supported yet.")
+    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
+    # runs inside the local_map boundary on local tensors.
+    if parallel_dims.cp_enabled:
+        apply_cp_to_forward(
+            # pyrefly: ignore [missing-attribute]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+        )
 
     model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:

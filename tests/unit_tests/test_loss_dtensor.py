@@ -33,10 +33,10 @@ class TestCrossEntropyDTensor(DTensorTestBase):
     def world_size(self):
         return 8
 
-    def _run_one(self, *, full_dtensor: bool, tp_shard_v: bool):
+    def _run_one(self, *, multi_axis: bool, tp_shard_v: bool):
         torch.use_deterministic_algorithms(True, warn_only=False)
         torch.manual_seed(0)
-        if full_dtensor:
+        if multi_axis:
             mesh = init_device_mesh(
                 self.device_type, (2, 2, 2), mesh_dim_names=("dp_shard", "cp", "tp")
             )
@@ -85,15 +85,15 @@ class TestCrossEntropyDTensor(DTensorTestBase):
 
     @with_comms
     def test_legacy_tp_disable_loss_parallel(self):
-        self._run_one(full_dtensor=False, tp_shard_v=False)
+        self._run_one(multi_axis=False, tp_shard_v=False)
 
     @with_comms
     def test_legacy_tp_loss_parallel(self):
-        self._run_one(full_dtensor=False, tp_shard_v=True)
+        self._run_one(multi_axis=False, tp_shard_v=True)
 
     @with_comms
-    def test_full_dtensor_disable_loss_parallel(self):
-        self._run_one(full_dtensor=True, tp_shard_v=False)
+    def test_multi_axis_disable_loss_parallel(self):
+        self._run_one(multi_axis=True, tp_shard_v=False)
 
 
 if __name__ == "__main__":
