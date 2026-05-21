@@ -425,10 +425,6 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
-    # Ensure masked_fill results are visible before get_dispatch_layout
-    # reads selected_experts_indices (which may run on DeepEP's comm stream).
-    torch.cuda.synchronize()
-
     # Hide buffer setup from SAC's __torch_dispatch__ via _disable_current_modes().
     # Buffer.__init__ calls all_gather_object() which triggers aten._to_copy
     # (CUDA→CPU), a MUST_SAVE op in our SAC policy. These are infrastructure
