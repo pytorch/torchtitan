@@ -139,57 +139,26 @@ def _create_hf_model(model_type: str):
 # ---------------------------------------------------------------------------
 
 
-def _transfer_weights(hf_moe_block, titan_moe, config):
-    """Transfer weights from HF MoE block to native titan MoE.
+def _transfer_weights_via_adapter(hf_moe_block, titan_moe):
+    """Transfer weights from HF MoE block to titan MoE via state dict adapter.
 
-    Handles the fused gate_up_proj → separate w1/w3 split and
-    router weight transfer.
+    Uses ``hf_to_titan_moe_state_dict`` to convert the HF state dict keys
+    and values, then loads into the titan module.
     """
-    experts = hf_moe_block.experts
+    from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
+        hf_to_titan_moe_state_dict,
+    )
 
-    # Expert weights: split fused gate_up_proj into w1 (gate) and w3 (up)
-    gate_up = experts.gate_up_proj.data  # (E, 2*I, H)
-    intermediate_size = gate_up.shape[1] // 2
-    titan_moe.experts.w1.data.copy_(gate_up[:, :intermediate_size, :])
-    titan_moe.experts.w3.data.copy_(gate_up[:, intermediate_size:, :])
-    titan_moe.experts.w2.data.copy_(experts.down_proj.data)
+    hf_sd = hf_moe_block.state_dict()
 
-    # Router gate weight
-    gate = getattr(hf_moe_block, "gate", None) or getattr(hf_moe_block, "router", None)
-    titan_moe.router.gate.weight.data.copy_(gate.weight.data)
+    # Prefix all keys with "mlp." to match the layer-level namespace
+    hf_sd_prefixed = {f"mlp.{k}": v for k, v in hf_sd.items()}
+    titan_sd = hf_to_titan_moe_state_dict(hf_sd_prefixed)
 
-    # Shared experts (if present)
-    if titan_moe.shared_experts is not None:
-        shared = None
-        for name in ("shared_expert", "shared_experts", "shared_mlp"):
-            shared = getattr(hf_moe_block, name, None)
-            if shared is not None:
-                break
+    # Strip the "mlp." prefix to match titan_moe's own state dict
+    titan_sd_stripped = {k.removeprefix("mlp."): v for k, v in titan_sd.items()}
 
-        if shared is not None:
-            # Determine the titan shared expert module
-            titan_shared = titan_moe.shared_experts
-            # Handle GatedSharedExpert wrapper
-            if hasattr(titan_shared, "ffn"):
-                titan_ffn = titan_shared.ffn
-                # Transfer gate
-                shared_gate = getattr(hf_moe_block, "shared_expert_gate", None)
-                if shared_gate is not None:
-                    titan_shared.gate.weight.data.copy_(shared_gate.weight.data)
-            else:
-                titan_ffn = titan_shared
-
-            titan_ffn.w1.weight.data.copy_(shared.gate_proj.weight.data)
-            titan_ffn.w3.weight.data.copy_(shared.up_proj.weight.data)
-            titan_ffn.w2.weight.data.copy_(shared.down_proj.weight.data)
-
-    # Expert bias (DeepSeek V3 e_score_correction_bias)
-    if (
-        gate is not None
-        and "e_score_correction_bias" in getattr(gate, "_buffers", {})
-        and titan_moe.expert_bias is not None
-    ):
-        titan_moe.expert_bias.data.copy_(gate.e_score_correction_bias.data)
+    titan_moe.load_state_dict(titan_sd_stripped, strict=False)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +231,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     # 2. Forward through HF MoE block
     torch.manual_seed(seed)
     x = torch.randn(2, 16, config.hidden_size, device=device)
-    hf_out = hf_moe_block(x.clone())
+    hf_out = hf_moe_block(x)
     if isinstance(hf_out, tuple):
         hf_out = hf_out[0]
 
@@ -278,12 +247,12 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     titan_moe.to_empty(device=device)
     titan_moe.init_states(buffer_device=device)
 
-    # 4. Transfer weights from HF to titan
-    _transfer_weights(hf_moe_block, titan_moe, config)
+    # 4. Transfer weights from HF to titan via state dict adapter
+    _transfer_weights_via_adapter(hf_moe_block, titan_moe)
     titan_moe.eval()
 
     # 5. Forward through titan MoE
-    tt_out = titan_moe(x.clone())
+    tt_out = titan_moe(x)
 
     # 6. Compare
     return _compare_outputs(hf_out, tt_out, model_type)
@@ -338,6 +307,56 @@ def main():
                 status = "FAIL"
                 detail = f"KL={result['kl_div']:.2e}  cos={result['cos_sim']:.6f}  max_diff={result['max_abs_diff']:.2e}"
                 all_passed = False
+
+            print(f"  {status:5s}  {model_type:20s}  {detail}")
+
+        except Exception as e:
+            print(f"  ERROR  {model_type:20s}  {e}")
+            all_passed = False
+
+    # Round-trip adapter test: HF → titan → HF
+    print("")
+    print("State dict adapter round-trip test")
+    print("-" * 80)
+
+    from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
+        hf_to_titan_moe_state_dict,
+        titan_to_hf_moe_state_dict,
+    )
+
+    for model_type in args.models:
+        try:
+            model, config = _create_hf_model(model_type)
+            hf_sd = model.state_dict()
+            titan_sd = hf_to_titan_moe_state_dict(hf_sd)
+            roundtrip_sd = titan_to_hf_moe_state_dict(titan_sd)
+
+            # Check all original keys are present
+            missing = set(hf_sd.keys()) - set(roundtrip_sd.keys())
+            extra = set(roundtrip_sd.keys()) - set(hf_sd.keys())
+
+            # Check values match
+            max_diff = 0.0
+            for k in hf_sd:
+                if k in roundtrip_sd:
+                    diff = (
+                        (hf_sd[k].float() - roundtrip_sd[k].float()).abs().max().item()
+                    )
+                    max_diff = max(max_diff, diff)
+
+            if missing or extra:
+                status = "FAIL"
+                detail = f"missing={len(missing)} extra={len(extra)}"
+                if missing:
+                    detail += f" missing_keys={list(missing)[:3]}"
+                all_passed = False
+            elif max_diff > 1e-6:
+                status = "FAIL"
+                detail = f"round-trip max_diff={max_diff:.2e}"
+                all_passed = False
+            else:
+                status = "PASS"
+                detail = f"round-trip max_diff={max_diff:.2e}"
 
             print(f"  {status:5s}  {model_type:20s}  {detail}")
 
