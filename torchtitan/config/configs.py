@@ -131,9 +131,6 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    full_dtensor: bool = False
-    """Whether to use full DTensor mode."""
-
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
@@ -348,6 +345,9 @@ class CommConfig:
 class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
+
+    spmd_typechecking: bool = False
+    """Enable global SPMD type checking."""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
