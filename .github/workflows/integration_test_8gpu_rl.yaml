@@ -5,7 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/rl/**'
-      - '.github/workflows/integration_test_4gpu_rl.yaml'
+      - '.github/workflows/integration_test_8gpu_rl.yaml'
   pull_request:
     types: [labeled, synchronize]
     branches: [ main ]
@@ -95,7 +95,17 @@ jobs:
         # but the CI docker image only has CUDA runtime, not the toolkit.
         uv pip install nvidia-cuda-nvcc
 
-        # Run E2E RL integration tests (TP=2 on 4 GPUs)
+        # Run default E2E RL integration tests (TP=4 on 8 GPUs)
         python -m torchtitan.experiments.rl.tests.integration_tests \
-          $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4 \
+          $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"
+
+        # Run bitwise parity tests (TP=4, batch-invariant mode)
+        HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=4 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py -v
+
+        # Run batch-invariant E2E RL integration test (debug model, no checkpoint needed)
+        python -m torchtitan.experiments.rl.tests.integration_tests \
+          $RUNNER_TEMP/artifacts-to-be-uploaded --test_suite h100 --ngpu 8
+
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*

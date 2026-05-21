@@ -252,3 +252,54 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
             debug=batch_invariant_config,
         ),
     )
+
+
+def rl_grpo_qwen3_debug_batch_invariant() -> RLTrainer.Config:
+    """Batch-invariant GRPO config using debug model with random init (4 GPUs: 2 gen + 2 train).
+
+    Uses the tiny debugmodel (dim=256, 8 layers, vocab=2048) with random
+    initialization — no HF checkpoint needed. Fits on A10G (22 GB) GPUs.
+    """
+    batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
+    group_size = 4
+    return RLTrainer.Config(
+        model_spec=model_registry("debugmodel", attn_backend="varlen"),
+        num_steps=5,
+        num_prompts_per_step=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+            ),
+            debug=batch_invariant_config,
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
+            ),
+            sampling=SamplingConfig(
+                n=group_size,
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=50,
+            ),
+            debug=batch_invariant_config,
+        ),
+    )

@@ -34,8 +34,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module rl",
                     "--config rl_grpo_qwen3_0_6b",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.tensor_parallel_degree 4",
                     "--generator.sampling.n 2",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
@@ -44,26 +44,26 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 no compile",
-            "rl_grpo_tp2_no_compile",
-            ngpu=4,
+            "RL GRPO TP=4 no compile",
+            "rl_grpo_tp4_no_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
                     "--module rl",
                     "--config rl_grpo_qwen3_0_6b",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.tensor_parallel_degree 4",
                     "--generator.sampling.n 2",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO TP=2 compile",
-            "rl_grpo_tp2_compile",
-            ngpu=4,
+            "RL GRPO TP=4 compile",
+            "rl_grpo_tp4_compile",
+            ngpu=8,
         ),
     ]
 
@@ -74,12 +74,16 @@ def build_rl_h100_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module rl",
+<<<<<<< HEAD
                     "--config rl_grpo_qwen3_0_6b_batch_invariant",
                     "--metrics.no-enable-wandb",
+=======
+                    "--config rl_grpo_qwen3_debug_batch_invariant",
+>>>>>>> fb75d98e1 (Move RL batch-invariant tests to A10G with debug model)
                 ],
             ],
-            "RL GRPO TP=2 batch-invariant + deterministic",
-            "rl_grpo_tp2_batch_invariant",
+            "RL GRPO debug batch-invariant + deterministic",
+            "rl_grpo_debug_batch_invariant",
             ngpu=4,
         ),
     ]
