@@ -21,6 +21,8 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.flex_shard import BucketSpec, flex_shard
 from torchtitan.experiments.flex_shard.example import (
+    GroupedRaggedShard,
+    make_grouped_ragged_placement_fn,
     make_ragged_placement_fn,
     per_param_ragged_placements,
     RaggedShard,
@@ -55,6 +57,17 @@ def _make_param_info(
         local_numel=local_numel,
         storage_nbytes=local_numel * tensor.dtype.itemsize,
         global_numel=tensor.numel(),
+    )
+
+
+def _expected_grouped_local(tensor: torch.Tensor, info: ParamInfo) -> torch.Tensor:
+    assert info.bucket_layout is not None
+    param_layout = info.bucket_layout.param_layouts[info.fqn]
+    start = param_layout.local_global_offset - param_layout.param_offset
+    return (
+        tensor.contiguous()
+        .view(-1)[start : start + info.local_numel]
+        .view(info.local_shape)
     )
 
 
@@ -325,6 +338,202 @@ class TestRaggedShardDistributed(FSDPTestMultiThread):
         self.assertEqual(full_param, weight)
         self.assertEqual(local_grad, local_shard)
 
+    def test_grouped_ragged_bucket_materializes_bucket_global_local_views(self):
+        mesh = self._mesh()
+        placement = GroupedRaggedShard(dims=(0,), local_units=(1, 3))
+
+        class TinyModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.arange(8, dtype=torch.float32).view(4, 2)
+                )
+                self.bias = nn.Parameter(torch.arange(4, dtype=torch.float32))
+
+        model = TinyModule()
+        named_params = list(model.named_parameters())
+        original_params = {fqn: param.detach().clone() for fqn, param in named_params}
+        placements = {fqn: (placement,) for fqn, _ in named_params}
+        bucket_spec = BucketSpec(
+            ["*"],
+            placement_fn=make_grouped_ragged_placement_fn(
+                dims=(0,),
+                local_units=(1, 3),
+            ),
+            reshard_after_forward=False,
+        )
+
+        bucket_storage = ShardedBucketStorage.from_bucket(
+            model,
+            named_params,
+            placements,
+            mesh,
+            torch.device("cpu"),
+            bucket_spec,
+        )
+
+        current_params = dict(model.named_parameters())
+        infos = bucket_storage.param_infos
+        for fqn, info in infos.items():
+            expected = _expected_grouped_local(original_params[fqn], info)
+            self.assertEqual(current_params[fqn], expected)
+            self.assertEqual(bucket_storage.get_local_view(fqn), expected)
+            if expected.numel() > 0:
+                self.assertEqual(
+                    current_params[fqn].untyped_storage().data_ptr(),
+                    bucket_storage.byte_storage.untyped_storage().data_ptr(),
+                )
+
+    def test_grouped_ragged_rejects_padding_only_local_bucket_range(self):
+        mesh = self._mesh()
+        placement = GroupedRaggedShard(dims=(0,), local_units=(1, 1))
+
+        class TinyModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.arange(4, dtype=torch.float32).view(1, 4)
+                )
+
+        model = TinyModule()
+        named_params = list(model.named_parameters())
+        placements = {fqn: (placement,) for fqn, _ in named_params}
+        bucket_spec = BucketSpec(
+            ["*"],
+            placement_fn=make_grouped_ragged_placement_fn(
+                dims=(0,),
+                local_units=(1, 1),
+            ),
+            reshard_after_forward=False,
+        )
+
+        if self.rank == 0:
+            bucket_storage = ShardedBucketStorage.from_bucket(
+                model,
+                named_params,
+                placements,
+                mesh,
+                torch.device("cpu"),
+                bucket_spec,
+            )
+            self.assertEqual(bucket_storage.total_bytes, 4 * torch.float32.itemsize)
+        else:
+            with self.assertRaisesRegex(ValueError, "contains only padding"):
+                ShardedBucketStorage.from_bucket(
+                    model,
+                    named_params,
+                    placements,
+                    mesh,
+                    torch.device("cpu"),
+                    bucket_spec,
+                )
+
+    def test_grouped_ragged_unshard_is_view_in_and_view_out(self):
+        mesh = self._mesh()
+        placement = GroupedRaggedShard(dims=(0,), local_units=(1, 3))
+
+        class TinyModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.arange(8, dtype=torch.float32).view(4, 2)
+                )
+                self.bias = nn.Parameter(torch.arange(4, dtype=torch.float32))
+
+        model = TinyModule()
+        named_params = list(model.named_parameters())
+        original_params = {fqn: param.detach().clone() for fqn, param in named_params}
+        placements = {fqn: (placement,) for fqn, _ in named_params}
+        bucket_spec = BucketSpec(
+            ["*"],
+            placement_fn=make_grouped_ragged_placement_fn(
+                dims=(0,),
+                local_units=(1, 3),
+            ),
+            reshard_after_forward=False,
+        )
+        bucket_storage = ShardedBucketStorage.from_bucket(
+            model,
+            named_params,
+            placements,
+            mesh,
+            torch.device("cpu"),
+            bucket_spec,
+        )
+        infos = [bucket_storage.param_infos[fqn] for fqn, _ in named_params]
+        local_shards = [bucket_storage.get_local_view(fqn) for fqn, _ in named_params]
+
+        prepared = placement.prepare_unshard_bucket(local_shards, infos, mesh, None)
+        send_buf = prepared.buffers[0]
+        self.assertEqual(
+            send_buf.untyped_storage().data_ptr(),
+            bucket_storage.byte_storage.untyped_storage().data_ptr(),
+        )
+        self.assertEqual(send_buf.data_ptr(), bucket_storage.byte_storage.data_ptr())
+
+        placement.run_prepared_unshard(prepared)
+        result = placement.finish_prepared_unshard(prepared).full_params
+        gathered_bucket = prepared.buffers[1]
+
+        for full_param, (fqn, original_param) in zip(
+            result,
+            named_params,
+            strict=True,
+        ):
+            self.assertEqual(full_param, original_params[fqn])
+            self.assertEqual(
+                full_param.untyped_storage().data_ptr(),
+                gathered_bucket.untyped_storage().data_ptr(),
+            )
+            self.assertNotEqual(full_param.data_ptr(), original_param.data_ptr())
+
+    def test_grouped_ragged_reduce_scatter_returns_local_grad_views(self):
+        mesh = self._mesh()
+        placement = GroupedRaggedShard(dims=(0,), local_units=(1, 3))
+
+        class TinyModule(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.empty(4, 2))
+                self.bias = nn.Parameter(torch.empty(4))
+
+        model = TinyModule()
+        named_params = list(model.named_parameters())
+        placements = {fqn: (placement,) for fqn, _ in named_params}
+        bucket_spec = BucketSpec(
+            ["*"],
+            placement_fn=make_grouped_ragged_placement_fn(
+                dims=(0,),
+                local_units=(1, 3),
+            ),
+            reshard_after_forward=False,
+        )
+        bucket_storage = ShardedBucketStorage.from_bucket(
+            model,
+            named_params,
+            placements,
+            mesh,
+            torch.device("cpu"),
+            bucket_spec,
+        )
+        weight_grad = torch.arange(8, dtype=torch.float32).view(4, 2)
+        bias_grad = torch.arange(4, dtype=torch.float32)
+        grads = [weight_grad, bias_grad]
+        infos = [bucket_storage.param_infos[fqn] for fqn, _ in named_params]
+
+        prepared = placement.prepare_reduce_grad(grads, infos, mesh, None)
+        reduce_result = placement.reduce_prepared_grad(prepared)
+        sharded_grads = reduce_result.sharded_grads
+        recv_buf = reduce_result.buffers[0]
+
+        for grad, sharded_grad, info in zip(grads, sharded_grads, infos, strict=True):
+            self.assertEqual(sharded_grad, _expected_grouped_local(grad, info))
+            if sharded_grad.numel() > 0:
+                self.assertEqual(
+                    sharded_grad.untyped_storage().data_ptr(),
+                    recv_buf.untyped_storage().data_ptr(),
+                )
+
 
 class TestRaggedShardRuntime(FSDPTest):
     @property
@@ -394,6 +603,62 @@ class TestRaggedShardRuntime(FSDPTest):
                 self.rank,
                 self.world_size,
             )
+            self.assertEqual(param_grad.detach(), expected_grad)
+
+    @skip_if_lt_x_gpu(2)
+    def test_grouped_ragged_flex_shard_forward_backward_on_cuda_mesh(self):
+        mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+        reference = _TinyRaggedModule(device_type.type)
+        model = _TinyRaggedModule(device_type.type)
+        for param in [*reference.parameters(), *model.parameters()]:
+            dist.broadcast(param.data, src=0)
+        x = torch.arange(8, dtype=torch.float32, device=device_type).view(2, 4)
+        dist.broadcast(x, src=0)
+
+        ref_output = reference(x)
+        ref_output.sum().backward()
+        for param in reference.parameters():
+            if param.grad is not None:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
+        original_params = {
+            fqn: param.detach().clone() for fqn, param in model.named_parameters()
+        }
+
+        flex_shard(
+            model,
+            mesh,
+            buckets=[
+                BucketSpec(
+                    ["*"],
+                    placement_fn=make_grouped_ragged_placement_fn(
+                        dims=(0,),
+                        local_units=(1, 3),
+                    ),
+                    reshard_after_forward=False,
+                )
+            ],
+        )
+        output = model(x)
+        output.sum().backward()
+
+        self.assertEqual(output, ref_output.detach())
+        bucket_storage = model.sharded_bucket_storages[0]
+        reference_params = dict(reference.named_parameters())
+        for fqn, param in model.named_parameters():
+            info = bucket_storage.param_infos[fqn]
+            expected_param = _expected_grouped_local(original_params[fqn], info)
+            self.assertEqual(param.detach(), expected_param)
+            param_grad = param.grad
+            ref_grad = reference_params[fqn].grad
+            self.assertIsNotNone(param_grad)
+            self.assertIsNotNone(ref_grad)
+            assert param_grad is not None
+            assert ref_grad is not None
+            expected_grad = _expected_grouped_local(ref_grad.detach(), info)
             self.assertEqual(param_grad.detach(), expected_grad)
 
 
