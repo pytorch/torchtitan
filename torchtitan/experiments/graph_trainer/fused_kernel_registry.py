@@ -152,15 +152,35 @@ def _iter_node_args(node: torch.fx.Node):
 
 @dataclass
 class Region:
-    """A fusible subgraph discovered by a RegionExtractor."""
+    """A fusible subgraph discovered by a RegionExtractor.
+
+    For extractors that decompose the graph (e.g. ``InductorRegionExtractor``),
+    ``nodes``/``external_inputs``/``output_nodes`` reference the ORIGINAL
+    (pre-decomposition) graph for replacement.  ``decomp_gm`` holds an
+    extracted FX subgraph from the decomposed graph, used for problem.py
+    generation (matches inductor's view of fusible ops).
+    """
 
     nodes: list[torch.fx.Node]
     external_inputs: list[torch.fx.Node]
     output_nodes: list[torch.fx.Node]
     norm_fqn: str = ""
 
+    # Decomposed representation (set by InductorRegionExtractor).
+    # decomp_gm is a standalone fx.GraphModule containing the post-decomp
+    # ops; its placeholders correspond 1:1 to ``external_inputs`` via
+    # from_node.  decomp_inputs_info captures shape/stride/dtype/device
+    # for stride-preserving repro inputs.
+    decomp_gm: torch.fx.GraphModule | None = None
+    decomp_inputs_info: list[dict] | None = None
+
     @property
     def num_compute_ops(self) -> int:
+        if self.decomp_gm is not None:
+            return sum(
+                1 for n in self.decomp_gm.graph.nodes
+                if n.op == "call_function" and str(n.target) not in _METADATA_OPS
+            )
         return sum(1 for n in self.nodes if str(n.target) not in _METADATA_OPS)
 
     @property
@@ -177,18 +197,35 @@ class Region:
 
 
 def _compute_region_hash(region: Region) -> str:
-    """Stable hash from op targets + input/output shapes."""
+    """Stable hash from op targets + input/output shapes.
+
+    When ``decomp_gm`` is set (InductorRegionExtractor), hashes the
+    decomposed ops + input strides for stable identification across
+    runs. Otherwise hashes the original-graph nodes.
+    """
     parts = []
-    for n in region.nodes:
-        parts.append(str(n.target))
-        shape, dtype = _get_tensor_info(n)
-        parts.append(f"{dtype}:{shape}")
-    for inp in region.external_inputs:
-        shape, dtype = _get_tensor_info(inp)
-        parts.append(f"in:{dtype}:{shape}")
-    for out in region.output_nodes:
-        shape, dtype = _get_tensor_info(out)
-        parts.append(f"out:{dtype}:{shape}")
+    if region.decomp_gm is not None:
+        # Position-independent op set + per-input shape/stride/dtype
+        ops = sorted(
+            str(n.target) for n in region.decomp_gm.graph.nodes
+            if n.op == "call_function"
+        )
+        parts.extend(ops)
+        for info in region.decomp_inputs_info or []:
+            parts.append(
+                f"in:{info.get('dtype')}:{info.get('shape')}:{info.get('stride')}"
+            )
+    else:
+        for n in region.nodes:
+            parts.append(str(n.target))
+            shape, dtype = _get_tensor_info(n)
+            parts.append(f"{dtype}:{shape}")
+        for inp in region.external_inputs:
+            shape, dtype = _get_tensor_info(inp)
+            parts.append(f"in:{dtype}:{shape}")
+        for out in region.output_nodes:
+            shape, dtype = _get_tensor_info(out)
+            parts.append(f"out:{dtype}:{shape}")
     key = "|".join(parts)
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
@@ -314,25 +351,224 @@ class FqnRegionExtractor(RegionExtractor):
         return gm, all_regions
 
 
+def _has_reduction(nodes: list[torch.fx.Node]) -> bool:
+    """Check if any node in the set is a reduction op via torch.Tag.reduction."""
+    for n in nodes:
+        if n.op == "call_function" and isinstance(n.target, torch._ops.OpOverload):
+            if torch.Tag.reduction in n.target.tags:
+                return True
+    return False
+
+
+def _is_activation_tensor(node: torch.fx.Node) -> bool:
+    """True if node looks like an activation (multi-dim, large).
+
+    Rejects 1D tensors (weights/biases) and scalars, which cause
+    spurious merges when weights are shared across layers.
+    """
+    val = node.meta.get("val", None)
+    if isinstance(val, torch.Tensor):
+        return val.dim() >= 2 and val.numel() >= 64
+    return False
+
+
+def _merge_shared_input_reductions(
+    components: list[list[torch.fx.Node]],
+) -> list[list[torch.fx.Node]]:
+    """Merge reduction partitions that share a common activation input.
+
+    Models inductor's mix-order reduction: if two partitions both contain
+    reductions and read from the same activation (e.g. LayerNorm backward
+    has inner reductions and outer reductions reading from tangents_1),
+    they would be fused into one kernel.  Only merges when one partition
+    is small (≤5 ops) to avoid over-merging in weight-sharing models.
+    """
+    if len(components) <= 1:
+        return components
+
+    reduction_idxs = [i for i, c in enumerate(components) if _has_reduction(c)]
+    if len(reduction_idxs) <= 1:
+        return components
+
+    def _external_inputs(comp_nodes: list[torch.fx.Node]) -> set[torch.fx.Node]:
+        node_set = set(comp_nodes)
+        inputs = set()
+        for n in comp_nodes:
+            for inp in n.all_input_nodes:
+                if inp not in node_set:
+                    inputs.add(inp)
+        return inputs
+
+    parent = list(range(len(components)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    inputs_by_comp = {i: _external_inputs(components[i]) for i in reduction_idxs}
+
+    for i in range(len(reduction_idxs)):
+        for j in range(i + 1, len(reduction_idxs)):
+            ci, cj = reduction_idxs[i], reduction_idxs[j]
+            if min(len(components[ci]), len(components[cj])) > 5:
+                continue
+            shared = inputs_by_comp[ci] & inputs_by_comp[cj]
+            if any(_is_activation_tensor(inp) for inp in shared):
+                union(ci, cj)
+
+    from collections import defaultdict
+    groups: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(components)):
+        groups[find(i)].append(i)
+
+    merged = []
+    for idxs in groups.values():
+        if len(idxs) == 1:
+            merged.append(components[idxs[0]])
+        else:
+            combined: list[torch.fx.Node] = []
+            seen: set[int] = set()
+            for idx in idxs:
+                for n in components[idx]:
+                    if id(n) not in seen:
+                        seen.add(id(n))
+                        combined.append(n)
+            merged.append(combined)
+    return merged
+
+
+def _extract_subgraph(
+    origin_nodes: list[torch.fx.Node], gm: torch.fx.GraphModule
+) -> tuple[torch.fx.GraphModule, list[dict], list[torch.fx.Node]] | None:
+    """Extract a minimal FX subgraph containing only the origin nodes.
+
+    Dependencies outside the origin set become placeholders. Returns:
+      - new_gm: the standalone subgraph
+      - placeholder_info: shape/stride/dtype/device per placeholder
+      - output_nodes: the source-graph nodes that are subgraph outputs
+        (in order, matching new_gm's output tuple)
+    """
+    if not origin_nodes:
+        return None
+
+    import copy as _copy
+
+    seen_ids: set[int] = set()
+    unique: list[torch.fx.Node] = []
+    for n in origin_nodes:
+        if id(n) not in seen_ids:
+            seen_ids.add(id(n))
+            unique.append(n)
+    origin_nodes = unique
+
+    needed: set[torch.fx.Node] = set(origin_nodes)
+    output_nodes: list[torch.fx.Node] = []
+    for n in origin_nodes:
+        has_internal_user = any(
+            u in needed and u.op != "output" for u in n.users
+        )
+        if not has_internal_user:
+            output_nodes.append(n)
+    if not output_nodes:
+        output_nodes = list(origin_nodes)
+
+    new_graph = torch.fx.Graph()
+    env: dict[torch.fx.Node, torch.fx.Node] = {}
+    placeholder_info: list[dict] = []
+    placeholder_names: set[str] = set()
+
+    def _record(name: str, meta: dict, orig_node: torch.fx.Node) -> None:
+        val = meta.get("val", None)
+        if isinstance(val, torch.Tensor):
+            stride = list(val.stride()) if not val.is_contiguous() else []
+            placeholder_info.append({
+                "name": name,
+                "shape": list(val.shape),
+                "stride": stride,
+                "dtype": str(val.dtype),
+                "device": str(val.device),
+                "orig_node": orig_node,
+            })
+
+    def _ensure(x):
+        if isinstance(x, torch.fx.Node):
+            if x in env:
+                return env[x]
+            ph = new_graph.placeholder(x.name)
+            ph.meta = _copy.copy(x.meta) if x.meta else {}
+            env[x] = ph
+            if x.name not in placeholder_names:
+                placeholder_names.add(x.name)
+                _record(x.name, x.meta or {}, x)
+            return ph
+        return x
+
+    all_nodes = list(gm.graph.nodes)
+    order = {n: i for i, n in enumerate(all_nodes)}
+    sorted_needed = sorted(needed, key=lambda n: order.get(n, 0))
+
+    for node in sorted_needed:
+        if node.op == "placeholder":
+            new_n = new_graph.placeholder(node.name)
+            new_n.meta = _copy.copy(node.meta) if node.meta else {}
+            env[node] = new_n
+            if node.name not in placeholder_names:
+                placeholder_names.add(node.name)
+                _record(node.name, node.meta or {}, node)
+        elif node.op == "get_attr":
+            new_n = new_graph.get_attr(node.target)
+            new_n.meta = _copy.copy(node.meta) if node.meta else {}
+            env[node] = new_n
+        elif node.op in ("call_function", "call_method"):
+            new_args = torch.fx.map_arg(node.args, _ensure)
+            new_kwargs = torch.fx.map_arg(node.kwargs, _ensure)
+            if node.op == "call_function":
+                new_n = new_graph.call_function(
+                    node.target, args=new_args, kwargs=new_kwargs
+                )
+            else:
+                new_n = new_graph.call_method(
+                    node.target, args=new_args, kwargs=new_kwargs
+                )
+            new_n.meta = _copy.copy(node.meta) if node.meta else {}
+            env[node] = new_n
+
+    final_output_nodes = [n for n in output_nodes if n in env]
+    if not final_output_nodes:
+        return None
+    mapped_outputs = [env[n] for n in final_output_nodes]
+    if len(mapped_outputs) == 1:
+        new_graph.output(mapped_outputs[0])
+    else:
+        new_graph.output(tuple(mapped_outputs))
+
+    new_graph.lint()
+    new_gm = torch.fx.GraphModule(gm, new_graph)
+    return new_gm, placeholder_info, final_output_nodes
+
+
 class InductorRegionExtractor(RegionExtractor):
-    """Applies inductor decompositions, then classifies nodes with
-    ``is_fusible_node`` to discover regions that match inductor's
-    actual fusion decisions.
+    """Discover fusible regions matching inductor's actual fusion groups.
 
-    Uses ``from_node`` provenance tracking (via ``torch.fx.Interpreter``
-    + ``make_fx``) to map decomposed regions back to the original graph.
-    This allows replacement in the original graph while using inductor's
-    post-decomposition fusibility classification.
-
-    Steps:
-      1. Decompose the graph using ``Interpreter + make_fx`` with
-         ``preserve_node_meta`` — each decomposed node gets ``from_node``
-         pointing to its original source node.
-      2. Classify each decomposed node via ``is_fusible_node``
-      3. Group consecutive fusible nodes, split connected components
-      4. Map each decomposed region back to original nodes via ``from_node``
-      5. Return Regions with original-graph nodes (for replacement) and
-         decomposed nodes (for hash computation and problem generation)
+    Closely mirrors compile-utils' ATen-level extractor:
+      1. Decompose the graph via ``Interpreter + make_fx`` with the full
+         inductor decomp table.  ``preserve_node_meta`` populates
+         ``from_node`` on every decomposed node for back-mapping.
+      2. Partition the decomposed graph with ``CapabilityBasedPartitioner``
+         + ``is_fusible_node`` — the canonical FX partitioner used by
+         inductor.
+      3. Merge reduction partitions that share a common activation input
+         (mix-order reduction fusion).
+      4. For each partition, extract a standalone ``fx.GraphModule``
+         subgraph (used for problem.py via ``print_readable``) and map
+         the partition back to original-graph nodes for replacement.
     """
 
     def __init__(self, example_inputs: tuple | None = None):
@@ -341,14 +577,7 @@ class InductorRegionExtractor(RegionExtractor):
     def _decompose_with_provenance(
         self, gm: torch.fx.GraphModule
     ) -> torch.fx.GraphModule | None:
-        """Decompose the graph using Interpreter + make_fx.
-
-        The Interpreter walks the original graph node-by-node, calling
-        ``set_current_meta`` for each.  ``make_fx`` records the
-        (possibly decomposed) ops as a new graph.  Combined with
-        ``preserve_node_meta``, each new node's ``from_node`` points
-        back to its original source node.
-        """
+        """Decompose via Interpreter + make_fx, with from_node tracking."""
         if self.example_inputs is None:
             return None
         try:
@@ -357,26 +586,7 @@ class InductorRegionExtractor(RegionExtractor):
             from torch.fx.experimental.proxy_tensor import make_fx
             from torch.fx.traceback import preserve_node_meta
 
-            decomp_table = dict(select_decomp_table())
-            # Exclude view/reshape/clone decompositions — the decomposed
-            # versions (torch._refs) are stricter about strides and fail
-            # on non-contiguous tensors that the original ops handle.
-            aten = torch.ops.aten
-            for op in (
-                aten.view.default, aten.view.dtype,
-                aten._unsafe_view.default,
-                aten.reshape.default,
-                aten.clone.default,
-                aten.t.default,
-                aten.permute.default,
-                aten.transpose.int,
-                aten.expand.default,
-                aten.slice.Tensor,
-                aten.select.int,
-                aten.unsqueeze.default,
-                aten.squeeze.dim, aten.squeeze.dims,
-            ):
-                decomp_table.pop(op, None)
+            decomp_table = select_decomp_table()
             fake_mode = None
             for inp in self.example_inputs:
                 if isinstance(inp, FakeTensor):
@@ -404,66 +614,39 @@ class InductorRegionExtractor(RegionExtractor):
             return None
 
     @staticmethod
-    def _map_decomp_region_to_orig(
-        decomp_region: Region,
+    def _map_placeholders_to_orig(
+        placeholder_info: list[dict],
+        decomp_ph_to_orig: dict[str, torch.fx.Node],
         orig_node_map: dict[str, torch.fx.Node],
-    ) -> Region | None:
-        """Map a decomposed-graph Region back to original-graph nodes.
+    ) -> list[torch.fx.Node] | None:
+        """Map each subgraph placeholder back to a node in the original graph.
 
-        Uses ``from_node`` metadata on each decomposed node to find the
-        corresponding original node.  Includes bridging nodes (getitem,
-        view, etc.) between mapped nodes so the region is contiguous
-        in the original graph.
+        Each placeholder's ``orig_node`` is a node in the decomposed graph.
+        For decomposed placeholders we use the positional decomp→orig
+        placeholder map; for other nodes we follow ``from_node``.
 
-        Returns a Region whose ``nodes`` are from the original graph
-        (for replacement) and whose ``decomp_nodes`` are from the
-        decomposed graph (for hashing and problem generation).
-
-        Returns None if the mapping fails.
+        Returns the list of original-graph nodes in placeholder order,
+        or None if any placeholder can't be mapped.
         """
-        # Collect original nodes via from_node provenance
-        orig_names_seen: set[str] = set()
-        orig_nodes_ordered: list[torch.fx.Node] = []
-        for dn in decomp_region.nodes:
-            from_node_list = dn.meta.get("from_node", [])
-            if not from_node_list:
+        result: list[torch.fx.Node] = []
+        for info in placeholder_info:
+            decomp_node = info["orig_node"]
+            if decomp_node.op == "placeholder":
+                # Positional map from work_gm placeholder → gm placeholder
+                orig = decomp_ph_to_orig.get(decomp_node.name)
+                if orig is None:
+                    return None
+                result.append(orig)
                 continue
-            orig_name = from_node_list[0].name
-            if orig_name and orig_name not in orig_names_seen:
-                orig_node = orig_node_map.get(orig_name)
-                if orig_node is not None:
-                    orig_names_seen.add(orig_name)
-                    orig_nodes_ordered.append(orig_node)
-
-        if not orig_nodes_ordered:
-            return None
-
-        # Include bridging nodes: getitem/view nodes that sit between
-        # mapped nodes and connect them.  Decompositions like
-        # _fused_rms_norm produce getitem nodes in the original graph
-        # that are absorbed into the decomposed region but not directly
-        # mapped via from_node.
-        region_names = {n.name for n in orig_nodes_ordered}
-        changed = True
-        while changed:
-            changed = False
-            for n in orig_nodes_ordered:
-                for user in n.users:
-                    if user.name in region_names:
-                        continue
-                    if user.target is not operator.getitem:
-                        continue
-                    # Include getitem if ANY of its users is in the region
-                    if any(u.name in region_names for u in user.users):
-                        region_names.add(user.name)
-                        orig_nodes_ordered.append(user)
-                        changed = True
-
-        # Re-sort by graph position
-        node_order = {n: i for i, n in enumerate(n for n in orig_nodes_ordered[0].graph.nodes)}
-        orig_nodes_ordered.sort(key=lambda n: node_order.get(n, 0))
-
-        return _build_region(orig_nodes_ordered, decomp_region.norm_fqn)
+            # Otherwise use from_node provenance
+            from_nodes = decomp_node.meta.get("from_node", [])
+            if not from_nodes:
+                return None
+            orig = orig_node_map.get(from_nodes[0].name)
+            if orig is None:
+                return None
+            result.append(orig)
+        return result
 
     def extract(
         self, gm: torch.fx.GraphModule
@@ -475,82 +658,146 @@ class InductorRegionExtractor(RegionExtractor):
                 is_fusible_node,
                 is_view_node,
             )
+            from torch.fx.passes.infra.partitioner import (
+                CapabilityBasedPartitioner,
+            )
+            from torch.fx.passes.operator_support import create_op_support
         except ImportError:
             logger.warning(
-                "InductorRegionExtractor: inductor not available, "
+                "InductorRegionExtractor: inductor/partitioner not available, "
                 "falling back to FqnRegionExtractor"
             )
             return FqnRegionExtractor().extract(gm)
 
         _t0 = _time.time()
 
-        # Step 1: Decompose with from_node provenance tracking
+        # Step 1: decompose with from_node provenance
         work_gm = self._decompose_with_provenance(gm)
         if work_gm is None:
-            work_gm = gm
+            logger.warning(
+                "InductorRegionExtractor: decomposition failed, "
+                "falling back to FqnRegionExtractor"
+            )
+            return FqnRegionExtractor().extract(gm)
 
-        has_provenance = work_gm is not gm
-        n_nodes = len(list(work_gm.graph.nodes))
-
-        # Build name→node map for the original graph (for back-mapping)
-        orig_node_map: dict[str, torch.fx.Node] = {}
-        if has_provenance:
-            for n in gm.graph.nodes:
-                orig_node_map[n.name] = n
-
-        # Step 2: Classify each node as fusible
-        fusible_nodes: set[str] = set()
-        for node in work_gm.graph.nodes:
-            if node.op == "call_function":
-                try:
-                    if is_fusible_node(node):
-                        fusible_nodes.add(node.name)
-                except Exception:
-                    pass
-
-        # Step 3: Group consecutive fusible nodes
-        partitions: list[tuple[list[torch.fx.Node], str]] = []
-        current_partition: list[torch.fx.Node] = []
-        for node in work_gm.graph.nodes:
-            if node.op != "call_function":
+        # Map decomp-graph nodes → original-graph nodes.
+        # Placeholders: positional (i-th work_gm placeholder → i-th gm placeholder).
+        # Other nodes: via from_node provenance.
+        orig_by_name: dict[str, torch.fx.Node] = {
+            n.name: n for n in gm.graph.nodes
+        }
+        work_phs = [n for n in work_gm.graph.nodes if n.op == "placeholder"]
+        orig_phs = [n for n in gm.graph.nodes if n.op == "placeholder"]
+        decomp_ph_to_orig: dict[str, torch.fx.Node] = {
+            wp.name: op for wp, op in zip(work_phs, orig_phs)
+        }
+        decomp_node_to_orig: dict[str, torch.fx.Node] = dict(decomp_ph_to_orig)
+        for dn in work_gm.graph.nodes:
+            if dn.op == "placeholder":
                 continue
-            if node.name in fusible_nodes:
-                current_partition.append(node)
-            else:
-                if current_partition:
-                    norm_fqn = _normalize_fqn(_get_node_fqn(current_partition[0]))
-                    partitions.append((current_partition, norm_fqn))
-                    current_partition = []
-        if current_partition:
-            norm_fqn = _normalize_fqn(_get_node_fqn(current_partition[0]))
-            partitions.append((current_partition, norm_fqn))
+            from_nodes = dn.meta.get("from_node", [])
+            if from_nodes:
+                orig = orig_by_name.get(from_nodes[0].name)
+                if orig is not None:
+                    decomp_node_to_orig[dn.name] = orig
 
+        # Step 2: partition the decomposed graph
+        def _is_supported(_subm, node):
+            return is_fusible_node(node)
+
+        support = create_op_support(_is_supported)
+        partitioner = CapabilityBasedPartitioner(
+            work_gm, support, allows_single_node_partition=True,
+        )
+        partitions = partitioner.propose_partitions()
+        components: list[list[torch.fx.Node]] = [
+            list(p.nodes.keys()) for p in partitions
+        ]
+
+        n_before = len(components)
+        components = _merge_shared_input_reductions(components)
+        merged_msg = (
+            f" (merged {n_before} → {len(components)})"
+            if n_before != len(components) else ""
+        )
         logger.info(
-            f"InductorRegionExtractor: {n_nodes} nodes, "
-            f"{len(fusible_nodes)} fusible, "
-            f"{len(partitions)} partitions in {_time.time()-_t0:.1f}s"
+            f"InductorRegionExtractor: {len(list(work_gm.graph.nodes))} nodes, "
+            f"{len(components)} partitions{merged_msg} in {_time.time()-_t0:.1f}s"
         )
 
-        # Step 4: Split disconnected components, filter, map back
+        # Step 3: build Regions
         all_regions: list[Region] = []
-        for comp, norm_fqn in partitions:
+        for comp in components:
+            # Skip view-only and unfusable partitions
             if all(is_view_node(n) or n.op != "call_function" for n in comp):
                 continue
-            if any(_is_unfusable(n) for n in comp):
+            if any(_is_unfusable(n) for n in comp if n.op == "call_function"):
                 continue
-            for connected in _split_connected(comp):
-                decomp_region = _build_region(connected, norm_fqn)
-                if has_provenance:
-                    region = self._map_decomp_region_to_orig(
-                        decomp_region, orig_node_map
-                    )
-                    if region is not None:
-                        all_regions.append(region)
-                else:
-                    all_regions.append(decomp_region)
 
-        # Return original graph — replacement happens on it, and
-        # downstream passes (inductor compilation) handle decomposition.
+            result = _extract_subgraph(comp, work_gm)
+            if result is None:
+                continue
+            decomp_gm, placeholder_info, decomp_output_nodes = result
+
+            # Map decomp inputs → original-graph nodes
+            ext_inputs = self._map_placeholders_to_orig(
+                placeholder_info, decomp_ph_to_orig, orig_by_name
+            )
+            if ext_inputs is None:
+                continue
+
+            # Map decomp outputs → original-graph nodes (preserving order, dedup)
+            out_nodes: list[torch.fx.Node] = []
+            seen_out: set[str] = set()
+            for dn in decomp_output_nodes:
+                orig = decomp_node_to_orig.get(dn.name)
+                if orig is not None and orig.name not in seen_out:
+                    seen_out.add(orig.name)
+                    out_nodes.append(orig)
+            if not out_nodes:
+                continue
+
+            # Compute region nodes in original graph: all original nodes
+            # that any decomp node in this partition maps to, plus
+            # bridging getitem nodes between mapped nodes.
+            orig_nodes_set: set[torch.fx.Node] = set()
+            for dn in comp:
+                orig = decomp_node_to_orig.get(dn.name)
+                if orig is not None:
+                    orig_nodes_set.add(orig)
+
+            # Include getitem users whose users are in the region
+            changed = True
+            while changed:
+                changed = False
+                for n in list(orig_nodes_set):
+                    for u in n.users:
+                        if u in orig_nodes_set:
+                            continue
+                        if u.target is operator.getitem and any(
+                            uu in orig_nodes_set for uu in u.users
+                        ):
+                            orig_nodes_set.add(u)
+                            changed = True
+
+            order = {n: i for i, n in enumerate(gm.graph.nodes)}
+            orig_nodes_sorted = sorted(
+                orig_nodes_set, key=lambda n: order.get(n, 0)
+            )
+            if not orig_nodes_sorted:
+                continue
+
+            norm_fqn = _normalize_fqn(_get_node_fqn(orig_nodes_sorted[0]))
+            region = Region(
+                nodes=orig_nodes_sorted,
+                external_inputs=ext_inputs,
+                output_nodes=out_nodes,
+                norm_fqn=norm_fqn,
+                decomp_gm=decomp_gm,
+                decomp_inputs_info=placeholder_info,
+            )
+            all_regions.append(region)
+
         return gm, all_regions
 
 
@@ -701,12 +948,139 @@ def _format_arg_for_problem(
     return repr(arg)
 
 
+def _input_creation_line(name: str, info: dict) -> str:
+    """Generate input creation code that preserves shape, stride, dtype, device.
+
+    Uses ``.as_strided()`` when the input is non-contiguous so the kernel
+    receives exactly the same memory layout as in production.
+    """
+    shape = info.get("shape", [])
+    stride = info.get("stride", [])
+    dtype = info.get("dtype", "torch.float32")
+    device = info.get("device", "cuda")
+    if "cuda" in device:
+        device = "cuda"
+
+    is_int = "int" in dtype
+    is_bool = "bool" in dtype
+
+    if stride and shape:
+        # Allocate minimum storage that covers the strided view
+        storage_size = sum(
+            s * (d - 1) for s, d in zip(stride, shape) if d > 1
+        ) + 1
+        if is_int:
+            return (
+                f"    {name} = torch.randint(0, 100, ({storage_size},), "
+                f"dtype={dtype}, device='{device}').as_strided({shape}, {stride})"
+            )
+        if is_bool:
+            return (
+                f"    {name} = torch.randint(0, 2, ({storage_size},), "
+                f"dtype={dtype}, device='{device}').as_strided({shape}, {stride})"
+            )
+        return (
+            f"    {name} = torch.randn(({storage_size},), "
+            f"dtype={dtype}, device='{device}').as_strided({shape}, {stride})"
+        )
+    # Contiguous
+    if is_int:
+        return f"    {name} = torch.randint(0, 100, {shape}, dtype={dtype}, device='{device}')"
+    if is_bool:
+        return f"    {name} = torch.randint(0, 2, {shape}, dtype={dtype}, device='{device}')"
+    return f"    {name} = torch.randn({shape}, dtype={dtype}, device='{device}')"
+
+
+def _format_subgraph_as_model(decomp_gm: torch.fx.GraphModule) -> str:
+    """Format an extracted decomp subgraph as ``class Model(nn.Module)``.
+
+    Uses ``GraphModule.print_readable`` for a faithful repro of the
+    decomposed ops, then renames the class.
+    """
+    code = decomp_gm.print_readable(print_output=False)
+    code = code.replace("class GraphModule(", "class Model(", 1)
+    return code
+
+
 def _write_problem(
     region: Region,
     output_dir: Path,
     count: int,
 ) -> None:
-    """Write a KernelAgent-compatible problem.py."""
+    """Write a KernelAgent-compatible problem.py.
+
+    When ``region.decomp_gm`` is set (InductorRegionExtractor),
+    serializes the decomposed subgraph via ``print_readable`` and uses
+    exact strides for inputs.  Otherwise falls back to building code
+    from the original-graph region.
+    """
+    if region.decomp_gm is not None:
+        _write_problem_from_decomp(region, output_dir, count)
+        return
+    _write_problem_from_orig(region, output_dir, count)
+
+
+def _write_problem_from_decomp(
+    region: Region,
+    output_dir: Path,
+    count: int,
+) -> None:
+    decomp_gm = region.decomp_gm
+    info_list = region.decomp_inputs_info or []
+
+    model_code = _format_subgraph_as_model(decomp_gm)
+
+    # Get placeholder names in declaration order
+    ph_names = [
+        n.name for n in decomp_gm.graph.nodes if n.op == "placeholder"
+    ]
+    info_by_name = {info["name"]: info for info in info_list}
+    input_lines = [
+        _input_creation_line(name, info_by_name.get(name, {}))
+        for name in ph_names
+    ]
+
+    compute_ops = [
+        str(n.target).split(".")[-2]
+        for n in decomp_gm.graph.nodes
+        if n.op == "call_function" and str(n.target) not in _METADATA_OPS
+    ]
+    n_ops = sum(1 for n in decomp_gm.graph.nodes if n.op == "call_function")
+    n_outputs = 1
+    out_node = next(n for n in decomp_gm.graph.nodes if n.op == "output")
+    outs = out_node.args[0]
+    if isinstance(outs, (tuple, list)):
+        n_outputs = len(outs)
+
+    desc = (
+        f"Fused region ({region.norm_fqn}): "
+        f"{' -> '.join(compute_ops) if compute_ops else 'reshape chain'}\n"
+        f"Instances: {count}. Ops: {n_ops}, compute: {len(compute_ops)}, "
+        f"outputs: {n_outputs}.\n"
+    )
+
+    problem = desc + f"""
+import torch
+import torch.nn as nn
+
+{model_code}
+
+def get_inputs():
+{chr(10).join(input_lines) if input_lines else '    pass'}
+    return [{', '.join(ph_names)}]
+
+def get_init_inputs():
+    return []
+"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "problem.py").write_text(problem)
+
+
+def _write_problem_from_orig(
+    region: Region,
+    output_dir: Path,
+    count: int,
+) -> None:
     nodes = region.nodes
     external_inputs = region.external_inputs
     output_nodes = region.output_nodes
@@ -733,7 +1107,6 @@ def _write_problem(
                 f"        {var} = torch.ops.{n.target}({', '.join(all_args)}){comment}"
             )
 
-    # Return
     num_outputs = len(output_nodes)
     if num_outputs == 1:
         body_lines.append(f"        return {var_map[output_nodes[0].name]}")
@@ -743,7 +1116,6 @@ def _write_problem(
         body_lines.append(f"        return ({out_vars})")
         ret_type = f"tuple[{', '.join(['torch.Tensor'] * num_outputs)}]"
 
-    # Params and inputs
     param_parts = []
     input_lines = []
     return_parts = []
