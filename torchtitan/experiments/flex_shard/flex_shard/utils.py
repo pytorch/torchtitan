@@ -58,6 +58,11 @@ def _get_single_placement(placements: tuple[Placement, ...]) -> Placement:
     return placements[0]
 
 
+def _bucket_compatibility_keys(placements: tuple[Placement, ...]) -> tuple[object, ...]:
+    """Return the bucket compatibility keys for a placement tuple."""
+    return tuple(placement.bucket_compatibility_key() for placement in placements)
+
+
 def _module_path_common_prefix(paths: list[str]) -> str:
     """Return the common module path prefix for parameter-owner module paths."""
     if not paths:
@@ -285,6 +290,7 @@ def _validate_bucket_uniform_dtype_and_placement(
             continue
         reference_dtype = param_dict[fqns[0]].dtype
         reference_placements = param_placements[fqns[0]]
+        reference_keys = _bucket_compatibility_keys(reference_placements)
         for fqn in fqns:
             dtype = param_dict[fqn].dtype
             if dtype != reference_dtype:
@@ -297,14 +303,14 @@ def _validate_bucket_uniform_dtype_and_placement(
                     "dtype."
                 )
             placements = param_placements[fqn]
-            if placements != reference_placements:
+            if _bucket_compatibility_keys(placements) != reference_keys:
                 raise ValueError(
                     f"Bucket {bucket_idx} "
                     f"{buckets[bucket_idx].patterns} "
                     f"has mixed placements: {fqns[0]!r} uses "
                     f"{reference_placements!r} but {fqn!r} uses "
                     f"{placements!r}. All params in a FlexShard bucket must "
-                    "share the same placement tuple because bucket collectives "
-                    "use one placement layout. Split parameters with different "
-                    "placements into separate buckets."
+                    "have bucket-compatible placements because bucket "
+                    "collectives use one placement layout. Split parameters "
+                    "with incompatible placements into separate buckets."
                 )
