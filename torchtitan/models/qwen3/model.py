@@ -147,11 +147,16 @@ class Qwen3Model(Decoder):
                     )
 
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
+            from torchtitan.components.loss import ChunkedCELoss
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_qwen3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(

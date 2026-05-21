@@ -17,9 +17,9 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torch.distributed.fsdp import DataParallelMeshDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
+from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
 
@@ -35,9 +35,7 @@ def parallelize_qwen3(
     dump_folder: str,
     skip_dp: bool = False,
 ):
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
@@ -46,25 +44,9 @@ def parallelize_qwen3(
         compile_config.enable and "model" in compile_config.components
     )
 
-    # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-    # runs inside the local_map boundary on local tensors.
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
-
+    model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-        )
 
     if ac_config.mode != "none":
         apply_ac(
@@ -84,12 +66,25 @@ def parallelize_qwen3(
     if skip_dp:
         return model
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+    mesh_names: list[str] = []
+    if parallel_dims.dp_replicate_enabled:
+        mesh_names.append("dp_replicate")
+    mesh_names.append("fsdp")
+    if parallel_dims.tp_enabled:
+        mesh_names.append("tp")
+    dp_mesh = parallel_dims.get_mesh(mesh_names)
+    dense_spmd_mesh = parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+    dp_mesh_dims = (
+        DataParallelMeshDims(
+            shard="fsdp",
+            replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+        )
+        if dense_spmd_mesh is not None
+        else None
     )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
     edp_mesh = None
+    sparse_spmd_mesh = None
     if parallel_dims.ep_enabled:
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
@@ -97,6 +92,9 @@ def parallelize_qwen3(
             else ["efsdp"]
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        sparse_spmd_mesh = parallel_dims.get_activated_mesh(
+            ["dp_replicate", "efsdp", "ep"]
+        )
 
     apply_fsdp(
         model,
@@ -108,6 +106,8 @@ def parallelize_qwen3(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        sparse_spmd_mesh=sparse_spmd_mesh,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     logger.info("Applied fully_shard to the model")

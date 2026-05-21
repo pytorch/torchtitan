@@ -14,6 +14,7 @@ from torch import nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
+    FlexAttention,
     ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -73,9 +74,9 @@ class Attention(BaseAttention):
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
             self.wq = config.wq.build()
         else:
-            assert (
-                config.wq_a is not None and config.wq_b is not None
-            ), "wq_a and wq_b are required when q_lora_rank > 0"
+            assert config.wq_a is not None and config.wq_b is not None, (
+                "wq_a and wq_b are required when q_lora_rank > 0"
+            )
             self.wq_a = config.wq_a.build()
             self.q_norm = config.q_norm.build()
             self.wq_b = config.wq_b.build()
@@ -230,22 +231,27 @@ class DeepSeekV3Model(Decoder):
 
             if parallelism.context_parallel_degree > 1 and not isinstance(
                 self.layers[0].attention.inner_attention,
-                ScaledDotProductAttention.Config,
+                FlexAttention.Config,
             ):
                 raise NotImplementedError(
-                    "Context Parallel for DeepSeek V3 only supports "
-                    "ScaledDotProductAttention. Got "
+                    "SPMD Context Parallel for DeepSeek V3 only supports "
+                    "FlexAttention. Got "
                     f"{type(self.layers[0].attention.inner_attention).__name__}."
                 )
 
             from torchtitan.models.deepseek_v3.sharding import (
                 set_deepseek_v3_sharding_config,
             )
+            from torchtitan.components.loss import ChunkedCELoss
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_deepseek_v3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(

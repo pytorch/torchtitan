@@ -64,9 +64,9 @@ class Attention(BaseAttention):
         self.qkv_linear = config.qkv_linear.build()
         self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
-        assert isinstance(
-            config.inner_attention, FlexAttention.Config
-        ), "gpt-oss only supports FlexAttention"
+        assert isinstance(config.inner_attention, FlexAttention.Config), (
+            "gpt-oss only supports FlexAttention"
+        )
         self.inner_attention = config.inner_attention.build()
 
     def forward(
@@ -200,6 +200,9 @@ class GptOssModel(Decoder):
             # Sync rope max_seq_len
             self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
+            if parallelism.context_parallel_degree > 1:
+                self.validate_context_parallel_attention()
+
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
@@ -214,11 +217,16 @@ class GptOssModel(Decoder):
                     )
 
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
+            from torchtitan.components.loss import ChunkedCELoss
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_gpt_oss_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
         # pyrefly: ignore [bad-override]

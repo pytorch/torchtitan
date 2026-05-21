@@ -154,10 +154,7 @@ class Llama4Model(Decoder):
                         )
 
             if parallelism.context_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Context Parallel is not supported for Llama4 "
-                    "(Llama4 requires FlexAttention, which is not supported with CP)."
-                )
+                self.validate_context_parallel_attention()
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
@@ -172,12 +169,18 @@ class Llama4Model(Decoder):
                         f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
                     )
 
+            from torchtitan.components.loss import ChunkedCELoss
             from torchtitan.models.llama4.sharding import set_llama4_sharding_config
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_llama4_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
+                enable_cp=parallelism.context_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(
