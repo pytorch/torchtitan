@@ -133,12 +133,6 @@ FAKE_BACKEND=1 FUSED_KERNEL_DIR=/tmp/kernels ./run_graph_trainer_llama3_8b.sh
 
 Compare the last step's tps/tflops/mfu between the two runs.
 
-A/B comparison with profiling + Perfetto upload:
-```bash
-FUSED_KERNEL_DIR=/tmp/kernels ./run_benchmark_fused_kernels.sh
-FUSED_KERNEL_DIR=/tmp/kernels FAKE_BACKEND=1 ./run_benchmark_fused_kernels.sh
-```
-
 ### E2E distributed benchmark (real NCCL)
 
 ```bash
@@ -163,7 +157,6 @@ torchtitan/experiments/graph_trainer/
     generated/.gitignore
 
 run_graph_trainer_llama3_8b.sh     # FUSED_KERNEL_DIR + FAKE_BACKEND
-run_benchmark_fused_kernels.sh     # A/B benchmark with profiling
 ```
 
 ## Don'ts
