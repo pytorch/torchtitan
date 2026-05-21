@@ -80,6 +80,7 @@ class ShardingConfig:
     out_src_shardings: NamedPlacement | tuple[NamedPlacement, ...] | None = None
     out_dst_shardings: NamedPlacement | None = None
     local_spmd: LocalSpmdConfig | None = None
+    mesh_reinterpret: NamedPlacement | None = None
 
     def axes(self) -> set[str]:
         """Return mesh axes referenced by this sharding config."""
@@ -101,6 +102,7 @@ class ShardingConfig:
         else:
             add_axes(self.out_src_shardings)
         add_axes(self.out_dst_shardings)
+        add_axes(self.mesh_reinterpret)
         return axes
 
     def to_dict(self) -> dict:
