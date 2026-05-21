@@ -126,6 +126,7 @@ _MODEL_CONFIGS = {
 
 
 def _create_hf_model(model_type: str):
+    """Create a tiny HF MoE model for testing."""
     from transformers import AutoConfig, AutoModelForCausalLM
 
     kwargs = _MODEL_CONFIGS[model_type]
@@ -264,6 +265,7 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
 
 
 def main():
+    """Run numerical equivalence and round-trip adapter tests."""
     parser = argparse.ArgumentParser(
         description="Numerical equivalence: HF MoE vs titan MoE"
     )

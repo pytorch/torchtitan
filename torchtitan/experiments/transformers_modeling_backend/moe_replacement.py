@@ -192,6 +192,7 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
 def _resolve_num_experts(
     experts: nn.Module, gate: nn.Module | None, moe_block: nn.Module, config
 ) -> int:
+    """Infer the total expert count from the HF MoE block or config."""
     for owner in (experts, gate, moe_block):
         if owner is None:
             continue
@@ -209,6 +210,7 @@ def _resolve_num_experts(
 
 
 def _resolve_top_k(moe_block: nn.Module, gate: nn.Module | None, config) -> int:
+    """Infer top-k routing from the HF MoE block or config."""
     for owner in (moe_block, gate):
         if owner is None:
             continue
@@ -223,6 +225,7 @@ def _resolve_top_k(moe_block: nn.Module, gate: nn.Module | None, config) -> int:
 
 
 def _resolve_score_func(gate: nn.Module | None, config) -> str:
+    """Determine the router scoring function (softmax or sigmoid)."""
     # DeepSeek V3/V4 uses sigmoid with e_score_correction_bias
     if gate is not None and "e_score_correction_bias" in getattr(gate, "_buffers", {}):
         return "sigmoid"
