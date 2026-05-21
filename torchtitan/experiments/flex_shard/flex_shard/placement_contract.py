@@ -56,6 +56,15 @@ class Placement(ABC):
         """Return a hash consistent with placement equality."""
         raise NotImplementedError
 
+    def bucket_compatibility_key(self) -> object:
+        """Return the bucket compatibility key for this placement.
+
+        Placements with different per-parameter metadata may still share one
+        bucket collective implementation. The default keeps exact placement
+        equality semantics for existing placements.
+        """
+        return self
+
     def compute_local_numel(
         self, global_shape: torch.Size, rank: int, world_size: int
     ) -> int:
