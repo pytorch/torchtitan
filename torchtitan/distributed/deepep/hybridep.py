@@ -22,12 +22,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch._library.opaque_object import (
     get_opaque_type_name,
     OpaqueBase,
     register_opaque_type,
 )
-import torch.distributed as dist
 
 from torchtitan.tools.logging import logger
 
@@ -176,6 +176,7 @@ def _dispatch_impl(
     """
     num_local_experts = num_experts // ep_size
 
+    # pyrefly: ignore [bad-argument-type]
     group = dist.distributed_c10d._resolve_process_group(group_name)
     get_buffer(
         group=group,
@@ -347,7 +348,9 @@ def _combine_bwd_impl(
         handle=handle.value,
     )
     if grad_probs_dense is None:
-        grad_probs_dense = torch.empty(0, device=grad_hidden.device, dtype=torch.float32)
+        grad_probs_dense = torch.empty(
+            0, device=grad_hidden.device, dtype=torch.float32
+        )
     return grad_x, grad_probs_dense
 
 

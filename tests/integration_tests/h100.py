@@ -4,12 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
 import logging
 
 from tests.integration_tests import OverrideDefinitions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_DEEPEP_AVAILABLE = importlib.util.find_spec("deep_ep") is not None
 
 
 def build_h100_tests_list() -> list[OverrideDefinitions]:
@@ -82,6 +85,21 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "HSDP+CP+torch.compile+Float8",
             "hsdp+cp+compile+float8",
             ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel_hybridep",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--compile.enable",
+                    "--compile.components model,loss",
+                ],
+            ],
+            "DeepSeek V3 FSDP+HybridEP+compile",
+            "deepseek_v3_fsdp+hybridep+compile",
+            ngpu=4,
+            disabled=not _DEEPEP_AVAILABLE,
         ),
     ]
     return integration_tests_flavors

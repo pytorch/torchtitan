@@ -60,6 +60,9 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
+        # Install DeepEP for HybridEP integration test
+        bash /install_deepep.sh
+
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
         # NVLS according to several CI runs.
         # DeepEP needs CUDA_HOME specified to JIT kernels.

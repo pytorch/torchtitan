@@ -80,8 +80,12 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
+        # Install DeepEP for HybridEP integration test
+        bash /install_deepep.sh
+
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
         # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
         # NLVS according to several CI runs.
-        NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        # DeepEP needs CUDA_HOME specified to JIT kernels.
+        CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
