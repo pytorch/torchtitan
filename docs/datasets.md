@@ -173,4 +173,4 @@ Interleaved dataloaders are fully stateful. The interleaver RNG and the state of
 | Multiple pre-training sources | `InterleavedHuggingFaceTextDataLoader` |
 | Single SFT source | `ChatDataLoader` |
 | Multiple SFT sources | `InterleavedChatDataLoader` |
-| Multimodal (vision + text) | `MultiModalDataLoader` |
+| Multimodal (vision + text) | `MMDataLoader` |
