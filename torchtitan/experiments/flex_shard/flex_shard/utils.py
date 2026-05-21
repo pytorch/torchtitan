@@ -251,6 +251,8 @@ def _validate_placements(
                 f"{fqn!r} uses {type(placement).__name__}."
             )
         param = param_dict[fqn]
+        if placement.uses_bucket_param_infos():
+            continue
         try:
             layout = placement.local_storage_layout(
                 param.shape,
