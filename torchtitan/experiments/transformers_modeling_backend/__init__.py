@@ -72,6 +72,12 @@ class TitanMoeModelConfig(TitanModelConfig):
     load_balance_coeff: float | None = 1e-3
     """Step size for auxiliary-loss-free MoE load balancing. None disables it."""
 
+    comm_backend: str = "standard"
+    """Token dispatch backend for expert parallelism.
+    "standard" uses PyTorch all-to-all collectives, "deepep" uses DeepEP
+    kernels for H100/NVLink, "hybridep" uses HybridEP for GB200/NVLink72.
+    """
+
 
 flavors = {
     "debugmodel": HFTransformerModel.Config(
