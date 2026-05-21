@@ -7,7 +7,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, cast, Literal
 
 import torch
 import tyro
@@ -304,7 +304,9 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
         seed: int = 42
         """Interleaving seed"""
 
-        stopping_strategy: str = "on_first_exhausted"
+        stopping_strategy: Literal[
+            "on_first_exhausted", "all_exhausted"
+        ] = "on_first_exhausted"
         """When to stop iteration: 'on_first_exhausted' or 'all_exhausted'"""
 
         def __post_init__(self) -> None:
@@ -709,7 +711,9 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
         seed: int = 42
         """Interleaving seed"""
 
-        stopping_strategy: str = "on_first_exhausted"
+        stopping_strategy: Literal[
+            "on_first_exhausted", "all_exhausted"
+        ] = "on_first_exhausted"
         """When to stop iteration: 'on_first_exhausted' or 'all_exhausted'"""
 
         def __post_init__(self) -> None:

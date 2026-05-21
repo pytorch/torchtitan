@@ -12,10 +12,9 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.hf_datasets.text_datasets import (
     DATASETS,
-    HuggingFaceTextDataLoader,
-    HuggingFaceTextDataset,
     HFDataSource,
     HuggingFaceTextDataLoader,
+    HuggingFaceTextDataset,
     InterleavedHuggingFaceTextDataLoader,
 )
 

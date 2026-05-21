@@ -26,8 +26,21 @@ from torch.utils.data import IterableDataset
 
 class InterleavedDataset(IterableDataset):
     """Randomly interleaves multiple IterableDatasets weighted by sampling probability.
+
     Re-looping, infinite behaviour, and within-source shuffling are each
     source's responsibility.
+
+    Args:
+        datasets: Source datasets. Each must implement ``state_dict()``
+            and ``load_state_dict()``.
+        weights: Sampling weights (normalised internally). Controls the
+            relative likelihood of drawing from each source at each step.
+        seed: Seed for the interleaver RNG.
+        stopping_strategy: Controls when iteration ends.
+            ``"on_first_exhausted"`` (default) stops as soon as any source
+            raises ``StopIteration``, defining a natural epoch boundary.
+            ``"all_exhausted"`` restarts an exhausted source and continues
+            until every source has been exhausted at least once.
     """
 
     def __init__(
@@ -39,19 +52,6 @@ class InterleavedDataset(IterableDataset):
             "on_first_exhausted", "all_exhausted"
         ] = "on_first_exhausted",
     ) -> None:
-        """
-        Args:
-            datasets: Source datasets. Each must implement ``state_dict()``
-                and ``load_state_dict()``.
-            weights: Sampling weights (normalised internally). Controls the
-                relative likelihood of drawing from each source at each step.
-            seed: Seed for the interleaver RNG.
-            stopping_strategy: Controls when iteration ends.
-                ``"on_first_exhausted"`` (default) stops as soon as any source
-                raises ``StopIteration``, defining a natural epoch boundary.
-                ``"all_exhausted"`` restarts an exhausted source and continues
-                until every source has been exhausted at least once.
-        """
         if not datasets:
             raise ValueError("At least one dataset must be provided.")
         if len(datasets) != len(weights):

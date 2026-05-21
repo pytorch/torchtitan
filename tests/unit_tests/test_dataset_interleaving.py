@@ -246,7 +246,9 @@ class TestAllExhaustedStrategy(unittest.TestCase):
         ds_long = _MockDataset(list(range(5)))
         samples = list(
             InterleavedDataset(
-                [ds_short, ds_long], [1.0, 1.0], seed=0,
+                [ds_short, ds_long],
+                [1.0, 1.0],
+                seed=0,
                 stopping_strategy="all_exhausted",
             )
         )
@@ -259,7 +261,9 @@ class TestAllExhaustedStrategy(unittest.TestCase):
         ds_b = _MockDataset([10, 20, 30])
         samples = list(
             InterleavedDataset(
-                [ds_a, ds_b], [1.0, 1.0], seed=0,
+                [ds_a, ds_b],
+                [1.0, 1.0],
+                seed=0,
                 stopping_strategy="all_exhausted",
             )
         )
@@ -272,7 +276,9 @@ class TestAllExhaustedStrategy(unittest.TestCase):
         ds_b = _MockDataset([4, 5, 6])
         samples = list(
             InterleavedDataset(
-                [ds_a, ds_b], [1.0, 1.0], seed=0,
+                [ds_a, ds_b],
+                [1.0, 1.0],
+                seed=0,
                 stopping_strategy="all_exhausted",
             )
         )
@@ -282,9 +288,7 @@ class TestAllExhaustedStrategy(unittest.TestCase):
         """Default strategy still stops on first exhaustion."""
         ds_short = _MockDataset([99])
         ds_long = _MockDataset(list(range(50)))
-        samples = list(
-            InterleavedDataset([ds_short, ds_long], [1.0, 1.0], seed=0)
-        )
+        samples = list(InterleavedDataset([ds_short, ds_long], [1.0, 1.0], seed=0))
         self.assertLess(len(samples), 50)
 
 
