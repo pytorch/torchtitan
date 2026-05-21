@@ -43,8 +43,7 @@ before inductor compilation:
      with `preserve_node_meta` for `from_node` provenance tracking), then
      classifies with `is_fusible_node`. Maps decomposed regions back to
      original graph nodes via `from_node` for replacement.
-   - `scheduler`: hooks into inductor's post-fusion scheduler
-   Config: `--compile.fused_kernel_extractor fqn|inductor|scheduler`
+   Config: `--compile.fused_kernel_extractor fqn|inductor`
 2. **Splits** disconnected components via union-find
 3. **Filters** unfusable ops: all `_c10d_functional.*`, `ao.*`,
    `bucketing.*` (collectives/offload), flash attention, embedding.

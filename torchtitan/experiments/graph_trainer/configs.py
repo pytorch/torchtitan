@@ -96,8 +96,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Region extraction strategy for the fused kernel pass.
         fqn: segment at module_fqn boundaries + union-find connectivity (default)
         inductor: use inductor's is_fusible_node for fusibility classification
-        scheduler: hook into inductor's post-fusion scheduler to capture actual
-            kernel groups (most accurate but runs a full inductor compile)
     """
 
     precompile_artifact_dir: str = ""

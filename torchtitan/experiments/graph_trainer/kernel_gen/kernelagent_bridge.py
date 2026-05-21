@@ -134,7 +134,7 @@ def generate_kernel(
             Model class, get_inputs(), and get_init_inputs().
         num_workers: Number of parallel generation workers.
         max_rounds: Max LLM refinement rounds per worker.
-        model_name: LLM model name (default: from env or claude-sonnet).
+        model_name: LLM model name (default: from env or claude-opus).
         output_dir: Directory to save generation logs.
         test_code: Optional additional test code for validation.
 
@@ -169,7 +169,7 @@ def generate_kernel(
         agent.cleanup()
 
 
-_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_MODEL = "claude-opus-4-7"
 
 # GPU names recognized by KernelAgent's spec database.
 _GPU_NAME_MAP = {
@@ -242,7 +242,7 @@ def optimize_kernel(
         strategy: Optimization strategy ("beam_search" or "greedy").
         num_workers: Number of parallel optimization workers.
         max_rounds: Maximum optimization rounds.
-        model_name: LLM model name (default: claude-sonnet).
+        model_name: LLM model name (default: claude-opus).
         output_dir: Directory for optimization logs.
         gpu_name: GPU name for NCU analysis (auto-detected if None).
 

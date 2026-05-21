@@ -241,17 +241,7 @@ def full_inductor_compilation_pass(
 
         return gm
 
-    # Skip decomposition when the graph contains opaque kernel_function
-    # calls (from fused_kernel_pass) — make_fx can't trace through them.
-    # compile_fx_inner applies decompositions internally anyway.
-    has_opaque_calls = any(
-        n.op == "call_function"
-        and callable(n.target)
-        and getattr(n.target, "__name__", "") == "kernel_function"
-        for n in gm.graph.nodes
-    )
-    if not has_opaque_calls:
-        gm = _apply_decompositions(gm, example_inputs)
+    gm = _apply_decompositions(gm, example_inputs)
     output_code = compile_fx_inner(gm, example_inputs)
 
     # compile_fx_inner returns OutputCode with boxed calling convention
