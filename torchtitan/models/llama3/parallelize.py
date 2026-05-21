@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
+    DataParallelMeshDims,
     fully_shard,
     MixedPrecisionPolicy,
 )
@@ -26,7 +27,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
@@ -53,23 +53,15 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallel_dims.cp_enabled:
-        apply_cp_to_forward(
-            # pyrefly: ignore [missing-attribute, not-callable]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-        )
+    model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+        tp_mesh = parallel_dims.get_mesh("tp")
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -89,8 +81,17 @@ def parallelize_llama(
 
     # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
     # all-gather but still installs the MixedPrecisionPolicy.
-    names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    dp_mesh = parallel_dims.get_mesh(names)
+    mesh_names = []
+    if parallel_dims.dp_replicate_enabled:
+        mesh_names.append("dp_replicate")
+    mesh_names.append("fsdp")
+    if parallel_dims.tp_enabled:
+        mesh_names.append("tp")
+    dp_mesh = parallel_dims.get_mesh(mesh_names)
+    dp_mesh_dims = DataParallelMeshDims(
+        shard="fsdp",
+        replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+    )
 
     apply_fsdp(
         model,
@@ -100,6 +101,7 @@ def parallelize_llama(
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     if parallel_dims.dp_replicate_enabled:
@@ -121,6 +123,7 @@ def apply_fsdp(
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
+    dp_mesh_dims: "DataParallelMeshDims | None" = None,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -137,6 +140,9 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
+        dp_mesh_dims: For SPMD meshes, ``fully_shard`` must flatten
+            ``fsdp`` away from non-data-parallel mesh axes. We pass this
+            explicitly rather than relying on FSDP mesh-name inference.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -144,6 +150,9 @@ def apply_fsdp(
         cast_forward_inputs=False,
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        # pyrefly: ignore[bad-typed-dict-key]
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
