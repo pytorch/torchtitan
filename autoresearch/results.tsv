@@ -4,3 +4,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-21T23:20:23	xxxxxxx	4432	47.0	discard	25.95	74	drop_unused_sdpa_outputs: removed 0 dead getitems; FX eliminate_dead_code already handles them post Exp 1
 2026-05-21T23:25:41	xxxxxxx	4371	47.0	discard	25.60	74	reorder_fsdp_all_gather_prefetch (Strategy A): moved 130/421 AGs by avg 3.5 slots; no cross-layer overlap; tps noise-level regression
 2026-05-21T23:41:03	xxxxxxx	4490	47.0	discard	26.29	74	bucket_qkv_all_gathers: 32 triplets (64 launches saved/step); +0.7% tps (below 1% threshold); Q/K/V are bandwidth-bound at this scale
+2026-05-21T23:50:17	xxxxxxx	4481	47.1	discard	26.24	74	prefetch_fsdp_all_gathers_cross_layer (Strategy B v1): 290/421 AGs hoisted avg 10.6 slots; prev_wait anchor was intra-layer, not cross-layer; +0.5% noise

@@ -75,6 +75,22 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   some topo-order violations only surface at full scale. Always run BOTH the
   numerics test AND the benchmark before declaring keep/discard.
 
+- **For "cross-layer" prefetch, the anchor is layer-end RS, not previous-AG-wait**
+  (Exp 5). Within a Llama3 layer, weight AGs+waits (Q,K,V,wo,attn_norm,...) are
+  packed tightly at the *start* of the layer. Choosing "previous AG's wait" as
+  the prefetch destination yields only intra-layer movement (~10 slots, ~1
+  barrier). The true layer boundary is the `wait_tensor` for the *output
+  reduce_scatter* (post-MLP residual), which marks the end of compute for
+  layer i. Hoisting next-layer's AG producer chain above THAT wait gives a
+  full layer's worth of compute to overlap. Implementer's TODO: identify the
+  RS-wait at the layer-end (group `'21'` on the activation tensor, downstream
+  of `w2`'s mm), and use it as the prefetch barrier.
+
+- **`Graph.move_before` does not exist on this PyTorch.** Use
+  `prev_wait.prepend(node)` to insert before, or
+  `prev_node.append(new_node)` to insert after. Walk movable subgraphs in
+  topological order over `gm.graph.nodes` to preserve relative ordering.
+
 ## Tooling tips
 
 - **Dump the post-trace graph from a graph pass.** Register a temporary pass
