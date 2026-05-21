@@ -9,14 +9,17 @@ from typing import TYPE_CHECKING
 from torch.distributed.tensor import Replicate, Shard
 
 from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
     dense_activation_placement,
     dense_param_placement,
+    rowwise_config,
 )
 from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.qwen3_vl.model import Qwen3VLModel
+    from torchtitan.models.qwen3_vl.vision_encoder import Qwen3VLVisionEncoder
 
 
 def set_qwen3_vl_sharding_config(
@@ -32,10 +35,11 @@ def set_qwen3_vl_sharding_config(
     ``Shard(1)``) -- no SequenceParallel due to vision scatter and
     DeepStack needing full-sequence access.
 
-    Vision encoder is sharded with the same Replicate-output discipline:
-    linears shard on TP for memory but immediately redistribute back to
-    Replicate on output (matching the legacy ``_apply_tp_to_vision_encoder``
-    pattern with ``use_local_output=False``).
+    Vision encoder uses heads-parallel TP: each colwise/rowwise pair
+    chains as ``Replicate -> Shard(-1) -> Replicate`` without any
+    intermediate all-gather; attention runs on local heads inside a
+    ``local_map`` on ``VisionInnerAttention`` so rope and flex_attention
+    see plain Tensors with TP-sharded heads.
     """
     set_qwen3_sharding_config(
         config,
@@ -48,36 +52,59 @@ def set_qwen3_vl_sharding_config(
         _set_vision_encoder_sharding(config.vision_encoder)
 
 
-def _set_vision_encoder_sharding(ve_cfg) -> None:
+def _set_vision_encoder_sharding(ve_cfg: "Qwen3VLVisionEncoder.Config") -> None:
     """Set sharding on the Qwen3-VL vision encoder.
 
-    Vision activations flow as DTensor(Replicate) throughout. Linears
-    shard on TP for memory but immediately redistribute back to
-    Replicate on output (matching the legacy ``_apply_tp_to_vision_encoder``
-    pattern with ``use_local_output=False``).
+    Activation flow under TP:
 
-    ``pos_embed`` is a root-level parameter on the encoder; declared via
-    ``state_shardings`` on the encoder root.
+    * ``patch_embed.proj`` wraps plain ``pixel_values`` to ``DTensor(Replicate)``;
+      that flows through residuals and norms (Replicate weights, pass-through).
+    * Each colwise/rowwise pair: colwise output is ``Shard(-1)``, GELU is
+      pointwise on DTensor, rowwise accepts ``Shard(-1)`` and all-reduces to
+      ``Replicate``. No intermediate all-gather.
+    * ``attn.qkv``'s ``Shard(-1)`` output propagates through reshape +
+      unbind into q/k/v ``DTensor(Shard(2))`` on the heads dim.
+    * ``attn.inner_attention`` is wrapped in ``local_map``: q/k/v unwrap to
+      plain locals with TP-sharded heads, rope and flex_attention run on
+      locals, output re-wraps to ``DTensor(Shard(2))``.
+    * After ``attn_output.reshape(..., -1)`` it becomes ``DTensor(Shard(-1))``
+      and feeds ``attn.proj`` rowwise -> ``Replicate``.
 
-    LayerNorm / GELU classes from ``models.common.nn_modules`` carry
-    sharding plans via their auto-generated ``Config`` slot.
+    ``pos_embed`` is declared on the encoder root via ``state_shardings``.
     """
     # Encoder root: pos_embed is a Replicate parameter on TP.
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={"pos_embed": dense_param_placement(tp=Replicate())},
     )
 
-    # Qwen3VLVisionEncoder.Config uses flat Linear.Config fields shared
-    # across all layers: patch_embed_proj, attn_qkv, attn_proj, mlp_fc1,
-    # mlp_fc2, merger_fc1, merger_fc2. Setting sharding on these configs
-    # applies to every layer that builds from them.
+    # Flat Linear.Config fields on Qwen3VLVisionEncoder.Config are shared
+    # across all layers; one sharding_config assignment propagates to every
+    # layer that builds from them.
     ve_cfg.patch_embed_proj.sharding_config = _replicate_linear_config()
-    ve_cfg.attn_qkv.sharding_config = _vision_colwise_config()
-    ve_cfg.attn_proj.sharding_config = _replicate_output_rowwise_config()
-    ve_cfg.mlp_fc1.sharding_config = _vision_colwise_config()
-    ve_cfg.mlp_fc2.sharding_config = _replicate_output_rowwise_config()
-    ve_cfg.merger_fc1.sharding_config = _vision_colwise_config()
-    ve_cfg.merger_fc2.sharding_config = _replicate_output_rowwise_config()
+    ve_cfg.attn_qkv.sharding_config = colwise_config()
+    ve_cfg.attn_proj.sharding_config = rowwise_config()
+    ve_cfg.mlp_fc1.sharding_config = colwise_config()
+    ve_cfg.mlp_fc2.sharding_config = rowwise_config()
+    ve_cfg.merger_fc1.sharding_config = colwise_config()
+    ve_cfg.merger_fc2.sharding_config = rowwise_config()
+
+    # local_map on VisionInnerAttention: fused qkv arrives as
+    # DTensor(Shard(-1)) on TP from attn.qkv. local_map unwraps to a plain
+    # local with shape (N, L, dim*3/TP); the reshape + permute + unbind +
+    # rope + flex_attention all run on local heads-parallel tensors. Output
+    # (N, L, n_heads, head_dim) re-wraps to DTensor(Shard(2)) which the
+    # caller reshapes into Shard(-1) for the rowwise self.proj.
+    # qkv arrives as ``DTensor(Shard(2))`` from attn.qkv (colwise on the last
+    # dim of a 3D activation -- use explicit ``Shard(2)`` to match local_map's
+    # strict placement-equality check).
+    qkv_placements = dense_activation_placement(tp=Shard(2))
+    out_placements = dense_activation_placement(tp=Shard(2))
+    ve_cfg.attn_inner_attention.sharding_config = ShardingConfig(
+        in_dst_shardings={"qkv": qkv_placements},
+        out_src_shardings=out_placements,
+        local_map=LocalMapConfig(in_grad_placements=(qkv_placements,)),
+    )
+
     vision_norm = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=Replicate()),
@@ -89,7 +116,11 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
 
 
 def _replicate_linear_config() -> ShardingConfig:
-    """Linear with all-Replicate weight on TP, used for patch_embed.proj."""
+    """Linear with all-Replicate weight on TP, used for ``patch_embed.proj``.
+
+    Wraps the plain ``pixel_values`` input as ``DTensor(Replicate)`` so the
+    rest of the encoder runs in DTensor space.
+    """
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=Replicate()),
@@ -97,37 +128,5 @@ def _replicate_linear_config() -> ShardingConfig:
         },
         in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
         in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
-        out_dst_shardings=dense_activation_placement(tp=Replicate()),
-    )
-
-
-def _vision_colwise_config() -> ShardingConfig:
-    """Colwise weight with Replicate input/output (vision encoder convention).
-
-    Differs from ``decoder_sharding.colwise_config`` (which has
-    Shard(-1) output) -- vision encoder keeps activations Replicate
-    throughout because there's no SP and the residual adds expect
-    Replicate.
-    """
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=Shard(0)),
-            "bias": dense_param_placement(tp=Shard(0)),
-        },
-        in_src_shardings={"input": dense_activation_placement(tp=Replicate())},
-        in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
-        out_dst_shardings=dense_activation_placement(tp=Replicate()),
-    )
-
-
-def _replicate_output_rowwise_config() -> ShardingConfig:
-    """Rowwise weight with Replicate input expected (Shard(-1)) and Replicate output."""
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=Shard(1)),
-            "bias": dense_param_placement(tp=Replicate()),
-        },
-        in_src_shardings={"input": dense_activation_placement(tp=Shard(1))},
-        in_dst_shardings={"input": dense_activation_placement(tp=Shard(1))},
         out_dst_shardings=dense_activation_placement(tp=Replicate()),
     )
