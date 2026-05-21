@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpoint import CheckpointManager, MODEL
 
 
 class FakeOptimizersContainer:
@@ -791,6 +791,11 @@ class TestConfigPostInit(unittest.TestCase):
             CheckpointManager.Config(keep_latest_k=-1)
         with self.assertRaisesRegex(ValueError, "at least 2 checkpoint replicas"):
             CheckpointManager.Config(keep_latest_k=1)
+
+        with self.assertRaisesRegex(
+            ValueError, f"{MODEL} key shouldn't be in exclude_from_loading."
+        ):
+            CheckpointManager.Config(exclude_from_loading=[MODEL])
 
     def test_path_normalization(self):
         """Test that paths are stripped and must be absolute."""

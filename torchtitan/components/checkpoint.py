@@ -319,6 +319,7 @@ class CheckpointManager(Configurable):
         exclude_from_loading: list[str] = field(default_factory=list)
         """
         Exclude specific keys from being loaded from the checkpoint.
+        Keys shouldn't include "model" key.
         """
 
         enable_first_step_checkpoint: bool = False
@@ -359,6 +360,8 @@ class CheckpointManager(Configurable):
                     "We need to maintain at least 2 checkpoint replicas, "
                     "as the last one may be in the process of being saved."
                 )
+            if MODEL in self.exclude_from_loading:
+                raise ValueError(f"{MODEL} key shouldn't be in exclude_from_loading.")
 
             # 2. Path Normalization & Warning
             if self.initial_load_path:
