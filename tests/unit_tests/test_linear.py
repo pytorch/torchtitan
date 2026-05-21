@@ -10,7 +10,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 
 
