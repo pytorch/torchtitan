@@ -286,11 +286,6 @@ class HFTransformerModel(BaseModel):
     def __init__(self, config: Config):
         super().__init__()
 
-        # NOTE(3outeille): This prevents Hugging Face modeling from initializing ROPE (inv_freq) buffers to NaN.
-        # Needed when loading from seed checkpoint.
-        if hasattr(config, "deterministic") and config.deterministic:
-            torch.utils.deterministic.fill_uninitialized_memory = False
-
         # Try to import the model class dynamically from the transformers library if not found in globals
         model_class_name = config.architectures[0]
         model_cls = globals().get(model_class_name, None)
