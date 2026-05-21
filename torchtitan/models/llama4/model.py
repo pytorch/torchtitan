@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -20,7 +19,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 def compute_moe_hidden_dim(
@@ -122,23 +120,13 @@ class Llama4Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-
-            training = trainer_config.training
+            Decoder.Config.update_from_config(
+                self, trainer_config=trainer_config, **kwargs
+            )
             parallelism = trainer_config.parallelism
-            debug = trainer_config.debug
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             for layer_cfg in self.layers:
                 if layer_cfg.moe is not None:
-                    layer_cfg.moe.router._debug_force_load_balance = (
-                        debug.moe_force_load_balance
-                    )
                     comm_backend = getattr(
                         layer_cfg.moe.experts.token_dispatcher,
                         "comm_backend",

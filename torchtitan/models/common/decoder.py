@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -79,6 +80,38 @@ class Decoder(BaseModel):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
         # and fix the typing here
         layers: list  # list[TransformerBlock.Config] or subclass configs
+
+        def update_from_config(
+            self,
+            *,
+            trainer_config,
+            **kwargs,
+        ) -> None:
+            """Apply trainer config to model config.
+
+            Validates ``training.seq_len`` against the model's intrinsic
+            ``rope.max_seq_len`` and resizes the RoPE cache.
+
+            ``debug`` is optional: callers that only need parallelism and
+            training setup (e.g. the vLLM inference wrapper) may omit it.
+            """
+            training = trainer_config.training
+            seq_len = training.seq_len
+            if seq_len > self.rope.max_seq_len:
+                raise ValueError(
+                    f"Training sequence length {seq_len} exceeds "
+                    f"model's maximum supported sequence length "
+                    f"{self.rope.max_seq_len}."
+                )
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
+
+            debug = getattr(trainer_config, "debug", None)
+            if debug is not None:
+                for layer_cfg in self.layers:
+                    if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

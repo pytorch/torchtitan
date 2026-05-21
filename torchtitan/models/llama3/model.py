@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -15,7 +14,6 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
-from torchtitan.tools.logging import logger
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -75,15 +73,10 @@ class Llama3Model(Decoder):
             trainer_config,
             **kwargs,
         ) -> None:
-            training = trainer_config.training
+            Decoder.Config.update_from_config(
+                self, trainer_config=trainer_config, **kwargs
+            )
             parallelism = trainer_config.parallelism
-            seq_len = training.seq_len
-            if seq_len > self.rope.max_seq_len:
-                logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                )
-            # Sync rope max_seq_len
-            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config
