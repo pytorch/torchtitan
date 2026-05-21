@@ -388,8 +388,8 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertTrue(parallel_dims.dp_shard_enabled)
 
 
-class TestSpmdMeshesLegacy(DTensorTestBase):
-    """spmd_meshes() under non-full_dtensor."""
+class TestSpmdMeshes(DTensorTestBase):
+    """spmd_meshes() uses logical dense axes."""
 
     @property
     def world_size(self):
@@ -408,51 +408,16 @@ class TestSpmdMeshesLegacy(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
-                full_dtensor=False,
             )
             pd.build_mesh()
 
-            # Legacy mode pre-flattens dp_shard+cp into 'fsdp'; dp_shard
-            # never appears as a single-axis mesh, so must not appear in any
-            # SPMD mesh either.
+            # Normal SPMD uses the logical dense mesh; dp_shard stays folded
+            # into the runtime FSDP mesh and is not an SPMD axis.
             meshes = pd.spmd_meshes()
             flat = {axis for m in meshes for axis in (m.mesh_dim_names or ())}
             self.assertNotIn("dp_shard", flat)
-            # Dense mesh names ``fsdp`` (the storage axis) instead of
-            # ``dp_shard`` / ``cp`` under legacy.
             dense = next(m for m in meshes if "tp" in (m.mesh_dim_names or ()))
-            self.assertEqual(set(dense.mesh_dim_names), {"dp_replicate", "fsdp", "tp"})
-
-
-class TestSpmdMeshesFullDTensor(DTensorTestBase):
-    """spmd_meshes() under full_dtensor."""
-
-    @property
-    def world_size(self):
-        return 8
-
-    @with_comms
-    def test_full_dtensor_spmd_meshes(self):
-        with patch(
-            "torchtitan.distributed.parallel_dims.device_type", self.device_type
-        ):
-            pd = ParallelDims(
-                dp_replicate=2,
-                dp_shard=2,
-                cp=1,
-                tp=2,
-                pp=1,
-                ep=1,
-                world_size=8,
-                full_dtensor=True,
-            )
-            pd.build_mesh()
-
-            # Dense mesh keeps dp_shard separate (no 'fsdp' flatten), in
-            # canonical outer-to-inner order; cp filtered out (disabled).
-            meshes = pd.spmd_meshes()
-            dense = next(m for m in meshes if "tp" in (m.mesh_dim_names or ()))
-            self.assertEqual(dense.mesh_dim_names, ("dp_replicate", "dp_shard", "tp"))
+            self.assertEqual(set(dense.mesh_dim_names), {"dp", "tp"})
 
 
 class TestParallelDimsWorld8MeshOperations(DTensorTestBase):

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import distribute_tensor, DTensor
+from torch.utils._pytree import tree_map
 
 import spmd_types as spmd
 from spmd_types.types import shard_types_to_partition_spec
@@ -57,10 +59,16 @@ def named_placement_to_spmd(named: NamedPlacement) -> NamedPlacement:
     """Drop axes that are not present in the active spmd_types mesh."""
     mesh_names = spmd.current_mesh_names()
     if mesh_names is None:
-        return dict(named)
+        return {}
+    resolved = dict(named)
+    if MeshAxisName.DP in resolved and MeshAxisName.DP not in mesh_names:
+        dp_value = resolved.pop(MeshAxisName.DP)
+        for axis_name in (MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD):
+            if axis_name in mesh_names:
+                resolved[axis_name] = dp_value
     return {
         axis_name: value
-        for axis_name, value in named.items()
+        for axis_name, value in resolved.items()
         if axis_name in mesh_names
     }
 
@@ -331,10 +339,22 @@ class Module(nn.Module, Configurable):
             if sharding_config.local_spmd is not None:
                 fn = self.local_spmd(fn, sharding_config.local_spmd)
 
+        _mesh_reinterpret = sharding_config.mesh_reinterpret
+
+        def _apply_mesh_reinterpret(t: torch.Tensor) -> torch.Tensor:
+            if not isinstance(t, torch.Tensor) or not spmd.has_local_type(t):
+                return t
+            assert _mesh_reinterpret is not None
+            resolved_reinterpret = named_placement_to_spmd(_mesh_reinterpret)
+            return spmd.reinterpret_mesh(t, resolved_reinterpret, inplace=True)
+
         def with_redistribution(*args: Any, **kwargs: Any) -> Any:
-            args, kwargs = self._shard_inputs(args, kwargs)
-            outputs = fn(*args, **kwargs)
-            return self._shard_outputs(outputs)
+            with set_current_mesh(mesh):
+                if _mesh_reinterpret and spmd.is_type_checking():
+                    args, kwargs = tree_map(_apply_mesh_reinterpret, (args, kwargs))
+                args, kwargs = self._shard_inputs(args, kwargs)
+                outputs = fn(*args, **kwargs)
+                return self._shard_outputs(outputs)
 
         self.forward = with_redistribution
 
@@ -393,6 +413,8 @@ class Module(nn.Module, Configurable):
 
         SPMD values → physical TP shard (if applicable) + ``spmd.assert_type``.
         """
+        mesh = current_mesh()
+        named_placement = named_placement_to_spmd(named_placement) if mesh else {}
         # Validate and collect shards. Values must be raw per-axis types.
         shard_dims: dict[int, str] = {}
         for axis_name, value in named_placement.items():
@@ -410,7 +432,6 @@ class Module(nn.Module, Configurable):
 
         for axis_name, value in named_placement.items():
             if isinstance(value, spmd.Shard):
-                mesh = current_mesh()
                 assert mesh is not None
                 pg = mesh.get_group(axis_name)
                 tensor = spmd.shard(tensor, pg, src=spmd.I, dst=value)
@@ -424,7 +445,7 @@ class Module(nn.Module, Configurable):
 
         # annotate the registered param/buffer (not the input tensor)
         registered = self._parameters[name] if is_param else self._buffers[name]
-        types = named_placement_to_spmd(named_placement)
+        types = named_placement
         if types:
             spmd.assert_type(registered, types)
 
@@ -455,26 +476,43 @@ class Module(nn.Module, Configurable):
         ) -> None:
             if not spmd.is_type_checking():
                 return
-            for t, types in zip(tensors, specs):
-                if isinstance(t, torch.Tensor) and types is not None and types:
+            for tensor, types in zip(tensors, specs):
+                if isinstance(tensor, torch.Tensor) and types is not None and types:
                     local_type, partition_spec = named_placement_to_assert_type(
                         types,
-                        t.ndim,
+                        tensor.ndim,
                     )
-                    spmd.assert_type(t, local_type, partition_spec=partition_spec)
+                    spmd.assert_type(
+                        tensor,
+                        local_type,
+                        partition_spec=partition_spec,
+                    )
 
-        def body(*args: Any, **kwargs: Any) -> Any:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             assert_types(args, resolved_in)
+            if kwargs:
+                assert_types(
+                    kwargs.values(),
+                    tuple(
+                        named_placement_to_spmd(in_dst[name])
+                        if name in in_dst
+                        else None
+                        for name in kwargs
+                    ),
+                )
+
             if spmd.is_type_checking():
                 with spmd.typecheck(local=True):
                     result = fn(*args, **kwargs)
             else:
                 result = fn(*args, **kwargs)
+
             outputs = (result,) if isinstance(result, torch.Tensor) else result
             assert_types(outputs, resolved_out)
             return result
 
-        return body
+        return wrapper
 
     def _shard_inputs(
         self,
