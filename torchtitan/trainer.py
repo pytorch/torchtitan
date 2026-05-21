@@ -44,7 +44,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_state import is_spmd_active, set_current_mesh
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -649,11 +649,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.full_dtensor:
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
-            )
-
         return inputs, labels, extra_inputs, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
@@ -737,12 +732,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with self.train_context():
                     with typecheck_scope:
                         pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                        # Under non-full_dtensor, labels stay as plain tensors. See
-                        # ``cross_entropy_loss`` for why pred must also be plain.
-                        # Remove once non-full_dtensor is no longer supported.
                         if (
                             isinstance(pred, DTensor)
-                            and not self.config.parallelism.full_dtensor
                             and self.config.parallelism.disable_loss_parallel
                         ):
                             pred = pred.to_local()
@@ -915,9 +906,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             labels = labels.to(self.device)
 
             with set_current_mesh(
-                parallel_dims.resolve_mesh(
-                    (MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP)
-                )
+                parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
             ):
                 loss = self.forward_backward_step(
                     input_dict=input_dict,
