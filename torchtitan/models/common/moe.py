@@ -4,20 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Partial
+import spmd_types as spmd
 
+from torchtitan.distributed.spmd_state import current_mesh
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import AllToAllTokenDispatcher, LocalTokenDispatcher
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 class GroupedExperts(Module):
@@ -48,6 +55,28 @@ class GroupedExperts(Module):
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
+        x_type = spmd.type_like(x)
+        count_type = spmd.type_like(num_tokens_per_expert)
+        out_type = x_type
+        mesh_axis_names = spmd.current_mesh_names()
+        if mesh_axis_names is not None and "tp" in mesh_axis_names:
+            local_type, partition_spec = (
+                x_type if isinstance(x_type, tuple) else (x_type, None)
+            )
+            local_type = dict(local_type)
+            local_type[mesh_axis_names["tp"]] = spmd.P
+            out_type = local_type, partition_spec
+        return spmd.local_map(
+            in_types=(x_type, count_type),
+            out_types=out_type,
+            local_typecheck=True,
+        )(self._run_grouped_experts)(x, num_tokens_per_expert)
+
+    def _run_grouped_experts(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
@@ -71,9 +100,24 @@ class GroupedExperts(Module):
         h = h * torch._grouped_mm(
             x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
         )
-        return torch._grouped_mm(
+        out = torch._grouped_mm(
             h, w2.bfloat16().transpose(-2, -1), offs=offsets
         ).type_as(x)
+        if spmd.is_type_checking():
+            mesh = current_mesh()
+            if (
+                mesh is not None
+                and mesh.mesh_dim_names is not None
+                and "tp" in mesh.mesh_dim_names
+            ):
+                out = spmd.reinterpret(
+                    out,
+                    mesh.get_group("tp"),
+                    src=spmd.V,
+                    dst=spmd.P,
+                    expert_mode=True,
+                )
+        return out
 
     def forward(
         self,
@@ -335,13 +379,14 @@ class MoE(Module):
         # This holds for all MoE components (router.gate, routed experts, shared
         # experts) and regardless of score_before_experts.
         if isinstance(x, DTensor):
-            assert (
-                x.device_mesh.ndim == 1
-            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            assert x.device_mesh.mesh_dim_names == (
-                "tp",
-            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
+            assert x.device_mesh.ndim == 1, (
+                f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
+            )
+            assert x.device_mesh.mesh_dim_names == ("tp",), (
+                f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
+            )
             x = x.to_local(grad_placements=(Partial(),))
+        x_3d = x
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
@@ -359,7 +404,52 @@ class MoE(Module):
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
+            mesh = current_mesh()
+            if spmd.is_type_checking() and mesh is not None:
+                mesh_axis_names = spmd.current_mesh_names() or {}
+                if "cp" in mesh_axis_names:
+                    counter_partial_axes = ("dp", "cp")
+                elif "tp" in mesh_axis_names:
+                    counter_partial_axes = ("dp",)
+                else:
+                    counter_partial_axes = ()
+                for axis_name in counter_partial_axes:
+                    if axis_name not in mesh_axis_names:
+                        continue
+                    num_tokens_per_expert = spmd.reinterpret(
+                        num_tokens_per_expert,
+                        mesh.get_group(axis_name),
+                        src=spmd.V,
+                        dst=spmd.P,
+                        expert_mode=True,
+                    )
             self.tokens_per_expert.add_(num_tokens_per_expert)
+
+        if (
+            spmd.is_type_checking()
+            and self.experts._sharding_config is not None
+            and self.experts._sharding_config.mesh_reinterpret is not None
+        ):
+            mesh = current_mesh()
+            mesh_axis_names = spmd.current_mesh_names() or {}
+            if mesh is not None:
+                expert_inputs = [x, top_scores, selected_experts_indices]
+                for i, t in enumerate(expert_inputs):
+                    if not spmd.has_local_type(t):
+                        continue
+                    local_type = spmd.get_local_type(t)
+                    for axis_name, axis in mesh_axis_names.items():
+                        if local_type.get(axis) is not spmd.R:
+                            continue
+                        t = spmd.reinterpret(
+                            t,
+                            mesh.get_group(axis_name),
+                            src=spmd.R,
+                            dst=spmd.V,
+                            expert_mode=True,
+                        )
+                    expert_inputs[i] = t
+                x, top_scores, selected_experts_indices = expert_inputs
 
         out = self.experts(
             x,
@@ -368,7 +458,32 @@ class MoE(Module):
             shared_experts=self.shared_experts,
         )
 
+        if spmd.is_type_checking():
+            with spmd.typecheck(local=True):
+                out = out.reshape(bs, slen, dim)
+            if (
+                self._sharding_config is None
+                or self._sharding_config.local_spmd is None
+            ):
+                return spmd.assert_type(
+                    out,
+                    spmd.get_local_type(x_3d),
+                    partition_spec=spmd.get_partition_spec(x_3d),
+                )
+            return out
         return out.reshape(bs, slen, dim)
+
+    def parallelize(self, parallel_dims: ParallelDims) -> None:
+        super().parallelize(parallel_dims)
+        if parallel_dims.ep_enabled:
+            dispatcher = self.experts.token_dispatcher
+            dispatcher.ep_mesh = parallel_dims.get_mesh("ep")
+            if parallel_dims.tp_enabled and isinstance(
+                dispatcher, AllToAllTokenDispatcher
+            ):
+                tp_mesh = parallel_dims.get_mesh("tp")
+                dispatcher.sp_size = tp_mesh.size()
+                dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
