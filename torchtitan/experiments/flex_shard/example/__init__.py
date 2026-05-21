@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from .flat_shard import flat_shard_placements, FlatShard
 from .owned import Owned, param_boundary_placements
 from .ragged_shard import (
     make_ragged_placement_fn,
@@ -14,6 +15,8 @@ from .shard import per_param_placements, Shard
 
 __all__ = [
     "make_ragged_placement_fn",
+    "FlatShard",
+    "flat_shard_placements",
     "Owned",
     "param_boundary_placements",
     "per_param_ragged_placements",

@@ -481,6 +481,12 @@ class BucketRuntime:
         """Start the next bucket's unshard if no prefetch is in flight."""
         if self.context.pending is not None:
             return
+        if self.bucket_storage._reshard_after_forward:
+            # Selective activation checkpointing must see the same unshard ops
+            # in each execution unit's original forward and backward recompute.
+            # Prefetching a bucket from the previous unit moves those ops across
+            # checkpoint boundaries, so reshard-after-forward launches on demand.
+            return
         prefetch_order = self.context.buckets
         is_recompute = self.in_reshard_after_forward_recompute()
         if is_recompute:
@@ -560,7 +566,8 @@ class BucketRuntime:
         )
         full_params = list(_BucketUnshard.apply(runtime, *local_shards))
         self.prefetch_next()
-        self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
+        if not self.in_reshard_after_forward_recompute():
+            self.context.flush_pending_reduce_grad_launches(max_to_flush=1)
         for bucket_param, full_param in zip(
             self.bucket_params, full_params, strict=True
         ):

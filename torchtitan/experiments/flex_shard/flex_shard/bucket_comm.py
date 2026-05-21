@@ -14,6 +14,7 @@ import torch
 from torch.distributed.device_mesh import _get_device_handle
 
 from .placement_contract import PlacementPreparedReduceGrad, PlacementPreparedUnshard
+from .utils import _bucket_compatibility_keys
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -79,11 +80,13 @@ def begin_bucket_unshard(
 ) -> UnshardHandle:
     """Begin a bucket unshard and return a handle for full params."""
     placement = infos[0].placement
+    reference_keys = _bucket_compatibility_keys(infos[0].placements)
     for info in infos[1:]:
-        if info.placement != placement:
+        if _bucket_compatibility_keys(info.placements) != reference_keys:
             raise ValueError(
                 "FlexShard bucket unshard requires all parameters in a "
-                f"bucket to use the same placement, but {infos[0].fqn!r} uses "
+                f"bucket to use bucket-compatible placements, but "
+                f"{infos[0].fqn!r} uses "
                 f"{placement!r} and {info.fqn!r} uses {info.placement!r}."
             )
 
@@ -113,11 +116,13 @@ def prepare_reduce_grad(
 ) -> PreparedReduceGrad:
     """Prepare reduce-grad inputs without launching the collective."""
     placement = infos[0].placement
+    reference_keys = _bucket_compatibility_keys(infos[0].placements)
     for info in infos[1:]:
-        if info.placement != placement:
+        if _bucket_compatibility_keys(info.placements) != reference_keys:
             raise ValueError(
                 "FlexShard bucket reduce-grad requires all parameters in a "
-                f"bucket to use the same placement, but {infos[0].fqn!r} uses "
+                f"bucket to use bucket-compatible placements, but "
+                f"{infos[0].fqn!r} uses "
                 f"{placement!r} and {info.fqn!r} uses {info.placement!r}."
             )
     placement_prepared = placement.prepare_reduce_grad(
