@@ -79,6 +79,8 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, compile_config)
 
+    # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
+    # all-gather but still installs the MixedPrecisionPolicy.
     mesh_names = []
     if parallel_dims.dp_replicate_enabled:
         mesh_names.append("dp_replicate")
@@ -139,13 +141,8 @@ def apply_fsdp(
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
         dp_mesh_dims: For SPMD meshes, ``fully_shard`` must flatten
-            ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
-            needs to know which axes of the multi-D SPMD mesh are
-            data-parallel. We pass this explicitly via ``dp_mesh_dims``
-            rather than letting FSDP infer it from mesh axis names: the
-            naming contract between ``fully_shard`` and torchtitan is not
-            strong enough to infer safely, and an explicit declaration
-            avoids silent miscategorization when new mesh axes appear.
+            ``fsdp`` away from non-data-parallel mesh axes. We pass this
+            explicitly rather than relying on FSDP mesh-name inference.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -154,6 +151,7 @@ def apply_fsdp(
     )
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if dp_mesh_dims is not None:
+        # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         # pyrefly: ignore[bad-typed-dict-key]
