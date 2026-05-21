@@ -35,3 +35,13 @@ learn from past experiments and avoid repeating failed approaches.
 - **Result**: tps=4,460 (+7.2% vs 4,161), mfu=26.12%, memory=47.03 GiB (-2.0 GiB vs 49.0), wall_time=81s, loss=9.21808, grad_norm=4.5867. Bitwise-identical numerics test passes. Pass removed 2006/3358 view nodes; 1222 retained as genuine reshapes.
 - **Analysis**: Identity-view elimination is purely structural so the +7.2% must come from the AOT runtime carrying these no-op nodes through to per-step execution (likely as extra Python/dispatcher overhead and/or reference-keeping that delayed buffer deallocation). The -2.0 GiB confirms the latter — identity views were anchoring tensor lifetimes longer than necessary. Removing them is essentially free (single linear scan, no math change).
 - **Lessons**: (1) Cleanup passes can yield meaningful perf, not just compile-time wins. (2) Run identity-view elimination **first** so subsequent pattern matchers see a clean graph (e.g. producer→view→consumer chains collapse to producer→consumer). (3) IDEAS.md count estimates from grep can underestimate; this confirms with a numeric "actually removed" metric in the pass log.
+
+---
+
+## Drop unused SDPA outputs — discard (xxxxxxx)
+
+- **Idea**: `_scaled_dot_product_flash_attention.default` returns a 9-tuple but only outputs `[0,1,6,7]` are used downstream. The pre-pass graph dump shows 4 dead `getitem` nodes per SDPA × 32 layers = 128 nodes potentially eliminable, mirroring Exp 1's reference-anchoring story.
+- **Changes**: Added `drop_unused_sdpa_outputs` peephole pass; registered after `remove_identity_views`. Scanned the graph for `aten._scaled_dot_product_flash_attention.default` nodes and erased their zero-user `getitem` children.
+- **Result**: tps=4,432, mfu=25.95%, memory=47.0 GiB, wall_time=74s. Pass removed **0** nodes. Numerics test still passes. Tps drift (-0.6% vs Exp 1's 4,460) is within run-to-run noise.
+- **Analysis**: By the time this pass executes (after `remove_identity_views`, which ends with `eliminate_dead_code()`), the dead getitems are already gone. FX's DCE traverses pure ops only — `_scaled_dot_product_flash_attention` is impure (RNG-using) so its node stays, but the individual `getitem` extractors are pure and get dropped as soon as their consumers vanish. The recon's evidence came from the raw post-make_fx dump, *before* any DCE pass had run.
+- **Lessons**: Always sanity-check "dead output" ideas against the *post-DCE* graph, not the raw make_fx dump. The peephole-as-DCE story Exp 1 told doesn't generalize to outputs of impure ops, because the FX framework already handles that case. Recorded in LEARNINGS.md so we don't burn another iteration on this class of idea.

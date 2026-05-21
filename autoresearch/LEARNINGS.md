@@ -28,7 +28,14 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 ## Patterns that didn't work
 
-(empty — agent populates)
+- **Don't trust the pre-pass graph dump for "dead outputs" ideas** (Exp 2).
+  `gm.print_readable()` output taken before any user passes shows zero-user
+  `getitem` nodes from multi-output ops (e.g. `_scaled_dot_product_flash_attention`'s
+  outputs 2..5, 8). These look ripe to delete. They're not — FX's
+  `eliminate_dead_code()` already removes them as soon as any pass calls it
+  (the producer is impure, but `getitem` itself is pure, so DCE drops it).
+  When evaluating "remove dead outputs of op X" ideas, sanity-check against the
+  post-DCE graph first; if it's gone, skip.
 
 ## Tooling tips
 
