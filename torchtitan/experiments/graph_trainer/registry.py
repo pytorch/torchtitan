@@ -7,8 +7,8 @@
 """
 Pass and hook registries for graph_trainer.
 
-Centralizes all registries so that ``passes.py`` and ``memory_policy.py``
-can both import from here without circular dependencies.
+Centralizes registries so multiple modules can import from here without
+circular dependencies.
 """
 
 from __future__ import annotations
@@ -38,12 +38,10 @@ def _make_registry_decorator(registry: dict):
 # Registries — keyed by string name
 # ---------------------------------------------------------------------------
 
-MEMORY_POLICY_REGISTRY: dict[str, Callable] = {}
 PASS_PIPELINE_REGISTRY: dict[str, Callable] = {}
 POST_INIT_HOOKS: dict[str, Callable] = {}
 PRE_TRAIN_STEP_HOOKS: dict[str, Callable] = {}
 
-register_memory_policy = _make_registry_decorator(MEMORY_POLICY_REGISTRY)
 register_pass_pipeline = _make_registry_decorator(PASS_PIPELINE_REGISTRY)
 register_post_init_hook = _make_registry_decorator(POST_INIT_HOOKS)
 register_pre_train_step_hook = _make_registry_decorator(PRE_TRAIN_STEP_HOOKS)

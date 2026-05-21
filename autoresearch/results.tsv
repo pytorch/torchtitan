@@ -1,0 +1,2 @@
+timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
+2026-05-21T14:09:00	baseline	4161	49.0	keep	24.36	75	Run 1 baseline: Llama3 8B FSDP=4 TP=2 bs=1 8xH100; c4_test; construct_default_graph_passes returns empty list

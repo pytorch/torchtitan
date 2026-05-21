@@ -84,8 +84,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
     def setUp(self):
         # Disable max_autotune for FlexAttention to ensure bitwise-identical
-        # results between eager (torch.compile) and traced (regional_inductor)
-        # paths. max_autotune causes kernel config divergence between the two.
+        # results between the eager and traced paths. max_autotune causes
+        # kernel config divergence between the two.
         self._orig_inductor_configs = FlexAttention.inductor_configs
         self._orig_compiled_flex_attn = FlexAttention._compiled_flex_attn
         FlexAttention.inductor_configs = {
@@ -143,7 +143,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         trainer_cls: type,
         *,
         enable_passes: bool = True,
-        numerics_changing_optim: bool = False,
     ) -> tuple[torch.Tensor, str, str]:
         """Run forward-backward-optimizer steps using the given trainer class."""
         # Annotate after deepcopy: annotate_fn wrappers capture bound methods
@@ -154,7 +153,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             self.model_config,
             trainer_cls,
             compile_enable_passes=enable_passes,
-            compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         )
         global_valid_tokens = torch.tensor(
@@ -222,20 +220,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
             extra_kwargs,
         )
 
-        # Step 2: Apply compile-time passes (cleanup + regional_inductor)
-        # before saving, so compiled Triton kernels are baked in
+        # Step 2: Apply compile-time passes before saving
         if enable_passes:
             config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
-                compile=SimpleNamespace(
-                    memory_policy="default",
-                    inductor_compilation="regional",
-                    numerics_changing_optim=False,
-                    cpu_offload_prefetch_n_layers=1,
-                    cpu_offload_defer_n_layers=1,
-                    cpu_offload_budget_gb=100.0,
-                    enable_fsdp_ag_rs_overlap=False,
-                ),
+                compile=SimpleNamespace(),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
                     fsdp_reshard_after_forward="default",
@@ -256,13 +245,12 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
             loaded_result = precompile_fx_trace_load(storage, expected_fingerprint="")
 
-        # Step 4: Apply load-time passes (cudagraph)
+        # Step 4: Apply load-time passes
         if enable_passes:
             load_config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
                 compile=SimpleNamespace(
                     precompile_artifact_dir="precompiled",
-                    inductor_compilation="regional",
                     disable_passes=[],
                 ),
             )
@@ -358,21 +346,6 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
-    def test_numerics_changing_optim_run_to_run(self):
-        """Two runs with numerics_changing_optim produce bitwise identical results."""
-        run_a = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-        run_b = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-
-        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
-
 
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
@@ -416,26 +389,11 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
-    def test_numerics_changing_optim_run_to_run(self):
-        """Two runs with numerics_changing_optim produce bitwise identical results."""
-        run_a = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-        run_b = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-
-        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
-
 
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
-    aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
+    aot_fx_trace traces FlexAttention HOPs and produces
     Triton kernels and produces bitwise identical results to eager.
     """
 
@@ -479,26 +437,11 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
-    def test_numerics_changing_optim_run_to_run(self):
-        """Two runs with numerics_changing_optim produce bitwise identical results."""
-        run_a = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-        run_b = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-
-        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
-
 
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
-    aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
+    aot_fx_trace traces FlexAttention HOPs and produces
     Triton kernels and produces bitwise identical results to eager.
     """
 
@@ -548,26 +491,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
-    # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0),
-        "flex_attention compilation exceeds resource limits on pre-Hopper GPUs",
-    )
-    def test_numerics_changing_optim_run_to_run(self):
-        """Two runs with numerics_changing_optim produce bitwise identical results."""
-        run_a = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-        run_b = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-
-        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
-
 
 class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE debug model."""
@@ -611,26 +534,11 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
 
-    def test_numerics_changing_optim_run_to_run(self):
-        """Two runs with numerics_changing_optim produce bitwise identical results."""
-        run_a = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-        run_b = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-
-        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
-
 
 class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE with FlexAttention.
 
-    aot_fx_trace compiles FlexAttention HOPs via regional_inductor into fused
+    aot_fx_trace traces FlexAttention HOPs and produces
     Triton kernels and produces bitwise identical results to eager.
     """
 
@@ -673,21 +581,6 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_precompile = self._run_steps_with_precompile(copy.deepcopy(self.model))
 
         self._assert_runs_match(run_traced, run_precompile, "trace vs precompile: ")
-
-    def test_numerics_changing_optim_run_to_run(self):
-        """Two runs with numerics_changing_optim produce bitwise identical results."""
-        run_a = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-        run_b = self._run_steps(
-            copy.deepcopy(self.model),
-            GraphTrainer,
-            numerics_changing_optim=True,
-        )
-
-        self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
 if __name__ == "__main__":
