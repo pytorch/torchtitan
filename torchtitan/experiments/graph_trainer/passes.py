@@ -39,6 +39,95 @@ def compile_time_passes(
     return construct_default_graph_passes(traced_result, config)
 
 
+def remove_identity_views(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Peephole pass that removes identity ``aten.view.default`` nodes.
+
+    DTensor plumbing (e.g. ``_api.py:112`` / ``_api.py:229``) emits many
+    ``view.default(x, list(x.shape))`` calls — structural no-ops that still
+    cost FX/compile time and can confuse downstream fusion. Replace each
+    such node with its input.
+
+    Only eliminate when input and target shape can be proven equal without
+    symbolic guards; SymInt shapes that can't be statically resolved are
+    skipped.
+    """
+    view_target = torch.ops.aten.view.default
+    num_removed = 0
+    num_view_nodes = 0
+    skipped_no_meta = 0
+    skipped_symint = 0
+    skipped_shape_mismatch = 0
+
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not view_target:
+            continue
+        num_view_nodes += 1
+
+        if len(node.args) < 2:
+            continue
+        input_node = node.args[0]
+        target_size = node.args[1]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        val = input_node.meta.get("val", None)
+        if val is None or not hasattr(val, "shape"):
+            skipped_no_meta += 1
+            continue
+        input_shape = val.shape
+        if len(input_shape) != len(target_size):
+            skipped_shape_mismatch += 1
+            continue
+
+        equal = True
+        for s_in, s_target in zip(input_shape, target_size):
+            # Both ints: easy.
+            if isinstance(s_in, int) and isinstance(s_target, int):
+                if s_in != s_target:
+                    equal = False
+                    break
+                continue
+            # Otherwise try identity comparison (same SymInt object) — safe
+            # because identical SymNodes mean identical symbolic values
+            # without introducing guards.
+            if s_in is s_target:
+                continue
+            # Mixed / non-identical SymInt: skip this view to avoid guards.
+            equal = False
+            skipped_symint += 1
+            break
+
+        if not equal:
+            if not isinstance(input_shape[0], int) or any(
+                not isinstance(s, int) for s in input_shape
+            ):
+                # Already accounted for in skipped_symint when applicable.
+                pass
+            else:
+                # Shape mismatch on concrete ints — real reshape, leave alone.
+                pass
+            continue
+
+        node.replace_all_uses_with(input_node)
+        gm.graph.erase_node(node)
+        num_removed += 1
+
+    if num_removed:
+        gm.graph.eliminate_dead_code()
+        gm.graph.lint()
+        gm.recompile()
+
+    logger.info(
+        f"remove_identity_views: removed {num_removed}/{num_view_nodes} "
+        f"aten.view.default nodes "
+        f"(skipped: no_meta={skipped_no_meta}, symint={skipped_symint}, "
+        f"shape_mismatch={skipped_shape_mismatch})"
+    )
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -47,7 +136,9 @@ def construct_default_graph_passes(
 
     The agent adds custom passes to this list.
     """
-    passes: list[Callable] = []
+    passes: list[Callable] = [
+        remove_identity_views,
+    ]
     return passes
 
 
