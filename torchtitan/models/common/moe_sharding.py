@@ -77,7 +77,7 @@ def moe_wrapper_config(*, enable_sp: bool) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "expert_bias": dense_param_placement(tp=spmd.R),
-            "tokens_per_expert": dense_counter_placement(),
+            "tokens_per_expert": dense_counter_placement(local=True),
         },
         in_src_shardings={"x": dense_activation_placement(tp=sp_tp)},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R)},
@@ -87,21 +87,12 @@ def moe_wrapper_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def moe_wrapper_state_config() -> ShardingConfig:
-    """MoE wrapper state only, for runs without real dense TP."""
-    return ShardingConfig(
-        state_shardings={
-            "expert_bias": dense_param_placement(tp=spmd.R),
-            "tokens_per_expert": dense_counter_placement(),
-        },
-    )
-
-
-def dense_counter_placement() -> NamedPlacement:
-    """Placement for additive counters accumulated from local token shards."""
+def dense_counter_placement(*, local: bool) -> NamedPlacement:
+    """Placement for counters accumulated from local token shards."""
+    token_axis_type = spmd.V if local else spmd.P
     return {
-        DP: spmd.P,
-        CP: spmd.P,
+        DP: token_axis_type,
+        CP: token_axis_type,
         TP: spmd.R,
     }
 
@@ -189,19 +180,11 @@ def routed_expert_ep_config(
     """EP-enabled routed experts: S(0)@ep on sparse mesh.
 
     All expert params are sharded on the expert dimension (dim 0)
-    across EP ranks. When TP is also enabled, inputs arrive from the
-    dense mesh (dp, tp) and need reinterpret to sparse mesh axes.
+    across EP ranks. Dense/sparse activation transitions are explicit in
+    the MoE dispatch/combine code.
     """
-    mesh_reinterpret = None
-    if enable_tp:
-        mesh_reinterpret = {
-            DP_REPLICATE: spmd.V,
-            EFSDP: spmd.V,
-            EP: spmd.V,
-        }
     return ShardingConfig(
         state_shardings={name: sparse_param_placement() for name in param_names},
-        mesh_reinterpret=mesh_reinterpret,
     )
 
 
@@ -252,7 +235,7 @@ def set_moe_sharding_config(
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
 
-    - ``moe`` (wrapper): dense-family ``LocalSpmdConfig`` when TP or CP is enabled.
+    - ``moe`` (wrapper): dense-family ``LocalSpmdConfig`` for all configs.
     - ``moe.router.gate``: R@tp weight with I→R convert hook.
     - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP with Partial flow.
     - ``moe.experts``: sparse-family EP (S(0)@ep) when EP enabled,
@@ -261,23 +244,15 @@ def set_moe_sharding_config(
     if expert_param_layout is None:
         expert_param_layout = {"w1": spmd.S(1), "w2": spmd.S(2), "w3": spmd.S(1)}
 
-    if enable_tp or enable_cp:
-        moe_cfg.sharding_config = moe_wrapper_config(enable_sp=enable_sp)
-        moe_cfg.router.gate.sharding_config = router_gate_config(
-            has_bias=router_has_bias
-        )
+    moe_cfg.sharding_config = moe_wrapper_config(enable_sp=enable_sp)
+    moe_cfg.router.gate.sharding_config = router_gate_config(has_bias=router_has_bias)
 
-        if getattr(moe_cfg, "shared_experts", None) is not None:
+    if getattr(moe_cfg, "shared_experts", None) is not None:
+        if enable_tp:
             moe_cfg.shared_experts.w1.sharding_config = shared_expert_colwise_config()
             moe_cfg.shared_experts.w2.sharding_config = shared_expert_rowwise_config()
             moe_cfg.shared_experts.w3.sharding_config = shared_expert_colwise_config()
-    else:
-        moe_cfg.sharding_config = moe_wrapper_state_config()
-        moe_cfg.router.gate.sharding_config = router_gate_config(
-            has_bias=router_has_bias
-        )
-
-        if getattr(moe_cfg, "shared_experts", None) is not None:
+        else:
             moe_cfg.shared_experts.w1.sharding_config = shared_expert_state_config()
             moe_cfg.shared_experts.w2.sharding_config = shared_expert_state_config()
             moe_cfg.shared_experts.w3.sharding_config = shared_expert_state_config()
