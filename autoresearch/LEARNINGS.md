@@ -42,6 +42,23 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   downstream pattern matchers see a clean graph and aren't tripped up by
   identity-view chains separating producer and consumer.
 
+## Matmul fusion is bitwise-safe when K is unchanged but hurts perf (Exps 38-39)
+
+Fusing multiple `mm(x, t(W))` into one `mm(x, t(cat([W1,...], dim=0)))` DOES preserve
+bitwise numerics when (a) all weights share the SAME K dimension AND (b) the fused
+weight only differs in N (row count), as shown by Exp 39's w1/w3 fusion (same K=4096,
+N doubled 7168→14336, bitwise PASS). Exp 38's QKV fusion (K=4096 unchanged but Q/K/V
+have DIFFERENT N: 4096/1024/1024) FAILED bitwise — cuBLAS changed splitK strategy for
+the heterogeneous shape.
+
+**But the performance is NEGATIVE:** the fused GEMM is ~1% SLOWER than separate GEMMs
+because (a) PyTorch already schedules independent mm ops on concurrent SMs, (b) the
+larger output matrix has worse L2 cache residency, and (c) cat+split overhead adds ops.
+Memory penalty is also large: +28 GiB from fused weight + output allocations.
+
+**Do not fuse matmuls for performance via FX rewrite.** The model's `FusedQKVLinear`
+(config-level, out of scope) is the proper solution since it avoids the cat.
+
 ## Determinism flag dramatically changes the noise floor (Exp 27)
 
 The `--debug.deterministic` flag adds ~7% step overhead (NaN-fill kernels,
