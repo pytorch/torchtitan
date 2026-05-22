@@ -15,6 +15,7 @@ pass functions and registers them in ``construct_default_graph_passes``.
 from __future__ import annotations
 
 import functools
+import operator
 import time
 from collections.abc import Callable
 
@@ -313,6 +314,234 @@ def remove_identity_ops(
     return gm
 
 
+def elide_split_cat_for_reduce_scatter(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Replace ``cat([split(x, ...)], dim=0)`` with a no-copy ``view`` when the
+    cat output is consumed by a ``reduce_scatter_tensor``.
+
+    Every TP-sharded matmul (wo / w2 / lm_head / tok_embeddings) emits the
+    pattern
+
+    .. code-block:: python
+
+        s_i = aten.split.Tensor(x, split_size, split_dim)          # views
+        y   = aten.cat.default([s_0, ..., s_{N-1}])                # dim=0, alloc
+        z   = reduce_scatter_tensor(y, 'sum', world_size, group)
+
+    where ``x`` is contiguous with shape ``[..., N*split_size, ...]`` along
+    ``split_dim`` and the cat stacks the resulting views back along a new
+    outer axis (``dim=0``). When ``split_dim`` is the *second* tensor dim
+    (so collapsing it produces an extra leading dim) and ``x`` is
+    contiguous, the cat is byte-equivalent to viewing ``x`` as the cat's
+    output shape — no data movement is required.
+
+    Concretely, for the high-volume Llama3 8B TP=2 case
+    ``x : bf16[1, 8192, 4096][33554432, 4096, 1]`` with
+    ``split(x, 4096, 1)`` followed by ``cat([s0, s1])`` (dim=0 default)
+    produces ``[2, 4096, 4096][16777216, 4096, 1]`` whose byte layout is
+    identical to ``x`` viewed as ``[2, 4096, 4096]``: dropping the cat
+    saves a 64 MiB allocation and copy per occurrence (~130/step on
+    Llama3 8B).
+    """
+    cat_target = torch.ops.aten.cat.default
+    split_target = torch.ops.aten.split.Tensor
+    rs_target = torch.ops._c10d_functional.reduce_scatter_tensor.default
+    view_target = torch.ops.aten.view.default
+
+    num_cat_total = 0
+    num_elided = 0
+    skipped_not_dim0 = 0
+    skipped_no_rs_consumer = 0
+    skipped_not_pure_split = 0
+    skipped_non_contiguous = 0
+    skipped_no_meta = 0
+    skipped_symint = 0
+    skipped_shape_mismatch = 0
+
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not cat_target:
+            continue
+        num_cat_total += 1
+
+        # aten.cat.default(tensors, dim=0) — dim is args[1] when present,
+        # otherwise the default 0.
+        cat_dim = node.args[1] if len(node.args) >= 2 else 0
+        if cat_dim != 0:
+            skipped_not_dim0 += 1
+            continue
+
+        cat_inputs = node.args[0]
+        if not isinstance(cat_inputs, (list, tuple)) or len(cat_inputs) == 0:
+            continue
+
+        # All cat inputs must be getitem nodes pointing at the same split.
+        split_node = None
+        getitem_indices: list[int] = []
+        ok = True
+        for inp in cat_inputs:
+            if not isinstance(inp, torch.fx.Node):
+                ok = False
+                break
+            if inp.op != "call_function" or inp.target is not operator.getitem:
+                ok = False
+                break
+            parent = inp.args[0]
+            if not isinstance(parent, torch.fx.Node):
+                ok = False
+                break
+            if parent.op != "call_function" or parent.target is not split_target:
+                ok = False
+                break
+            if split_node is None:
+                split_node = parent
+            elif parent is not split_node:
+                ok = False
+                break
+            idx = inp.args[1]
+            if not isinstance(idx, int):
+                ok = False
+                break
+            getitem_indices.append(idx)
+        if not ok or split_node is None:
+            skipped_not_pure_split += 1
+            continue
+
+        # Split args: (x, split_size, split_dim=0)
+        if len(split_node.args) < 2:
+            skipped_not_pure_split += 1
+            continue
+        x_node = split_node.args[0]
+        if not isinstance(x_node, torch.fx.Node):
+            skipped_not_pure_split += 1
+            continue
+        split_dim = split_node.args[2] if len(split_node.args) >= 3 else 0
+        if not isinstance(split_dim, int):
+            skipped_not_pure_split += 1
+            continue
+
+        x_val = x_node.meta.get("val", None)
+        cat_val = node.meta.get("val", None)
+        if (
+            x_val is None
+            or cat_val is None
+            or not hasattr(x_val, "shape")
+            or not hasattr(cat_val, "shape")
+        ):
+            skipped_no_meta += 1
+            continue
+
+        x_shape = list(x_val.shape)
+        cat_shape = list(cat_val.shape)
+
+        # Only handle concrete int shapes; SymInt is out of scope.
+        if any(not isinstance(s, int) for s in x_shape) or any(
+            not isinstance(s, int) for s in cat_shape
+        ):
+            skipped_symint += 1
+            continue
+
+        # Geometry equivalence: cat([split(x, k, d)], dim=0) is byte-identical
+        # to view(x, cat_shape) iff
+        #   1. x is contiguous
+        #   2. split_dim is the *second* tensor dim (index 1) and ranks before
+        #      it are all size 1 — i.e. x[:k, :] type shapes — so collapsing
+        #      that axis into an outer N=axis-size/k just reshapes contiguous
+        #      bytes.  More generally, the prefix dims of x before split_dim
+        #      must all be size 1 so that the cat's new leading dim
+        #      effectively replaces them.
+        #   3. The number of splits equals cat's leading dim.
+        #   4. The trailing shape after split_dim matches cat_shape[1+...].
+        if split_dim < 1 or split_dim >= len(x_shape):
+            skipped_shape_mismatch += 1
+            continue
+        if any(s != 1 for s in x_shape[:split_dim]):
+            skipped_shape_mismatch += 1
+            continue
+
+        num_splits = len(cat_inputs)
+        # cat output shape should be [num_splits, split_size, *x_shape[split_dim+1:]]
+        # where split_size = x_shape[split_dim] // num_splits exactly.
+        axis_size = x_shape[split_dim]
+        if num_splits == 0 or axis_size % num_splits != 0:
+            skipped_shape_mismatch += 1
+            continue
+        split_size = axis_size // num_splits
+        # split_node.args[1] is the declared split size; it must match.
+        if not isinstance(split_node.args[1], int) or split_node.args[1] != split_size:
+            skipped_shape_mismatch += 1
+            continue
+        # Expected cat shape: [num_splits, split_size, *x_shape[split_dim+1:]]
+        expected_cat_shape = [num_splits, split_size] + x_shape[split_dim + 1 :]
+        if cat_shape != expected_cat_shape:
+            skipped_shape_mismatch += 1
+            continue
+        # The getitems should consume the split in increasing index order
+        # (cat stacks them in input order).
+        if getitem_indices != list(range(num_splits)):
+            skipped_shape_mismatch += 1
+            continue
+
+        # Contiguity check on the split source: only valid when x's byte
+        # layout matches what `view(cat_shape)` would expect.
+        try:
+            x_is_contig = bool(x_val.is_contiguous())
+        except Exception:
+            x_is_contig = False
+        if not x_is_contig:
+            skipped_non_contiguous += 1
+            continue
+
+        # The cat must feed a reduce_scatter (single consumer).
+        cat_users = list(node.users)
+        if len(cat_users) != 1:
+            skipped_no_rs_consumer += 1
+            continue
+        rs = cat_users[0]
+        if rs.op != "call_function" or rs.target is not rs_target:
+            skipped_no_rs_consumer += 1
+            continue
+
+        # Perform the rewrite: insert view(x, cat_shape) just before the cat.
+        with gm.graph.inserting_before(node):
+            new_view = gm.graph.call_function(
+                view_target, args=(x_node, list(cat_shape))
+            )
+        new_view.meta["val"] = cat_val
+        # Preserve source-location / annotations from the original cat so
+        # downstream tooling (tlparse, annotations) keeps attribution.
+        if "stack_trace" in node.meta:
+            new_view.meta["stack_trace"] = node.meta["stack_trace"]
+        if "custom" in node.meta:
+            new_view.meta["custom"] = node.meta["custom"]
+
+        node.replace_all_uses_with(new_view)
+        gm.graph.erase_node(node)
+        num_elided += 1
+        # DCE will reclaim the split + getitems if they have no other users;
+        # if any getitem has additional consumers, the split stays alive.
+
+    if num_elided:
+        gm.graph.eliminate_dead_code()
+        gm.graph.lint()
+        gm.recompile()
+
+    # Saved memory traffic: each elided cat avoids ``2 * cat_shape.numel() *
+    # dtype.itemsize`` bytes of alloc+copy (read+write). At 130 cats × 64 MiB
+    # each in the Llama3 8B TP=2 case, that's ~8.3 GiB per step.
+    logger.info(
+        f"elide_split_cat_for_reduce_scatter: elided {num_elided}/{num_cat_total} "
+        f"split-cat-reduce_scatter cats (skipped: not_dim0={skipped_not_dim0}, "
+        f"not_pure_split={skipped_not_pure_split}, "
+        f"no_rs_consumer={skipped_no_rs_consumer}, "
+        f"non_contiguous={skipped_non_contiguous}, "
+        f"shape_mismatch={skipped_shape_mismatch}, "
+        f"no_meta={skipped_no_meta}, symint={skipped_symint})"
+    )
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -324,6 +553,7 @@ def construct_default_graph_passes(
     passes: list[Callable] = [
         remove_identity_views,
         remove_identity_ops,
+        elide_split_cat_for_reduce_scatter,
     ]
     return passes
 

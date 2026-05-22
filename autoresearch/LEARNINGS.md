@@ -127,6 +127,20 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   intra-layer barrier — the hoist target is wrong. Expect 1.5-2.0+ for
   cross-layer prefetch to be meaningful.
 
+- **TP `split→cat→reduce_scatter` cat is provably a view** (Exp 11, +1.58% tps).
+  When the split source `x` is contiguous, `cat([split[0], split[1]], dim=0)`
+  has byte-layout identical to `x.view([W, N, D])` for `W=2, N=split_size, D`.
+  Proven element-by-element: cat-element `(r, i, j)` lands at byte
+  `r*N*D + i*D + j`, which matches `x`-element `(0, r*N+i, j)` at byte
+  `(r*N+i)*D + j`. Replacing the cat with a view is zero-copy, NCCL accepts
+  it, and numerics are bitwise-identical. The pattern fires after every
+  TP-sharded matmul (130×/step in this graph) — generalizes to any
+  "split-along-inner → cat-along-outer-to-stack-for-RS" sequence-parallel
+  scatter idiom. Memory floor doesn't drop because the cats are short-lived
+  intermediates; the win is launch-count + memcpy bandwidth (~8.3 GiB/step
+  of avoidable allocation/copy traffic). Always verify the split source's
+  `meta["val"].is_contiguous()` before rewriting; skip otherwise.
+
 - **Sub-200-ops/step metadata cleanup is below noise floor** (Exps 9, 10).
   Exp 9 removed 194 detach nodes (+0.2%). Exp 10 removed 160 nodes (96 view
   + 32 _conj + 32 clone CSE, +0.4%). Both well under +1% threshold. The
