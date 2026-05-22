@@ -57,3 +57,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T19:22:00	xxxxxxx	6399	47.0	stability	37.47	70	stability batch 9: n=15 mean=6399 sd=42; total ~118 samples; grand mean ~6,390
 2026-05-22T19:40:00	xxxxxxx	6390	47.0	stability	37.41	70	stability batch 10: n=15 mean=6390 sd=29; total ~133 samples; grand mean confirmed ~6,390 tps
 2026-05-22T19:50:00	xxxxxxx	0	0.0	crash	0.00	0	exp46 decompose_rope_complex_mul: 64 fwd matches rewritten to real f32 arithmetic; CRASH — c64 mul uses FMA (fma(a,c,-b*d)), our mul+sub rounds twice; loss diverges by ~5e-7 ULP
+2026-05-22T19:55:00	xxxxxxx	0	0.0	discard	0.00	0	exp47 torch.compile whole graph: no_target — returns OptimizedModule not GraphModule; apply_graph_passes asserts GraphModule; structurally impossible within pass contract
