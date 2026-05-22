@@ -12,8 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-import spmd_types as spmd
-from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
+from torchtitan.distributed.spmd_state import set_current_mesh
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -81,6 +80,7 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
+        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -92,7 +92,9 @@ class GroupedExperts(Module):
         sparse_mesh = getattr(self.token_dispatcher, "sparse_mesh", None)
         with set_current_mesh(sparse_mesh):
             routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x)
+        return self.token_dispatcher.combine(
+            routed_output, metadata, x, shared_experts=shared_experts
+        )
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
@@ -362,10 +364,15 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        out = self.experts(x, top_scores, selected_experts_indices)
-
-        # shared_experts runs in parallel with deepep combine communication.
-        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+        if self.shared_experts is not None:
+            out = self.experts(
+                x,
+                top_scores,
+                selected_experts_indices,
+                shared_experts=self.shared_experts,
+            )
+        else:
+            out = self.experts(x, top_scores, selected_experts_indices)
 
         if (
             isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
@@ -378,31 +385,6 @@ class MoE(Module):
 
             sync_combine()
 
-        if shared_out is not None:
-            if spmd.is_type_checking() and spmd.has_local_type(out):
-                mesh = current_mesh()
-                routed_type = spmd.get_local_type(out)
-                shared_type = (
-                    spmd.get_local_type(shared_out)
-                    if spmd.has_local_type(shared_out)
-                    else {}
-                )
-                mesh_axis_names = spmd.current_mesh_names() or {}
-                if mesh is not None:
-                    for axis_name, axis in mesh_axis_names.items():
-                        if routed_type.get(axis) is not spmd.P:
-                            continue
-                        src_type = shared_type.get(axis, spmd.R)
-                        if src_type is spmd.P:
-                            continue
-                        shared_out = spmd.reinterpret(
-                            shared_out,
-                            mesh.get_group(axis_name),
-                            src=src_type,
-                            dst=spmd.P,
-                            expert_mode=True,
-                        )
-            out = out + shared_out
         return out.reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

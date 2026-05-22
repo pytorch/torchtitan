@@ -267,6 +267,8 @@ class LocalTokenDispatcher(Configurable):
         routed_output: torch.Tensor,
         metadata: LocalDispatchMetadata,
         x: torch.Tensor,
+        combine_base: torch.Tensor | None = None,
+        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Score and scatter_add routed expert outputs.
 
@@ -278,7 +280,14 @@ class LocalTokenDispatcher(Configurable):
         Returns:
             (num_tokens, dim) combined output.
         """
-        out = torch.zeros_like(x)
+        if combine_base is not None and shared_experts is not None:
+            raise ValueError("combine_base and shared_experts are mutually exclusive")
+        if combine_base is not None:
+            out = combine_base
+        elif shared_experts is not None:
+            out = shared_experts(x)
+        else:
+            out = torch.zeros_like(x)
         return self._scatter_local_expert_outputs(
             out,
             routed_output,
@@ -602,6 +611,8 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         routed_output: torch.Tensor,
         metadata: AllToAllDispatchMetadata,
         x: torch.Tensor,
+        combine_base: torch.Tensor | None = None,
+        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Reverse the dispatch: unpermute + all-to-all + score + scatter_add.
 
@@ -619,7 +630,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """
         # EP=1: fall back to local combine (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().combine(routed_output, metadata, x)
+            return super().combine(
+                routed_output,
+                metadata,
+                x,
+                combine_base=combine_base,
+                shared_experts=shared_experts,
+            )
         assert self.sparse_mesh is not None
 
         with set_current_mesh(self.sparse_mesh):
@@ -643,7 +660,14 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
                 self._dense_token_placement(),
             )
 
-        out = torch.zeros_like(x)
+        if combine_base is not None and shared_experts is not None:
+            raise ValueError("combine_base and shared_experts are mutually exclusive")
+        if combine_base is not None:
+            out = combine_base
+        elif shared_experts is not None:
+            out = shared_experts(x)
+        else:
+            out = torch.zeros_like(x)
         routed_type = _local_type_like(routed_output)
 
         # With SP, token indices are 0-based within the local shard.
