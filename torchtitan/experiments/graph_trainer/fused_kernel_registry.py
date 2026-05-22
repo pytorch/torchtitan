@@ -54,13 +54,21 @@ _UNFUSABLE_OPS = {
     "bucketing._pre_bucket_reduce_scatter.default",
     "aten._scaled_dot_product_flash_attention.default",
     "aten._scaled_dot_product_flash_attention_backward.default",
-    "aten.embedding.default",
-    "aten.embedding_dense_backward.default",
+    # Matmul: dedicated kernels (cublas/cutlass), not part of fused triton.
+    "aten.mm.default",
+    "aten.bmm.default",
+    "aten.addmm.default",
+    # Complex-tensor reinterpret views: triton can't handle conjugate views
+    # or change-of-dtype views of complex tensors.
+    "aten.view_as_complex.default",
+    "aten.view_as_real.default",
+    "aten._conj.default",
 }
 
 # Namespaces where ALL ops are unfusable
 _UNFUSABLE_NAMESPACES = {"_c10d_functional", "ao", "bucketing"}
 
+# Kept for FqnRegionExtractor's "already optimized" filter (not for classifier).
 _ALREADY_OPTIMIZED_OPS = {
     "aten.mm.default",
     "aten.bmm.default",
@@ -124,6 +132,8 @@ _POINTWISE_OPS = frozenset({
     "aten.index.Tensor",
     "aten.gather.default",
     "aten.scatter.value", "aten.scatter.src",
+    "aten.embedding.default",
+    "aten.embedding_dense_backward.default",
 })
 
 # Reduction ops — fusible (inductor groups them with pointwise epilogs).
@@ -234,27 +244,24 @@ def _is_unfusable(node: torch.fx.Node) -> bool:
 def _classify_node(node: torch.fx.Node) -> str:
     """Classify a node as one of:
 
-      ``"unfusable"`` — collectives, embedding, flash attention, etc.
-      ``"matmul"``    — mm/bmm/addmm (already optimized, not standalone fusible)
+      ``"unfusable"`` — collectives, matmul, flash attention, complex
+                        tensor views — never fuse.
       ``"view"``      — pure view/reshape (doesn't block fusion, isn't a kernel)
-      ``"pointwise"`` — elementwise ops, dtype convert, etc.
+      ``"pointwise"`` — elementwise ops, dtype convert, embedding/gather, etc.
       ``"reduction"`` — sum/mean/amax/etc.
       ``"decomposable"`` — _fused_rms_norm/layernorm/softmax/nll (decompose
                           into pointwise+reduction and are fusible as a whole)
-      ``"other"``     — anything not on our allow-list
+      ``"other"``     — anything not on our allow-list (treated as unfusable)
 
-    This is a graph_trainer-specific classifier, deliberately independent
-    of inductor's ``is_fusible_node`` which expects a post-decomposition
-    graph and miscategorizes many of our pre-decomp nodes (e.g.
-    ``bucketing.*`` tagged True, ``_to_copy`` / ``silu`` tagged False).
+    Graph_trainer-specific classifier, deliberately independent of
+    inductor's ``is_fusible_node`` which expects a post-decomposition
+    graph and miscategorizes many of our pre-decomp nodes.
     """
     if node.op != "call_function":
         return "other"
     if _is_unfusable(node):
         return "unfusable"
     target_str = str(node.target)
-    if target_str in _ALREADY_OPTIMIZED_OPS:
-        return "matmul"
     if target_str in _POINTWISE_OPS:
         return "pointwise"
     if target_str in _REDUCTION_OPS:
