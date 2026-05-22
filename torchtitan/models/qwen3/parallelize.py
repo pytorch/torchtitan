@@ -85,8 +85,8 @@ def parallelize_qwen3(
     }
 
     layers = list(model.layers.values())
-    for i in range(0, len(layers), 3):
-        fully_shard(layers[i : i + 3], **fsdp_config)
+    for layer in layers:
+        fully_shard(layer, **fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
     if layers:
