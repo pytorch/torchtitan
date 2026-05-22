@@ -189,7 +189,7 @@ def qwen3_14b() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry(
             "14B",
-            attn_backend="sdpa",
+            attn_backend="flex_flash",
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
