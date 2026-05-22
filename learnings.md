@@ -7877,3 +7877,33 @@ Interpretation:
 
 - Grouping two transformer layers per FSDP parameter group is valid and fits, but it increases memory and remains below the durable per-layer FSDP grouping.
 - The reduction in collective count does not compensate for coarser all-gather granularity or weaker overlap. Restore one FSDP group per transformer layer.
+
+## Experiment 331: Flex Flash After CUTE Dependency Install
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run331-flex-flash-after-cute-install-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Set Qwen3 14B `attn_backend="flex_flash"`.
+
+Result:
+
+- Status: crash.
+- The pre-run dependency checks passed:
+  `cutlass.utils.ampere_helpers`, `flash_attn.cute.interface`, `_flash_attn_fwd`, `_flash_attn_bwd`, `ensure_cute_available()`, and `ensure_flash_available()` were all available.
+- The run failed before completing step 1.
+- Root cause:
+
+```text
+ModuleNotFoundError: No module named 'flash_attn.cute.block_sparsity'
+```
+
+Interpretation:
+
+- Installing compatible CUTLASS DSL fixed the earlier import barrier and allowed Inductor to generate/launch CUTE FlashAttention code.
+- The installed FlashAttention package still lacks `flash_attn.cute.block_sparsity`, which this PyTorch Inductor CUTE template imports at runtime.
+- Restore SDPA. `flex_flash` remains blocked until the FlashAttention package/source revision matches this PyTorch Inductor expectation.
