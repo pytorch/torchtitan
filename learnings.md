@@ -7957,3 +7957,30 @@ Interpretation:
 - The `flex_flash` path still does not run for this workload. The blocker has moved to a CUTE FlashAttention SM100 block-sparse correction path where an expected tensor/object is `None`.
 - This now looks like a FlashAttention/PyTorch CUTE API or shape mismatch, not a simple dependency installation gap.
 - Restore SDPA and keep `flex_flash` closed unless broader dependency/source patching becomes allowed.
+
+## Experiment 333: CUTE DSL GEMM Autotune Backend
+
+Command:
+
+```bash
+CUTEDSL_ENABLE_AUTOTUNING=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=ATEN,CUTEDSL NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run333-cutedsl-gemm-autotune-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,481, below the run318 10,658 measured peak.
+- Step 10 MFU: 39.25%.
+- Step 10 peak memory: 169.10 GiB, 94.81%.
+- Loss moved from 12.49151 at step 1 to 5.80813 at step 10; finite and overall decreasing, although step 3 rose locally.
+- No CUTE DSL lowering error, traceback, allocator retry, OOM, NCCL warning, DTensor warning, dataset re-loop, or DataLoader warning appeared.
+
+Interpretation:
+
+- Inductor's CUTE DSL GEMM autotune backend is runnable on this B200 environment with `nvidia-cutlass-dsl[cu13]==4.4.2`.
+- It does not improve the final SDPA stack. The result is similar to other lower-band exact-command samples and below both run318 and run321.
+- Keep the durable default GEMM backend/settings.

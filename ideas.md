@@ -3221,6 +3221,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Prefix the exact current-best command with `CUTEDSL_ENABLE_AUTOTUNING=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=ATEN,CUTEDSL` and keep `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is longer compile time, CUTE DSL lowering failure, or another memory-heavy max-autotune regression.
+  Result: discarded at source state `d30819f`; 10,481 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. CUTE DSL GEMM autotune is valid on this environment but does not beat the default GEMM path, so keep the durable compile backend/settings.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
