@@ -3261,6 +3261,16 @@
   Planned source/config changes: Inside `qwen3_14b()`, locally import `OptimizersInBackwardContainer` and set `optimizer=OptimizersInBackwardContainer.Config(lr=8e-4)`.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 or a clean memory saving that can be converted into higher batch throughput. Risk is many tiny optimizer objects/hooks adding overhead or changing step ordering enough to slow training.
+  Result: kept for follow-up at source state `8a9c2bd`; 10,657 tps, 39.91% MFU, and 167.17 GiB peak memory. This is effectively tied with the measured peak while saving about 1.9 GiB, but `grad_norm` reports 0.0 because optimizer-in-backward zeroes gradients during backward. Test whether the memory headroom converts into higher batch throughput; do not treat the grad_norm metric as comparable.
+
+- Idea: OptimizerInBackward with local_batch_size=162
+  Current best source commit: 8a9c2bd
+  Source: memory-conversion follow-up after optimizer-in-backward saved about 1.9 GiB while matching the peak throughput band
+  Expected mechanism: Keep optimizer-in-backward active and increase local batch from 160 to 162. If the memory savings translate into more useful work per step without returning to the memory-risk envelope, batch162 may exceed the 10,658 tps peak.
+  Supporting evidence: Run337 reached 10,657 tps at 167.17 GiB; durable-source batch162 was slower and memory-risky, but optimizer-in-backward changes the memory budget enough to retest the nearest larger batch.
+  Planned source/config changes: Keep `OptimizersInBackwardContainer.Config(lr=8e-4)` in `qwen3_14b()`.
+  Planned command or config overrides: Exact run337 command but set `--training.local_batch_size=162`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite loss and peak memory near or below the durable 169.10 GiB band. Risk is slower batch shape, memory returning above the preferred envelope, or the zero-grad-norm observability caveat remaining unacceptable.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b

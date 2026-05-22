@@ -8081,3 +8081,31 @@ Interpretation:
 - Three-layer FSDP groups fit, but they are slower than per-layer FSDP and pairwise grouping while using materially more memory.
 - Coarser grouping reduces collective count but likely hurts overlap and increases unsharded parameter residency enough to lose.
 - Restore durable per-layer FSDP groups.
+
+## Experiment 337: Optimizer In Backward
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run337-optimizer-in-backward-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Inside `qwen3_14b()`, locally imported `OptimizersInBackwardContainer`.
+- Set `optimizer=OptimizersInBackwardContainer.Config(lr=8e-4)`.
+
+Result:
+
+- Status: keep for follow-up.
+- Step 10 `tps`: 10,657, effectively tied with the run318 10,658 measured peak.
+- Step 10 MFU: 39.91%.
+- Step 10 peak memory: 167.17 GiB, 93.73%.
+- Loss moved from 12.44781 at step 1 to 7.51728 at step 10; finite and overall decreasing, although step 10 rose locally.
+- `grad_norm` reported 0.0 at every step.
+
+Interpretation:
+
+- Optimizer-in-backward saves about 1.9 GiB and keeps throughput in the best measured band.
+- The zero `grad_norm` is an observability caveat: the optimizer hook steps and zeroes gradients during backward, so TorchTitan's existing grad-norm metric is no longer comparable.
+- Keep this source only for a memory-conversion follow-up at local batch size 162. If the larger batch does not beat the durable peak, restore the normal optimizer because the metric caveat is not worth keeping for equal throughput alone.
