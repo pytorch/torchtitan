@@ -859,7 +859,7 @@ def _filter_regions(
     *,
     min_ops: int = 2,
     min_compute_ops: int = 1,
-    min_count: int = 2,
+    min_count: int = 1,
 ) -> tuple[list[Region], Counter[str]]:
     """Filter and deduplicate regions. Returns (unique regions, hash counts)."""
     hash_counts: Counter[str] = Counter()
@@ -1301,7 +1301,7 @@ def fused_kernel_pass(
     extractor: str = "fqn",
     min_ops: int = 2,
     min_compute_ops: int = 1,
-    min_count: int = 2,
+    min_count: int = 1,
 ) -> torch.fx.GraphModule:
     """Single-pass extract + replace + accelerate.
 
