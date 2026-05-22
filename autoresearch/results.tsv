@@ -16,3 +16,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T02:42:30	xxxxxxx	5131	47.2	discard	30.05	72	fuse_coalesced_input_casts (cat+cast+split fallback): 516 cast launches saved + 194 detaches elided; +0.14% — cat/split overhead canceled the wins
 2026-05-22T02:50:00	xxxxxxx	5130	47.1	discard	30.04	72	coalesce_all_reduces: all_reduce_coalesced exists, 0 buckets (every wait consumed before next AR, no hoist path); +0.12%
 2026-05-22T03:00:12	xxxxxxx	5143	47.1	discard	30.11	72	bucket_tp_collectives + detach: 0 TP buckets (structurally un-coalesceable), only 194 detaches removed; +0.37%
+2026-05-22T03:11:08	xxxxxxx	5157	47.1	discard	30.20	72	cleanup_bundle: 354 ops (detach 194 + view CSE 96 + conj 32 + clone 32, 0 unsafe_view/transpose/mul/add); +0.64% — sub-noise ceiling for cleanup bundles
