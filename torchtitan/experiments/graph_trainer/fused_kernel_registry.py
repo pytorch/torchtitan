@@ -314,11 +314,12 @@ def _iter_node_args(node: torch.fx.Node):
 class Region:
     """A fusible subgraph discovered by a RegionExtractor.
 
-    For extractors that decompose the graph (e.g. ``InductorRegionExtractor``),
-    ``nodes``/``external_inputs``/``output_nodes`` reference the ORIGINAL
-    (pre-decomposition) graph for replacement.  ``decomp_gm`` holds an
-    extracted FX subgraph from the decomposed graph, used for problem.py
-    generation (matches inductor's view of fusible ops).
+    ``nodes``/``external_inputs``/``output_nodes`` reference the parent
+    graph (for replacement). ``subgraph_gm`` is an optional standalone
+    fx.GraphModule containing copies of the same nodes — used for
+    problem.py generation via ``print_readable`` and for op-set hashing.
+    ``inputs_info`` captures shape/stride/dtype/device per placeholder
+    so the generated problem.py recreates exact-stride inputs.
     """
 
     nodes: list[torch.fx.Node]
@@ -326,19 +327,14 @@ class Region:
     output_nodes: list[torch.fx.Node]
     norm_fqn: str = ""
 
-    # Decomposed representation (set by InductorRegionExtractor).
-    # decomp_gm is a standalone fx.GraphModule containing the post-decomp
-    # ops; its placeholders correspond 1:1 to ``external_inputs`` via
-    # from_node.  decomp_inputs_info captures shape/stride/dtype/device
-    # for stride-preserving repro inputs.
-    decomp_gm: torch.fx.GraphModule | None = None
-    decomp_inputs_info: list[dict] | None = None
+    subgraph_gm: torch.fx.GraphModule | None = None
+    inputs_info: list[dict] | None = None
 
     @property
     def num_compute_ops(self) -> int:
-        if self.decomp_gm is not None:
+        if self.subgraph_gm is not None:
             return sum(
-                1 for n in self.decomp_gm.graph.nodes
+                1 for n in self.subgraph_gm.graph.nodes
                 if n.op == "call_function" and str(n.target) not in _METADATA_OPS
             )
         return sum(1 for n in self.nodes if str(n.target) not in _METADATA_OPS)
@@ -359,19 +355,19 @@ class Region:
 def _compute_region_hash(region: Region) -> str:
     """Stable hash from op targets + input/output shapes.
 
-    When ``decomp_gm`` is set (InductorRegionExtractor), hashes the
-    decomposed ops + input strides for stable identification across
-    runs. Otherwise hashes the original-graph nodes.
+    When ``subgraph_gm`` is set, hashes a position-independent op set
+    + per-input shape/stride/dtype (more robust across runs). Otherwise
+    hashes the original-graph nodes positionally.
     """
     parts = []
-    if region.decomp_gm is not None:
+    if region.subgraph_gm is not None:
         # Position-independent op set + per-input shape/stride/dtype
         ops = sorted(
-            str(n.target) for n in region.decomp_gm.graph.nodes
+            str(n.target) for n in region.subgraph_gm.graph.nodes
             if n.op == "call_function"
         )
         parts.extend(ops)
-        for info in region.decomp_inputs_info or []:
+        for info in region.inputs_info or []:
             parts.append(
                 f"in:{info.get('dtype')}:{info.get('shape')}:{info.get('stride')}"
             )
@@ -490,13 +486,10 @@ def tag_fusible_nodes_pass(
 class RegionExtractor(ABC):
     """Base class for fusible region extractors.
 
-    ``extract`` returns a (possibly transformed) graph and the regions
-    discovered in it.  For extractors that work on the original graph
-    (e.g. ``FqnRegionExtractor``), the returned graph is ``gm``
-    unchanged.  For extractors that decompose (e.g.
-    ``InductorRegionExtractor``), the returned graph is a decomposed
-    copy — the caller operates on it for replacement, problem
-    generation, and downstream passes.
+    ``extract`` returns a graph and the regions discovered in it. Both
+    current extractors return the input ``gm`` unchanged; the tuple
+    return is kept for backward compatibility with prior extractors
+    that transformed the graph.
     """
 
     @abstractmethod
@@ -840,8 +833,8 @@ class InductorRegionExtractor(RegionExtractor):
                 external_inputs=ext_inputs,
                 output_nodes=output_nodes,
                 norm_fqn=norm_fqn,
-                decomp_gm=sub_gm,
-                decomp_inputs_info=placeholder_info,
+                subgraph_gm=sub_gm,
+                inputs_info=placeholder_info,
             )
             all_regions.append(region)
 
@@ -1035,13 +1028,13 @@ def _input_creation_line(name: str, info: dict) -> str:
     return f"    {name} = torch.randn({shape}, dtype={dtype}, device='{device}')"
 
 
-def _format_subgraph_as_model(decomp_gm: torch.fx.GraphModule) -> str:
-    """Format an extracted decomp subgraph as ``class Model(nn.Module)``.
+def _format_subgraph_as_model(subgraph_gm: torch.fx.GraphModule) -> str:
+    """Format the extracted subgraph as ``class Model(nn.Module)``.
 
-    Uses ``GraphModule.print_readable`` for a faithful repro of the
-    decomposed ops, then renames the class.
+    Uses ``GraphModule.print_readable`` for a faithful repro, then
+    renames the class.
     """
-    code = decomp_gm.print_readable(print_output=False)
+    code = subgraph_gm.print_readable(print_output=False)
     code = code.replace("class GraphModule(", "class Model(", 1)
     return code
 
@@ -1053,30 +1046,30 @@ def _write_problem(
 ) -> None:
     """Write a KernelAgent-compatible problem.py.
 
-    When ``region.decomp_gm`` is set (InductorRegionExtractor),
-    serializes the decomposed subgraph via ``print_readable`` and uses
-    exact strides for inputs.  Otherwise falls back to building code
-    from the original-graph region.
+    When ``region.subgraph_gm`` is set (InductorRegionExtractor),
+    serializes the subgraph via ``print_readable`` and uses exact
+    strides for inputs. Otherwise falls back to building code from
+    ``region.nodes`` directly.
     """
-    if region.decomp_gm is not None:
-        _write_problem_from_decomp(region, output_dir, count)
+    if region.subgraph_gm is not None:
+        _write_problem_from_subgraph(region, output_dir, count)
         return
     _write_problem_from_orig(region, output_dir, count)
 
 
-def _write_problem_from_decomp(
+def _write_problem_from_subgraph(
     region: Region,
     output_dir: Path,
     count: int,
 ) -> None:
-    decomp_gm = region.decomp_gm
-    info_list = region.decomp_inputs_info or []
+    subgraph_gm = region.subgraph_gm
+    info_list = region.inputs_info or []
 
-    model_code = _format_subgraph_as_model(decomp_gm)
+    model_code = _format_subgraph_as_model(subgraph_gm)
 
     # Get placeholder names in declaration order
     ph_names = [
-        n.name for n in decomp_gm.graph.nodes if n.op == "placeholder"
+        n.name for n in subgraph_gm.graph.nodes if n.op == "placeholder"
     ]
     info_by_name = {info["name"]: info for info in info_list}
     input_lines = [
@@ -1086,12 +1079,12 @@ def _write_problem_from_decomp(
 
     compute_ops = [
         str(n.target).split(".")[-2]
-        for n in decomp_gm.graph.nodes
+        for n in subgraph_gm.graph.nodes
         if n.op == "call_function" and str(n.target) not in _METADATA_OPS
     ]
-    n_ops = sum(1 for n in decomp_gm.graph.nodes if n.op == "call_function")
+    n_ops = sum(1 for n in subgraph_gm.graph.nodes if n.op == "call_function")
     n_outputs = 1
-    out_node = next(n for n in decomp_gm.graph.nodes if n.op == "output")
+    out_node = next(n for n in subgraph_gm.graph.nodes if n.op == "output")
     outs = out_node.args[0]
     if isinstance(outs, (tuple, list)):
         n_outputs = len(outs)
