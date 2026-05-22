@@ -8016,3 +8016,40 @@ Interpretation:
 - Float8 conversion substantially lowers memory, but it does not translate into throughput for this DP-only FSDP layout.
 - The late-step throughput collapse plus the FSDP pre-backward-hook warning make this a poor candidate even before longer convergence validation.
 - Restore BF16 `Linear` configs and keep Float8 closed for this implementation unless the source scope expands to handle the FSDP view/in-place interaction.
+
+## Experiment 335: Qwen3 MXFP8Linear Converter
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run335-mxfp8-linear-converter-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Inside `qwen3_14b()`, locally imported `MXFP8LinearConverter`.
+- Passed `converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
+
+Result:
+
+- Status: crash.
+- No training step completed.
+- The run converted modules to MXFP8 and reached the compiled first forward.
+- Root cause:
+
+```text
+CUDA Error in /__w/ao/ao/pytorch/ao/torchao/csrc/cuda/mx_kernels/mxfp8_quantize.cuh at line 367: invalid argument
+RuntimeError: invalid argument
+```
+
+- The generated Inductor callsite was:
+
+```text
+torch.ops.torchao.mxfp8_quantize.default(buf109, False, True, 1, 32, 'e4m3', 'rceil')
+```
+
+Interpretation:
+
+- MXFP8Linear is not runnable for this compiled Qwen3 path in the current TorchAO/PyTorch environment.
+- This is a runtime kernel argument failure rather than a missing dependency or unsupported-SM check.
+- Restore BF16 `Linear` configs and keep MXFP8 closed unless broader TorchAO/kernel debugging enters scope.

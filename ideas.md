@@ -3241,6 +3241,7 @@
   Planned source/config changes: Inside `qwen3_14b()`, locally import `MXFP8LinearConverter` and pass `converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: A performance lead is step-10 tps above 10,658 with finite loss and no FSDP hook warnings. Because this changes computation, any promising result requires longer loss convergence validation before it can be considered correct. Risk is compile failure, unsupported MXFP8 kernels, worse throughput, or unstable short-run loss.
+  Result: crash at source state `b9347ac`; the run fails before step 1 inside generated Inductor code calling `torch.ops.torchao.mxfp8_quantize.default(..., 1, 32, 'e4m3', 'rceil')`, with a CUDA invalid-argument error from `torchao/csrc/cuda/mx_kernels/mxfp8_quantize.cuh`. Restore BF16 Linear configs; MXFP8Linear is not runnable for this compiled Qwen3 path.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
