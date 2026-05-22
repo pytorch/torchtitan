@@ -1,4 +1,4 @@
 timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-21T14:09:00	baseline	4161	49.0	keep	24.36	75	Run 1 baseline: Llama3 8B FSDP=4 TP=2 bs=1 8xH100; c4_test; construct_default_graph_passes returns empty list
 2026-05-22T14:44:00	xxxxxxx	0	0.0	discard	0.00	0	Graph reconnaissance: counted FX node targets; 421 ag + 421 rs + 68 ar collectives; 196 detach; 842 _to_copy (recon-only, no perf attempt)
-2026-05-22T14:52:00	f07966f	4188	47.0	keep	24.52	75	remove_detach_nodes pass: rewire and erase 196 aten.detach.default nodes (autograd-no-op under runtime no_grad); avg of 2 runs (4202, 4174); -2GiB memory
+2026-05-22T14:52:00	ae6e425	4188	47.0	keep	24.52	75	remove_detach_nodes pass: rewire and erase 196 aten.detach.default nodes (autograd-no-op under runtime no_grad); avg of 2 runs (4202, 4174); -2GiB memory
