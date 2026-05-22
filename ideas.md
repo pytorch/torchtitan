@@ -3223,6 +3223,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is longer compile time, CUTE DSL lowering failure, or another memory-heavy max-autotune regression.
   Result: discarded at source state `d30819f`; 10,481 tps with finite overall-decreasing loss and unchanged 169.10 GiB peak memory. CUTE DSL GEMM autotune is valid on this environment but does not beat the default GEMM path, so keep the durable compile backend/settings.
 
+- Idea: Qwen3 14B Float8Linear converter
+  Current best source commit: aae710c
+  Source: profiler-driven GEMM-cost probe after compile backend and attention backend tests did not beat SDPA
+  Expected mechanism: Use the allowed Qwen3 `model_registry(..., converters=...)` hook to replace dense `Linear.Config` modules with TorchAO `Float8Linear` configs. This should reduce dominant GEMM work on B200 while retaining the durable FSDP, SDPA, compile, loss chunking, and DataLoader settings.
+  Supporting evidence: The current profile remains GEMM dominated, TorchAO `Float8LinearConfig.from_recipe_name` is available, B200 satisfies the SM89+ requirement, and TorchTitan already uses `Float8LinearConverter` in other model registries.
+  Planned source/config changes: Inside `qwen3_14b()`, locally import `Float8LinearConverter` and pass `converters=[Float8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: A performance lead is step-10 tps above 10,658 with finite loss and no numerical blow-up. Because this changes computation, any promising result requires longer loss convergence validation before it can be considered correct. Risk is compile failure, unsupported Float8Linear under this FSDP layout, worse throughput, or unstable short-run loss.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
