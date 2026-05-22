@@ -23,11 +23,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torch._library.opaque_object import (
-    get_opaque_type_name,
-    OpaqueBase,
-    register_opaque_type,
-)
+from torch._library.opaque_object import OpaqueBase, register_opaque_type
 
 from torchtitan.tools.logging import logger
 
@@ -91,36 +87,6 @@ def _apply_scores(
     return hidden, scores
 
 
-# Custom op registration for torch.compile and SAC compatibility
-_handle_type = get_opaque_type_name(DispatchHandle)
-
-torch.library.define(
-    "hybridep::dispatch",
-    f"(Tensor x, Tensor topk_idx, Tensor topk_weights, int num_experts, "
-    f"int ep_size, str group_name, bool non_blocking, "
-    f"float? moe_expert_capacity_factor, int? pad_multiple) "
-    f"-> (Tensor, Tensor, Tensor, {_handle_type})",
-)
-
-torch.library.define(
-    "hybridep::combine",
-    f"(Tensor x, {_handle_type} handle, int num_tokens, int? pad_multiple) -> Tensor",
-)
-
-# Backward ops: these wrap the communication calls so AOT Autograd can trace them
-# dispatch_bwd: used in combine's backward (scatters gradients via dispatch_with_permute)
-torch.library.define(
-    "hybridep::dispatch_bwd",
-    f"(Tensor grad_combined, {_handle_type} handle, int num_permuted_tokens, int? pad_multiple) -> Tensor",
-)
-
-# combine_bwd: used in dispatch's backward (gathers gradients via combine_with_unpermute)
-torch.library.define(
-    "hybridep::combine_bwd",
-    f"(Tensor grad_hidden, Tensor grad_scores, {_handle_type} handle, int num_tokens, int num_experts) -> (Tensor, Tensor)",
-)
-
-
 def _num_permuted_tokens_for_non_blocking(
     num_tokens: int,
     ep_size: int,
@@ -152,7 +118,10 @@ def _num_permuted_tokens_for_non_blocking(
     return n
 
 
-@torch.library.impl("hybridep::dispatch", "CUDA")
+# Custom op registration for torch.compile and SAC compatibility
+
+
+@torch.library.custom_op("hybridep::dispatch", mutates_args=(), device_types="cuda")
 def _dispatch_impl(
     x: torch.Tensor,
     topk_idx: torch.Tensor,
@@ -233,7 +202,7 @@ def _dispatch_impl(
     return hidden, scores, tokens_per_expert, DispatchHandle(value=handle)
 
 
-@torch.library.register_fake("hybridep::dispatch")
+@_dispatch_impl.register_fake
 def _dispatch_fake(
     x: torch.Tensor,
     topk_idx: torch.Tensor,
@@ -264,7 +233,7 @@ def _dispatch_fake(
     return hidden, scores, tpe, DispatchHandle()
 
 
-@torch.library.impl("hybridep::combine", "CUDA")
+@torch.library.custom_op("hybridep::combine", mutates_args=(), device_types="cuda")
 def _combine_impl(
     x: torch.Tensor,
     handle: DispatchHandle,
@@ -280,7 +249,7 @@ def _combine_impl(
     return combined
 
 
-@torch.library.register_fake("hybridep::combine")
+@_combine_impl.register_fake
 def _combine_fake(
     x: torch.Tensor,
     handle: DispatchHandle,
@@ -296,7 +265,7 @@ def _combine_fake(
 # ============================================================================
 
 
-@torch.library.impl("hybridep::dispatch_bwd", "CUDA")
+@torch.library.custom_op("hybridep::dispatch_bwd", mutates_args=(), device_types="cuda")
 def _dispatch_bwd_impl(
     grad_combined: torch.Tensor,
     handle: DispatchHandle,
@@ -318,7 +287,7 @@ def _dispatch_bwd_impl(
     return grad_x
 
 
-@torch.library.register_fake("hybridep::dispatch_bwd")
+@_dispatch_bwd_impl.register_fake
 def _dispatch_bwd_fake(
     grad_combined: torch.Tensor,
     handle: DispatchHandle,
@@ -329,7 +298,7 @@ def _dispatch_bwd_fake(
     return grad_combined.new_empty(num_permuted_tokens, grad_combined.shape[1])
 
 
-@torch.library.impl("hybridep::combine_bwd", "CUDA")
+@torch.library.custom_op("hybridep::combine_bwd", mutates_args=(), device_types="cuda")
 def _combine_bwd_impl(
     grad_hidden: torch.Tensor,
     grad_scores: torch.Tensor,
@@ -354,7 +323,7 @@ def _combine_bwd_impl(
     return grad_x, grad_probs_dense
 
 
-@torch.library.register_fake("hybridep::combine_bwd")
+@_combine_bwd_impl.register_fake
 def _combine_bwd_fake(
     grad_hidden: torch.Tensor,
     grad_scores: torch.Tensor,
@@ -424,12 +393,10 @@ def _combine_setup_context(ctx, inputs, output):
     ctx.pad_multiple = pad_multiple
 
 
-torch.library.register_autograd(
-    "hybridep::dispatch", _dispatch_backward, setup_context=_dispatch_setup_context
+_dispatch_impl.register_autograd(
+    _dispatch_backward, setup_context=_dispatch_setup_context
 )
-torch.library.register_autograd(
-    "hybridep::combine", _combine_backward, setup_context=_combine_setup_context
-)
+_combine_impl.register_autograd(_combine_backward, setup_context=_combine_setup_context)
 
 
 _NUM_SMS_DISPATCH = 16
