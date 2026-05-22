@@ -42,6 +42,21 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   downstream pattern matchers see a clean graph and aren't tripped up by
   identity-view chains separating producer and consumer.
 
+## Determinism flag dramatically changes the noise floor (Exp 27)
+
+The `--debug.deterministic` flag adds ~7% step overhead (NaN-fill kernels,
+Exp 24) AND apparently INCREASES the noise band of benchmarks. In
+deterministic mode, the cleanup_bundle of 354 ops/step gave only +0.64%
+(sub-noise, Exp 17/21). The IDENTICAL pass under non-deterministic mode
+gave **+1.71%** (Exp 27) — a 2.7x larger measured win.
+
+Implications:
+- A previously-discarded experiment can become a KEEP under non-det.
+- The "<500 ops/step is sub-noise" rule (LEARNINGS prior) applies to
+  deterministic mode; under non-det the bar is lower.
+- **Re-test previously-discarded passes that had +0.5-0.9% measurements**
+  (Exps 9, 14, 16, 21) — they may now be keeps. Use best-of-3 to confirm.
+
 ## Profile-derived bottleneck breakdown (Exp 24)
 
 Profiled run (`--profiler.enable_profiling`) reveals the actual GPU-time

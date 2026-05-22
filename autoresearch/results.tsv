@@ -28,3 +28,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T06:08:00	xxxxxxx	5125	47.0	stability	30.01	73	stability re-bench (median of 3: 5137/5135/5125); within 0.3% of original Exp 13 measurement
 2026-05-22T06:12:00	xxxxxxx	0	0.0	discard	0.00	0	exp26 iterative identity passes: 0 new candidates iter2/iter3 - bucketing is pure relocation, not structure-creator; fixed point confirmed
 2026-05-22T06:17:00	d8fb3fb	6334	47.0	baseline	37.09	72	NEW BASELINE: dropped --debug.deterministic from run_benchmark.sh (per user) - recovers 7% NaN-fill overhead; numerics test still passes (own determinism setup)
+2026-05-22T06:27:06	8e02ed8	6442	47.0	keep	37.72	69	cleanup_bundle (Exp 17 redux): 354 ops removed (detach 194 + view 96 + conj 32 + clone 32); +1.71% in non-det mode (vs +0.64% in det); dispatch-overhead win is real

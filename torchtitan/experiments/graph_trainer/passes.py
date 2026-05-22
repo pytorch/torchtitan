@@ -928,6 +928,236 @@ def bucket_fsdp_collectives(
     return gm
 
 
+def cleanup_bundle(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Aggregate residual peephole / CSE cleanups left after the structural
+    passes (Exp 17 mega-cleanup, retested under non-deterministic baseline).
+
+    Patterns:
+
+    1. ``aten.detach.default(x) → x`` — detach is metadata-only in this
+       graph (autograd retracing is already complete by AOT). ~194 nodes
+       hanging off ``_fused_rms_norm[1]`` saved-mean and SDPA
+       ``getitem_4``.
+    2. ``aten.detach.default(aten.detach.default(x)) → aten.detach.default(x)`` —
+       detach-of-detach pairs that survive after step 1's first pass
+       (Exp 20 spotted +97).
+    3. ``aten.view.default(input, args)`` CSE — dedupe by
+       ``(id(input), tuple(args))`` to drop duplicate view-on-same-input
+       calls (~96 expected from the post-Exp13 graph).
+    4. ``aten._conj.default(input)`` CSE — dedupe by ``id(input)`` for
+       backward RoPE.
+    5. ``aten.clone.default(input)`` CSE — dedupe by ``id(input)`` + kwargs
+       only when the clone has no in-place consumer.
+    6. ``aten._to_copy.default(input)`` CSE — dedupe by
+       ``(id(input), dtype)``. Speculative — Exp 21 saw 0 here but the
+       check is cheap.
+    7. ``aten.t.default(input)`` CSE — dedupe by ``id(input)``. Same
+       caveat as 6.
+
+    Per IDEAS.md / LEARNINGS.md: under the previous ``--debug.deterministic``
+    baseline this bundle netted +0.64-0.86% (Exp 17/21). The new
+    non-deterministic baseline removes the framework NaN-fill overhead, so
+    we're remeasuring whether the dispatch savings still register.
+    """
+    detach_target = torch.ops.aten.detach.default
+    view_target = torch.ops.aten.view.default
+    conj_target = torch.ops.aten._conj.default
+    clone_target = torch.ops.aten.clone.default
+    to_copy_target = torch.ops.aten._to_copy.default
+    t_target = torch.ops.aten.t.default
+
+    # ---- 1. detach removal --------------------------------------------------
+    num_detach_removed = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not detach_target:
+            continue
+        if len(node.args) < 1:
+            continue
+        inp = node.args[0]
+        if not isinstance(inp, torch.fx.Node):
+            continue
+        node.replace_all_uses_with(inp)
+        gm.graph.erase_node(node)
+        num_detach_removed += 1
+
+    # ---- 2. detach-of-detach -----------------------------------------------
+    # After step 1, most detaches are gone, but the original graph also has
+    # detach-of-detach chains where the inner detach has multiple users
+    # (so step 1 may have replaced one detach but the outer detach still
+    # appears with the original detach input). We keep the pattern here for
+    # completeness; if step 1 already removed all detaches, this is a no-op.
+    num_dod_removed = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not detach_target:
+            continue
+        if len(node.args) < 1:
+            continue
+        inner = node.args[0]
+        if not isinstance(inner, torch.fx.Node):
+            continue
+        if inner.op != "call_function" or inner.target is not detach_target:
+            continue
+        if len(inner.args) < 1:
+            continue
+        grandparent = inner.args[0]
+        if not isinstance(grandparent, torch.fx.Node):
+            continue
+        # Replace outer detach with grandparent (skip one level).
+        node.args = (grandparent,) + node.args[1:]
+        num_dod_removed += 1
+
+    # ---- CSE helpers --------------------------------------------------------
+    def _cse(
+        target,
+        key_fn,
+        *,
+        gate=None,
+    ) -> int:
+        """Walk graph nodes in order; keep first occurrence per key, redirect
+        later occurrences to the first one. Returns number of merged nodes.
+        ``gate`` is an optional predicate that returns True if the node is
+        eligible for CSE (e.g. no in-place consumers for clones).
+        """
+        seen: dict = {}
+        merged = 0
+        for node in list(gm.graph.nodes):
+            if node.op != "call_function" or node.target is not target:
+                continue
+            if gate is not None and not gate(node):
+                continue
+            try:
+                key = key_fn(node)
+            except Exception:
+                continue
+            if key is None:
+                continue
+            if key in seen:
+                node.replace_all_uses_with(seen[key])
+                gm.graph.erase_node(node)
+                merged += 1
+            else:
+                seen[key] = node
+        return merged
+
+    # ---- 3. view CSE --------------------------------------------------------
+    def _view_key(node):
+        if len(node.args) < 2:
+            return None
+        inp = node.args[0]
+        shape = node.args[1]
+        if not isinstance(inp, torch.fx.Node):
+            return None
+        if not isinstance(shape, (list, tuple)):
+            return None
+        # Reject anything we can't hash deterministically.
+        try:
+            shape_t = tuple(shape)
+        except TypeError:
+            return None
+        for s in shape_t:
+            if not isinstance(s, int):
+                return None
+        return (id(inp), shape_t)
+
+    num_view_cse = _cse(view_target, _view_key)
+
+    # ---- 4. _conj CSE -------------------------------------------------------
+    def _conj_key(node):
+        if len(node.args) < 1:
+            return None
+        inp = node.args[0]
+        if not isinstance(inp, torch.fx.Node):
+            return None
+        return (id(inp),)
+
+    num_conj_cse = _cse(conj_target, _conj_key)
+
+    # ---- 5. clone CSE -------------------------------------------------------
+    def _clone_gate(node):
+        # Reject if any user is an in-place op (those write through the
+        # clone; we can't share the buffer).
+        for user in node.users:
+            if user.op != "call_function":
+                continue
+            tgt = user.target
+            name = getattr(tgt, "_overloadname", None) or getattr(
+                tgt, "__name__", ""
+            )
+            if "_" in name and name.endswith("_"):
+                return False
+            # Heuristic: torch.ops.aten.foo_.something also.
+            if hasattr(tgt, "overloadpacket"):
+                pkt = tgt.overloadpacket.__name__
+                if pkt.endswith("_"):
+                    return False
+        return True
+
+    def _clone_key(node):
+        if len(node.args) < 1:
+            return None
+        inp = node.args[0]
+        if not isinstance(inp, torch.fx.Node):
+            return None
+        kwargs_t = tuple(sorted(node.kwargs.items()))
+        return (id(inp), kwargs_t)
+
+    num_clone_cse = _cse(clone_target, _clone_key, gate=_clone_gate)
+
+    # ---- 6. _to_copy CSE ----------------------------------------------------
+    def _to_copy_key(node):
+        if len(node.args) < 1:
+            return None
+        inp = node.args[0]
+        if not isinstance(inp, torch.fx.Node):
+            return None
+        # Key on input id + dtype + device + layout + memory_format. Any
+        # variance in these means a different output.
+        dtype = node.kwargs.get("dtype", None)
+        device = node.kwargs.get("device", None)
+        layout = node.kwargs.get("layout", None)
+        mf = node.kwargs.get("memory_format", None)
+        return (id(inp), dtype, device, layout, mf)
+
+    num_to_copy_cse = _cse(to_copy_target, _to_copy_key)
+
+    # ---- 7. t.default CSE ---------------------------------------------------
+    def _t_key(node):
+        if len(node.args) < 1:
+            return None
+        inp = node.args[0]
+        if not isinstance(inp, torch.fx.Node):
+            return None
+        return (id(inp),)
+
+    num_t_cse = _cse(t_target, _t_key)
+
+    total = (
+        num_detach_removed
+        + num_dod_removed
+        + num_view_cse
+        + num_conj_cse
+        + num_clone_cse
+        + num_to_copy_cse
+        + num_t_cse
+    )
+    if total:
+        gm.graph.eliminate_dead_code()
+        gm.graph.lint()
+        gm.recompile()
+
+    logger.info(
+        f"cleanup_bundle: detach={num_detach_removed}, "
+        f"detach_of_detach={num_dod_removed}, "
+        f"view_cse={num_view_cse}, conj_cse={num_conj_cse}, "
+        f"clone_cse={num_clone_cse}, to_copy_cse={num_to_copy_cse}, "
+        f"t_cse={num_t_cse}, total={total}"
+    )
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -941,6 +1171,7 @@ def construct_default_graph_passes(
         remove_identity_ops,
         elide_split_cat_for_reduce_scatter,
         bucket_fsdp_collectives,
+        cleanup_bundle,
     ]
     return passes
 
