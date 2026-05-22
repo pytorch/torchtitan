@@ -32,3 +32,5 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T06:37:00	xxxxxxx	6431	47.0	discard	37.66	69	foreach_cast_via_cat (Exp 14 redux): 33+33 buckets fused, -0.17%; cat+split overhead ≈ 516 launch savings regardless of det mode
 2026-05-22T06:50:00	xxxxxxx	0	0.0	discard	0.00	0	exp29 re-profile non-det: top kernels NCCL TP RS bf16 183ms, AG mix 177ms, FSDP RS 123ms, GEMMs 155ms - no FX-targetable hot kernel
 2026-05-22T07:05:00	xxxxxxx	6447	47.3	discard	37.74	70	exp30 global_weight_prefetch: 33 AGs hoisted avg 1696 slots; +0.08% confirms FX reorder doesn't add overlap beyond Exp 13's per-layer hoist
+2026-05-22T07:10:00	xxxxxxx	0	0.0	discard	0.00	0	exp31 fused activation ops: no SwiGLU op exists in PyTorch; aten.glu is sigmoid-based not SwiGLU; only aten.silu (single op)
+2026-05-22T07:15:00	xxxxxxx	0	0.0	discard	0.00	0	exp32 coalesce_gamma_grad_ARs: structural blocker - γ-grad wait consumed by intermediate _to_copy→FSDP_RS chain, not just graph output
