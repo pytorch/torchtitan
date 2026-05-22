@@ -39,6 +39,7 @@ import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
     CompileConfig,
     ConfigManager,
@@ -184,7 +185,7 @@ def _log_samples(items: list[Episode] | list[Completion]) -> None:
         logger.info(f"       A: {item.text[:300].replace(chr(10), ' ').strip()}")
 
 
-def _build_reward_metrics(
+def _prepare_reward_metrics(
     prefix: str,
     trajectories: list[Trajectory],
 ) -> list[m.Metric]:
@@ -193,10 +194,18 @@ def _build_reward_metrics(
     Example::
 
         trajectories = [
-            Trajectory(sample_idx=0, transitions=[(c0, Step(rewards={"correctness": 1.0, "format": 0.5}, done=True))]),
-            Trajectory(sample_idx=1, transitions=[(c1, Step(rewards={"correctness": 0.0},               done=True))]),
+            Trajectory(
+                sample_idx=0,
+                prompt_token_ids=p0,
+                transitions=[(c0, Step(rewards={"correctness": 1.0, "format": 0.5}, done=True))],
+            ),
+            Trajectory(
+                sample_idx=1,
+                prompt_token_ids=p1,
+                transitions=[(c1, Step(rewards={"correctness": 0.0}, done=True))],
+            ),
         ]
-        _build_reward_metrics("reward/component", trajectories)
+        _prepare_reward_metrics("reward/component", trajectories)
         # -> [
         #      Metric("reward/component/correctness", Mean(sum=1.0, count=2)),  # 0.5
         #      Metric("reward/component/format",      Mean(sum=0.5, count=1)),  # 0.5 - "format" only in trajectory 0
@@ -306,6 +315,8 @@ class RLTrainer(Configurable):
             log_dir=config.dump_folder,
             job_config=config.to_dict(),
         )
+        # TODO: Replace this single-turn tokenizer with renderer
+        self.tokenizer = HuggingFaceTokenizer(tokenizer_path=config.hf_assets_path)
 
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
@@ -563,8 +574,15 @@ class RLTrainer(Configurable):
         envs = [
             self.config.env.build(step=step, group_idx=i) for i in range(num_groups)
         ]
-        completions = self._get_rank_0_value(
-            self.generator.generate.call([env.prompt for env in envs]).get()
+        # TODO: Add a check max_tokens = min(max_tokens, context_window - model_input.length)
+        # and pass max_tokens to the generator call or skip the call if max_tokens<=0.
+        # Do the same for validation.
+        tokenized_prompts = [
+            self.tokenizer.encode(env.prompt, add_bos=True, add_eos=False)
+            for env in envs
+        ]
+        completions, generation_metrics = self._get_rank_0_value(
+            self.generator.generate.call(tokenized_prompts).get()
         )
 
         trajectories: list[Trajectory] = []
@@ -572,11 +590,16 @@ class RLTrainer(Configurable):
             for c in completions:
                 step_result = envs[c.prompt_idx].step(c.text)
                 trajectories.append(
-                    Trajectory(sample_idx=c.prompt_idx, transitions=[(c, step_result)])
+                    Trajectory(
+                        sample_idx=c.prompt_idx,
+                        prompt_token_ids=tokenized_prompts[c.prompt_idx],
+                        transitions=[(c, step_result)],
+                    )
                 )
 
+        # Metrics
         response_lens = [len(c.token_ids) for c in completions]
-        prompt_lens = [len(c.prompt_token_ids) for c in completions]
+        prompt_lens = [len(t.prompt_token_ids) for t in trajectories]
         total_lens = [p + r for p, r in zip(prompt_lens, response_lens, strict=True)]
         truncated = [c.finish_reason == "length" for c in completions]
         rollout_metrics: list[m.Metric] = [
@@ -587,7 +610,8 @@ class RLTrainer(Configurable):
             m.Metric("rollout/total_length", m.Max.from_list(total_lens)),
             m.Metric("rollout/truncation_rate", m.Mean.from_list(truncated)),
         ]
-        rollout_metrics += _build_reward_metrics(
+        rollout_metrics += generation_metrics
+        rollout_metrics += _prepare_reward_metrics(
             prefix="reward/component", trajectories=trajectories
         )
         return trajectories, rollout_metrics
@@ -616,7 +640,7 @@ class RLTrainer(Configurable):
                     Episode(
                         policy_version=c.policy_version,
                         prompt_idx=sample_idx,
-                        prompt_token_ids=c.prompt_token_ids,
+                        prompt_token_ids=t.prompt_token_ids,
                         text=c.text,
                         token_ids=c.token_ids,
                         token_logprobs=c.token_logprobs,
@@ -677,14 +701,25 @@ class RLTrainer(Configurable):
             top_p=1.0,
             max_tokens=self.config.generator.sampling.max_tokens,
         )
-        completions = self._get_rank_0_value(
+
+        tokenized_prompts: list[list[int]] = [
+            self.tokenizer.encode(env.prompt, add_bos=True, add_eos=False)
+            for env in envs
+        ]
+        completions, generation_metrics = self._get_rank_0_value(
             self.generator.generate.call(
-                [env.prompt for env in envs], sampling_config=greedy
+                tokenized_prompts,
+                sampling_config=greedy,
+                metrics_prefix="validation_generator",
             ).get()
         )
 
         trajectories = [
-            Trajectory(sample_idx=i, transitions=[(c, envs[i].step(c.text))])
+            Trajectory(
+                sample_idx=i,
+                prompt_token_ids=tokenized_prompts[i],
+                transitions=[(c, envs[i].step(c.text))],
+            )
             for i, c in enumerate(completions)
         ]
 
@@ -702,7 +737,8 @@ class RLTrainer(Configurable):
             ),
             m.Metric("validation/num_samples", m.NoReduce(float(len(trajectories)))),
         ]
-        validation_metrics += _build_reward_metrics(
+        validation_metrics += generation_metrics
+        validation_metrics += _prepare_reward_metrics(
             prefix="validation/reward/component", trajectories=trajectories
         )
 

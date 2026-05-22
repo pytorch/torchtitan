@@ -51,6 +51,7 @@ def build_minimal_trainer(
                 inductor_compilation="regional",
                 numerics_changing_optim=compile_numerics_changing_optim,
                 disable_passes=[],
+                enable_fsdp_ag_rs_overlap=False,
                 debug_graph_passes=False,
                 cpu_offload_prefetch_n_layers=1,
                 cpu_offload_defer_n_layers=1,
