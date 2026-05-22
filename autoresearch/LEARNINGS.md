@@ -127,6 +127,15 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   intra-layer barrier — the hoist target is wrong. Expect 1.5-2.0+ for
   cross-layer prefetch to be meaningful.
 
+- **Sub-200-ops/step metadata cleanup is below noise floor** (Exps 9, 10).
+  Exp 9 removed 194 detach nodes (+0.2%). Exp 10 removed 160 nodes (96 view
+  + 32 _conj + 32 clone CSE, +0.4%). Both well under +1% threshold. The
+  combined removal of ~350 small ops/step from these two passes is invisible
+  in tps. **Don't pursue more passes that target <500 ops/step of pure
+  cleanup unless they hit a peak-memory anchor (like Exp 1 did with views)
+  or unlock a bigger downstream rewrite.** Future wins need to target high-
+  volume traffic, not high-count-low-cost cleanup.
+
 - **FX-level AG reordering does NOT translate to runtime overlap on this
   graph** (Exps 3, 5, 6, 8 — four attempts, all noise-level or negative).
   Even after reaching the diagnostic target (avg ~1.44 barriers crossed
@@ -158,3 +167,17 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   size 2 is the TP axis (matches `data_parallel_shard_degree=4`,
   `tensor_parallel_degree=2`). Verify this any time the parallelism config
   changes.
+- **Finding CSE / duplicate-op opportunities cheaply.** For any op category,
+  histogram the *exact argument strings* (e.g.
+  `grep -oE "torch\.ops\.aten\._conj\.default\([a-z_0-9]+\)" file | sort | uniq -c | sort -rn`)
+  — any line with count >1 is a duplicate-call candidate. Same trick on
+  `view.default(<src>, <shape>)` finds repeated `view(view_K, [...])` from
+  one source. This caught the `_conj(view_X)`×2 backward-RoPE pattern and
+  the 3-way duplicate `view([8192,4096])` feeding Q/K/V matmuls.
+- **Post-cleanup vs pre-cleanup op-histogram diff** is a one-line check
+  that tells you which ideas from the original recon are now stale: pipe
+  both `grep -oE "torch\.ops..." | sort | uniq -c | sort -rn | head -30`
+  outputs through `diff`. View count drop (3358→1352) and slice drop
+  (421→0) make their respective recon ideas already-explored; ops that
+  *didn't* shrink (e.g. `_to_copy` 842→841, `transpose.int` 256→256) are
+  the surviving structural patterns worth a fresh pass.

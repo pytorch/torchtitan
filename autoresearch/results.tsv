@@ -9,3 +9,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T00:58:29	6a86f11	4569	47.0	keep	26.76	74	remove_identity_ops: 421/421 identity slices + 450/1125 double-t eliminated; +2.4% tps; combined with Exp 1 = +9.8% over raw baseline
 2026-05-22T01:14:31	xxxxxxx	4549	47.2	discard	26.64	74	prefetch_fsdp_all_gathers_v3 (Strategy B v3, end-of-layer-only): 290/291 AGs hoisted 47 slots / 1.44 barriers; reached target but no overlap won; closing prefetch direction
 2026-05-22T01:22:45	xxxxxxx	4578	47.0	discard	26.81	75	collapse_views_and_aliases: 1/1352 view-chains (most multi-user), 194/194 detaches, 0 alias/expand; +0.2% noise; metadata cleanup tapped out
+2026-05-22T01:36:42	xxxxxxx	4587	47.0	discard	26.86	75	cse_views_and_conj: 96 view + 32 _conj + 32 clone CSE'd (matches recon prediction); +0.4% noise; <200 ops/step cleanup confirmed sub-noise
