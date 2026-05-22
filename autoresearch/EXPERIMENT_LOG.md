@@ -28,6 +28,26 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## apply_inductor_pattern_passes — keep (pending)
+
+- **Idea**: PyTorch's Inductor ships several FX-level pattern matchers (`joint_graph_passes`, `post_grad_passes`, etc.) that fuse common ATen sequences (mm+bias+activation, SDPA epilogues, `_to_copy` round-trips, …) by rewriting the GraphModule in place. They were designed for the same kind of joint fwd+bwd graph that `make_fx` produces, so they should apply directly.
+- **Changes**: Added `apply_inductor_pattern_passes(gm, example_inputs)` that tries 5 upstream entry points in sequence, each wrapped in its own `try/except`: `joint_graph_passes`, `post_grad_passes(is_inference=False)`, `pre_grad_passes`, `binary_folding_pass`, `dedupe_symint_uses_pass`. Each logs availability and before/after node counts. Registered AFTER `remove_detach_nodes`.
+- **Result**: keep. Two consecutive runs: tps=4,569 (mfu=26.75%) and tps=4,576 (mfu=26.80%); avg **tps=4,572 (+9.9% vs baseline 4,161)**. Loss=9.21808, grad_norm=4.5867 (bitwise identical). Numerics test passes. Wall time 77s.
+- **Node-count trace**:
+  - initial: 11,538
+  - after `joint_graph_passes`: 9,106 (−2,432, −21%)
+  - after `post_grad_passes(is_inference=False)`: 9,101 (−5)
+  - `pre_grad_passes`: ran no-op (pre-grad targets a different graph form)
+  - `binary_folding_pass`, `dedupe_symint_uses_pass`: not available in this PyTorch build
+- **Analysis**: This is the first iteration to move TPS meaningfully — the −21% node reduction translates to a clean +10% TPS. Earlier topology-only FX edits (bucket/prefetch) failed to translate to TPS, but Inductor's pattern matchers are doing real *semantic* fusion (combining producer/consumer ATen ops into single fused ops, removing entire chains of casts, etc.), not just reordering. The pattern matchers also know how to fuse the `_to_copy` round-trips that iter 2 couldn't touch, which likely accounts for a large chunk of the gain.
+- **Lessons**:
+  - **Reuse upstream Inductor passes before writing your own.** PyTorch already ships pattern matchers that took years to tune; rewriting from scratch is wasteful.
+  - The next big wins likely come from running additional Inductor pipeline stages — full **codegen via `compile_fx`** (Triton kernels for pointwise), and **CUDA graphs** for static replay.
+  - `joint_graph_passes` is the right entry point for joint fwd+bwd graphs out of `make_fx`. `post_grad_passes` does small extra cleanup on top.
+  - The two unavailable passes (`binary_folding_pass`, `dedupe_symint_uses_pass`) suggest the installed PyTorch version is older than the ones that exposed those names. Future iterations should be careful about API drift.
+
+---
+
 ## prefetch_all_gathers (FX-level move) — discard (xxxxxxx)
 
 - **Idea**: Move each `all_gather_into_tensor` node to its earliest valid FX position (right after its inputs). The launch happens on a separate NCCL stream, so intervening compute should overlap with the AG transfer; the `wait_tensor` stays at its original position.

@@ -73,6 +73,145 @@ def remove_detach_nodes(
     return gm
 
 
+def apply_inductor_pattern_passes(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> torch.fx.GraphModule:
+    """Apply Inductor's joint-graph FX pattern matchers to the traced graph.
+
+    Inductor ships several FX-level pattern matchers that fuse common ATen
+    sequences (mm+bias+activation, SDPA epilogues, _to_copy round-trips,
+    binary folding, symint dedup, etc.). They operate in place on the
+    GraphModule and don't require re-tracing. We try several upstream
+    entry points, log what's available and what changes the graph, then
+    lint+recompile.
+
+    Each call is independently wrapped: import failures and runtime errors
+    are logged and skipped, never re-raised.
+    """
+
+    def _node_count(g: torch.fx.GraphModule) -> int:
+        return len(list(g.graph.nodes))
+
+    initial_count = _node_count(gm)
+    logger.info(f"apply_inductor_pattern_passes: initial node count {initial_count}")
+
+    # 1) joint_graph_passes
+    try:
+        from torch._inductor.fx_passes.joint_graph import joint_graph_passes
+
+        try:
+            before = _node_count(gm)
+            joint_graph_passes(gm)
+            after = _node_count(gm)
+            logger.info(
+                f"apply_inductor_pattern_passes: joint_graph_passes ran "
+                f"(nodes {before} -> {after})"
+            )
+        except Exception as e:
+            logger.info(
+                f"apply_inductor_pattern_passes: joint_graph_passes raised "
+                f"{type(e).__name__}({e})"
+            )
+    except ImportError:
+        logger.info("apply_inductor_pattern_passes: joint_graph_passes not available")
+
+    # 2) post_grad_passes (training mode)
+    try:
+        from torch._inductor.fx_passes.post_grad import post_grad_passes
+
+        try:
+            before = _node_count(gm)
+            post_grad_passes(gm, is_inference=False)
+            after = _node_count(gm)
+            logger.info(
+                f"apply_inductor_pattern_passes: post_grad_passes(is_inference=False) "
+                f"ran (nodes {before} -> {after})"
+            )
+        except Exception as e:
+            logger.info(
+                f"apply_inductor_pattern_passes: post_grad_passes raised "
+                f"{type(e).__name__}({e})"
+            )
+    except ImportError:
+        logger.info("apply_inductor_pattern_passes: post_grad_passes not available")
+
+    # 3) pre_grad_passes
+    try:
+        from torch._inductor.fx_passes.pre_grad import pre_grad_passes
+
+        try:
+            before = _node_count(gm)
+            pre_grad_passes(gm, example_inputs)
+            after = _node_count(gm)
+            logger.info(
+                f"apply_inductor_pattern_passes: pre_grad_passes ran "
+                f"(nodes {before} -> {after})"
+            )
+        except Exception as e:
+            logger.info(
+                f"apply_inductor_pattern_passes: pre_grad_passes raised "
+                f"{type(e).__name__}({e})"
+            )
+    except ImportError:
+        logger.info("apply_inductor_pattern_passes: pre_grad_passes not available")
+
+    # 4) binary_folding_pass
+    try:
+        from torch._inductor.fx_passes.binary_folding import binary_folding_pass
+
+        try:
+            before = _node_count(gm)
+            binary_folding_pass(gm.graph)
+            after = _node_count(gm)
+            logger.info(
+                f"apply_inductor_pattern_passes: binary_folding_pass ran "
+                f"(nodes {before} -> {after})"
+            )
+        except Exception as e:
+            logger.info(
+                f"apply_inductor_pattern_passes: binary_folding_pass raised "
+                f"{type(e).__name__}({e})"
+            )
+    except ImportError:
+        logger.info(
+            "apply_inductor_pattern_passes: binary_folding_pass not available"
+        )
+
+    # 5) dedupe_symint_uses_pass
+    try:
+        from torch._inductor.fx_passes.dedupe_symint_uses import (
+            dedupe_symint_uses_pass,
+        )
+
+        try:
+            before = _node_count(gm)
+            dedupe_symint_uses_pass(gm.graph)
+            after = _node_count(gm)
+            logger.info(
+                f"apply_inductor_pattern_passes: dedupe_symint_uses_pass ran "
+                f"(nodes {before} -> {after})"
+            )
+        except Exception as e:
+            logger.info(
+                f"apply_inductor_pattern_passes: dedupe_symint_uses_pass raised "
+                f"{type(e).__name__}({e})"
+            )
+    except ImportError:
+        logger.info(
+            "apply_inductor_pattern_passes: dedupe_symint_uses_pass not available"
+        )
+
+    gm.graph.lint()
+    gm.recompile()
+    final_count = _node_count(gm)
+    logger.info(
+        f"apply_inductor_pattern_passes: final node count {final_count} "
+        f"(delta {final_count - initial_count})"
+    )
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -83,6 +222,7 @@ def construct_default_graph_passes(
     """
     passes: list[Callable] = [
         remove_detach_nodes,
+        apply_inductor_pattern_passes,
     ]
     return passes
 

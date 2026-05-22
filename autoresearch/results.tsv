@@ -5,3 +5,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T14:58:00	xxxxxxx	0	0.0	discard	0.00	0	remove_redundant_to_copy: tested same-dtype/device elimination — 0 of 841 candidates qualified; all are real fp32->bf16 mixed-precision casts
 2026-05-22T15:25:00	xxxxxxx	4169	47.0	discard	24.41	75	bucket_all_gathers: shape-grouped, hoisted pure-op input chains; 421 AGs -> 64 buckets covering 160 AGs; 261 unbucketed singletons (shape heterogeneity); tps unchanged within noise
 2026-05-22T15:50:00	xxxxxxx	4177	47.0	discard	24.46	75	prefetch_all_gathers FX-level: only 65/421 movable, avg move 7 positions; make_fx already places AGs right after their input deps; tps unchanged
+2026-05-22T16:00:00	pending	4572	47.0	keep	26.77	77	apply_inductor_pattern_passes: joint_graph_passes + post_grad_passes (is_inference=False); 11538 -> 9101 nodes (-21%); tps 4576/4569 avg 4572 (+9.9% vs baseline)

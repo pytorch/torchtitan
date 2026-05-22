@@ -17,6 +17,14 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   experiment cleanly before starting the next one.
 - Subagent prompts must include reading-scope restrictions verbatim and
   the benchmark/numerics commands, or they will drift.
+- **Try upstream pattern matchers before writing your own.** Inductor's
+  `joint_graph_passes` / `post_grad_passes` etc. encode many fusions
+  already; we got our first +10% TPS by simply calling them. Hand-rolled
+  passes should target gaps the upstream passes leave behind.
+- **TPS is the only metric that matters.** Node-count reduction, fewer
+  collective launches, etc. are *necessary but not sufficient*. We've
+  seen 23% fewer launches and 7-position prefetches that didn't move
+  TPS. Always benchmark, don't trust topology metrics.
 
 ## Patterns that worked
 
@@ -27,6 +35,14 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   collect nodes whose target is `torch.ops.aten.detach.default`, call
   `node.replace_all_uses_with(node.args[0])`, then `erase_node`,
   finally `eliminate_dead_code() + lint() + recompile()`.
+- **Reusing upstream Inductor FX pattern matchers
+  (`joint_graph_passes` + `post_grad_passes(is_inference=False)`).**
+  Single biggest TPS win observed: **+9.9% tps, +2.4 pp MFU, bitwise
+  identical numerics, node count 11,538 → 9,101 (−21%)**. These passes
+  do real *semantic* fusion (mm+bias+activation, SDPA epilogues,
+  collapsing `_to_copy` round-trips that iter 2 couldn't touch), not
+  just reordering. **Always try the upstream pattern matchers before
+  hand-rolling cleanup passes — they have years of tuning behind them.**
 
 ## Patterns that didn't work
 
