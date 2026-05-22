@@ -127,6 +127,18 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   intra-layer barrier — the hoist target is wrong. Expect 1.5-2.0+ for
   cross-layer prefetch to be meaningful.
 
+- **FX-level AG reordering does NOT translate to runtime overlap on this
+  graph** (Exps 3, 5, 6, 8 — four attempts, all noise-level or negative).
+  Even after reaching the diagnostic target (avg ~1.44 barriers crossed
+  per AG with end-of-layer-only anchor in Exp 8), tps did not improve and
+  in fact regressed slightly. Either NCCL stream scheduling is already
+  serialized at the runtime level (so moving the AG node earlier doesn't
+  create earlier-on-stream issue), or the AOT-trace runtime doesn't issue
+  collectives onto a separate non-blocking stream as expected. **Do not
+  spend more iterations on AG-prefetch via FX node reordering** — change
+  strategy: either reduce the *number* of AGs (bucketing with coalesced
+  ops) or reduce the *cost* per AG (eliminate the fp32→bf16 cast prefix).
+
 ## Tooling tips
 
 - **Dump the post-trace graph from a graph pass.** Register a temporary pass
