@@ -625,6 +625,11 @@ class InductorRegionExtractor(RegionExtractor):
         For decomposed placeholders we use the positional decomp→orig
         placeholder map; for other nodes we follow ``from_node``.
 
+        Handles the getitem-on-list case: when ``from_node`` points to a
+        list-returning op (e.g. ``split_with_sizes``) but the decomp node
+        is itself a ``getitem`` on it, look for the matching ``getitem``
+        in the original graph using the same index.
+
         Returns the list of original-graph nodes in placeholder order,
         or None if any placeholder can't be mapped.
         """
@@ -645,6 +650,29 @@ class InductorRegionExtractor(RegionExtractor):
             orig = orig_node_map.get(from_nodes[0].name)
             if orig is None:
                 return None
+
+            # If the decomp node is a getitem on a list, but the mapped
+            # orig node returns the full list, find the matching getitem
+            # in the original graph.
+            orig_val = orig.meta.get("val")
+            if (
+                decomp_node.target is operator.getitem
+                and isinstance(orig_val, (list, tuple))
+            ):
+                idx = decomp_node.args[1]
+                matching = None
+                for user in orig.users:
+                    if (
+                        user.target is operator.getitem
+                        and len(user.args) >= 2
+                        and user.args[1] == idx
+                    ):
+                        matching = user
+                        break
+                if matching is None:
+                    return None
+                orig = matching
+
             result.append(orig)
         return result
 
@@ -739,6 +767,22 @@ class InductorRegionExtractor(RegionExtractor):
                 continue
             decomp_gm, placeholder_info, decomp_output_nodes = result
 
+            # Skip complex-tensor regions — triton kernels don't reliably
+            # handle complex dtypes (conjugate views, view_as_complex/real).
+            has_complex = False
+            for info in placeholder_info:
+                if "complex" in info.get("dtype", ""):
+                    has_complex = True
+                    break
+            if not has_complex:
+                for dn in decomp_output_nodes:
+                    val = dn.meta.get("val")
+                    if isinstance(val, torch.Tensor) and val.dtype.is_complex:
+                        has_complex = True
+                        break
+            if has_complex:
+                continue
+
             # Map decomp inputs → original-graph nodes
             ext_inputs = self._map_placeholders_to_orig(
                 placeholder_info, decomp_ph_to_orig, orig_by_name
@@ -746,20 +790,39 @@ class InductorRegionExtractor(RegionExtractor):
             if ext_inputs is None:
                 continue
 
-            # Map decomp outputs → original-graph nodes (preserving order, dedup)
+            # Map decomp outputs → original-graph nodes (preserving order, dedup).
+            # These match the kernel's actual output count.
+            # Also require dtype/shape consistency between decomp output
+            # and the mapped original — if decomp added a convert or
+            # reshape, replacing the original would break the type contract
+            # of downstream consumers.
             out_nodes: list[torch.fx.Node] = []
             seen_out: set[str] = set()
+            dtype_mismatch = False
             for dn in decomp_output_nodes:
                 orig = decomp_node_to_orig.get(dn.name)
-                if orig is not None and orig.name not in seen_out:
-                    seen_out.add(orig.name)
-                    out_nodes.append(orig)
-            if not out_nodes:
+                if orig is None or orig.name in seen_out:
+                    continue
+                dn_val = dn.meta.get("val")
+                orig_val = orig.meta.get("val")
+                if (
+                    isinstance(dn_val, torch.Tensor)
+                    and isinstance(orig_val, torch.Tensor)
+                    and (
+                        dn_val.dtype != orig_val.dtype
+                        or tuple(dn_val.shape) != tuple(orig_val.shape)
+                    )
+                ):
+                    dtype_mismatch = True
+                    break
+                seen_out.add(orig.name)
+                out_nodes.append(orig)
+            if dtype_mismatch or not out_nodes:
                 continue
+            out_node_set = set(out_nodes)
 
             # Compute region nodes in original graph: all original nodes
-            # that any decomp node in this partition maps to, plus
-            # bridging getitem nodes between mapped nodes.
+            # that any decomp node in this partition maps to.
             orig_nodes_set: set[torch.fx.Node] = set()
             for dn in comp:
                 orig = decomp_node_to_orig.get(dn.name)
@@ -779,6 +842,25 @@ class InductorRegionExtractor(RegionExtractor):
                         ):
                             orig_nodes_set.add(u)
                             changed = True
+
+            # Filter region: a node is safe only if all its users are
+            # in the region or in out_nodes.
+            changed = True
+            while changed:
+                changed = False
+                for n in list(orig_nodes_set):
+                    if n in out_node_set:
+                        continue
+                    if not all(
+                        u in orig_nodes_set or u in out_node_set
+                        for u in n.users
+                    ):
+                        orig_nodes_set.discard(n)
+                        changed = True
+
+            # Sanity: out_nodes must all be in the region.
+            if not all(n in orig_nodes_set for n in out_nodes):
+                continue
 
             order = {n: i for i, n in enumerate(gm.graph.nodes)}
             orig_nodes_sorted = sorted(
@@ -1180,21 +1262,35 @@ def _replace_region_with_kernel(
     external_inputs = region.external_inputs
     output_nodes = region.output_nodes
 
-    # Find the correct insertion point: after all external inputs are
-    # defined, to avoid topological ordering violations.  For regions
-    # mapped from decomposed graphs, external inputs may include nodes
-    # that sit between (or after) the region's own nodes.
+    # Find a valid insertion point:
+    #  - AFTER all external inputs are defined
+    #  - BEFORE the earliest external user of any output_node
+    # If no valid point exists, raise to skip this region.
     node_order = {n: i for i, n in enumerate(graph.nodes)}
+    region_set = set(nodes)
+
     latest_input_pos = max(
-        (node_order.get(inp, 0) for inp in external_inputs),
+        (node_order.get(inp, -1) for inp in external_inputs),
         default=-1,
     )
-    first_node_pos = node_order.get(nodes[0], 0)
+    # Earliest external user position across all output_nodes
+    earliest_user_pos = float("inf")
+    for out_node in output_nodes:
+        for u in out_node.users:
+            if u in region_set:
+                continue
+            u_pos = node_order.get(u, -1)
+            if u_pos >= 0 and u_pos < earliest_user_pos:
+                earliest_user_pos = u_pos
 
-    if latest_input_pos >= first_node_pos and external_inputs:
-        # An external input is defined at or after the first region node.
-        # Insert after the latest input to satisfy topological order.
-        latest_input_node = max(external_inputs, key=lambda n: node_order.get(n, 0))
+    if latest_input_pos >= earliest_user_pos:
+        raise RuntimeError(
+            f"Cannot insert kernel: latest input at pos {latest_input_pos} >= "
+            f"earliest external user at pos {earliest_user_pos}"
+        )
+
+    if external_inputs and latest_input_pos >= 0:
+        latest_input_node = max(external_inputs, key=lambda n: node_order.get(n, -1))
         with graph.inserting_after(latest_input_node):
             call_node = graph.call_function(
                 kernel_fn, args=tuple(external_inputs)
@@ -1205,10 +1301,10 @@ def _replace_region_with_kernel(
                 kernel_fn, args=tuple(external_inputs)
             )
 
-        if len(output_nodes) == 1:
-            call_node.meta = output_nodes[0].meta.copy()
-        else:
-            call_node.meta = {}
+    if len(output_nodes) == 1:
+        call_node.meta = output_nodes[0].meta.copy()
+    else:
+        call_node.meta = {}
 
     if len(output_nodes) == 1:
         output_nodes[0].replace_all_uses_with(call_node)
@@ -1345,7 +1441,14 @@ def fused_kernel_pass(
             skipped_invalid += 1
             continue
         best_fn, _ = hash_best[h]
-        _replace_region_with_kernel(work_gm, r, best_fn)
+        try:
+            _replace_region_with_kernel(work_gm, r, best_fn)
+        except RuntimeError as e:
+            # Topological-order conflict: external_inputs and external
+            # users straddle the region.  Skip safely.
+            logger.debug(f"Skipping {h}: {e}")
+            skipped_invalid += 1
+            continue
         live_nodes = {n.name for n in work_gm.graph.nodes}
         replaced += 1
 
