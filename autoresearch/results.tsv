@@ -6,3 +6,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-21T23:41:03	xxxxxxx	4490	47.0	discard	26.29	74	bucket_qkv_all_gathers: 32 triplets (64 launches saved/step); +0.7% tps (below 1% threshold); Q/K/V are bandwidth-bound at this scale
 2026-05-21T23:50:17	xxxxxxx	4481	47.1	discard	26.24	74	prefetch_fsdp_all_gathers_cross_layer (Strategy B v1): 290/421 AGs hoisted avg 10.6 slots; prev_wait anchor was intra-layer, not cross-layer; +0.5% noise
 2026-05-22T00:51:00	xxxxxxx	4467	47.2	discard	26.16	74	prefetch_fsdp_all_gathers_v2 (Strategy B v2, TP-RS-wait anchor): 290/291 hoisted avg 20.5 slots; 1.0 barriers crossed - still intra-layer (anchor lands at mid-layer post-wo); +0.16% noise
+2026-05-22T00:58:29	6a86f11	4569	47.0	keep	26.76	74	remove_identity_ops: 421/421 identity slices + 450/1125 double-t eliminated; +2.4% tps; combined with Exp 1 = +9.8% over raw baseline

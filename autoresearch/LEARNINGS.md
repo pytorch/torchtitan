@@ -14,6 +14,21 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 ## Patterns that worked
 
+- **Identity-slice + double-transpose elimination** (Exp 7, +2.4% tps).
+  Extends Exp 1 to two more peephole patterns. 100% of `aten.slice.Tensor`
+  nodes (421/421) were full-range DTensor local-extraction slices. 40% of
+  `aten.t.default` nodes (450/1125) were back-to-back `t(t(x))` cancelling
+  pairs (mostly from backward grad accumulation). Identity casts (`_to_copy`
+  with same source/target dtype) had zero matches — every `_to_copy` is
+  real bf16↔fp32 traffic. Memory unchanged here (unlike Exp 1's -2.0 GiB),
+  because slice/t are metadata-only ops — the win is launch/dispatch
+  overhead, not deallocation.
+
+  Tooling tip: combine multiple safe peepholes in a single `remove_identity_ops`
+  pass, apply slice→double-t→identity-cast in that order so earlier
+  eliminations expose later opportunities, end with a single
+  `eliminate_dead_code() + lint() + recompile()`.
+
 - **Identity-view elimination is a strict win** (Exp 1, +7.2% tps, -2.0 GiB).
   The AOT FX graph carries ~2k `aten.view.default(x, list(x.shape))` nodes
   from DTensor plumbing. A one-pass peephole that swaps each for its input

@@ -128,6 +128,191 @@ def remove_identity_views(
     return gm
 
 
+_INT64_MAX = 9223372036854775807
+
+
+def remove_identity_ops(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+) -> torch.fx.GraphModule:
+    """Combined peephole pass for residual no-op patterns left by AOT/DTensor.
+
+    Extends :func:`remove_identity_views` to three more zero-cost patterns:
+
+    1. **Identity slice**: ``aten.slice.Tensor(x, dim, 0, end, 1)`` where
+       ``end >= x.shape[dim]`` (incl. ``INT64_MAX``) — replace with ``x``.
+    2. **Double transpose**: ``aten.t.default(aten.t.default(x))`` cancels
+       to ``x`` (2D tensors). Replace the outer ``t`` with the grandparent.
+    3. **Identity dtype cast**: ``aten._to_copy.default(x, dtype=x.dtype,
+       ...)`` with no other tensor-attribute change — replace with ``x``.
+
+    These nodes are no-ops in eager but still anchor FX nodes that delay
+    deallocation post-AOT. Order matters: slice → double-t → identity cast
+    so each step exposes more candidates for the next.
+    """
+    slice_target = torch.ops.aten.slice.Tensor
+    t_target = torch.ops.aten.t.default
+    to_copy_target = torch.ops.aten._to_copy.default
+
+    num_slice_total = 0
+    num_slice_removed = 0
+    num_slice_skipped_meta = 0
+    num_slice_skipped_symint = 0
+
+    num_t_total = 0
+    num_t_removed = 0
+
+    num_to_copy_total = 0
+    num_to_copy_removed = 0
+    num_to_copy_skipped_meta = 0
+
+    # ----- Pass 1: identity slice ----------------------------------------
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not slice_target:
+            continue
+        num_slice_total += 1
+
+        if len(node.args) < 4:
+            continue
+        input_node = node.args[0]
+        dim_arg = node.args[1]
+        start = node.args[2]
+        end = node.args[3]
+        step = node.args[4] if len(node.args) >= 5 else 1
+        if step is None:
+            step = 1
+
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        if not (
+            isinstance(dim_arg, int)
+            and isinstance(start, int)
+            and isinstance(end, int)
+            and isinstance(step, int)
+        ):
+            continue
+        if start != 0 or step != 1:
+            continue
+
+        val = input_node.meta.get("val", None)
+        if val is None or not hasattr(val, "shape"):
+            num_slice_skipped_meta += 1
+            continue
+        shape = val.shape
+        if dim_arg < 0:
+            dim_arg = dim_arg + len(shape)
+        if not (0 <= dim_arg < len(shape)):
+            continue
+        dim_size = shape[dim_arg]
+        if not isinstance(dim_size, int):
+            num_slice_skipped_symint += 1
+            continue
+        # end == INT64_MAX (or any value >= dim_size) means full range.
+        if not (end >= dim_size or end == _INT64_MAX):
+            continue
+
+        node.replace_all_uses_with(input_node)
+        gm.graph.erase_node(node)
+        num_slice_removed += 1
+
+    # ----- Pass 2: double transpose --------------------------------------
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not t_target:
+            continue
+        num_t_total += 1
+
+        if len(node.args) < 1:
+            continue
+        inner = node.args[0]
+        if not isinstance(inner, torch.fx.Node):
+            continue
+        if inner.op != "call_function" or inner.target is not t_target:
+            continue
+        if len(inner.args) < 1:
+            continue
+        grandparent = inner.args[0]
+        if not isinstance(grandparent, torch.fx.Node):
+            continue
+
+        node.replace_all_uses_with(grandparent)
+        gm.graph.erase_node(node)
+        num_t_removed += 1
+        # Leave `inner` alone — DCE will remove it if it now has no users,
+        # otherwise it's still needed by some other path.
+
+    # ----- Pass 3: identity dtype cast -----------------------------------
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not to_copy_target:
+            continue
+        num_to_copy_total += 1
+
+        if len(node.args) < 1:
+            continue
+        input_node = node.args[0]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        val = input_node.meta.get("val", None)
+        if val is None or not hasattr(val, "dtype"):
+            num_to_copy_skipped_meta += 1
+            continue
+
+        target_dtype = node.kwargs.get("dtype", None)
+        if target_dtype is not None and target_dtype != val.dtype:
+            continue
+
+        # Bail if the cast also changes layout / device / pin_memory in any
+        # meaningful way. Treat `None` and a value matching the input as
+        # "no change". We only inspect the bound kwargs; missing kwargs are
+        # implicitly identity.
+        non_identity = False
+        target_layout = node.kwargs.get("layout", None)
+        if target_layout is not None:
+            input_layout = getattr(val, "layout", None)
+            if input_layout is not None and target_layout != input_layout:
+                non_identity = True
+
+        target_device = node.kwargs.get("device", None)
+        if target_device is not None:
+            input_device = getattr(val, "device", None)
+            if input_device is not None and target_device != input_device:
+                non_identity = True
+
+        # pin_memory=True would actually allocate. Only safe if False/None.
+        target_pin = node.kwargs.get("pin_memory", None)
+        if target_pin:
+            non_identity = True
+
+        # memory_format that forces a contiguous re-layout could matter.
+        # Only treat as identity if absent or torch.preserve_format.
+        target_mf = node.kwargs.get("memory_format", None)
+        if target_mf is not None and target_mf is not torch.preserve_format:
+            non_identity = True
+
+        if non_identity:
+            continue
+
+        node.replace_all_uses_with(input_node)
+        gm.graph.erase_node(node)
+        num_to_copy_removed += 1
+
+    total_removed = num_slice_removed + num_t_removed + num_to_copy_removed
+    if total_removed:
+        gm.graph.eliminate_dead_code()
+        gm.graph.lint()
+        gm.recompile()
+
+    logger.info(
+        f"remove_identity_ops: removed "
+        f"slice={num_slice_removed}/{num_slice_total} "
+        f"(skipped: no_meta={num_slice_skipped_meta}, "
+        f"symint={num_slice_skipped_symint}), "
+        f"double_t={num_t_removed}/{num_t_total}, "
+        f"identity_cast={num_to_copy_removed}/{num_to_copy_total} "
+        f"(skipped: no_meta={num_to_copy_skipped_meta})"
+    )
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -138,6 +323,7 @@ def construct_default_graph_passes(
     """
     passes: list[Callable] = [
         remove_identity_views,
+        remove_identity_ops,
     ]
     return passes
 
