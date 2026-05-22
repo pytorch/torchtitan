@@ -387,7 +387,6 @@ def pipeline_hf_transformers(
         m = parallelize_fn(
             m,
             parallel_dims=parallel_dims,
-            training=training,
             parallelism=parallelism,
             compile_config=compile_config,
             ac_config=ac_config,

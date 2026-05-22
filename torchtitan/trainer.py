@@ -342,7 +342,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ) = model_spec.pipelining_fn(
                     model,
                     parallel_dims=parallel_dims,
-                    training=config.training,
                     parallelism=config.parallelism,
                     compile_config=config.compile,
                     ac_config=config.activation_checkpoint,
@@ -351,6 +350,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     model_config=model_config,
                     parallelize_fn=model_spec.parallelize_fn,
                     loss_fn=self.loss_fn,
+                    local_batch_size=config.training.local_batch_size,
                 )
                 # when PP is enabled, `model` obj is no longer used after this point,
                 # model_parts is used instead
@@ -377,7 +377,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     model = model_spec.parallelize_fn(
                         model,
                         parallel_dims=parallel_dims,
-                        training=config.training,
                         parallelism=config.parallelism,
                         compile_config=config.compile,
                         ac_config=config.activation_checkpoint,
