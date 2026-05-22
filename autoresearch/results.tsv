@@ -54,3 +54,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T18:40:00	xxxxxxx	6389	47.0	stability	37.41	70	stability batch 5 (clean): n=9 (excl 1 outlier) mean=6389 sd=35; cumulative ~68 samples confirm ~6,400 tps ± 0.6%
 2026-05-22T19:10:00	xxxxxxx	6368	47.0	stability	37.28	70	stability batch 6+7: n=20 mean=6368 sd=64 (under varying system load); confirms ~6,350-6,450 operating band
 2026-05-22T19:15:00	xxxxxxx	6388	47.0	stability	37.40	70	stability batch 8 (cleanest): n=15 mean=6388 sd=27 CV=0.4%; total ~103 samples; tps band 6,329-6,439
+2026-05-22T19:22:00	xxxxxxx	6399	47.0	stability	37.47	70	stability batch 9: n=15 mean=6399 sd=42; total ~118 samples; grand mean ~6,390
