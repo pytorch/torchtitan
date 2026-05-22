@@ -22,6 +22,7 @@ the beginning:
 
 - [~] **Graph cleanup**: Remove no-ops from the graph to make it cleaner and easier for future optimizations.
   - 2026-05-22 14:52 — Removed 196 `aten.detach.default` nodes (autograd no-op under runtime no_grad). TPS delta within noise but memory dropped ~2 GiB. Still TODO: investigate 842 `_to_copy.default` round-trips and any redundant view/transpose chains.
+  - 2026-05-22 14:58 — `_to_copy.default` same-dtype/device elimination: 0 of 841 qualified — they are all real fp32↔bf16 mixed-precision casts. Plain elimination won't help; need bf16→fp32→bf16 round-trip collapse or fuse-into-producer/consumer.
 - [ ] **CUDA graphs**: If the model is CPU-bound, CUDA graphs remove CPU overhead.
 - [ ] **Computation/communication overlap**: If there are exposed communications, see if they can be overlapped with computations.
 - [ ] **Kernel fusions**: Find regions worth fusing and generate fused kernels. torch.compile, Triton kernels, or custom kernels could all help.

@@ -30,7 +30,14 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 ## Patterns that didn't work
 
-(empty — agent populates)
+- **Same-dtype `_to_copy.default` elimination.** All 842 `_to_copy.default`
+  nodes are genuine fp32↔bf16 mixed-precision casts; none satisfy the
+  same-dtype/device/layout criterion. Plain elimination is dead-on-arrival
+  here. To make progress on these casts, try (a) bf16→fp32→bf16
+  round-trip collapse, (b) fuse the cast into the producer/consumer
+  kernel via inductor regional compile, or (c) avoid emitting the cast
+  altogether by restructuring the graph (e.g. keep a master copy and
+  read it as bf16 once).
 
 ## Tooling tips
 
