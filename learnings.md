@@ -8136,3 +8136,37 @@ Interpretation:
 - Optimizer-in-backward creates enough memory headroom for batch162, but the batch-shape slowdown remains.
 - Since the memory conversion does not beat the durable peak, the zero-grad-norm observability caveat is not worth keeping.
 - Restore the normal optimizer.
+
+## Experiment 339: Model-Only Compile Components
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["model"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run339-model-only-compile-sdpa-prefetch-seq128-lbs160-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: crash.
+- No training step completed.
+- The override was accepted: the log did not print `Compiling the loss function with torch.compile`.
+- Root cause:
+
+```text
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB.
+...
+loss.py line 25, in cross_entropy_loss
+return torch.nn.functional.cross_entropy(...)
+```
+
+- At failure, each rank reported about 177.06 GiB in use with only 1.28 GiB free.
+
+Interpretation:
+
+- Compiling the loss is required for the durable batch160 memory envelope.
+- The uncompiled chunked cross-entropy path OOMs even with `loss.num_chunks=6`.
+- Keep the durable `compile.components=["model", "loss"]` behavior.

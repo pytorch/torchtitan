@@ -1,0 +1,361 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable '--compile.components=["model"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run339-model-only-compile-sdpa-prefetch-seq128-lbs160-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder
+W0522 14:34:38.752000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0522 14:34:38.752000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0522 14:34:38.752000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0522 14:34:38.752000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0522 14:34:44.498000 2612459 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-22 14:34:45,254 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-22 14:34:45,312 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run339-model-only-compile-sdpa-prefetch-seq128-lbs160-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/structured_logs/training.global_rank_0.20260522-143445-VI099W.jsonl
+[rank0]:[titan] 2026-05-22 14:34:45,528 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-22 14:34:45,530 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-22 14:34:45,538 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-22 14:34:45,539 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-22 14:34:50,285 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-22 14:34:50,289 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-22 14:34:50,315 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-22 14:34:50,398 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-22 14:34:50,553 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-22 14:34:50,553 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-22 14:34:50,632 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-22 14:34:51,101 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-22 14:34:51,101 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-22 14:34:51,103 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-22 14:34:51,103 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-22 14:34:51,119 - root - INFO - Trainer is initialized with local batch size 160, global batch size 1280, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-22 14:34:51,119 - root - INFO - Training starts at step 1
+[rank0]:[rank0]:[W522 14:34:58.280572326 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 8126464, total: 191503138816).
+[rank0]:[rank0]:[W522 14:34:58.399942852 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 8126464, total: 191503138816).
+[rank0]:[rank0]:[W522 14:34:58.444692361 CUDACachingAllocator.cpp:495] expandable_segments: memory mapping failed with OOM on device 0 while trying to map 20971520 bytes (free: 8126464, total: 191503138816).
+[rank0]:[rank0]: Traceback (most recent call last):
+[rank0]:[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:[rank0]:     main()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 65, in main
+[rank0]:[rank0]:     trainer.train()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+[rank0]:[rank0]:     return f(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+[rank0]:[rank0]:     self.train_step(data_iterator)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+[rank0]:[rank0]:     loss = self.forward_backward_step(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+[rank0]:[rank0]:     return func(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+[rank0]:[rank0]:     loss = self.loss_fn(pred, labels, global_valid_tokens)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+[rank0]:[rank0]:     chunk_loss = self.fn(logits, label_chunk)
+[rank0]:[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+[rank0]:[rank0]:     return torch.nn.functional.cross_entropy(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+[rank0]:[rank0]:     return torch._C._nn.cross_entropy_loss(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 0 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+W0522 14:35:02.159000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2612459 closing signal SIGTERM
+W0522 14:35:02.160000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2612460 closing signal SIGTERM
+W0522 14:35:02.160000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2612461 closing signal SIGTERM
+W0522 14:35:02.160000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2612464 closing signal SIGTERM
+W0522 14:35:02.160000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2612467 closing signal SIGTERM
+W0522 14:35:02.160000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2612470 closing signal SIGTERM
+W0522 14:35:02.160000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 2612471 closing signal SIGTERM
+E0522 14:35:06.047000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 3 (pid: 2612462) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0522 14:35:06.051000 2608900 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/3/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 2612459) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/0/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 0 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[2]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 2612460) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/1/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 1 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[3]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 2612461) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/2/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 2 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[4]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : 1 (pid: 2612464) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 4 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[5]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : 1 (pid: 2612467) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 5 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[6]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : 1 (pid: 2612470) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 6 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+[7]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 2612471) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 7 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-22_14:34:58
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 2612462) 
+  error_file: /tmp/torchelastic_zf21gmmy/none_5galty2z/attempt_0/3/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 687, in forward_backward_step
+      loss = self.loss_fn(pred, labels, global_valid_tokens)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 327, in __call__
+      chunk_loss = self.fn(logits, label_chunk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/components/loss.py", line 25, in cross_entropy_loss
+      return torch.nn.functional.cross_entropy(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/functional.py", line 3513, in cross_entropy
+      return torch._C._nn.cross_entropy_loss(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.99 GiB. GPU 3 has a total capacity of 178.35 GiB of which 1.28 GiB is free. Including non-PyTorch memory, this process has 177.06 GiB memory in use. Of the allocated memory 175.17 GiB is allocated by PyTorch, and 234.85 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  
+============================================================

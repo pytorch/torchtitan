@@ -3281,6 +3281,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command but add `--compile.components='["model"]'`, keeping `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no compile fallback/crash. Risk is slower loss execution or config parser/list syntax failure.
+  Result: crash at source state `8ed2db5`; the override was accepted and the loss compile log disappeared, but the run OOMed before step 1 in the uncompiled chunked cross-entropy call while trying to allocate 1.99 GiB with about 177.06 GiB already in use. Keep compiling the loss; it is required for the durable batch160 memory envelope.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
