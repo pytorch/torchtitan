@@ -14,17 +14,20 @@ For each supported HF MoE model, this script:
 5. Compares outputs via KL divergence, cosine similarity, and max abs diff
 
 Note on numerical precision:
-    Results are NOT bit-exact due to a difference in accumulation precision
-    between HF and titan token dispatchers. HF's ``grouped_mm_experts_forward``
-    multiplies expert outputs by routing scores in float32 and accumulates
-    via ``reshape+sum`` in float32 before casting to bf16. Titan's
-    ``LocalTokenDispatcher.combine()`` also multiplies in float32 but casts
-    back to bf16 *before* ``deterministic_scatter_add``, so the accumulation
-    happens in bf16. This causes max_diff to scale with hidden_size (e.g.
-    ~2e-3 at H=2048, ~1.25e-1 at H=7168). Accumulating in float32 in the
-    dispatcher produces bit-exact (0.00) results across all models.
-    TODO(mreso): Make the accumulation dtype in ``LocalTokenDispatcher.combine``
-    configurable (or default to float32) so titan matches HF's precision.
+    Results are NOT bit-exact due to three differences in core torchtitan.
+    With all three fixed, all models produce max_diff=0.00 (verified on
+    full pretrained Mixtral-8x7B, Qwen3-30B-A3B, DeepSeek-V2-Lite,
+    OLMoE-1B-7B).
+
+    1. ``LocalTokenDispatcher.combine()`` casts score-weighted output to
+       bf16 before ``scatter_add``, so accumulation happens in bf16. Fix:
+       keep in f32 through accumulation, cast only at the end.
+    2. ``scatter_add`` accumulates in expert-sorted order; HF uses
+       ``reshape(N, K, D).sum(dim=1)`` in token order. Fix: unsort back
+       to token order and use reshape+sum instead of scatter_add.
+    3. ``TokenChoiceTopKRouter`` uses ``topk(sorted=False)``; HF defaults
+       to ``sorted=True``. Different order causes different f32 sum in
+       route_norm. Fix: use ``sorted=True``.
 
 Usage:
     python -m torchtitan.experiments.transformers_modeling_backend.tests.numerical_equivalence
