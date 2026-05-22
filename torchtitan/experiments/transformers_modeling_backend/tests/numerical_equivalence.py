@@ -36,7 +36,6 @@ Usage:
 import argparse
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -327,7 +326,9 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
         gate.float()
         gate.register_forward_pre_hook(
             lambda mod, args: tuple(
-                a.float() if isinstance(a, torch.Tensor) and a.is_floating_point() else a
+                a.float()
+                if isinstance(a, torch.Tensor) and a.is_floating_point()
+                else a
                 for a in args
             )
         )
