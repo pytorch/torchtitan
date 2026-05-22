@@ -11,10 +11,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+import spmd_types as spmd
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList
+from torchtitan.protocols.sharding import ShardingConfig
 
 LayerNorm = Module.from_nn_module(nn.LayerNorm)
 GELU = Module.from_nn_module(nn.GELU)
@@ -70,6 +72,15 @@ def _compute_learned_pos_embeds(
     merge_size = spatial_merge_size
 
     pos_embeds = learned_pos_embed.new_zeros(num_vision, max_num_patch, dim)
+    # TODO: spmd_types should propagate the source type through new_zeros.
+    mesh_names = spmd.current_mesh_names() if spmd.is_type_checking() else None
+    if mesh_names is not None and "tp" in mesh_names:
+        pos_embeds = spmd.mutate_type(
+            pos_embeds,
+            "tp",
+            src=spmd.R,
+            dst=spmd.I,
+        )
 
     # Group images by (h, w) to batch compute position embeddings
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -263,8 +274,15 @@ class PatchEmbed(Module):
 class VisionRotaryEmbedding(Module):
     """2D Rotary Position Embedding for Vision Transformer."""
 
-    def __init__(self, dim: int, theta: float = 10000.0):
+    def __init__(
+        self,
+        dim: int,
+        theta: float = 10000.0,
+        *,
+        sharding_config: ShardingConfig | None = None,
+    ):
         super().__init__()
+        self._sharding_config = sharding_config
         self.dim = dim
         self.theta = theta
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
@@ -311,15 +329,19 @@ class PatchMerger(Module):
         *,
         fc1: Linear.Config,
         fc2: Linear.Config,
+        sharding_config: ShardingConfig | None = None,
+        norm_sharding_config: ShardingConfig | None = None,
         use_postshuffle_norm: bool = False,
     ):
         super().__init__()
+        self._sharding_config = sharding_config
         self.spatial_merge_size = spatial_merge_size
         self.merged_hidden_size = hidden_size * (spatial_merge_size**2)
         self.use_postshuffle_norm = use_postshuffle_norm
 
         norm_dim = self.merged_hidden_size if use_postshuffle_norm else hidden_size
         self.norm = LayerNorm(norm_dim, eps=1e-6)
+        self.norm._sharding_config = norm_sharding_config
         self.linear_fc1 = fc1.build()
         self.act_fn = GELU(approximate="tanh")
         self.linear_fc2 = fc2.build()
@@ -356,9 +378,16 @@ class VisionAttention(Module):
     """Multi-head attention with FlexAttention for efficient batched processing."""
 
     def __init__(
-        self, dim: int, n_heads: int, *, qkv: Linear.Config, proj: Linear.Config
+        self,
+        dim: int,
+        n_heads: int,
+        *,
+        qkv: Linear.Config,
+        proj: Linear.Config,
+        sharding_config: ShardingConfig | None = None,
     ):
         super().__init__()
+        self._sharding_config = sharding_config
         self.dim = dim
         self.num_heads = n_heads
         self.head_dim = self.dim // self.num_heads
@@ -403,8 +432,15 @@ class VisionAttention(Module):
 class VisionMLP(Module):
     """Feed-forward network with GELU activation."""
 
-    def __init__(self, *, fc1: Linear.Config, fc2: Linear.Config):
+    def __init__(
+        self,
+        *,
+        fc1: Linear.Config,
+        fc2: Linear.Config,
+        sharding_config: ShardingConfig | None = None,
+    ):
         super().__init__()
+        self._sharding_config = sharding_config
         self.linear_fc1 = fc1.build()
         self.linear_fc2 = fc2.build()
         self.act_fn = GELU(approximate="tanh")
@@ -426,12 +462,27 @@ class VisionTransformerBlock(Module):
         attn_proj: Linear.Config,
         mlp_fc1: Linear.Config,
         mlp_fc2: Linear.Config,
+        attn_sharding_config: ShardingConfig | None = None,
+        mlp_sharding_config: ShardingConfig | None = None,
+        norm_sharding_config: ShardingConfig | None = None,
     ):
         super().__init__()
         self.norm1 = LayerNorm(dim, eps=layer_norm_eps)
         self.norm2 = LayerNorm(dim, eps=layer_norm_eps)
-        self.attn = VisionAttention(dim, n_heads, qkv=attn_qkv, proj=attn_proj)
-        self.mlp = VisionMLP(fc1=mlp_fc1, fc2=mlp_fc2)
+        self.norm1._sharding_config = norm_sharding_config
+        self.norm2._sharding_config = norm_sharding_config
+        self.attn = VisionAttention(
+            dim,
+            n_heads,
+            qkv=attn_qkv,
+            proj=attn_proj,
+            sharding_config=attn_sharding_config,
+        )
+        self.mlp = VisionMLP(
+            fc1=mlp_fc1,
+            fc2=mlp_fc2,
+            sharding_config=mlp_sharding_config,
+        )
 
     def forward(
         self,
@@ -485,6 +536,11 @@ class Qwen3VLVisionEncoder(Module):
         mlp_fc2: Linear.Config
         merger_fc1: Linear.Config
         merger_fc2: Linear.Config
+        attn_sharding_config: ShardingConfig | None = None
+        mlp_sharding_config: ShardingConfig | None = None
+        merger_sharding_config: ShardingConfig | None = None
+        norm_sharding_config: ShardingConfig | None = None
+        rotary_sharding_config: ShardingConfig | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -510,7 +566,9 @@ class Qwen3VLVisionEncoder(Module):
 
         head_dim = config.dim // config.n_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(
-            head_dim // 2, theta=config.rope_theta
+            head_dim // 2,
+            theta=config.rope_theta,
+            sharding_config=config.rotary_sharding_config,
         )
         # Cached RoPE freq table — recomputed only when max_hw grows
         self._cached_freq_table: torch.Tensor | None = None
@@ -525,6 +583,9 @@ class Qwen3VLVisionEncoder(Module):
                     attn_proj=config.attn_proj,
                     mlp_fc1=config.mlp_fc1,
                     mlp_fc2=config.mlp_fc2,
+                    attn_sharding_config=config.attn_sharding_config,
+                    mlp_sharding_config=config.mlp_sharding_config,
+                    norm_sharding_config=config.norm_sharding_config,
                 )
                 for idx in range(config.n_layers)
             }
@@ -536,6 +597,8 @@ class Qwen3VLVisionEncoder(Module):
             spatial_merge_size=config.spatial_merge_size,
             fc1=config.merger_fc1,
             fc2=config.merger_fc2,
+            sharding_config=config.merger_sharding_config,
+            norm_sharding_config=config.norm_sharding_config,
         )
 
         # DeepStack mergers for intermediate layers
@@ -549,6 +612,8 @@ class Qwen3VLVisionEncoder(Module):
                     spatial_merge_size=config.spatial_merge_size,
                     fc1=config.merger_fc1,
                     fc2=config.merger_fc2,
+                    sharding_config=config.merger_sharding_config,
+                    norm_sharding_config=config.norm_sharding_config,
                     use_postshuffle_norm=True,
                 )
                 for _ in range(len(config.deepstack_visual_indices))
@@ -596,6 +661,14 @@ class Qwen3VLVisionEncoder(Module):
             self.spatial_merge_size,
             head_dim,
         )
+        mesh_names = spmd.current_mesh_names() if spmd.is_type_checking() else None
+        if mesh_names is not None and "tp" in mesh_names:
+            rope_cache = spmd.mutate_type(
+                rope_cache,
+                "tp",
+                src=spmd.R,
+                dst=spmd.R,
+            )
 
         return learned_pos, rope_cache
 
@@ -629,14 +702,15 @@ class Qwen3VLVisionEncoder(Module):
         hidden_states = hidden_states + learned_pos
 
         mask_mod = get_vision_block_mask_mod(num_patch, max_num_patch)
-        attention_mask = _compiled_create_block_mask(
-            mask_mod,
-            num_vision,
-            None,
-            max_num_patch,
-            max_num_patch,
-            device=hidden_states.device,
-        )
+        with spmd.no_typecheck():
+            attention_mask = _compiled_create_block_mask(
+                mask_mod,
+                num_vision,
+                None,
+                max_num_patch,
+                max_num_patch,
+                device=hidden_states.device,
+            )
         deepstack_features = []
 
         for layer_idx, layer in self.layers.items():

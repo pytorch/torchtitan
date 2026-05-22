@@ -15,13 +15,7 @@ import torch
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import distribute_tensor, Replicate
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    RowwiseParallel,
-)
+from torch.distributed.fsdp import DataParallelMeshDims, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -35,77 +29,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.models.qwen3_vl.model import Qwen3VLModel
 from torchtitan.tools.logging import logger
-
-
-def _apply_tp_to_vision_encoder(
-    vision_encoder: nn.Module,
-    tp_mesh: DeviceMesh,
-):
-    """Apply tensor parallelism to the vision encoder.
-
-    Hidden states flow as DTensor(Replicate) throughout — all ranks hold the
-    full hidden_states. Only the linear layers (qkv, proj, fc1, fc2) are
-    sharded via ColwiseParallel/RowwiseParallel to save memory. Norms operate
-    on Replicate DTensors directly.
-    """
-    # NoParallel on patch_embed distributes its params as Replicate DTensors
-    # on tp_mesh for FSDP mesh consistency. Its input hook wraps plain
-    # pixel_values as DTensor(Replicate), and the output stays as DTensor
-    # (Replicate) to flow through the rest of the vision encoder.
-    parallelize_module(vision_encoder, tp_mesh, {"patch_embed": NoParallel()})
-
-    # pos_embed is an nn.Parameter (not a submodule), so it can't be targeted
-    # by parallelize_module's plan dict. We distribute it as Replicate DTensor
-    # on tp_mesh for FSDP mesh consistency.
-    vision_encoder.pos_embed = nn.Parameter(
-        # pyrefly: ignore [bad-argument-type]
-        distribute_tensor(vision_encoder.pos_embed.data, tp_mesh, [Replicate()]),
-        requires_grad=vision_encoder.pos_embed.requires_grad,
-    )
-
-    # TP plan for each vision transformer block.
-    # hidden_states flows through as DTensor (Replicate) so residual adds work.
-    # NoParallel on norms sets their params as Replicate DTensors on tp_mesh
-    # (for consistent (fsdp, tp) mesh after FSDP).
-    # RowwiseParallel uses use_local_output=False to return DTensor (Replicate)
-    # so residual connections (hidden_states + attn/mlp output) stay in DTensor
-    # space. ColwiseParallel uses use_local_output=True (default) to return
-    # local shards for the internal attention/MLP computation.
-    layer_plan = {
-        "norm1": NoParallel(),
-        "norm2": NoParallel(),
-        "attn.qkv": ColwiseParallel(),  # needs plain tensor for reshape after qkv
-        "attn.proj": RowwiseParallel(use_local_output=False),
-        "mlp.linear_fc1": ColwiseParallel(use_local_output=False),
-        "mlp.linear_fc2": RowwiseParallel(use_local_output=False),
-    }
-
-    # pyrefly: ignore [not-callable]
-    for transformer_block in vision_encoder.layers.values():
-        # pyrefly: ignore [bad-argument-type]
-        parallelize_module(transformer_block, tp_mesh, layer_plan)
-
-    # TP plan for patch mergers (main + deepstack).
-    # Mergers output DTensor(Replicate) — the model passes padded embeddings
-    # directly to vision scatter and DeepStack.
-    merger_plan = {
-        "norm": NoParallel(),
-        "linear_fc1": ColwiseParallel(use_local_output=False),
-        "linear_fc2": RowwiseParallel(use_local_output=False),
-    }
-
-    # pyrefly: ignore [bad-argument-type]
-    parallelize_module(vision_encoder.merger, tp_mesh, merger_plan)
-    # pyrefly: ignore [not-iterable]
-    for merger in vision_encoder.deepstack_merger_list:
-        # pyrefly: ignore [bad-argument-type]
-        parallelize_module(merger, tp_mesh, merger_plan)
-
-    logger.info("Applied Tensor Parallelism to the vision encoder")
 
 
 def _apply_fsdp_to_vision_encoder(
@@ -115,6 +42,7 @@ def _apply_fsdp_to_vision_encoder(
     reduce_dtype: torch.dtype,
     reshard_after_forward_policy: str = "default",
     pp_enabled: bool = False,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
     Apply FSDP to the vision encoder as a single unit.
@@ -130,6 +58,8 @@ def _apply_fsdp_to_vision_encoder(
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled=pp_enabled
     )
@@ -158,9 +88,6 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.full_dtensor:
-        raise NotImplementedError("full_dtensor is not supported yet.")
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -168,15 +95,7 @@ def parallelize_qwen3_vl(
     if parallel_dims.cp_enabled:
         raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
 
-    if parallel_dims.tp_enabled:
-        # TODO(@fegin): Apply TP to vision encoder (still uses parallelize_module path)
-        if model.vision_encoder is not None:
-            _apply_tp_to_vision_encoder(
-                model.vision_encoder, parallel_dims.get_mesh("tp")
-            )
-
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        model.parallelize(parallel_dims)
+    model.parallelize(parallel_dims)
 
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
@@ -204,13 +123,26 @@ def parallelize_qwen3_vl(
             apply_compile(model.vision_encoder, compile_config)
 
     # Apply FSDP / HSDP unconditionally (fully_shard handles dp_shard=1)
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
+    dp_mesh_names: list[str] = []
+    if parallel_dims.dp_replicate_enabled:
+        dp_mesh_names.append("dp_replicate")
+    dp_mesh_names.append("fsdp")
+    if parallel_dims.tp_enabled:
+        dp_mesh_names.append("tp")
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+    dense_spmd_mesh = parallel_dims.get_activated_mesh(["dp", "cp", "tp"])
+    dp_mesh_dims = (
+        DataParallelMeshDims(
+            shard="fsdp",
+            replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+        )
+        if dense_spmd_mesh is not None
+        else None
+    )
 
     # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
     edp_mesh = None
+    sparse_spmd_mesh = None
     if parallel_dims.ep_enabled:
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
@@ -218,6 +150,9 @@ def parallelize_qwen3_vl(
             else ["efsdp"]
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        sparse_spmd_mesh = parallel_dims.get_activated_mesh(
+            ["dp_replicate", "efsdp", "ep"]
+        )
 
     # FSDP the vision encoder as a single unit (see _apply_fsdp_to_vision_encoder)
     if model.vision_encoder is not None:
@@ -228,6 +163,7 @@ def parallelize_qwen3_vl(
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=parallel_dims.pp_enabled,
+            dp_mesh_dims=dp_mesh_dims,
         )
 
     # FSDP the decoder with MoE-aware sharding
@@ -241,6 +177,8 @@ def parallelize_qwen3_vl(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        sparse_spmd_mesh=sparse_spmd_mesh,
+        dp_mesh_dims=dp_mesh_dims,
     )
 
     logger.info("Applied fully_shard to the Qwen3-VL model")

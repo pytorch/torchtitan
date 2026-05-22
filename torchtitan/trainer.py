@@ -478,8 +478,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_train_context(False)
 
         if isinstance(self.loss_fn, ChunkedCELoss):
+            tok_embeddings_config = getattr(model_config, "tok_embeddings", None)
             self.loss_fn.enable_sp = (
-                parallel_dims.tp_enabled and config.parallelism.enable_sequence_parallel
+                parallel_dims.tp_enabled
+                and tok_embeddings_config is not None
+                and tok_embeddings_config.enable_sp
             )
             self.loss_fn.loss_parallel = (
                 parallel_dims.tp_enabled
