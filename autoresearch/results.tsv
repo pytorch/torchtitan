@@ -37,3 +37,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T07:30:00	xxxxxxx	0	0.0	discard	0.00	0	exp33 hunt: identified RoPE freq lookup duplication (32x squeeze+index+view); mul/add identity 0; transpose past SDPA blocked
 2026-05-22T07:40:00	xxxxxxx	6453	46.9	discard	37.78	70	exp34 cse_rope_freq_lookup: 93 direct + 62 cascade (cleanup_bundle conj/clone 32→63) = 155 ops; +0.17% sub-noise
 2026-05-22T07:55:00	xxxxxxx	6402	47.1	discard	37.49	71	exp35 overlap_tp_rs_with_fsdp_ag: 64 RS-AG pairs, avg 53.8 slots moved; -0.6% regression — casts were hiding in FFN compute, moving them to critical path was net-negative
+2026-05-22T14:57:00	xxxxxxx	6523	47.1	discard	38.19	71	exp36 mega_coalesce_bwd_rs: 33→1 coalesced RS, 291 tensors; median +0.70% (best 6,523 borderline above threshold but 2/3 below); bwd RS waits feed only graph outputs (async fire-and-forget already)
