@@ -28,7 +28,7 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
-## apply_inductor_pattern_passes — keep (pending)
+## apply_inductor_pattern_passes — keep (76d3f9e)
 
 - **Idea**: PyTorch's Inductor ships several FX-level pattern matchers (`joint_graph_passes`, `post_grad_passes`, etc.) that fuse common ATen sequences (mm+bias+activation, SDPA epilogues, `_to_copy` round-trips, …) by rewriting the GraphModule in place. They were designed for the same kind of joint fwd+bwd graph that `make_fx` produces, so they should apply directly.
 - **Changes**: Added `apply_inductor_pattern_passes(gm, example_inputs)` that tries 5 upstream entry points in sequence, each wrapped in its own `try/except`: `joint_graph_passes`, `post_grad_passes(is_inference=False)`, `pre_grad_passes`, `binary_folding_pass`, `dedupe_symint_uses_pass`. Each logs availability and before/after node counts. Registered AFTER `remove_detach_nodes`.
