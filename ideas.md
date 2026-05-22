@@ -3271,6 +3271,7 @@
   Planned source/config changes: Keep `OptimizersInBackwardContainer.Config(lr=8e-4)` in `qwen3_14b()`.
   Planned command or config overrides: Exact run337 command but set `--training.local_batch_size=162`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite loss and peak memory near or below the durable 169.10 GiB band. Risk is slower batch shape, memory returning above the preferred envelope, or the zero-grad-norm observability caveat remaining unacceptable.
+  Result: discarded at source state `8a9c2bd`; 10,548 tps with finite overall-decreasing loss, 39.50% MFU, and 168.92 GiB peak memory. The larger batch does not beat the durable peak, so restore the normal optimizer because the zero `grad_norm` observability caveat is not worth keeping for a tie-band result.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b

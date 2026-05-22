@@ -8109,3 +8109,30 @@ Interpretation:
 - Optimizer-in-backward saves about 1.9 GiB and keeps throughput in the best measured band.
 - The zero `grad_norm` is an observability caveat: the optimizer hook steps and zeroes gradients during backward, so TorchTitan's existing grad-norm metric is no longer comparable.
 - Keep this source only for a memory-conversion follow-up at local batch size 162. If the larger batch does not beat the durable peak, restore the normal optimizer because the metric caveat is not worth keeping for equal throughput alone.
+
+## Experiment 338: Optimizer In Backward With Local Batch Size 162
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=162 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run338-optimizer-in-backward-lbs162-sdpa-prefetch-seq128-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run337 `OptimizersInBackwardContainer.Config(lr=8e-4)` source.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 10,548, below the run318 10,658 measured peak and below run337 at batch160.
+- Step 10 MFU: 39.50%.
+- Step 10 peak memory: 168.92 GiB, 94.71%.
+- Loss moved from 12.56832 at step 1 to 5.73261 at step 10; finite and overall decreasing, although steps 3 and 5 rose locally.
+- `grad_norm` again reported 0.0 at every step.
+
+Interpretation:
+
+- Optimizer-in-backward creates enough memory headroom for batch162, but the batch-shape slowdown remains.
+- Since the memory conversion does not beat the durable peak, the zero-grad-norm observability caveat is not worth keeping.
+- Restore the normal optimizer.
