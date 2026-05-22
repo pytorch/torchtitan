@@ -22,3 +22,5 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T03:30:00	xxxxxxx	0	0.0	discard	0.00	0	exp20 model+scaffolding code review: no_target - FusedQKVLinear exists but config-level only; FFN w1/w3 fusion requires checkpoint changes; compile_config has no exploitable knob; 97 detach-of-detach found but sub-noise
 2026-05-22T03:37:00	xxxxxxx	5168	47.0	discard	30.26	73	max_cleanup_bundle: 354 ops (_to_copy CSE=0, t.default CSE=0, cascade=0); +0.86% — 8 tps short of threshold; cleanup ceiling confirmed
 2026-05-22T03:45:00	xxxxxxx	5139	47.0	discard	30.09	73	aggressive_view_chain_shortcut: 1/1482 shortcuts (386 rank_mismatch, 1095 no_inner_view); view-of-view-that-undoes-itself essentially doesn't exist; +0.29%
+2026-05-22T03:55:00	xxxxxxx	0	0.0	discard	0.00	0	exp23 batched specks: pass reorder + unsafe_view + t.default + bwd AG-split mirror; all no_target/sub-noise (Exp 11 already absorbed bwd splits)
+2026-05-22T04:00:00	xxxxxxx	0	0.0	discard	0.00	0	exp24 profile-driven: top 5 kernels - NCCL coalesced AG/RS done, SDPA/GEMM compute-only, FillFunctor 3065/step from --debug.deterministic (invisible to FX, ~7% step overhead)

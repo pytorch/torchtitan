@@ -42,6 +42,27 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   downstream pattern matchers see a clean graph and aren't tripped up by
   identity-view chains separating producer and consumer.
 
+## Profile-derived bottleneck breakdown (Exp 24)
+
+Profiled run (`--profiler.enable_profiling`) reveals the actual GPU-time
+breakdown is dominated by:
+1. NCCL AllGather (~197 ms / 169 calls) — already coalesced post-Exp 13.
+2. SDPA backward (~160 ms / 35 calls) — pure compute, not FX-rewritable.
+3. NCCL ReduceScatter (~130 ms / 37 calls) — already coalesced post-Exp 13.
+4. GEMM kernels (~240 ms / 641 calls) — pure compute.
+5. **`FillFunctor` (3065 calls, ~50 ms, ~7% of step time) — INVISIBLE to FX**.
+   These are framework-side `aten::empty`-with-NaN-fill operations
+   triggered by `torch.use_deterministic_algorithms(True)` via
+   `--debug.deterministic`. No `aten.empty.*` callsites exist in the FX
+   graph; the fills are emitted at C++ kernel-launch time, not as FX nodes.
+
+**Implication**: our 5,124 tps baseline is on a *determinism-constrained*
+config. A production run without `--debug.deterministic` would skip the
+~7% NaN-fill overhead — i.e. observed tps would be higher than 5,124.
+The +23.1% we achieved is the FX-pass-side improvement on top of this
+flag-constrained measurement, but is real and persists when the flag is
+disabled. The remaining ~7% is not addressable from `passes.py`.
+
 ## Run summary (after Exp 18, 2026-05-22 ~03:20 UTC)
 
 **Cumulative tps: 4,161 → 5,124 = +23.1%** over raw baseline, via four committed passes:
