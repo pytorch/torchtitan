@@ -151,6 +151,7 @@ def compile_time_passes(
 
     from torchtitan.experiments.graph_trainer.fused_kernel_registry import (
         fused_kernel_pass,
+        tag_fusible_nodes_pass,
     )
 
     n_layers = len(config.model_spec.model.layers)
@@ -183,6 +184,10 @@ def compile_time_passes(
     # No-op when fused_kernel_dir is empty.
     fused_dir = config.compile.fused_kernel_dir
     if fused_dir:
+        # tag_fusible_nodes_pass runs first so the tlparse dump before
+        # fused_kernel_pass shows per-node fusibility classification
+        # (under node.meta["custom"]["is_fusible"]).
+        passes.append(tag_fusible_nodes_pass)
         passes.append(
             functools.partial(
                 fused_kernel_pass,

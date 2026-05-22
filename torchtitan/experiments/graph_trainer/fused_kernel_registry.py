@@ -294,6 +294,58 @@ def _build_region(comp: list[torch.fx.Node], norm_fqn: str = "") -> Region:
     )
 
 
+def tag_fusible_nodes_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Tag each call_function node with its ``is_fusible_node`` result.
+
+    Sets ``node.meta["custom"]["is_fusible"]`` so the classification
+    shows up in ``print_readable`` / tlparse output.  Useful for
+    debugging which nodes ``InductorRegionExtractor`` will group into
+    fusion regions.
+
+    No-op if ``torch._inductor.fx_passes.fusion_regions`` isn't
+    available.
+    """
+    try:
+        from torch._inductor.fx_passes.fusion_regions import (
+            is_fusible_node,
+            is_view_node,
+        )
+    except ImportError:
+        return gm
+
+    n_fusible = n_view = n_unfusable = 0
+    for node in gm.graph.nodes:
+        if node.op != "call_function":
+            continue
+        try:
+            fusible = bool(is_fusible_node(node))
+        except Exception:
+            fusible = None
+        try:
+            view = bool(is_view_node(node))
+        except Exception:
+            view = False
+        custom = node.meta.setdefault("custom", {})
+        custom["is_fusible"] = fusible
+        if view:
+            custom["is_view"] = True
+        if _is_unfusable(node):
+            custom["graph_trainer_unfusable"] = True
+            n_unfusable += 1
+        elif view:
+            n_view += 1
+        elif fusible:
+            n_fusible += 1
+    logger.info(
+        f"tag_fusible_nodes: {n_fusible} fusible, {n_view} view, "
+        f"{n_unfusable} unfusable (graph_trainer-filtered)"
+    )
+    return gm
+
+
 class RegionExtractor(ABC):
     """Base class for fusible region extractors.
 
