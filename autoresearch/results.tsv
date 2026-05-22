@@ -30,3 +30,5 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T06:17:00	d8fb3fb	6334	47.0	baseline	37.09	72	NEW BASELINE: dropped --debug.deterministic from run_benchmark.sh (per user) - recovers 7% NaN-fill overhead; numerics test still passes (own determinism setup)
 2026-05-22T06:27:06	8e02ed8	6442	47.0	keep	37.72	69	cleanup_bundle (Exp 17 redux): 354 ops removed (detach 194 + view 96 + conj 32 + clone 32); +1.71% in non-det mode (vs +0.64% in det); dispatch-overhead win is real
 2026-05-22T06:37:00	xxxxxxx	6431	47.0	discard	37.66	69	foreach_cast_via_cat (Exp 14 redux): 33+33 buckets fused, -0.17%; cat+split overhead ≈ 516 launch savings regardless of det mode
+2026-05-22T06:50:00	xxxxxxx	0	0.0	discard	0.00	0	exp29 re-profile non-det: top kernels NCCL TP RS bf16 183ms, AG mix 177ms, FSDP RS 123ms, GEMMs 155ms - no FX-targetable hot kernel
+2026-05-22T07:05:00	xxxxxxx	6447	47.3	discard	37.74	70	exp30 global_weight_prefetch: 33 AGs hoisted avg 1696 slots; +0.08% confirms FX reorder doesn't add overlap beyond Exp 13's per-layer hoist
