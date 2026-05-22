@@ -3233,6 +3233,15 @@
   Success criteria and expected risk: A performance lead is step-10 tps above 10,658 with finite loss and no numerical blow-up. Because this changes computation, any promising result requires longer loss convergence validation before it can be considered correct. Risk is compile failure, unsupported Float8Linear under this FSDP layout, worse throughput, or unstable short-run loss.
   Result: discarded at source state `70c04bd`; step-10 throughput fell to 5,227 tps, MFU was N/A, peak memory dropped to 129.86 GiB, and the run emitted an FSDP2 warning that `FSDPFloat8Linear` returned a view tensor that can drop pre-backward hooks after in-place ops. Restore BF16 Linear configs; Float8Linear does not provide a usable speed lead for this FSDP layout.
 
+- Idea: Qwen3 14B MXFP8Linear converter
+  Current best source commit: e67defc
+  Source: GEMM-cost converter follow-up after TorchAO Float8Linear was slower and warned under FSDP
+  Expected mechanism: Use the allowed Qwen3 `model_registry(..., converters=...)` hook to replace dense `Linear.Config` modules with TorchTitan `MXFP8Linear.Config`, which wraps TorchAO MXFP8 dynamic quantization. MXFP8 is SM100-native and may have a different kernel path from Float8Linear while reducing GEMM cost and memory.
+  Supporting evidence: B200 satisfies the SM100 requirement, `MXFP8LinearConverter` is available in TorchTitan, and it subclasses the local `Linear` wrapper rather than TorchAO `Float8Linear`, so it may avoid the exact FSDP view-output behavior seen in run334.
+  Planned source/config changes: Inside `qwen3_14b()`, locally import `MXFP8LinearConverter` and pass `converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: A performance lead is step-10 tps above 10,658 with finite loss and no FSDP hook warnings. Because this changes computation, any promising result requires longer loss convergence validation before it can be considered correct. Risk is compile failure, unsupported MXFP8 kernels, worse throughput, or unstable short-run loss.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
