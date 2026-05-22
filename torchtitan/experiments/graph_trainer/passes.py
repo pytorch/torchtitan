@@ -39,6 +39,40 @@ def compile_time_passes(
     return construct_default_graph_passes(traced_result, config)
 
 
+def remove_detach_nodes(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> torch.fx.GraphModule:
+    """Remove ``aten.detach.default`` nodes from the joint fwd+bwd graph.
+
+    The graph is executed inside a ``torch.no_grad()`` block at runtime, so
+    ``detach`` has no autograd effect. Each ``detach.default`` call still
+    allocates a new tensor view in the dispatcher, so removing them shaves
+    a small amount of per-step launch and bookkeeping overhead.
+
+    Strategy:
+        1. Collect all ``aten.detach.default`` call_function nodes.
+        2. Rewire every user of each node to read from ``node.args[0]``.
+        3. Erase the now-orphaned detach nodes.
+        4. Run ``eliminate_dead_code`` once to clean up any newly-dead ops,
+           followed by ``graph.lint()`` and ``gm.recompile()``.
+    """
+    detach_nodes = [
+        node
+        for node in gm.graph.nodes
+        if node.op == "call_function"
+        and node.target is torch.ops.aten.detach.default
+    ]
+    for node in detach_nodes:
+        node.replace_all_uses_with(node.args[0])
+        gm.graph.erase_node(node)
+    gm.graph.eliminate_dead_code()
+    gm.graph.lint()
+    gm.recompile()
+    logger.info(f"remove_detach_nodes: removed {len(detach_nodes)} detach nodes")
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -47,7 +81,9 @@ def construct_default_graph_passes(
 
     The agent adds custom passes to this list.
     """
-    passes: list[Callable] = []
+    passes: list[Callable] = [
+        remove_detach_nodes,
+    ]
     return passes
 
 

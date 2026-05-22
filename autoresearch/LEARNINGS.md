@@ -20,7 +20,13 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 ## Patterns that worked
 
-(empty — agent populates)
+- **Removing `aten.detach.default` nodes from the joint graph.** The
+  graph is executed under `torch.no_grad()`, so detach is autograd-only
+  and pure overhead. Removing 196 such nodes did not change numerics,
+  freed ~2 GiB of memory, and shaved noise-level tps. The mechanic:
+  collect nodes whose target is `torch.ops.aten.detach.default`, call
+  `node.replace_all_uses_with(node.args[0])`, then `erase_node`,
+  finally `eliminate_dead_code() + lint() + recompile()`.
 
 ## Patterns that didn't work
 
