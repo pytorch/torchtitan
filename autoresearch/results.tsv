@@ -51,3 +51,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T18:00:00	xxxxxxx	6422	47.0	stability	37.63	70	stability batch 3: n=5 median=6425; 5 more in background
 2026-05-22T18:25:00	xxxxxxx	6404	47.0	stability	37.52	70	stability batch 4: n=8 clean (excl 2 contention) mean=6404 sd=39; n=10 raw mean=6316 sd=182
 2026-05-22T18:25:00	xxxxxxx	0	0.0	discard	0.00	0	exp45 creative deep-dive: 6 angles explored (unsafe_view, squeeze CSE, AR coalesce, output dedup, loss hoist, bwd patterns); all <300 ops; FX passes exhausted
+2026-05-22T18:40:00	xxxxxxx	6389	47.0	stability	37.41	70	stability batch 5 (clean): n=9 (excl 1 outlier) mean=6389 sd=35; cumulative ~68 samples confirm ~6,400 tps ± 0.6%
