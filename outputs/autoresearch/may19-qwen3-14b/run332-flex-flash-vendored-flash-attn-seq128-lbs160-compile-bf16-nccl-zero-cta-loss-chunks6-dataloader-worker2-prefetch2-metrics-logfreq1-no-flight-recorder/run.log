@@ -1,0 +1,1717 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run332-flex-flash-vendored-flash-attn-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder
+W0522 14:04:49.944000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0522 14:04:49.944000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0522 14:04:49.944000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0522 14:04:49.944000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0522 14:04:58.799000 4187220 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-22 14:04:59,551 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-22 14:04:59,608 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run332-flex-flash-vendored-flash-attn-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/structured_logs/training.global_rank_0.20260522-140459-IRTM50.jsonl
+[rank0]:[titan] 2026-05-22 14:05:00,834 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-22 14:05:00,836 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-22 14:05:00,844 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-22 14:05:00,845 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-22 14:05:04,339 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-22 14:05:04,344 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-22 14:05:04,369 - root - INFO - Building qwen3 14B
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-22 14:05:04,453 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-22 14:05:04,610 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-22 14:05:04,610 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-22 14:05:04,611 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-22 14:05:04,628 - root - INFO - Compiling each TransformerBlock with torch.compile
+[rank0]:[titan] 2026-05-22 14:05:04,707 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-22 14:05:05,229 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-22 14:05:05,229 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-22 14:05:05,231 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-22 14:05:05,231 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-22 14:05:05,249 - root - INFO - Trainer is initialized with local batch size 160, global batch size 1280, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-22 14:05:05,249 - root - INFO - Training starts at step 1
+[rank0]:[rank0]: Traceback (most recent call last):
+[rank0]:[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:[rank0]:     main()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 65, in main
+[rank0]:[rank0]:     trainer.train()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+[rank0]:[rank0]:     return f(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+[rank0]:[rank0]:     self.train_step(data_iterator)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+[rank0]:[rank0]:     loss = self.forward_backward_step(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+[rank0]:[rank0]:     return func(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+[rank0]:[rank0]:     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+[rank0]:[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+[rank0]:[rank0]:     return inner()
+[rank0]:[rank0]:            ^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+[rank0]:[rank0]:     result = forward_call(*args, **kwargs)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+[rank0]:[rank0]:     h = layer(h, self.freqs_cis, attention_masks, positions)
+[rank0]:[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:[rank0]:     return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+[rank0]:[rank0]:     result = fn(*args, **kwargs)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+[rank0]:[rank0]:     return inner()
+[rank0]:[rank0]:            ^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+[rank0]:[rank0]:     result = forward_call(*args, **kwargs)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+[rank0]:[rank0]:     def forward(
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+[rank0]:[rank0]:     return fn(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+[rank0]:[rank0]:     return compiled_fn(full_args)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+[rank0]:[rank0]:     result = _codegen_runtime_wrapper(
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+[rank0]:[rank0]:     return f(*args)
+[rank0]:[rank0]:            ^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+[rank0]:[rank0]:     return super().apply(*args, **kwargs)  # type: ignore[misc]
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+[rank0]:[rank0]:     return CompiledFunction._fwd_fn(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+[rank0]:[rank0]:     return self.current_callable(inputs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/tmp/torchinductor_avenkataraman/ru/cruhkrday4r7mzfi4d62us3c4hjbgj2qp3an2vmfavvfixznptwa.py", line 903, in call
+[rank0]:[rank0]:     cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream0)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+[rank0]:[rank0]:     return self.kernel_fn(*args, stream=stream, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+[rank0]:[rank0]:     _flash_attn_fwd(
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+[rank0]:[rank0]:     _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+[rank0]:[rank0]:                                                  ^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+[rank0]:[rank0]:     ).launch(
+[rank0]:[rank0]:   ^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+[rank0]:[rank0]:     if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+[rank0]:[rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+[rank0]:[rank0]:     self.correction_loop(
+[rank0]:[rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+[rank0]:[rank0]:     while work_tile.is_valid_tile:
+[rank0]:[rank0]: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+[rank0]:[rank0]:     if has_work:
+[rank0]:[rank0]: ^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+[rank0]:[rank0]:     ) = handle_block_sparse_empty_tile_correction_sm100(
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+[rank0]:[rank0]:     gO[None, None, stage],
+[rank0]:[rank0]:     ~~^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]: TypeError: 'NoneType' object is not subscriptable
+W0522 14:05:20.997000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 4187220 closing signal SIGTERM
+W0522 14:05:20.998000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 4187224 closing signal SIGTERM
+W0522 14:05:20.998000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 4187227 closing signal SIGTERM
+W0522 14:05:20.998000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 4187230 closing signal SIGTERM
+W0522 14:05:20.998000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 4187234 closing signal SIGTERM
+W0522 14:05:20.998000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 4187238 closing signal SIGTERM
+E0522 14:05:22.369000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 2 (pid: 4187225) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0522 14:05:22.375000 4182651 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/2/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : 1 (pid: 4187233) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/cw/ccwcijxf3izvdcle3on3wpsamah5dordd2jm3rl3bdxeabzs2xv6.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream5)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+[2]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 4187220) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/0/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/ru/cruhkrday4r7mzfi4d62us3c4hjbgj2qp3an2vmfavvfixznptwa.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream0)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+[3]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 4187224) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/1/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/pb/cpb3eqyha4tgtm2rd7c7sqlyktjjus2xfzrv6nfi6yegyr3th2po.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream1)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+[4]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 4187227) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/3/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/7a/c7akwlbxwvajygz75ap6fyjj6c5rxptg556d6zzjxgal567cp6vn.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream3)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+[5]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : 1 (pid: 4187230) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/mk/cmkgts27msolidvtuohgivuzblyf6zj26cj6x4rpn7exezadve4a.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream4)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+[6]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : 1 (pid: 4187234) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/gd/cgd47lg7dglqsbfh3wohx7vpotskzpospxgp5ct6zon66be5ylj6.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream6)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+[7]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 4187238) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/ik/cikxoa5a67excc3c5owc56bjkk2pa6zs27psaoktxtgmxgiad5mh.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream7)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-22_14:05:18
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 4187225) 
+  error_file: /tmp/torchelastic_jy742r18/none_pk22w9z0/attempt_0/2/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1141, in compile_wrapper
+      result = fn(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 56, in forward
+      def forward(
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1415, in _fn
+      return fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/aot_autograd.py", line 1273, in forward
+      return compiled_fn(full_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1126, in runtime_wrapper
+      result = _codegen_runtime_wrapper(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(runtime_wrapper_orchestration)", line 7, in _runtime_wrapper
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/utils.py", line 93, in g
+      return f(*args)
+             ^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/autograd/function.py", line 625, in apply
+      return super().apply(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3440, in forward
+      return CompiledFunction._fwd_fn(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/subclass_codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/output_code.py", line 753, in __call__
+      return self.current_callable(inputs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/ki/ckiotcvxtpslo72524o5grx4f5szb5cfhgioxkme5xw2235rohxd.py", line 903, in call
+      cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37.run(reinterpret_tensor(buf13, (160, 40, 128, 128), (655360, 128, 5120, 1), 0), reinterpret_tensor(buf14, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), reinterpret_tensor(buf5, (160, 8, 128, 128), (131072, 128, 1024, 1), 0), buf17, primals_11, primals_10, primals_13, primals_14, buf15, buf18, stream=raw_stream2)
+    File "/home/avenkataraman/github/pytorch/torch/_inductor/codegen/cutedsl/cutedsl_kernel.py", line 68, in run
+      return self.kernel_fn(*args, stream=stream, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/tmp/torchinductor_avenkataraman/wx/cwx4ib7wve6tkmmjnpovgtpcft3g2rljol3kbogvoofjxkmlw53m.py", line 74, in cutedsl_fused__to_copy__unsafe_view_flex_attention_transpose_view_396c1e37_main
+      _flash_attn_fwd(
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/interface.py", line 852, in _flash_attn_fwd
+      _flash_attn_fwd.compile_cache[compile_key] = cute.compile(
+                                                   ^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 562, in __call__
+      return self._compile(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/compiler.py", line 641, in _compile
+      return func._dsl_object._func(func, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1567, in _func
+      result = self.generate_mlir(
+               ^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1356, in generate_mlir
+      module, module_hash, result = self.generate_original_ir(
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1158, in generate_original_ir
+      module, result = build_ir_module()
+                       ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1138, in build_ir_module
+      result = funcBody(*ir_args, **ir_kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 723, in __call__
+      ).launch(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass.py", line 1216, in launch
+      ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1863, in kernel_wrapper
+      kernel_ret = funcBody(*ir_args, **ir_kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in kernel
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1217, in if_region_27
+      if warp_idx >= self.correction_warp_ids[0] and warp_idx < self.mma_warp_id:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 482, in then_builder
+      return then_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 1222, in then_block_28
+      self.correction_loop(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in correction_loop
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 270, in ir_while_loop
+      return func(*write_args)
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2286, in while_region_1
+      while work_tile.is_valid_tile:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 282, in while_executor
+      return executor.while_execute(
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 171, in while_execute
+      return self._while_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 635, in _while_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 622, in after_block_builder
+      after_results = while_after_block(*flat_args)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in while_after_block_2
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 263, in ir_loop
+      return func(pred, *write_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2321, in if_region_6
+      if has_work:
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 299, in if_executor
+      return executor.if_execute(
+             ^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/ast_helpers.py", line 151, in if_execute
+      return self._if_dynamic(
+             ^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 506, in _if_execute_dynamic
+      return scf_gen.scf_execute_dynamic(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 205, in scf_execute_dynamic
+      region_result = builder(
+                      ^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cutlass_dsl/cutlass_ast_decorators.py", line 502, in else_builder
+      return else_block(*flat_args)
+             ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/flash_fwd_sm100.py", line 2436, in else_block_16
+      ) = handle_block_sparse_empty_tile_correction_sm100(
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 457, in jit_wrapper
+      return getattr(func._dsl_object, executor_name)(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/dsl.py", line 1517, in _func
+      return funcBody(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py", line 739, in handle_block_sparse_empty_tile_correction_sm100
+      gO[None, None, stage],
+      ~~^^^^^^^^^^^^^^^^^^^
+  TypeError: 'NoneType' object is not subscriptable
+  
+============================================================

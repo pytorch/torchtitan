@@ -3203,6 +3203,16 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no CUTE/Flash lowering errors. Risk is compile/runtime failure from package/API mismatch, longer first-step compile, or slower throughput if SDPA remains better for seq128.
   Result: crash at source state `5939c33`; CUTE availability checks pass and lowering reaches generated CUTE code, but runtime fails before step 1 with `ModuleNotFoundError: No module named 'flash_attn.cute.block_sparsity'`. The installed FlashAttention package is still missing an API expected by this PyTorch Inductor CUTE template.
 
+- Idea: flex_flash attention backend with vendored FlashAttention source
+  Current best source commit: 96cc9d6
+  Source: dependency follow-up after PyPI `flash-attn==2.8.3` lacked `flash_attn.cute.block_sparsity`
+  Expected mechanism: Use the newer FlashAttention source vendored under `/home/avenkataraman/github/pytorch/third_party/flash-attention`, which includes `flash_attn.cute.block_sparsity`, together with `quack-kernels`, `apache-tvm-ffi`, and PyTorch-known-good `nvidia-cutlass-dsl[cu13]==4.4.2`. This should satisfy Inductor's generated CUTE FlashAttention imports and finally test whether `attn_backend="flex_flash"` improves the durable SDPA stack.
+  Supporting evidence: With `PYTHONPATH` pointing to the vendored source, `flash_attn.cute.block_sparsity` imports, `_flash_attn_fwd` and `_flash_attn_bwd` exist, and both `ensure_cute_available()` and `ensure_flash_available()` return true.
+  Planned source/config changes: In `qwen3_14b()`, set `model_registry("14B", attn_backend="flex_flash")`.
+  Planned command or config overrides: Exact current-best command with `PYTHONPATH=/home/avenkataraman/github/pytorch/third_party/flash-attention:$PYTHONPATH`, `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no CUTE/Flash lowering errors. Risk is a vendored-source/API mismatch inside the CUTE DSL kernels even though imports pass.
+  Result: crash at source state `41b60a8`; the vendored source resolves `block_sparsity`, but the run fails before step 1 in `flash_attn/cute/block_sparse_utils.py` with `TypeError: 'NoneType' object is not subscriptable` while handling the SM100 block-sparse empty-tile correction. Restore SDPA; this path now appears blocked by a FlashAttention/PyTorch CUTE API or shape mismatch rather than an install-only problem.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command

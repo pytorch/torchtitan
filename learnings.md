@@ -7907,3 +7907,53 @@ Interpretation:
 - Installing compatible CUTLASS DSL fixed the earlier import barrier and allowed Inductor to generate/launch CUTE FlashAttention code.
 - The installed FlashAttention package still lacks `flash_attn.cute.block_sparsity`, which this PyTorch Inductor CUTE template imports at runtime.
 - Restore SDPA. `flex_flash` remains blocked until the FlashAttention package/source revision matches this PyTorch Inductor expectation.
+
+## Experiment 332: Flex Flash With Vendored FlashAttention Source
+
+Command:
+
+```bash
+PYTHONPATH=/home/avenkataraman/github/pytorch/third_party/flash-attention:$PYTHONPATH NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run332-flex-flash-vendored-flash-attn-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Set Qwen3 14B `attn_backend="flex_flash"`.
+
+Environment changes for this probe:
+
+- Installed `quack-kernels==0.4.1` and `apache-tvm-ffi==0.1.11`.
+- Set `nvidia-cutlass-dsl[cu13]==4.4.2`, which satisfies `quack-kernels` and is in PyTorch's known-good CUTE DSL set.
+- Used the FlashAttention source vendored in `/home/avenkataraman/github/pytorch/third_party/flash-attention` through `PYTHONPATH`.
+
+Pre-run checks:
+
+- `flash_attn` resolved to the vendored source.
+- `flash_attn.cute.block_sparsity` resolved to the vendored source.
+- `_flash_attn_fwd` and `_flash_attn_bwd` were present.
+- `ensure_cute_available()` and `ensure_flash_available()` returned true.
+
+Result:
+
+- Status: crash.
+- The run failed before completing step 1.
+- Root cause:
+
+```text
+TypeError: 'NoneType' object is not subscriptable
+```
+
+- The traceback enters `flash_attn/cute/flash_fwd_sm100.py` and fails in
+  `flash_attn/cute/block_sparse_utils.py`:
+
+```text
+gO[None, None, stage],
+~~^^^^^^^^^^^^^^^^^^^
+```
+
+Interpretation:
+
+- The missing-module issue from run331 is fixed by the vendored FlashAttention source.
+- The `flex_flash` path still does not run for this workload. The blocker has moved to a CUTE FlashAttention SM100 block-sparse correction path where an expected tensor/object is `None`.
+- This now looks like a FlashAttention/PyTorch CUTE API or shape mismatch, not a simple dependency installation gap.
+- Restore SDPA and keep `flex_flash` closed unless broader dependency/source patching becomes allowed.
