@@ -91,6 +91,27 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   `prev_node.append(new_node)` to insert after. Walk movable subgraphs in
   topological order over `gm.graph.nodes` to preserve relative ordering.
 
+- **NCCL group-name strings (`'42'`, `'21'`, `'19'`) are NOT stable across
+  runs** (Exp 6). They depend on the order in which process groups were
+  created in this process. Two consecutive benchmark runs gave different TP
+  group tags. Match on **group size** (`args[1]` of the functional collective,
+  e.g. world_size=4 for FSDP, 2 for TP) instead of the group-name string.
+
+- **Per-layer RS waits in the AOT graph come in pairs** (Exp 6). Each
+  Llama3 layer emits TWO TP `reduce_scatter` barriers: one after `wo`
+  (mid-layer, post-attention) and one after `w2` (end-of-layer, post-FFN).
+  Counting RS-waits in fwd+bwd of 32 layers gives ~130 total. For
+  cross-layer prefetch you want only the **end-of-layer (post-`w2`)** ones —
+  every *other* RS-wait. A naive "most recent RS-wait" anchor lands at a
+  mid-layer barrier most of the time, giving only ~1 barrier of overlap,
+  which is still intra-layer.
+
+- **Hoist distance and barriers-crossed are the diagnostic** for prefetch
+  passes. After moving, log avg slots and avg barriers crossed per AG.
+  If barriers-crossed averages ~1.0, you're moving across a *single*
+  intra-layer barrier — the hoist target is wrong. Expect 1.5-2.0+ for
+  cross-layer prefetch to be meaningful.
+
 ## Tooling tips
 
 - **Dump the post-trace graph from a graph pass.** Register a temporary pass
