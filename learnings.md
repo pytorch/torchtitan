@@ -7984,3 +7984,35 @@ Interpretation:
 - Inductor's CUTE DSL GEMM autotune backend is runnable on this B200 environment with `nvidia-cutlass-dsl[cu13]==4.4.2`.
 - It does not improve the final SDPA stack. The result is similar to other lower-band exact-command samples and below both run318 and run321.
 - Keep the durable default GEMM backend/settings.
+
+## Experiment 334: Qwen3 Float8Linear Converter
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run334-float8-linear-converter-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Inside `qwen3_14b()`, locally imported `Float8LinearConverter`.
+- Passed `converters=[Float8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 5,227, far below the run318 10,658 measured peak.
+- Step 10 MFU: N/A because TorchTitan suppresses MFU when quantization is active.
+- Step 10 peak memory: 129.86 GiB, 72.81%.
+- Loss moved from 12.27849 at step 1 to 6.82982 at step 10; finite but not monotonically decreasing.
+- The run emitted this warning:
+
+```text
+FSDP2-wrapped module (FSDPFloat8Linear) returned a view tensor. An in-place op on this view (e.g., `x += y`) will silently drop the pre-backward hook and skip the all-gather, which can cause backward to fail or produce wrong gradients.
+```
+
+Interpretation:
+
+- Float8 conversion substantially lowers memory, but it does not translate into throughput for this DP-only FSDP layout.
+- The late-step throughput collapse plus the FSDP pre-backward-hook warning make this a poor candidate even before longer convergence validation.
+- Restore BF16 `Linear` configs and keep Float8 closed for this implementation unless the source scope expands to handle the FSDP view/in-place interaction.

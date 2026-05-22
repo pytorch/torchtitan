@@ -3231,6 +3231,7 @@
   Planned source/config changes: Inside `qwen3_14b()`, locally import `Float8LinearConverter` and pass `converters=[Float8LinearConverter.Config(model_compile_enabled=True)]` to `model_registry("14B", attn_backend="sdpa", ...)`.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: A performance lead is step-10 tps above 10,658 with finite loss and no numerical blow-up. Because this changes computation, any promising result requires longer loss convergence validation before it can be considered correct. Risk is compile failure, unsupported Float8Linear under this FSDP layout, worse throughput, or unstable short-run loss.
+  Result: discarded at source state `70c04bd`; step-10 throughput fell to 5,227 tps, MFU was N/A, peak memory dropped to 129.86 GiB, and the run emitted an FSDP2 warning that `FSDPFloat8Linear` returned a view tensor that can drop pre-backward hooks after in-place ops. Restore BF16 Linear configs; Float8Linear does not provide a usable speed lead for this FSDP layout.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
