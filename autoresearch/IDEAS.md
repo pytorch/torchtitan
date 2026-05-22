@@ -26,7 +26,8 @@ the beginning:
 - [ ] **CUDA graphs**: If the model is CPU-bound, CUDA graphs remove CPU overhead.
 - [ ] **Computation/communication overlap**: If there are exposed communications, see if they can be overlapped with computations.
 - [ ] **Kernel fusions**: Find regions worth fusing and generate fused kernels. torch.compile, Triton kernels, or custom kernels could all help.
-- [ ] **Collective coalescing**: Bucket many small NCCL launches into fewer large ones to reduce launch overhead.
+- [~] **Collective coalescing**: Bucket many small NCCL launches into fewer large ones to reduce launch overhead.
+  - 2026-05-22 15:25 — Dim-0 shape-grouped bucketing of all_gathers: 421→64+261 (~23% fewer launches) but tps unchanged. FSDP AG shapes are heterogeneous so only adjacent same-shape pairs/triples bucket together; and slice→reshape after the bucket likely costs a memcpy that wipes the savings. Try (a) flatten-to-1D bucketing to enable broader coverage and contiguous-view recovery, and (b) prefetch AGs to overlap with intervening compute (probably the bigger win).
 - [ ] **Profile-driven optimization**: Profile the model, analyze the trace, and look for opportunities to optimize.
 - [~] **Graph inspection**: Dump and study the FX graph to find optimization opportunities not covered by the ideas above.
   - 2026-05-22 14:44 — Counted FX nodes by op (recon pass; see LEARNINGS.md snapshot). 11.9k nodes total. Largest collective categories: 421 all_gather_into_tensor, 421 reduce_scatter_tensor, 68 all_reduce — bucketing/overlap is the biggest single target. 196 detach.default and 842 _to_copy look like cheap cleanup targets.

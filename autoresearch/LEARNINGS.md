@@ -38,6 +38,16 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   kernel via inductor regional compile, or (c) avoid emitting the cast
   altogether by restructuring the graph (e.g. keep a master copy and
   read it as bf16 once).
+- **Shape-grouped dim-0 AG bucketing (with reshape-back).** Cut launches
+  ~23% but TPS unchanged. Two compounding reasons: (1) FSDP all_gather
+  inputs are highly shape-heterogeneous (per-layer shapes differ by both
+  parameter and FSDP shard layout), so bucket sizes average ~2.5 even
+  with aggressive hoisting; (2) recovering per-original outputs requires
+  a slice along the within-rank dim, which is non-contiguous and forces
+  a reshape that copies. The copy can erase the launch savings. Bucketing
+  is **necessary but not sufficient**: it must be paired with
+  contiguous-view recovery (e.g. flatten-then-cat 1D inputs) AND with
+  comm/compute overlap (prefetch) to actually move TPS.
 
 ## Tooling tips
 
