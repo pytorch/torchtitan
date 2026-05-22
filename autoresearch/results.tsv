@@ -25,3 +25,5 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T03:55:00	xxxxxxx	0	0.0	discard	0.00	0	exp23 batched specks: pass reorder + unsafe_view + t.default + bwd AG-split mirror; all no_target/sub-noise (Exp 11 already absorbed bwd splits)
 2026-05-22T04:00:00	xxxxxxx	0	0.0	discard	0.00	0	exp24 profile-driven: top 5 kernels - NCCL coalesced AG/RS done, SDPA/GEMM compute-only, FillFunctor 3065/step from --debug.deterministic (invisible to FX, ~7% step overhead)
 2026-05-22T04:05:00	xxxxxxx	0	0.0	discard	0.00	0	exp25 addmm fusion: 0 direct add(c,mm(a,b)) patterns - mm always flows through view/wait_tensor before any add
+2026-05-22T06:08:00	xxxxxxx	5125	47.0	stability	30.01	73	stability re-bench (median of 3: 5137/5135/5125); within 0.3% of original Exp 13 measurement
+2026-05-22T06:12:00	xxxxxxx	0	0.0	discard	0.00	0	exp26 iterative identity passes: 0 new candidates iter2/iter3 - bucketing is pure relocation, not structure-creator; fixed point confirmed
