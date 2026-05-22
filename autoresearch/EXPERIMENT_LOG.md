@@ -28,7 +28,7 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
-## expanded apply_inductor_pattern_passes (bucketing + overlap scheduling) — keep (pending)
+## expanded apply_inductor_pattern_passes (bucketing + overlap scheduling) — keep (b9c27f1)
 
 - **Idea**: `torch._inductor.fx_passes` exposes 30+ submodules. Iter 5 only used `joint_graph_passes` + `post_grad_passes`. The submodules `bucketing`, `overlap_scheduling`, `micro_pipeline_tp`, `low_contention_collectives`, `fsdp`, `fuse_attention`, `pad_mm`, `b2b_gemm`, `decompose_mem_bound_mm`, `group_batch_fusion`, etc. should give additional gains specific to distributed and matmul-heavy graphs.
 - **Changes**: Expanded `apply_inductor_pattern_passes`. After iter 5's pattern matchers, added (in order): config-flag setup, then `bucketing.bucket_all_gather(gm)`, `bucketing.bucket_reduce_scatter(gm)`, `stable_topological_sort(gm)`, `overlap_scheduling.schedule_overlap_bucketing(gm)`. Discovered candidates via `dir(module)`, tried plausible entry points with try/except, kept only ones that changed node count OR improved TPS, dropped all no-ops.
