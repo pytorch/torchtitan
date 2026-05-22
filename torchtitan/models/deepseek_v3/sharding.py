@@ -13,14 +13,13 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     norm_config,
-    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.protocols.sharding import LocalSpmdConfig, ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.deepseek_v3.model import (
@@ -85,6 +84,9 @@ def _set_deepseek_v3_layer_sharding(
             "x": dense_activation_placement(tp=spmd.R),
             "freqs_cis": dense_param_placement(tp=spmd.R),
         },
+        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        out_dst_shardings=dense_activation_placement(tp=attn_x_placement),
+        local_spmd=LocalSpmdConfig(),
     )
     # Low-rank projections and norms keep Replicate weights on TP. We still
     # distribute them (Replicate DTensor) so DTensor activations flow through
@@ -97,7 +99,12 @@ def _set_deepseek_v3_layer_sharding(
     attention.kv_norm.sharding_config = replicate_weight
 
     attention.wkv_b.sharding_config = colwise_config()
-    attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+    attention.wo.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.I),
+        },
+    )
 
     set_gqa_inner_attention_local_map(attention.inner_attention)
 

@@ -126,7 +126,7 @@ class Attention(BaseAttention):
         kv = self.wkv_b(self.kv_norm(kv))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
+        k = torch.cat([k_nope, k_pe.expand(-1, -1, k_nope.shape[-2], -1)], dim=-1)
 
         output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale

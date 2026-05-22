@@ -32,11 +32,34 @@ def _deterministic_scatter_add_with_spmd_asserts(
     mesh_axis_names = spmd.current_mesh_names() or {}
     if "tp" in mesh_axis_names:
         tp_axis = mesh_axis_names["tp"]
+        if spmd.is_type_checking():
+            mesh = current_mesh()
+            assert mesh is not None
+            pg = mesh.get_group("tp")
+            out_axis_type = spmd.get_local_type(out).get(tp_axis, spmd.R)
+            if out_axis_type is not spmd.P:
+                out = spmd.reinterpret(
+                    out,
+                    pg,
+                    src=out_axis_type,
+                    dst=spmd.P,
+                    expert_mode=True,
+                )
+            src_axis_type = spmd.get_local_type(src).get(tp_axis, spmd.R)
+            if not ep_enabled and src_axis_type is spmd.V:
+                src = spmd.reinterpret(
+                    src,
+                    pg,
+                    src=spmd.V,
+                    dst=spmd.P,
+                    expert_mode=True,
+                )
         # TODO: Give deterministic_scatter_add a local SPMD typing rule.
         # The scatter indices are local routing metadata, so the global
         # checker cannot currently type this custom op directly.
         with spmd.typecheck(local=True):
-            spmd.assert_type(out, {tp_axis: spmd.P})
+            out_axis_type = spmd.get_local_type(out).get(tp_axis, spmd.R)
+            assert out_axis_type in (spmd.R, spmd.P)
             spmd.assert_type(index, {tp_axis: spmd.V if ep_enabled else spmd.R})
             spmd.assert_type(src, {tp_axis: spmd.V if ep_enabled else spmd.P})
         out_type[tp_axis] = spmd.P
@@ -204,12 +227,13 @@ class LocalTokenDispatcher(Configurable):
             if spmd.is_type_checking():
                 spmd.assert_type(routed_output, routed_type)
 
+        ep_enabled = getattr(self, "ep_mesh", None) is not None
         index = token_indices_experts_sorted.reshape(-1, 1).expand(-1, out.shape[-1])
         return _deterministic_scatter_add_with_spmd_asserts(
             out,
             index,
             routed_output,
-            ep_enabled=getattr(self, "ep_mesh", None) is not None,
+            ep_enabled=ep_enabled,
         )
 
     def combine(
