@@ -179,15 +179,17 @@ def compile_time_passes(
     if config.parallelism.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
+    # Tag every call_function node with is_fusible_node classification
+    # under node.meta["custom"]["is_fusible"]. Visible in tlparse dumps.
+    # Runs unconditionally so the classification is always available for
+    # debugging, even when fused_kernel_pass is disabled.
+    passes.append(tag_fusible_nodes_pass)
+
     # Fused kernel pass: discovers fusible regions, replaces with
     # call_module (eager fallback), loads kernels if available.
     # No-op when fused_kernel_dir is empty.
     fused_dir = config.compile.fused_kernel_dir
     if fused_dir:
-        # tag_fusible_nodes_pass runs first so the tlparse dump before
-        # fused_kernel_pass shows per-node fusibility classification
-        # (under node.meta["custom"]["is_fusible"]).
-        passes.append(tag_fusible_nodes_pass)
         passes.append(
             functools.partial(
                 fused_kernel_pass,
