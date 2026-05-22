@@ -1090,9 +1090,9 @@ def _write_problem_from_subgraph(
         n_outputs = len(outs)
 
     desc = (
-        f"Fused region ({region.norm_fqn}): "
+        f"# Fused region ({region.norm_fqn}): "
         f"{' -> '.join(compute_ops) if compute_ops else 'reshape chain'}\n"
-        f"Instances: {count}. Ops: {n_ops}, compute: {len(compute_ops)}, "
+        f"# Instances: {count}. Ops: {n_ops}, compute: {len(compute_ops)}, "
         f"outputs: {n_outputs}.\n"
     )
 
@@ -1176,8 +1176,8 @@ def _write_problem_from_orig(
         str(n.target).replace("aten.", "").replace(".default", "").replace(".Tensor", "")
         for n in nodes if str(n.target) not in _METADATA_OPS
     ]
-    desc = f"Fused region ({region.norm_fqn}): {' -> '.join(compute_ops) if compute_ops else 'reshape chain'}\n"
-    desc += f"Instances: {count}. Ops: {len(nodes)}, compute: {len(compute_ops)}, outputs: {num_outputs}.\n"
+    desc = f"# Fused region ({region.norm_fqn}): {' -> '.join(compute_ops) if compute_ops else 'reshape chain'}\n"
+    desc += f"# Instances: {count}. Ops: {len(nodes)}, compute: {len(compute_ops)}, outputs: {num_outputs}.\n"
 
     problem = desc + f"""
 import torch
