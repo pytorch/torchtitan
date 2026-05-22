@@ -143,14 +143,28 @@ class GptOssGroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
         routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+        return self.token_dispatcher.combine(routed_output, metadata, x)
+
+    def parallelize(self, parallel_dims) -> None:
+        """Parallelize experts and wire dispatcher meshes.
+
+        Mirrors ``GroupedExperts.parallelize``: after the base
+        ``Module.parallelize`` distributes the expert weight params, install
+        the EP / TP meshes on the non-Module ``token_dispatcher`` child via
+        ``wire_meshes``. ``GptOssGroupedExperts`` inherits ``Module``
+        directly (not ``GroupedExperts``) so it needs its own override.
+        """
+        super().parallelize(parallel_dims)
+        self.token_dispatcher.wire_meshes(
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
 
 
 class GptOssMoE(MoE):
@@ -164,13 +178,17 @@ class GptOssMoE(MoE):
         # Initialize the base MoE class
         super().__init__(config)
 
-        # Override the base GroupedExperts with GptOssGroupedExperts
+        # Override the base GroupedExperts with GptOssGroupedExperts. Forward
+        # every Module.Config slot from ``config.experts`` so the rebuilt
+        # config carries ``sharding_config`` (set by
+        # ``set_moe_sharding_config``) into the new instance.
         gptoss_experts_config = GptOssGroupedExperts.Config(
             dim=config.experts.dim,
             hidden_dim=config.experts.hidden_dim,
             num_experts=config.experts.num_experts,
             swiglu_limit=config.swiglu_limit,
             param_init=config.experts.param_init,
+            sharding_config=config.experts.sharding_config,
             token_dispatcher=config.experts.token_dispatcher,
         )
         self.experts = gptoss_experts_config.build()
