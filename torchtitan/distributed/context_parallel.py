@@ -365,6 +365,8 @@ def cp_shard(
                     else {k: v for k, v in zip(attention_masks.keys(), masks)}
                 ),
             )
+        case None:
+            pass
         case _:
             raise ValueError(
                 f"Unsupported attention_masks type for CP sharding: "
