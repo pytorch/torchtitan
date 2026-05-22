@@ -10,7 +10,8 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 ## Methodology
 
-(empty — agent populates)
+- **Re-recon every keep that materially reshapes the graph.** Exp 11 (cat→view, 130 elisions) and Exp 13 (291 fwd-AG → 33 coalesced + 291 bwd-RS → 33 coalesced + hoisted producer chains) both invalidated prior "next-target" priorities. Post-keep, re-dump with a temporary pass at the END of `construct_default_graph_passes`, diff op histograms vs the previous dump (single-line `grep ... | sort | uniq -c | sort -rn | head` and `diff`), and update IDEAS.md before kicking off the next experiment. Keep the diff in the dump-file path: e.g. `/tmp/post_cleanup_graph.txt`, `/tmp/post_exp11_graph.txt`, `/tmp/post_exp13_graph.txt` — each dump is the post-all-passes state up to and including that experiment's accepted pass.
+- **Histogram raw line-grep "x.y.default = torch.ops..." for actual call sites only.** Plain `grep -c torch.ops.X.Y` overcounts because the dump references each call multiple times (assignment line, the right-hand side, and the `... = None` self-clean line at the end of each call). Use `grep -cE "X[a-z_0-9_]* = torch\.ops"` to count assignment LHS only — gives the true call-count.
 
 ## Patterns that worked
 
@@ -126,6 +127,9 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   If barriers-crossed averages ~1.0, you're moving across a *single*
   intra-layer barrier — the hoist target is wrong. Expect 1.5-2.0+ for
   cross-layer prefetch to be meaningful.
+
+- **Coalescing only works when producer chains are hoistable, which means tracing to placeholders** (Exps 12-16).
+  Five coalesce attempts (Exp 4 cat-based, Exp 12 ws=4 RS, Exp 13 ws=4 AG+RS, Exp 15 AR, Exp 16 ws=2 TP) showed the universal pattern: critical-path-gated coalescing without hoisting yields 0-few buckets when the wait_tensor of each member is immediately consumed by intervening compute. Only Exp 13 worked because forward FSDP weight AGs have producer chains that trace back to graph placeholders — fully hoistable to the layer's start. All other collectives (TP ws=2, bwd RMSNorm γ-grad AR, bwd activation-grad RS) have producer chains that depend on deep compute outputs (e.g. `_fused_rms_norm_backward`, `mm`) and can't be hoisted across the prior compute barrier. Stop chasing more coalescing — the placeholder-rooted opportunity (291 forward AGs + 291 backward param-grad RSes) was the only one and Exp 13 captured it.
 
 - **Coalesced AG + producer-chain hoist gives +10% — the prefetch we couldn't achieve via reordering** (Exp 13).
   Coalescing forward FSDP AGs alone yields zero buckets if you respect critical-path constraints: every AG's wait is immediately consumed by `mm`, so a "no consumer between bucket members" gate rejects all coalescing. The trick is to **hoist each AG's private producer chain (`_to_copy(placeholder)`) before the bucket's anchor** so the coalesced AG can issue at the layer's start with all 9 weights. NCCL transfers in parallel with the entire layer's compute — this IS the cross-layer prefetch that node-reordering (Exps 3/5/6/8) couldn't deliver, because here the coalesce is itself the single barrier point.

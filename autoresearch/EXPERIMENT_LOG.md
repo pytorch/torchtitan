@@ -165,3 +165,21 @@ learn from past experiments and avoid repeating failed approaches.
 - **Result**: best-of-3 tps=5,131 (+0.14% vs 5,124), all runs 5,116/5,112/5,131, mfu=30.05%, memory=47.19 GiB (+0.14), wall_time=72s. Numerics bitwise-identical. 33/33 fwd + 33/33 bwd buckets coalesced; 194 detaches removed. Below +1% keep threshold.
 - **Analysis**: The fallback path adds 66 cats + 66 splits + 1188 view ops/step. The cat+split overhead approximately equals the 516 cast-launch savings. Detach removal alone was confirmed sub-noise in Exp 9. Memory bumped +0.14 GiB from the cat allocating fused f32 buffers (~12 MiB × 33 = ~400 MiB resident). This is the **same lesson as Exp 4**: cat+split surgery cancels small launch wins when per-launch overhead is already low.
 - **Lessons**: (1) Without a functional foreach-cast HOP, fusing small same-shape-family casts is a wash — the surgery overhead matches the launch savings. (2) `aten._foreach_to_copy` does NOT exist in PyTorch; `aten._foreach_copy` does but is in-place. (3) Detach removal stays as a "always include in any bigger pass" item — it's free but never enough on its own to clear threshold.
+
+---
+
+## coalesce_all_reduces — discard (xxxxxxx)
+
+- **Idea**: 68 `all_reduce.default` calls in the graph (3 loss-path + 65 RMSNorm γ-grad partial→replicate). `all_reduce_coalesced.default` exists with schema `(Tensor[], str reduce_op, Any group_name) -> Tensor[]` (no group_size, full-group). Bucket and coalesce.
+- **Result**: best-of-3 tps=5,130 (+0.12% vs 5,124), 0 buckets formed. Numerics pass.
+- **Analysis**: 65 of 68 are bwd `_fused_rms_norm_backward` partials (one per γ tensor). Each one's `wait_tensor` is immediately consumed by `_to_copy(f32)` → AG-ws-2 → next-layer compute, all positioned strictly between consecutive AR nodes. Critical-path gate rejects every adjacent pair. Unlike Exp 13 (fwd AGs), the AR producer chain is deep compute (`_fused_rms_norm_backward` output) — no hoistable placeholder-input path.
+- **Lessons**: Coalesced AR exists but unusable on this graph without a producer-chain hoist that the bwd structure forbids. Recorded the op qualname for future reference.
+
+---
+
+## bucket_tp_collectives + detach — discard (xxxxxxx)
+
+- **Idea**: Apply Exp 13's hoist-and-coalesce technique to ws=2 (TP) collectives. 130 AG-ws-2 + 130 RS-ws-2. Bundle detach removal (194 nodes) as free addendum.
+- **Result**: best-of-2 tps=5,143 (+0.37% vs 5,124). AG buckets=0, RS buckets=0, 194 detaches removed. Below +1% threshold.
+- **Analysis**: Path A (critical-path gate) rejected every adjacent ws=2 pair: each wait is consumed by the intervening RMSNorm or residual-add before the next collective. Path B (hoist) blocked because the AG-ws-2 producer chain traces back to a wait_tensor with MULTIPLE external users via the residual stream — not "private". With 0 buckets formed, the +0.37% is the detach-removal floor confirmed by Exp 9 (+0.2% standalone). TP collectives are structurally un-coalesceable in this graph.
+- **Lessons**: Three different coalesce attempts (Exp 12 ws=4 RS alone, Exp 15 AR, Exp 16 ws=2 TP) all failed standalone for the same reason: critical-path-blocking + non-hoistable producers. Exp 13's success required BOTH ws=4 forward AGs (whose producers are placeholders — perfectly hoistable) AND the ws=4 backward RSes (whose buckets happen to align with layer structure). That combination is unique. Don't chase more coalescing — there's nothing left to gain.

@@ -14,3 +14,5 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T02:02:29	xxxxxxx	4678	47.0	discard	27.40	72	bucket_param_grad_reduce_scatters: 33 buckets avg 8.82, 291/291 RSes coalesced via reduce_scatter_tensor_coalesced; +0.80% (below 1% threshold)
 2026-05-22T02:24:01	fc602aa	5124	47.0	keep	30.00	71	bucket_fsdp_collectives: AG+RS coalesced (291+291 in 33+33 buckets) w/ producer-chain hoist; +10.4% tps; cumulative +23.1% over raw baseline
 2026-05-22T02:42:30	xxxxxxx	5131	47.2	discard	30.05	72	fuse_coalesced_input_casts (cat+cast+split fallback): 516 cast launches saved + 194 detaches elided; +0.14% — cat/split overhead canceled the wins
+2026-05-22T02:50:00	xxxxxxx	5130	47.1	discard	30.04	72	coalesce_all_reduces: all_reduce_coalesced exists, 0 buckets (every wait consumed before next AR, no hoist path); +0.12%
+2026-05-22T03:00:12	xxxxxxx	5143	47.1	discard	30.11	72	bucket_tp_collectives + detach: 0 TP buckets (structurally un-coalesceable), only 194 detaches removed; +0.37%
