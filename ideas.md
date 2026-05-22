@@ -3193,6 +3193,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator retry/OOM. Risk is higher memory or worse overlap if two-layer all-gathers become too coarse.
   Result: discarded at source state `e0b48db`; 10,561 tps with finite overall-decreasing loss and 169.86 GiB peak memory. Pairwise FSDP grouping fits but does not beat per-layer grouping, so restore one FSDP group per transformer layer.
 
+- Idea: flex_flash attention backend after installing CUTE dependencies
+  Current best source commit: 91616ba
+  Source: dependency follow-up after installing compatible `flash-attn` and `nvidia-cutlass-dsl` packages
+  Expected mechanism: Retry Qwen3 `attn_backend="flex_flash"` now that PyTorch's `ensure_cute_available()` and `ensure_flash_available()` checks pass. This exercises FlexAttention with the CUTE Flash backend rather than the earlier unavailable path, potentially reducing the per-block attention cost while keeping the durable FSDP/prefetch/loss/DataLoader stack unchanged.
+  Supporting evidence: Earlier `flex_flash` failed before step 1 solely because `flash_attn.cute`/CUTE were unavailable. The current environment now imports `flash_attn.cute.interface`, exposes `_flash_attn_fwd` and `_flash_attn_bwd`, and passes the PyTorch availability checks.
+  Planned source/config changes: In `qwen3_14b()`, set `model_registry("14B", attn_backend="flex_flash")`.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no CUTE/Flash lowering errors. Risk is compile/runtime failure from package/API mismatch, longer first-step compile, or slower throughput if SDPA remains better for seq128.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
