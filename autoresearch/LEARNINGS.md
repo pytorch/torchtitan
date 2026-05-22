@@ -95,15 +95,22 @@ The +23.1% we achieved is the FX-pass-side improvement on top of this
 flag-constrained measurement, but is real and persists when the flag is
 disabled. The remaining ~7% is not addressable from `passes.py`.
 
-## Run summary (after Exp 18, 2026-05-22 ~03:20 UTC)
+## Run summary (UPDATED: after Exp 41, 2026-05-22 ~17:00 UTC)
 
-**Cumulative tps: 4,161 → 5,124 = +23.1%** over raw baseline, via four committed passes:
+**Cumulative tps: 4,161 → 6,442 = +54.8%** over raw deterministic baseline
+(+23.1% from FX passes, +23.5% from dropping --debug.deterministic, +1.71% from cleanup bundle), via five committed passes + one config change:
 1. `remove_identity_views` (Exp 1, +7.2%) — drop ~2k identity DTensor views.
 2. `remove_identity_ops` (Exp 7, +2.4%) — full-range slice + double-transpose cancellation.
 3. `elide_split_cat_for_reduce_scatter` (Exp 11, +1.58%) — TP cat-as-view.
 4. `bucket_fsdp_collectives` (Exp 13, +10.4%) — coalesced AG/RS + producer-chain hoist.
+5. `cleanup_bundle` (Exp 27, +1.71%) — detach removal + view/conj/clone CSE.
+6. Config: dropped `--debug.deterministic` from benchmark (+23.5%) — NaN fills were 7% overhead.
 
-13 of 18 experiments discarded. The decisive structural wins (Exps 11 & 13) came from finding zero-copy / launch-collapsing rewrites grounded in byte-layout proofs (Exp 11) and placeholder-rooted hoist trees (Exp 13). Pure-cleanup bundles ceiling at +0.6% (Exp 17). Metadata peephole well is dry. Collective-coalescing without hoistable producers is dead (Exps 12/15/16). FX-level AG reordering doesn't translate to runtime overlap (Exps 3/5/6/8). Bitwise-numerics constraint forbids RoPE fp32 round-trip elimination and any precision-modifying rewrite. The next significant wins would require either (a) custom HOPs with backing kernels (out of scope), (b) FSDP/model config changes (out of scope), or (c) a structurally novel pattern not yet identified — Exp 18's open-ended search returned no_target.
+35 of 41 experiments discarded/crashed. The decisive structural wins (Exps 11 & 13) came from finding zero-copy / launch-collapsing rewrites grounded in byte-layout proofs (Exp 11) and placeholder-rooted hoist trees (Exp 13). Pure-cleanup bundles ceiling at +0.6% (Exp 17). Metadata peephole well is dry. Collective-coalescing without hoistable producers is dead (Exps 12/15/16). FX-level AG reordering doesn't translate to runtime overlap (Exps 3/5/6/8). Bitwise-numerics constraint forbids RoPE fp32 round-trip elimination and any precision-modifying rewrite. Further wins explored post-Exp 18 and all discarded:
+- Matmul fusion (Exps 37-39): mm→linear regresses; QKV fusion breaks bitwise; w1/w3 fusion passes bitwise but fused GEMM is slower.
+- torch.compile on subgraph (Exp 40): Inductor lacks complex codegen; compiled RoPE 29% SLOWER.
+- Loss fusion (Exp 41): logsumexp replaces exp→sum; bitwise PASSES but -1.3% regression (fused kernel slower for this shape).
+- Remaining wins require: (a) custom HOPs/Triton kernels (out of scope), (b) FSDP/model config changes (FusedQKVLinear), or (c) NCCL-backend-level scheduling control.
 
 ## Patterns that didn't work
 
