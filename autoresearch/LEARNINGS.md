@@ -46,6 +46,18 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 ## Patterns that didn't work
 
+- **Whole-graph `compile_fx` / `compile_fx_inner` on the make_fx joint graph.**
+  - `compile_fx` re-functionalizes and rejects `_c10d_functional.all_reduce_.default`
+    (in-place collective baked in by DTensor redistribute) with "Found a
+    custom (non-ATen) operator whose output has alias annotations".
+  - `compile_fx_inner` (after iter 5's pattern passes) fails with
+    "_to_copy.default registered twice" in Inductor's decomp/fallback
+    registry — likely because joint_graph_passes left state.
+  - **Takeaway**: routing this graph through Inductor codegen requires
+    either regional compile (subgraphs without collectives), or a fresh
+    re-trace path that avoids the in-place collective. Don't expect
+    drop-in whole-graph compile to work.
+
 - **Same-dtype `_to_copy.default` elimination.** All 842 `_to_copy.default`
   nodes are genuine fp32↔bf16 mixed-precision casts; none satisfy the
   same-dtype/device/layout criterion. Plain elimination is dead-on-arrival

@@ -28,6 +28,22 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## compile_fx_inductor (whole-graph) — discard (xxxxxxx)
+
+- **Idea**: Route the cleaned joint fwd+bwd graph through Inductor's full pipeline (`compile_fx_inner` / `compile_fx`) to get **Triton kernel codegen**. Iter 5's pattern passes did FX-level rewrites; the next lever is full kernel codegen.
+- **Changes**: Added `compile_fx_inductor(gm, example_inputs)` that tries 3 entry points and overrides `gm.forward` with the compiled callable. Registered AFTER `apply_inductor_pattern_passes`. Failures fall through to no-op so iter 5 gains persist.
+- **Result**: discard. step 20: tps=4,577 mfu=26.80% (basically iter 5's number, since pass falls through). Numerics PASS. The pass never installed a compiled function.
+- **Failures (all 3 variants)**:
+  1. `compile_fx_inner(gm, list(example_inputs))` → `InductorError(AssertionError: both a fallback and a decomp for same op: aten._to_copy.default)`. The decomp registry sees `_to_copy.default` twice. Suspected: iter 5's `joint_graph_passes` primed Inductor state, and the second call hits a duplicate.
+  2. `fx_codegen_and_compile(gm, list(example_inputs))` → `TypeError: missing 1 required positional argument: 'inputs_to_check'`. API needs args we can't infer without reading the source.
+  3. `compile_fx(gm, list(example_inputs))` → `RuntimeError: Found a custom (non-ATen) operator whose output has alias annotations: _c10d_functional::all_reduce_`. `compile_fx` re-runs functionalization; the joint graph already contains the in-place `_c10d_functional.all_reduce_.default` (DTensor redistribute baked it in). This is structural: graphs with mutable functional collectives can't pass through `compile_fx`.
+- **Lessons**:
+  - **Whole-graph Inductor codegen is blocked on (a) in-place functional collectives, and (b) decomposition registry conflicts after iter 5's pattern passes.** Two distinct walls; both need workarounds.
+  - To use Inductor codegen on this workload we must either (i) compile **regions** that exclude collectives, (ii) reset Inductor's registry between calls, or (iii) re-trace the graph fresh and avoid emitting the in-place all_reduce_.
+  - First-step compile attempts only added ~7s wall time even when they all failed, so safe try/except wrappers are cheap.
+
+---
+
 ## apply_inductor_pattern_passes — keep (76d3f9e)
 
 - **Idea**: PyTorch's Inductor ships several FX-level pattern matchers (`joint_graph_passes`, `post_grad_passes`, etc.) that fuse common ATen sequences (mm+bias+activation, SDPA epilogues, `_to_copy` round-trips, …) by rewriting the GraphModule in place. They were designed for the same kind of joint fwd+bwd graph that `make_fx` produces, so they should apply directly.
