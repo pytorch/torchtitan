@@ -184,8 +184,6 @@ def qwen3_1_7b() -> Trainer.Config:
 
 
 def qwen3_14b() -> Trainer.Config:
-    from torchtitan.components.optimizer import OptimizersInBackwardContainer
-
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
@@ -194,7 +192,7 @@ def qwen3_14b() -> Trainer.Config:
             attn_backend="sdpa",
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=OptimizersInBackwardContainer.Config(lr=8e-4),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=4,
