@@ -748,126 +748,28 @@ def _extract_subgraph(
 
 
 class InductorRegionExtractor(RegionExtractor):
-    """Discover fusible regions matching inductor's actual fusion groups.
+    """Discover fusible regions matching inductor's fusion groups.
 
-    Closely mirrors compile-utils' ATen-level extractor:
-      1. Decompose the graph via ``Interpreter + make_fx`` with the full
-         inductor decomp table.  ``preserve_node_meta`` populates
-         ``from_node`` on every decomposed node for back-mapping.
-      2. Partition the decomposed graph with ``CapabilityBasedPartitioner``
-         + ``is_fusible_node`` — the canonical FX partitioner used by
-         inductor.
-      3. Merge reduction partitions that share a common activation input
+    Closely mirrors compile-utils' ATen-level extractor, but operates
+    directly on the pre-decomposition graph (no make_fx step):
+      1. Partition with ``CapabilityBasedPartitioner`` + our own
+         ``is_fusible_node`` classifier (graph_trainer-specific, see
+         ``_classify_node``).
+      2. Merge reduction partitions that share a common activation input
          (mix-order reduction fusion).
-      4. For each partition, extract a standalone ``fx.GraphModule``
-         subgraph (used for problem.py via ``print_readable``) and map
-         the partition back to original-graph nodes for replacement.
+      3. For each partition, extract a standalone ``fx.GraphModule``
+         subgraph; its placeholders are direct references to the
+         original graph's nodes, so replacement is trivial.
+
+    Working pre-decomposition means: no from_node back-mapping, no
+    dtype/shape mismatch checks, and problem.py uses semantic ops
+    (e.g. ``_fused_rms_norm`` instead of the decomposed pow/mean/rsqrt
+    chain).
     """
 
     def __init__(self, example_inputs: tuple | None = None):
+        # example_inputs kept for signature compat; unused now.
         self.example_inputs = example_inputs
-
-    def _decompose_with_provenance(
-        self, gm: torch.fx.GraphModule
-    ) -> torch.fx.GraphModule | None:
-        """Decompose via Interpreter + make_fx, with from_node tracking."""
-        if self.example_inputs is None:
-            return None
-        try:
-            from torch._inductor.decomposition import select_decomp_table
-            from torch._subclasses.fake_tensor import FakeTensor
-            from torch.fx.experimental.proxy_tensor import make_fx
-            from torch.fx.traceback import preserve_node_meta
-
-            decomp_table = select_decomp_table()
-            fake_mode = None
-            for inp in self.example_inputs:
-                if isinstance(inp, FakeTensor):
-                    fake_mode = inp.fake_mode
-                    break
-            if fake_mode is None:
-                return None
-
-            interp = torch.fx.Interpreter(gm)
-            with fake_mode, preserve_node_meta():
-                work_gm = make_fx(
-                    lambda *a: interp.run(*a),
-                    decomposition_table=decomp_table,
-                    _allow_non_fake_inputs=True,
-                )(*self.example_inputs)
-
-            logger.info(
-                f"InductorRegionExtractor: decomposed "
-                f"{len(list(gm.graph.nodes))} → "
-                f"{len(list(work_gm.graph.nodes))} nodes (with from_node)"
-            )
-            return work_gm
-        except Exception as e:
-            logger.warning(f"InductorRegionExtractor: decomposition failed: {e}")
-            return None
-
-    @staticmethod
-    def _map_placeholders_to_orig(
-        placeholder_info: list[dict],
-        decomp_ph_to_orig: dict[str, torch.fx.Node],
-        orig_node_map: dict[str, torch.fx.Node],
-    ) -> list[torch.fx.Node] | None:
-        """Map each subgraph placeholder back to a node in the original graph.
-
-        Each placeholder's ``orig_node`` is a node in the decomposed graph.
-        For decomposed placeholders we use the positional decomp→orig
-        placeholder map; for other nodes we follow ``from_node``.
-
-        Handles the getitem-on-list case: when ``from_node`` points to a
-        list-returning op (e.g. ``split_with_sizes``) but the decomp node
-        is itself a ``getitem`` on it, look for the matching ``getitem``
-        in the original graph using the same index.
-
-        Returns the list of original-graph nodes in placeholder order,
-        or None if any placeholder can't be mapped.
-        """
-        result: list[torch.fx.Node] = []
-        for info in placeholder_info:
-            decomp_node = info["orig_node"]
-            if decomp_node.op == "placeholder":
-                # Positional map from work_gm placeholder → gm placeholder
-                orig = decomp_ph_to_orig.get(decomp_node.name)
-                if orig is None:
-                    return None
-                result.append(orig)
-                continue
-            # Otherwise use from_node provenance
-            from_nodes = decomp_node.meta.get("from_node", [])
-            if not from_nodes:
-                return None
-            orig = orig_node_map.get(from_nodes[0].name)
-            if orig is None:
-                return None
-
-            # If the decomp node is a getitem on a list, but the mapped
-            # orig node returns the full list, find the matching getitem
-            # in the original graph.
-            orig_val = orig.meta.get("val")
-            if (
-                decomp_node.target is operator.getitem
-                and isinstance(orig_val, (list, tuple))
-            ):
-                idx = decomp_node.args[1]
-                matching = None
-                for user in orig.users:
-                    if (
-                        user.target is operator.getitem
-                        and len(user.args) >= 2
-                        and user.args[1] == idx
-                    ):
-                        matching = user
-                        break
-                if matching is None:
-                    return None
-                orig = matching
-
-            result.append(orig)
-        return result
 
     def extract(
         self, gm: torch.fx.GraphModule
@@ -888,43 +790,13 @@ class InductorRegionExtractor(RegionExtractor):
 
         _t0 = _time.time()
 
-        # Step 1: decompose with from_node provenance
-        work_gm = self._decompose_with_provenance(gm)
-        if work_gm is None:
-            logger.warning(
-                "InductorRegionExtractor: decomposition failed, "
-                "falling back to FqnRegionExtractor"
-            )
-            return FqnRegionExtractor().extract(gm)
-
-        # Map decomp-graph nodes → original-graph nodes.
-        # Placeholders: positional (i-th work_gm placeholder → i-th gm placeholder).
-        # Other nodes: via from_node provenance.
-        orig_by_name: dict[str, torch.fx.Node] = {
-            n.name: n for n in gm.graph.nodes
-        }
-        work_phs = [n for n in work_gm.graph.nodes if n.op == "placeholder"]
-        orig_phs = [n for n in gm.graph.nodes if n.op == "placeholder"]
-        decomp_ph_to_orig: dict[str, torch.fx.Node] = {
-            wp.name: op for wp, op in zip(work_phs, orig_phs)
-        }
-        decomp_node_to_orig: dict[str, torch.fx.Node] = dict(decomp_ph_to_orig)
-        for dn in work_gm.graph.nodes:
-            if dn.op == "placeholder":
-                continue
-            from_nodes = dn.meta.get("from_node", [])
-            if from_nodes:
-                orig = orig_by_name.get(from_nodes[0].name)
-                if orig is not None:
-                    decomp_node_to_orig[dn.name] = orig
-
-        # Step 2: partition the decomposed graph
+        # Partition the original graph using our classifier
         def _is_supported(_subm, node):
             return is_fusible_node(node)
 
         support = create_op_support(_is_supported)
         partitioner = CapabilityBasedPartitioner(
-            work_gm, support, allows_single_node_partition=True,
+            gm, support, allows_single_node_partition=True,
         )
         partitions = partitioner.propose_partitions()
         components: list[list[torch.fx.Node]] = [
@@ -938,133 +810,37 @@ class InductorRegionExtractor(RegionExtractor):
             if n_before != len(components) else ""
         )
         logger.info(
-            f"InductorRegionExtractor: {len(list(work_gm.graph.nodes))} nodes, "
+            f"InductorRegionExtractor: {len(list(gm.graph.nodes))} nodes, "
             f"{len(components)} partitions{merged_msg} in {_time.time()-_t0:.1f}s"
         )
 
-        # Step 3: build Regions
         all_regions: list[Region] = []
         for comp in components:
-            # Skip view-only and unfusable partitions
+            # Skip view-only and any unfusable partitions
             if all(is_view_node(n) or n.op != "call_function" for n in comp):
                 continue
             if any(_is_unfusable(n) for n in comp if n.op == "call_function"):
                 continue
 
-            result = _extract_subgraph(comp, work_gm)
+            result = _extract_subgraph(comp, gm)
             if result is None:
                 continue
-            decomp_gm, placeholder_info, decomp_output_nodes = result
+            sub_gm, placeholder_info, output_nodes = result
 
-            # Skip complex-tensor regions — triton kernels don't reliably
-            # handle complex dtypes (conjugate views, view_as_complex/real).
-            has_complex = False
-            for info in placeholder_info:
-                if "complex" in info.get("dtype", ""):
-                    has_complex = True
-                    break
-            if not has_complex:
-                for dn in decomp_output_nodes:
-                    val = dn.meta.get("val")
-                    if isinstance(val, torch.Tensor) and val.dtype.is_complex:
-                        has_complex = True
-                        break
-            if has_complex:
-                continue
-
-            # Map decomp inputs → original-graph nodes
-            ext_inputs = self._map_placeholders_to_orig(
-                placeholder_info, decomp_ph_to_orig, orig_by_name
-            )
-            if ext_inputs is None:
-                continue
-
-            # Map decomp outputs → original-graph nodes (preserving order, dedup).
-            # These match the kernel's actual output count.
-            # Also require dtype/shape consistency between decomp output
-            # and the mapped original — if decomp added a convert or
-            # reshape, replacing the original would break the type contract
-            # of downstream consumers.
-            out_nodes: list[torch.fx.Node] = []
-            seen_out: set[str] = set()
-            dtype_mismatch = False
-            for dn in decomp_output_nodes:
-                orig = decomp_node_to_orig.get(dn.name)
-                if orig is None or orig.name in seen_out:
-                    continue
-                dn_val = dn.meta.get("val")
-                orig_val = orig.meta.get("val")
-                if (
-                    isinstance(dn_val, torch.Tensor)
-                    and isinstance(orig_val, torch.Tensor)
-                    and (
-                        dn_val.dtype != orig_val.dtype
-                        or tuple(dn_val.shape) != tuple(orig_val.shape)
-                    )
-                ):
-                    dtype_mismatch = True
-                    break
-                seen_out.add(orig.name)
-                out_nodes.append(orig)
-            if dtype_mismatch or not out_nodes:
-                continue
-            out_node_set = set(out_nodes)
-
-            # Compute region nodes in original graph: all original nodes
-            # that any decomp node in this partition maps to.
-            orig_nodes_set: set[torch.fx.Node] = set()
-            for dn in comp:
-                orig = decomp_node_to_orig.get(dn.name)
-                if orig is not None:
-                    orig_nodes_set.add(orig)
-
-            # Include getitem users whose users are in the region
-            changed = True
-            while changed:
-                changed = False
-                for n in list(orig_nodes_set):
-                    for u in n.users:
-                        if u in orig_nodes_set:
-                            continue
-                        if u.target is operator.getitem and any(
-                            uu in orig_nodes_set for uu in u.users
-                        ):
-                            orig_nodes_set.add(u)
-                            changed = True
-
-            # Filter region: a node is safe only if all its users are
-            # in the region or in out_nodes.
-            changed = True
-            while changed:
-                changed = False
-                for n in list(orig_nodes_set):
-                    if n in out_node_set:
-                        continue
-                    if not all(
-                        u in orig_nodes_set or u in out_node_set
-                        for u in n.users
-                    ):
-                        orig_nodes_set.discard(n)
-                        changed = True
-
-            # Sanity: out_nodes must all be in the region.
-            if not all(n in orig_nodes_set for n in out_nodes):
-                continue
+            # External inputs: the original-graph nodes referenced by the
+            # subgraph's placeholders.  Already recorded in placeholder_info.
+            ext_inputs = [info["orig_node"] for info in placeholder_info]
 
             order = {n: i for i, n in enumerate(gm.graph.nodes)}
-            orig_nodes_sorted = sorted(
-                orig_nodes_set, key=lambda n: order.get(n, 0)
-            )
-            if not orig_nodes_sorted:
-                continue
+            nodes_sorted = sorted(comp, key=lambda n: order.get(n, 0))
+            norm_fqn = _normalize_fqn(_get_node_fqn(nodes_sorted[0]))
 
-            norm_fqn = _normalize_fqn(_get_node_fqn(orig_nodes_sorted[0]))
             region = Region(
-                nodes=orig_nodes_sorted,
+                nodes=nodes_sorted,
                 external_inputs=ext_inputs,
-                output_nodes=out_nodes,
+                output_nodes=output_nodes,
                 norm_fqn=norm_fqn,
-                decomp_gm=decomp_gm,
+                decomp_gm=sub_gm,
                 decomp_inputs_info=placeholder_info,
             )
             all_regions.append(region)
