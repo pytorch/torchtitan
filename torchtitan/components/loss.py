@@ -190,7 +190,8 @@ class GradAccumulator:
             DTensor, only its device mesh is reused; the placement of the
             returned DTensor is taken from the first added chunk (see add()),
             not from this reference, so the buffer is labeled with the actual
-            gradient placement (e.g. Partial(sum) for a loss-parallel
+            gradient placement (e.g. Partial(sum) on the TP axis when the
+            forward used a Replicate input with a Shard(0) weight, as in
             ColwiseParallel lm_head) rather than the activation placement.
         num_chunks: Number of chunks that will be added.
         seq_dim: The sequence dimension along which chunks are accumulated.
