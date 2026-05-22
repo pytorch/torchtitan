@@ -39,7 +39,8 @@ class LocalTokenDispatcher(Configurable):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
     Also serves as the base class for EP dispatchers (AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher) which override dispatch() and combine().
+    DeepEPTokenDispatcher, HybridEPTokenDispatcher) which override
+    dispatch() and combine().
 
     Not an nn.Module — dispatchers have no learnable parameters or buffers.
     """
@@ -64,27 +65,29 @@ class LocalTokenDispatcher(Configurable):
         """No-op for the EP=1 dispatcher. Subclasses override."""
         del ep_mesh, tp_mesh
 
-    def dispatch(
+    def _local_reorder(
         self,
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reorder tokens by expert assignment for local expert computation.
 
+        Groups tokens by expert index via histc + argsort, optionally
+        applies routing scores (when ``score_before_experts`` is True).
+
         Args:
-            x: (num_tokens, dim) all input tokens
+            x: (num_tokens, dim) input tokens
             top_scores: (num_tokens, top_k) routing scores
-            selected_experts_indices: (num_tokens, top_k) expert indices per token
+            selected_experts_indices: (num_tokens, top_k) expert indices
 
         Returns:
-            routed_input: (num_tokens * top_k, dim) tokens sorted by expert index
+            routed_input: (num_tokens * top_k, dim) tokens in expert-sorted
+                order, score-weighted if ``score_before_experts``
             num_tokens_per_expert: (num_experts,) token counts per expert
-            metadata: LocalDispatchMetadata for combine()
+            token_indices_experts_sorted: (num_tokens * top_k,) token-to-original mapping
+            top_scores_experts_sorted: (num_tokens * top_k,) scores in expert-sorted order
         """
-        # TODO: Extract this local reordering block (histc, argsort, score
-        # application) into a shared helper — it's duplicated in
-        # AllToAllTokenDispatcher.dispatch.
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert = torch.histc(
             selected_experts_indices.view(-1),
@@ -111,6 +114,38 @@ class LocalTokenDispatcher(Configurable):
                 routed_input.to(torch.float32)
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
+
+        return (
+            routed_input,
+            num_tokens_per_expert,
+            token_indices_experts_sorted,
+            top_scores_experts_sorted,
+        )
+
+    def dispatch(
+        self,
+        x: torch.Tensor,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
+        """Reorder tokens by expert assignment for local expert computation.
+
+        Args:
+            x: (num_tokens, dim) all input tokens
+            top_scores: (num_tokens, top_k) routing scores
+            selected_experts_indices: (num_tokens, top_k) expert indices per token
+
+        Returns:
+            routed_input: (num_tokens * top_k, dim) tokens sorted by expert index
+            num_tokens_per_expert: (num_experts,) token counts per expert
+            metadata: LocalDispatchMetadata for combine()
+        """
+        (
+            routed_input,
+            num_tokens_per_expert,
+            token_indices_experts_sorted,
+            top_scores_experts_sorted,
+        ) = self._local_reorder(x, top_scores, selected_experts_indices)
 
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted=token_indices_experts_sorted,
@@ -229,35 +264,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
 
         ep_size = self.ep_mesh.size()
 
-        # TODO: Extract this local reordering block (histc, argsort, score
-        # application) into a shared helper — it's duplicated in
-        # LocalTokenDispatcher.dispatch.
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
-            selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
-        )
-
-        # Reorder the token indices to match the order of the experts
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
-        token_indices_experts_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
-        )
-
-        top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-        token_indices_experts_sorted = token_indices_experts_sorted // self.top_k
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = x[token_indices_experts_sorted]
-
-        # Apply scores before expert computation if configured
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
+        (
+            routed_input,
+            num_tokens_per_expert,
+            token_indices_experts_sorted,
+            top_scores_experts_sorted,
+        ) = self._local_reorder(x, top_scores, selected_experts_indices)
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
@@ -514,76 +526,30 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
 @dataclass(frozen=True, kw_only=True)
 class DeepEPDispatchMetadata:
-    """Metadata for DeepEP/HybridEP token dispatch."""
+    """Metadata for DeepEP and HybridEP token dispatch."""
 
     state: object  # deepep.DispatchState or hybridep.DispatchState
 
 
 class DeepEPTokenDispatcher(LocalTokenDispatcher):
-    """Token dispatcher using DeepEP/HybridEP for efficient token dispatch/combine.
+    """Token dispatcher using DeepEP for efficient token dispatch/combine.
 
-    Uses DeepEP library kernels instead of standard all-to-all collectives for
-    token dispatch and combine. For the DeepEP backend, combine is asynchronous
-    — callers must call sync_combine() before using the result.
-
-    ep_mesh is set by ExpertParallel._apply().
+    Uses DeepEP library kernels (H100/NVLink Switch) instead of standard
+    all-to-all collectives. Combine is asynchronous — callers must call
+    sync_combine() before using the result.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        """Config for DeepEP/HybridEP token dispatcher.
-
-        Args:
-            comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
-            non_blocking_capacity_factor: Enable non-blocking HybridEP dispatch with a
-                given capacity factor.
-
-                Setting this to a float in (0, 1] enables CPU-free non-blocking
-                dispatch and controls num_permuted_tokens — the fused-permute
-                output capacity, estimated as:
-                num_tokens × ep_size × min(num_local_experts, top_k) × cf,
-                aligned for MXFP8.  Tokens whose permuted offset exceeds this
-                limit are silently dropped (overflow_flag is set on GPU).
-
-                - None = blocking mode (default).  HybridEP calls
-                  cudaStreamSynchronize after dispatch, copies
-                  tokens_per_expert to pinned CPU memory, and computes the
-                  exact num_permuted_tokens on the host.  No token dropping.
-                - 1.0 = non-blocking, worst-case sizing: every token can reach
-                  every local expert, no drops, highest memory.
-                - < 1.0 = non-blocking, reduced memory; controls the
-                  fused-permute output tensor size (num_permuted_tokens).
-                  Safe in practice when forced load balancing (e.g. aux-loss /
-                  round-robin) keeps distribution roughly uniform.
-
-                Note: this factor has no lasting effect on the all-to-all
-                communication buffer.  HybridEP's dispatch_with_permute
-                internally passes the actual num_tokens to
-                update_template_config, which auto-grows the buffer to the
-                full token count on the first dispatch regardless of this
-                setting.
-        """
-
-        comm_backend: str
-        non_blocking_capacity_factor: float | None = None
-        pad_multiple: int | None = None
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.comm_backend = config.comm_backend
-        self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
-        self.pad_multiple = config.pad_multiple
-        # Wired by GroupedExperts.parallelize via wire_meshes.
         self.ep_mesh: DeviceMesh | None = None
-        self.sp_size: int = 1
-        self.sp_rank: int | torch.SymInt = 0
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
-        if config.comm_backend == "hybridep":
-            from torchtitan.distributed.deepep import hybridep  # noqa: F401
-        else:
-            from torchtitan.distributed.deepep import deepep  # noqa: F401
+        from torchtitan.distributed.deepep import deepep  # noqa: F401
 
     def wire_meshes(
         self,
@@ -614,32 +580,18 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         )
         ep_group = self.ep_mesh.get_group()
         num_local_experts = self.num_experts // ep_group.size()
-        if self.comm_backend == "hybridep":
-            from torchtitan.distributed.deepep.hybridep import dispatch_tokens
 
-            hidden_states, tokens_per_expert, state = dispatch_tokens(
-                x,
-                selected_experts_indices,
-                top_scores,
-                num_local_experts,
-                self.num_experts,
-                ep_group,
-                score_before_experts=self.score_before_experts,
-                non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
-                pad_multiple=self.pad_multiple,
-            )
-        else:
-            from torchtitan.distributed.deepep.deepep import dispatch_tokens
+        from torchtitan.distributed.deepep.deepep import dispatch_tokens
 
-            hidden_states, tokens_per_expert, state = dispatch_tokens(
-                x,
-                selected_experts_indices,
-                top_scores,
-                num_local_experts,
-                self.num_experts,
-                ep_group,
-                score_before_experts=self.score_before_experts,
-            )
+        hidden_states, tokens_per_expert, state = dispatch_tokens(
+            x,
+            selected_experts_indices,
+            top_scores,
+            num_local_experts,
+            self.num_experts,
+            ep_group,
+            score_before_experts=self.score_before_experts,
+        )
 
         metadata = DeepEPDispatchMetadata(state=state)
         return hidden_states, tokens_per_expert, metadata
@@ -651,33 +603,151 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         metadata: DeepEPDispatchMetadata,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        """Combine tokens via DeepEP/HybridEP.
+        """Combine tokens via DeepEP.
 
-        For deepep with sp_size == 1, combine is async — sync_combine()
-        is deferred to MoE.forward, enabling overlap with shared_experts.
-        For sp_size > 1, there is no overlap: sync is forced here because
+        When sp_size == 1, combine is async — sync_combine() is deferred
+        to MoE.forward, enabling overlap with shared_experts.
+        When sp_size > 1, there is no overlap: sync is forced here because
         the SP expansion must read the combine result before returning.
-        HybridEP combine is always synchronous (no overlap in either case).
         """
-        if self.comm_backend == "hybridep":
-            from torchtitan.distributed.deepep import hybridep
+        from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-            routed_output = hybridep.combine_tokens(
-                routed_output,
-                metadata.state,  # pyrefly: ignore [bad-argument-type]
-                pad_multiple=self.pad_multiple,
+        # pyrefly: ignore [bad-argument-type]
+        routed_output = combine_tokens(routed_output, metadata.state)
+
+        if self.sp_size > 1:
+            sync_combine()
+            out = torch.zeros(
+                routed_output.shape[0] * self.sp_size,
+                routed_output.shape[-1],
+                device=routed_output.device,
+                dtype=routed_output.dtype,
             )
-        else:
-            from torchtitan.distributed.deepep.deepep import (
-                combine_tokens,
-                sync_combine,
-            )
+            offset = routed_output.shape[0] * self.sp_rank
+            out[offset : offset + routed_output.shape[0]] = routed_output
+            return out
 
-            # pyrefly: ignore [bad-argument-type]
-            routed_output = combine_tokens(routed_output, metadata.state)
+        return routed_output
 
-            if self.sp_size > 1:
-                sync_combine()
+
+class HybridEPTokenDispatcher(LocalTokenDispatcher):
+    """Token dispatcher using HybridEP for efficient token dispatch/combine.
+
+    Uses HybridEP library kernels (GB200/NVLink72) instead of standard
+    all-to-all collectives.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(LocalTokenDispatcher.Config):
+        """Config for HybridEP token dispatcher.
+
+        Args:
+            non_blocking_capacity_factor: Enable non-blocking HybridEP dispatch
+                with a given capacity factor.
+
+                Setting this to a float in (0, 1] enables CPU-free non-blocking
+                dispatch and controls num_permuted_tokens — the fused-permute
+                output capacity, estimated as:
+                num_tokens × ep_size × min(num_local_experts, top_k) × cf,
+                aligned for MXFP8.  Tokens whose permuted offset exceeds this
+                limit are silently dropped (overflow_flag is set on GPU).
+
+                - None = blocking mode (default).  HybridEP calls
+                  cudaStreamSynchronize after dispatch, copies
+                  tokens_per_expert to pinned CPU memory, and computes the
+                  exact num_permuted_tokens on the host.  No token dropping.
+                - 1.0 = non-blocking, worst-case sizing: every token can reach
+                  every local expert, no drops, highest memory.
+                - < 1.0 = non-blocking, reduced memory; controls the
+                  fused-permute output tensor size (num_permuted_tokens).
+                  Safe in practice when forced load balancing (e.g. aux-loss /
+                  round-robin) keeps distribution roughly uniform.
+
+                Note: this factor has no lasting effect on the all-to-all
+                communication buffer.  HybridEP's dispatch_with_permute
+                internally passes the actual num_tokens to
+                update_template_config, which auto-grows the buffer to the
+                full token count on the first dispatch regardless of this
+                setting.
+        """
+
+        non_blocking_capacity_factor: float | None = None
+        pad_multiple: int | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
+        self.pad_multiple = config.pad_multiple
+        self.ep_mesh: DeviceMesh | None = None
+        self.sp_size: int = 1
+        self.sp_rank: int | torch.SymInt = 0
+
+        # Import to register custom ops so SAC saves communication outputs
+        # instead of recomputing them. This must happen before apply_ac.
+        from torchtitan.distributed.deepep import hybridep  # noqa: F401
+
+    def wire_meshes(
+        self,
+        *,
+        ep_mesh: DeviceMesh | None,
+        tp_mesh: DeviceMesh | None,
+    ) -> None:
+        """Install the EP mesh used by HybridEP dispatch / combine.
+
+        ``tp_mesh`` provides SP coordinates so combine can expand its output
+        to full sequence length (matching AllToAll's convention).
+        """
+        self.ep_mesh = ep_mesh
+        if tp_mesh is not None:
+            self.sp_size = tp_mesh.size()
+            self.sp_rank = tp_mesh._sym_get_coordinate(0)
+
+    # pyrefly: ignore [bad-override]
+    def dispatch(
+        self,
+        x: torch.Tensor,
+        top_scores: torch.Tensor,
+        selected_experts_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        assert self.ep_mesh is not None, (
+            "ep_mesh must be set before dispatch. "
+            "ExpertParallel._partition_fn() should set it."
+        )
+        ep_group = self.ep_mesh.get_group()
+        num_local_experts = self.num_experts // ep_group.size()
+
+        from torchtitan.distributed.deepep.hybridep import dispatch_tokens
+
+        hidden_states, tokens_per_expert, state = dispatch_tokens(
+            x,
+            selected_experts_indices,
+            top_scores,
+            num_local_experts,
+            self.num_experts,
+            ep_group,
+            score_before_experts=self.score_before_experts,
+            non_blocking_expert_capacity_factor=self.non_blocking_capacity_factor,
+            pad_multiple=self.pad_multiple,
+        )
+
+        metadata = DeepEPDispatchMetadata(state=state)
+        return hidden_states, tokens_per_expert, metadata
+
+    # pyrefly: ignore [bad-override]
+    def combine(
+        self,
+        routed_output: torch.Tensor,
+        metadata: DeepEPDispatchMetadata,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """Combine tokens via HybridEP."""
+        from torchtitan.distributed.deepep import hybridep
+
+        routed_output = hybridep.combine_tokens(
+            routed_output,
+            metadata.state,  # pyrefly: ignore [bad-argument-type]
+            pad_multiple=self.pad_multiple,
+        )
 
         if self.sp_size > 1:
             out = torch.zeros(
