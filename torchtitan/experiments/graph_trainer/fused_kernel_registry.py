@@ -1031,10 +1031,17 @@ def _input_creation_line(name: str, info: dict) -> str:
 def _format_subgraph_as_model(subgraph_gm: torch.fx.GraphModule) -> str:
     """Format the extracted subgraph as ``class Model(nn.Module)``.
 
-    Uses ``GraphModule.print_readable`` for a faithful repro, then
-    renames the class.
+    Uses ``GraphModule.print_readable`` for a faithful repro (same
+    flags as the tlparse graph dump: include stride, include device,
+    expanded def, autograd_backward meta), then renames the class.
     """
-    code = subgraph_gm.print_readable(print_output=False)
+    code = subgraph_gm.print_readable(
+        print_output=False,
+        include_stride=True,
+        include_device=True,
+        expanded_def=True,
+        additional_meta=["autograd_backward"],
+    )
     code = code.replace("class GraphModule(", "class Model(", 1)
     return code
 
