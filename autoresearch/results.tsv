@@ -47,3 +47,5 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T17:35:00	xxxxxxx	6393	47.0	stability	37.44	70	stability data: n=28 mean=6393 stddev=39 CV=0.6% median=6391 p5=6319 p95=6448; optimized state is stable
 2026-05-22T17:40:00	xxxxxxx	0	0.0	discard	0.00	0	exp43 CUDA graph compute blocks: no_target — compile-time pass can't capture at runtime; copy overhead > dispatch savings; use_cudagraph param exists but requires infra outside passes.py
 2026-05-22T17:45:00	xxxxxxx	6409	47.0	stability	37.54	70	stability batch 2: n=10 mean=6409 sd=21; n=38 cumulative mean=6398 — confirms +54% over raw det baseline
+2026-05-22T17:55:00	xxxxxxx	0	0.0	discard	0.00	0	exp44 reorder_for_peak_memory=True: no effect (Inductor config irrelevant in aot_fx_trace mode); reverted
+2026-05-22T18:00:00	xxxxxxx	6422	47.0	stability	37.63	70	stability batch 3: n=5 median=6425; 5 more in background
