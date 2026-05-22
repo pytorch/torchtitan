@@ -7,11 +7,24 @@
 """Numerical equivalence test: HF native MoE vs titan-replaced MoE.
 
 For each supported HF MoE model, this script:
-1. Creates a tiny HF model with random weights
-2. Runs forward on the HF-native MoE block
+1. Creates a single-layer HF model with production-scale dimensions and random weights
+2. Runs forward on the HF-native MoE block (using grouped_mm experts)
 3. Builds the equivalent native titan MoE, transfers weights from HF
 4. Runs forward on the titan MoE block with the same input
 5. Compares outputs via KL divergence, cosine similarity, and max abs diff
+
+Note on numerical precision:
+    Results are NOT bit-exact due to a difference in accumulation precision
+    between HF and titan token dispatchers. HF's ``grouped_mm_experts_forward``
+    multiplies expert outputs by routing scores in float32 and accumulates
+    via ``reshape+sum`` in float32 before casting to bf16. Titan's
+    ``LocalTokenDispatcher.combine()`` also multiplies in float32 but casts
+    back to bf16 *before* ``deterministic_scatter_add``, so the accumulation
+    happens in bf16. This causes max_diff to scale with hidden_size (e.g.
+    ~2e-3 at H=2048, ~1.25e-1 at H=7168). Accumulating in float32 in the
+    dispatcher produces bit-exact (0.00) results across all models.
+    TODO(mreso): Make the accumulation dtype in ``LocalTokenDispatcher.combine``
+    configurable (or default to float32) so titan matches HF's precision.
 
 Usage:
     python -m torchtitan.experiments.transformers_modeling_backend.tests.numerical_equivalence
@@ -20,6 +33,7 @@ Usage:
 import argparse
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -30,14 +44,14 @@ import torch.nn.functional as F
 _MODEL_CONFIGS = {
     "qwen3_moe": dict(
         model_type="qwen3_moe",
-        hidden_size=64,
-        intermediate_size=128,
-        moe_intermediate_size=32,
-        num_local_experts=4,
+        hidden_size=2048,
+        intermediate_size=6144,
+        moe_intermediate_size=768,
+        num_local_experts=8,
         num_experts_per_tok=2,
         num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
+        num_attention_heads=32,
+        num_key_value_heads=4,
         decoder_sparse_step=1,
         vocab_size=256,
         max_position_embeddings=64,
@@ -46,13 +60,13 @@ _MODEL_CONFIGS = {
     ),
     "mixtral": dict(
         model_type="mixtral",
-        hidden_size=64,
-        intermediate_size=128,
-        num_local_experts=4,
+        hidden_size=4096,
+        intermediate_size=14336,
+        num_local_experts=8,
         num_experts_per_tok=2,
         num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
+        num_attention_heads=32,
+        num_key_value_heads=8,
         vocab_size=256,
         max_position_embeddings=64,
         attn_implementation="sdpa",
@@ -60,17 +74,17 @@ _MODEL_CONFIGS = {
     ),
     "deepseek_v3": dict(
         model_type="deepseek_v3",
-        hidden_size=64,
-        intermediate_size=128,
-        moe_intermediate_size=32,
+        hidden_size=7168,
+        intermediate_size=18432,
+        moe_intermediate_size=2048,
         num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
+        num_attention_heads=8,
+        num_key_value_heads=8,
         vocab_size=256,
         max_position_embeddings=64,
         first_k_dense_replace=0,
-        n_routed_experts=4,
-        num_local_experts=4,
+        n_routed_experts=8,
+        num_local_experts=8,
         num_experts_per_tok=2,
         n_group=2,
         topk_group=1,
@@ -85,13 +99,13 @@ _MODEL_CONFIGS = {
     ),
     "olmoe": dict(
         model_type="olmoe",
-        hidden_size=64,
-        intermediate_size=128,
-        num_local_experts=4,
+        hidden_size=2048,
+        intermediate_size=1024,
+        num_local_experts=8,
         num_experts_per_tok=2,
         num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
+        num_attention_heads=16,
+        num_key_value_heads=16,
         vocab_size=256,
         max_position_embeddings=64,
         attn_implementation="sdpa",
@@ -99,20 +113,20 @@ _MODEL_CONFIGS = {
     ),
     "deepseek_v2": dict(
         model_type="deepseek_v2",
-        hidden_size=64,
-        intermediate_size=128,
-        moe_intermediate_size=32,
+        hidden_size=2048,
+        intermediate_size=10944,
+        moe_intermediate_size=1408,
         num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
+        num_attention_heads=8,
+        num_key_value_heads=8,
         vocab_size=256,
         max_position_embeddings=64,
         first_k_dense_replace=0,
-        n_routed_experts=4,
+        n_routed_experts=8,
         num_experts_per_tok=2,
         n_group=None,
         topk_group=None,
-        n_shared_experts=1,
+        n_shared_experts=2,
         mla_type="deepseek_v2",
         q_lora_rank=None,
         kv_lora_rank=16,
@@ -122,30 +136,70 @@ _MODEL_CONFIGS = {
         attn_implementation="sdpa",
         use_cache=False,
     ),
+    "glm4_moe": dict(
+        model_type="glm4_moe",
+        hidden_size=5120,
+        intermediate_size=12288,
+        moe_intermediate_size=1536,
+        num_hidden_layers=1,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        vocab_size=256,
+        max_position_embeddings=64,
+        first_k_dense_replace=0,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        n_group=1,
+        topk_group=1,
+        n_shared_experts=1,
+        norm_topk_prob=True,
+        routed_scaling_factor=2.5,
+        attn_implementation="sdpa",
+        use_cache=False,
+    ),
+    "glm_moe_dsa": dict(
+        model_type="glm_moe_dsa",
+        hidden_size=6144,
+        intermediate_size=12288,
+        moe_intermediate_size=2048,
+        num_hidden_layers=1,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=256,
+        max_position_embeddings=64,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        n_group=1,
+        topk_group=1,
+        n_shared_experts=1,
+        norm_topk_prob=True,
+        routed_scaling_factor=2.5,
+        q_lora_rank=16,
+        kv_lora_rank=16,
+        qk_rope_head_dim=8,
+        qk_nope_head_dim=8,
+        v_head_dim=16,
+        index_n_heads=2,
+        index_head_dim=8,
+        index_topk=8,
+        mlp_layer_types=["sparse"],
+        attn_implementation="sdpa",
+        use_cache=False,
+    ),
 }
 
 # Models that require AutoConfig.from_pretrained (remote config).
 # Keys are overrides applied after loading the pretrained config.
-_PRETRAINED_MODEL_CONFIGS = {
-    "glm4_moe": dict(
-        hf_model_id="zai-org/GLM-4.7",
-        overrides=dict(
-            num_hidden_layers=4,
-            use_cache=False,
-        ),
-    ),
-    "glm_moe_dsa": dict(
-        hf_model_id="zai-org/GLM-5",
-        overrides=dict(
-            num_hidden_layers=4,
-            use_cache=False,
-        ),
-    ),
-}
+_PRETRAINED_MODEL_CONFIGS = {}
 
 
 def _create_hf_model(model_type: str):
-    """Create a tiny HF MoE model for testing."""
+    """Create a tiny HF MoE model for testing.
+
+    Uses ``grouped_mm`` expert implementation so HF and titan both use
+    ``torch._grouped_mm``, isolating weight-transfer and routing logic
+    from kernel-level numerical differences.
+    """
     from transformers import AutoConfig, AutoModelForCausalLM
 
     if model_type in _MODEL_CONFIGS:
@@ -161,6 +215,7 @@ def _create_hf_model(model_type: str):
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
+    config._experts_implementation = "grouped_mm"
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     return model, config
 
@@ -259,6 +314,21 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     if hf_moe_block is None:
         return {"model": model_type, "error": "No MoE layer found"}
 
+    # Cast the HF router gate module to float32, matching titan's
+    # torch.autocast(dtype=float32) on the gate linear. HF models compute
+    # the gate linear in the model dtype (bf16) while titan uses float32.
+    # Casting the full gate module (weights + inputs via pre-hook) removes
+    # that precision difference so the test isolates routing/dispatch logic.
+    gate = getattr(hf_moe_block, "gate", None) or getattr(hf_moe_block, "router", None)
+    if gate is not None:
+        gate.float()
+        gate.register_forward_pre_hook(
+            lambda mod, args: tuple(
+                a.float() if isinstance(a, torch.Tensor) and a.is_floating_point() else a
+                for a in args
+            )
+        )
+
     # 2. Forward through HF MoE block
     torch.manual_seed(seed)
     x = torch.randn(2, 16, config.hidden_size, device=device, dtype=torch.bfloat16)
@@ -276,7 +346,8 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     with torch.device("meta"):
         titan_moe = moe_config.build()
     titan_moe.to_empty(device=device)
-    titan_moe.init_states(buffer_device=device)
+    buffer_device = device if isinstance(device, torch.device) else torch.device(device)
+    titan_moe.init_states(buffer_device=buffer_device)
 
     # 4. Transfer weights from HF to titan via state dict adapter
     _transfer_weights_via_adapter(hf_moe_block, titan_moe)
