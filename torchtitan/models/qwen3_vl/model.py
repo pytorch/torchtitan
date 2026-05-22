@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.qwen3.model import Qwen3Model
@@ -80,6 +81,18 @@ class Qwen3VLModel(Qwen3Model):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
+
+            from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
+            from torchtitan.components.loss import ChunkedCELoss
+
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
+            set_qwen3_vl_sharding_config(
+                self,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
+            )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
@@ -306,6 +319,8 @@ class Qwen3VLModel(Qwen3Model):
         # --- Compute interleaved MRoPE cos/sin from position IDs ---
 
         freqs_cis = self.freqs_cis
+        if isinstance(freqs_cis, DTensor):
+            freqs_cis = freqs_cis.to_local()
         head_dim = freqs_cis.shape[-1] // 2
         cos_cache = freqs_cis[:, :head_dim]
         sin_cache = freqs_cis[:, head_dim:]

@@ -4,27 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial
-import spmd_types as spmd
+from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_state import set_current_mesh
+import spmd_types as spmd
+from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import AllToAllTokenDispatcher, LocalTokenDispatcher
-
-if TYPE_CHECKING:
-    from torchtitan.distributed.parallel_dims import ParallelDims
+from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 
 
 class GroupedExperts(Module):
@@ -78,22 +72,19 @@ class GroupedExperts(Module):
         h = h * torch._grouped_mm(
             x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
         )
-        out = torch._grouped_mm(
+        return torch._grouped_mm(
             h, w2.bfloat16().transpose(-2, -1), offs=offsets
         ).type_as(x)
-        return out
 
     def forward(
         self,
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        shared_experts is passed to combine() where it overlaps with the async
-        combine all-to-all (NCCL stream) or async DeepEP combine.
+        The outer MoE ``LocalSpmdConfig`` makes this a local tensor region.
         """
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
@@ -101,7 +92,20 @@ class GroupedExperts(Module):
         sparse_mesh = getattr(self.token_dispatcher, "sparse_mesh", None)
         with set_current_mesh(sparse_mesh):
             routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x, shared_experts)
+        return self.token_dispatcher.combine(routed_output, metadata, x)
+
+    def parallelize(self, parallel_dims) -> None:
+        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
+        so dispatch/combine see the right meshes at runtime."""
+        super().parallelize(parallel_dims)
+        self.token_dispatcher.wire_meshes(
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
+        if parallel_dims.ep_enabled:
+            self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
+                ["dp_replicate", "efsdp", "ep"]
+            )
 
 
 class TokenChoiceTopKRouter(Module):
@@ -268,18 +272,21 @@ class MoE(Module):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
-    1. Router computes expert assignments
-    2. GroupedExperts.forward() handles:
+    1. Router computes expert assignments (stays on DTensor)
+    2. GroupedExperts.forward() converts DTensor to local, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
-       b. expert computation
+       b. expert computation (local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
-          With EP, starts async communication (NCCL all-to-all or DeepEP
-          combine), runs shared_experts in parallel, then forces sync
-          (scatter_add for NCCL AllToAll, sync_combine for DeepEP) and
-          produces final output.
-          Without EP (LocalTokenDispatcher), no communication is needed.
+          - LocalTokenDispatcher (no EP): scatter_add only.
+          - AllToAll: all-to-all communication, then scatter_add.
+          - DeepEP: async combine_tokens (sync deferred to step 4 when
+            sp_size == 1; forced inside combine when sp_size > 1).
+          - HybridEP: synchronous combine_tokens.
+    3. Shared experts run on DTensor. Overlaps with DeepEP async combine
+       when sp_size == 1; no overlap otherwise.
+    4. Routed and shared expert outputs are summed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -328,31 +335,14 @@ class MoE(Module):
 
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
+
+        Under TP, the MoE wrapper's ``sharding_config`` (set by
+        ``set_moe_sharding_config``) handles input/output redistribution:
+        input is redistributed from sp_layout to desired_input_layouts;
+        output (Partial) is redistributed to sp_layout. MoE.forward()
+        operates on DTensors — the DTensor→local conversion happens at
+        the GroupedExperts boundary.
         """
-        # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
-        # in backward, so gradient reduction (reduce-scatter from Partial to
-        # Shard(1)) happens once at the MoE boundary rather than being
-        # duplicated inside the MoE.
-        #
-        # Why grad(x) is Partial on the tp_mesh across all parallelism:
-        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
-        #   w1/w3, Rowwise on w2) produce Partial output gradients.
-        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
-        #   (via sequence-parallel token splitting in AllToAllTokenDispatcher),
-        #   so grad(x) is non-zero only at each rank's token positions (Partial).
-        #
-        # This holds for all MoE components (router.gate, routed experts, shared
-        # experts) and regardless of score_before_experts.
-        if isinstance(x, DTensor):
-            assert x.device_mesh.ndim == 1, (
-                f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            )
-            assert x.device_mesh.mesh_dim_names == ("tp",), (
-                f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            )
-            x = x.to_local(grad_placements=(Partial(),))
-        x_3d = x
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
@@ -372,43 +362,48 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        out = self.experts(
-            x,
-            top_scores,
-            selected_experts_indices,
-            shared_experts=self.shared_experts,
-        )
+        out = self.experts(x, top_scores, selected_experts_indices)
 
-        if spmd.is_type_checking():
-            with spmd.typecheck(local=True):
-                out = out.reshape(bs, slen, dim)
-            if (
-                self._sharding_config is None
-                or self._sharding_config.local_spmd is None
-            ):
-                return spmd.assert_type(
-                    out,
-                    spmd.get_local_type(x_3d),
-                    partition_spec=spmd.get_partition_spec(x_3d),
+        # shared_experts runs in parallel with deepep combine communication.
+        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
+
+        if (
+            isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
+            and self.experts.token_dispatcher.sp_size == 1
+        ):
+            # Sync the combine operation before using routed_output.
+            # This inserts a CUDA stream wait, ensuring combine is complete before
+            # the subsequent addition or reshape operations read routed output.
+            from torchtitan.distributed.deepep.deepep import sync_combine
+
+            sync_combine()
+
+        if shared_out is not None:
+            if spmd.is_type_checking() and spmd.has_local_type(out):
+                mesh = current_mesh()
+                routed_type = spmd.get_local_type(out)
+                shared_type = (
+                    spmd.get_local_type(shared_out)
+                    if spmd.has_local_type(shared_out)
+                    else {}
                 )
-            return out
+                mesh_axis_names = spmd.current_mesh_names() or {}
+                if mesh is not None:
+                    for axis_name, axis in mesh_axis_names.items():
+                        if routed_type.get(axis) is not spmd.P:
+                            continue
+                        src_type = shared_type.get(axis, spmd.R)
+                        if src_type is spmd.P:
+                            continue
+                        shared_out = spmd.reinterpret(
+                            shared_out,
+                            mesh.get_group(axis_name),
+                            src=src_type,
+                            dst=spmd.P,
+                            expert_mode=True,
+                        )
+            out = out + shared_out
         return out.reshape(bs, slen, dim)
-
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
-        super().parallelize(parallel_dims)
-        if parallel_dims.ep_enabled:
-            dispatcher = self.experts.token_dispatcher
-            dispatcher.ep_mesh = parallel_dims.get_mesh("ep")
-            dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
-                ["dp_replicate", "efsdp", "ep"]
-            )
-            if parallel_dims.tp_enabled and isinstance(
-                dispatcher, AllToAllTokenDispatcher
-            ):
-                tp_mesh = parallel_dims.get_mesh("tp")
-                dispatcher.sp_size = tp_mesh.size()
-                with set_current_mesh(parallel_dims.get_activated_mesh(["dp", "cp", "tp"])):
-                    dispatcher.set_sp_rank(tp_mesh._sym_get_coordinate(0))
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)

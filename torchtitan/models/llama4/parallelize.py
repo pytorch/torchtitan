@@ -15,12 +15,7 @@ from torch.distributed.fsdp import (
     fully_shard,
     MixedPrecisionPolicy,
 )
-from torch.distributed.tensor import Partial, Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    parallelize_module,
-    PrepareModuleInputOutput,
-    RowwiseParallel,
-)
+from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -32,17 +27,13 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import (
-    ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
-    NoParallel,
 )
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.tools.logging import logger
 
@@ -396,85 +387,3 @@ def apply_fsdp(
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
-
-
-def apply_moe_ep_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh | None,
-    ep_mesh: DeviceMesh | None,
-    enable_sp: bool = True,
-):
-    """
-    Legacy DTensor MoE expert/tensor parallelism helper.
-
-    Kept for model paths that have not moved to config-based MoE sharding yet.
-    Llama4, Qwen3, DeepSeek V3, and GPT-OSS use ``Module.parallelize()`` and
-    ``set_moe_sharding_config`` instead.
-    """
-    assert ep_mesh is not None or tp_mesh is not None
-
-    sp_layout = Shard(1) if enable_sp else Replicate()
-
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
-        # pyrefly: ignore [missing-attribute]
-        if not transformer_block.moe_enabled:
-            continue
-
-        if tp_mesh is not None:
-            moe_layer_plan = {
-                "moe": PrepareModuleInputOutput(
-                    input_layouts=(sp_layout,),
-                    desired_input_layouts=(Replicate(),),
-                    use_local_input=False,
-                    output_layouts=(Partial(),),
-                    desired_output_layouts=(sp_layout,),
-                    use_local_output=False,
-                ),
-                "moe.router.gate": NoParallel(
-                    local_output_grad_placements=(Partial(),),
-                ),
-            }
-            # pyrefly: ignore [missing-attribute]
-            if transformer_block.moe.shared_experts is not None:
-                # pyrefly: ignore [no-matching-overload]
-                moe_layer_plan.update(
-                    {
-                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
-                        ),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Partial(),
-                        ),
-                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
-                            local_input_grad_placements=(Partial(),)
-                        ),
-                    }
-                )
-            parallelize_module(
-                # pyrefly: ignore [bad-argument-type]
-                module=transformer_block,
-                device_mesh=tp_mesh,
-                # pyrefly: ignore [bad-argument-type]
-                parallelize_plan=moe_layer_plan,
-            )
-
-        experts_mesh, experts_plan = None, None
-        if ep_mesh is None:
-            experts_mesh = tp_mesh
-            experts_plan = TensorParallel()
-        else:
-            experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
-            # pyrefly: ignore [missing-attribute]
-            dispatcher = transformer_block.moe.experts.token_dispatcher
-            if tp_mesh is not None and isinstance(dispatcher, AllToAllTokenDispatcher):
-                dispatcher.sp_size = tp_mesh.size()
-                dispatcher.sp_rank = tp_mesh._sym_get_coordinate(0)
-
-        parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=transformer_block.moe.experts,
-            device_mesh=experts_mesh,
-            parallelize_plan=experts_plan,
-        )
