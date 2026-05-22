@@ -126,6 +126,7 @@ _POINTWISE_OPS = frozenset({
     "aten.full.default", "aten.full_like.default",
     "aten._to_copy.default",
     "aten.copy.default",
+    "aten.clone.default",
     "prims.convert_element_type.default",
     "prims.broadcast_in_dim.default",
     # Indexing/gather — inductor fuses these with pointwise ops.
@@ -188,7 +189,6 @@ _VIEW_OPS = frozenset({
     "aten.alias.default",
     "aten.detach.default",
     "aten.contiguous.default",
-    "aten.clone.default",
     # Tuple-returning view: returns a list of slices (no data movement).
     # The downstream getitem nodes index into the tuple to get tensors.
     "aten.split_with_sizes.default",
