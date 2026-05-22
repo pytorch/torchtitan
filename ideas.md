@@ -3243,6 +3243,15 @@
   Success criteria and expected risk: A performance lead is step-10 tps above 10,658 with finite loss and no FSDP hook warnings. Because this changes computation, any promising result requires longer loss convergence validation before it can be considered correct. Risk is compile failure, unsupported MXFP8 kernels, worse throughput, or unstable short-run loss.
   Result: crash at source state `b9347ac`; the run fails before step 1 inside generated Inductor code calling `torch.ops.torchao.mxfp8_quantize.default(..., 1, 32, 'e4m3', 'rceil')`, with a CUDA invalid-argument error from `torchao/csrc/cuda/mx_kernels/mxfp8_quantize.cuh`. Restore BF16 Linear configs; MXFP8Linear is not runnable for this compiled Qwen3 path.
 
+- Idea: three-layer FSDP parameter groups
+  Current best source commit: 1cd33cd
+  Source: profiler-led FSDP granularity follow-up after two-layer groups fit but stayed below peak
+  Expected mechanism: Group transformer layers in triples with `fully_shard(layers[i : i + 3], ...)` to reduce FSDP all-gather/reduce-scatter count further than the pairwise run. This may improve collective scheduling or overlap if the pairwise grouping did not go far enough.
+  Supporting evidence: Run330 showed two-layer groups fit at 169.86 GiB and reached 10,561 tps, below peak but not catastrophic. The profile still shows FSDP collectives as a major bucket. A three-layer group is the next coarse granularity test before closing grouped FSDP; memory may rise but could still fit below hard OOM.
+  Planned source/config changes: In `parallelize.py`, replace per-layer `fully_shard(layer, **fsdp_config)` with chunked `fully_shard(layers[i : i + 3], **fsdp_config)`. Keep `lm_head`, root FSDP, compile, and one-module prefetch chain unchanged.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator/OOM. Risk is higher memory above the preferred envelope or worse overlap from overly coarse all-gathers.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
