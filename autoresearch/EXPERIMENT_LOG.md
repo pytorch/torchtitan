@@ -28,6 +28,18 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## prefetch_all_gathers (FX-level move) — discard (xxxxxxx)
+
+- **Idea**: Move each `all_gather_into_tensor` node to its earliest valid FX position (right after its inputs). The launch happens on a separate NCCL stream, so intervening compute should overlap with the AG transfer; the `wait_tensor` stays at its original position.
+- **Changes**: `prefetch_all_gathers(gm, example_inputs)` walks the graph, computes each AG's earliest-valid position from `A.all_input_nodes`, and moves the AG via the FX doubly-linked-list API. Distance capped at 200 to bound memory peak. Registered after `remove_detach_nodes`.
+- **Result**: discard. step 20: tps=4,177 mfu=24.46% memory=47.03GiB; loss=9.21808, grad_norm=4.5867. Pass moved only **65 of 421 AGs**, average distance **7** positions, max **8**. The 200-cap never triggered. Numerics test pass.
+- **Analysis**: `make_fx` already places AGs immediately after their input shards are computed. Without also hoisting the AG's **input ops** (`_to_copy(view(param))` patterns) earlier in the graph, the AG cannot move. The 7-position headroom is essentially insignificant.
+- **Lessons**:
+  - **FX-level reordering alone cannot prefetch FSDP all_gathers**: the AG input chain (cast + view of a placeholder param) is what pins the AG in place. To prefetch effectively we must (a) move the input ops too, OR (b) reorder at a different level (NCCL stream priorities, separate compile step), OR (c) attack the **wait_tensor side** instead — move waits LATE toward consumers so AG↔wait gap widens.
+  - This also explains iter 3's bucket result: even after hoisting input ops, the shape-heterogeneity meant most AGs stayed singletons. Together they suggest FX-level scheduling of FSDP collectives has limited slack — the dominant gains live in **fusion of the compute** (kernel side) or in **whole-graph compile via inductor** (which does its own scheduling), not in shuffling existing nodes.
+
+---
+
 ## bucket_all_gathers (dim-0 shape-grouped) — discard (xxxxxxx)
 
 - **Idea**: Bucket consecutive `_c10d_functional.all_gather_into_tensor.default` calls (421 of them) to amortize launch overhead. Combine inputs via `aten.cat(..., 0)`, do one all_gather, then `view → slice along dim 1 → reshape` to recover per-original outputs preserving rank-major layout.

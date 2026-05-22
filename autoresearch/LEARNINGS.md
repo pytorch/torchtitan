@@ -48,6 +48,15 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   is **necessary but not sufficient**: it must be paired with
   contiguous-view recovery (e.g. flatten-then-cat 1D inputs) AND with
   comm/compute overlap (prefetch) to actually move TPS.
+- **FX-level AG node prefetching.** Moving AGs to their earliest valid
+  FX position only relocates 65/421 nodes by 7 positions max. `make_fx`
+  already emits AGs right after their input casts/views. To do
+  meaningful prefetch we'd need to hoist the input ops too, OR move
+  `wait_tensor` nodes LATER, OR get scheduling from a downstream
+  compiler (Inductor) rather than from FX reordering. **Takeaway: pure
+  FX-graph topology shuffling has very limited TPS impact on this
+  workload.** The win has to come from compute-side optimizations
+  (fusion, CUDA graphs, whole-graph compile).
 
 ## Tooling tips
 
