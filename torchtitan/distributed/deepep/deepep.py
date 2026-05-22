@@ -18,9 +18,7 @@ from torch.distributed import ProcessGroup
 from torch.utils._python_dispatch import _disable_current_modes
 
 try:
-    from deep_ep import Buffer
-
-    from deep_ep.utils import EventHandle, EventOverlap
+    from deep_ep import Buffer, EventHandle, EventOverlap
 except ImportError as e:
     raise ImportError(
         "DeepEP is required for this module. "

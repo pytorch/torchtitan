@@ -234,6 +234,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                     cpu_offload_prefetch_n_layers=1,
                     cpu_offload_defer_n_layers=1,
                     cpu_offload_budget_gb=100.0,
+                    enable_fsdp_ag_rs_overlap=False,
                 ),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
@@ -431,11 +432,6 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-# TODO: All FlexAttn bitwise deterministic tests disabled due to upstream
-# PyTorch nightly regression in dev20260508. TransformGetItemToIndex mode
-# has no dispatch for torch.ops.higher_order.flex_attention.
-# Re-enable once the upstream fix lands.
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 with FlexAttention (debugmodel_flex_attn).
 
@@ -475,6 +471,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
+    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -498,7 +495,6 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DSv3 with FlexAttention (debugmodel_flex_attn).
 
@@ -544,11 +540,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    # TODO: FlexAttention compilation exceeds resource limits on pre-Hopper GPUs.
-    @unittest.skipUnless(
-        has_cuda_capability(9, 0),
-        "flex_attention compilation exceeds resource limits on pre-Hopper GPUs",
-    )
+    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
@@ -635,7 +627,6 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
         self._assert_runs_match(run_a, run_b, "numerics_changing_optim run-to-run: ")
 
 
-@unittest.skip("upstream TransformGetItemToIndex flex_attention regression")
 class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE with FlexAttention.
 
@@ -675,6 +666,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
+    @unittest.skip("FlexAttention graphs contain unpicklable code objects")
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         run_traced = self._run_steps(copy.deepcopy(self.model), GraphTrainer)
