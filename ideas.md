@@ -3251,6 +3251,7 @@
   Planned source/config changes: In `parallelize.py`, replace per-layer `fully_shard(layer, **fsdp_config)` with chunked `fully_shard(layers[i : i + 3], **fsdp_config)`. Keep `lm_head`, root FSDP, compile, and one-module prefetch chain unchanged.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator/OOM. Risk is higher memory above the preferred envelope or worse overlap from overly coarse all-gathers.
+  Result: discarded at source state `4e5f0e2`; 10,528 tps with finite overall-decreasing loss and 172.50 GiB peak memory (96.72%). Triples fit but are slower than per-layer FSDP and push memory above the preferred risk envelope, so restore the durable per-layer groups.
 
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
