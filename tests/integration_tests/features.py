@@ -5,70 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import dataclasses
 import os
 
 from tests.integration_tests import OverrideDefinitions
-
-
-def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
-    """True when the variant has PP > 1 and no other SPMD parallelism > 1.
-
-    full_dtensor requires at least one SPMD axis > 1; PP-only runs collapse
-    every dense SPMD axis to size 1 and trip DTensor's reshape / flatten
-    rejection of Shard-on-degenerate-axis. Detected by parsing the explicit
-    ``--parallelism.*_degree`` flags and back-computing ``dp_shard`` (default
-    -1, "fill remaining").
-    """
-    degrees = {
-        "pipeline_parallel_degree": 1,
-        "data_parallel_replicate_degree": 1,
-        "data_parallel_shard_degree": -1,
-        "tensor_parallel_degree": 1,
-        "context_parallel_degree": 1,
-        "expert_parallel_degree": 1,
-    }
-    for arg in variant:
-        for key in degrees:
-            if key in arg:
-                try:
-                    degrees[key] = int(arg.split()[-1])
-                except ValueError:
-                    pass
-                break
-    if degrees["data_parallel_shard_degree"] == -1:
-        denom = (
-            degrees["pipeline_parallel_degree"]
-            * degrees["data_parallel_replicate_degree"]
-            * degrees["context_parallel_degree"]
-            * degrees["tensor_parallel_degree"]
-        )
-        degrees["data_parallel_shard_degree"] = max(1, ngpu // denom)
-    return degrees["pipeline_parallel_degree"] > 1 and all(
-        v <= 1 for k, v in degrees.items() if k != "pipeline_parallel_degree"
-    )
-
-
-def _enable_full_dtensor(t: OverrideDefinitions) -> OverrideDefinitions:
-    """Inject ``--parallelism.full_dtensor`` into every variant.
-
-    All features.py tests run under full_dtensor except PP-only variants
-    (see ``_is_pp_only``) and CP + compile variants (upstream symint
-    limitation); legacy non-full_dtensor coverage lives in models.py.
-    CP variants also switch to FlexAttention config because
-    full_dtensor + CP is not supported with SDPA / Varlen.
-    """
-    new_args = []
-    for variant in t.override_args:
-        prefix: list[str] = []
-        has_cp = any("context_parallel_degree" in arg for arg in variant)
-        has_compile = any("compile.enable" in arg for arg in variant)
-        if not _is_pp_only(variant, t.ngpu) and not (has_cp and has_compile):
-            prefix.append("--parallelism.full_dtensor")
-        if has_cp:
-            prefix.append("--module llama3 --config llama3_debugmodel_flex_attn")
-        new_args.append(tuple(prefix) + tuple(variant))
-    return dataclasses.replace(t, override_args=tuple(new_args))
 
 
 # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
@@ -699,6 +638,309 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=1,
             timeout=30,
         ),
+        # ---- spmd_types integration tests ----
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP (no/global typecheck)",
+            "spmd_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types DDP (no/global typecheck)",
+            "spmd_ddp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types HSDP (no/global typecheck)",
+            "spmd_hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types TP SP/LP on/off matrix",
+            "spmd_tp_sp_lp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP/DDP + TP/SP/LP composition",
+            "spmd_fsdp_ddp_tp_sp_lp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types HSDP + TP/SP/LP composition",
+            "spmd_hsdp_tp_sp_lp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.context_parallel_degree=2",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.context_parallel_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types CP (no/global typecheck)",
+            "spmd_cp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP + CP (no/global typecheck)",
+            "spmd_fsdp_cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types CP + TP SP/LP on/off matrix",
+            "spmd_cp_tp_sp_lp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+                [
+                    "--module llama3 --config llama3_debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                    "--parallelism.no-enable-sequence-parallel",
+                    "--parallelism.disable-loss-parallel",
+                    "--debug.spmd_typechecking",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP + CP + TP composition",
+            "spmd_fsdp_cp_tp",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--compile.enable",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types FSDP + compile",
+            "spmd_fsdp_compile",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=4",
+                    "--compile.enable",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types DDP + compile",
+            "spmd_ddp_compile",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--compile.enable",
+                    "--training.steps=10",
+                    "--activation_checkpoint.mode=none",
+                ],
+            ],
+            "spmd_types HSDP + compile",
+            "spmd_hsdp_compile",
+            ngpu=4,
+        ),
     ]
 
-    return [_enable_full_dtensor(t) for t in integration_tests_flavors]
+    return integration_tests_flavors

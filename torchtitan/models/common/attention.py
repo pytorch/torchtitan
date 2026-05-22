@@ -27,6 +27,7 @@ from torch.nn.attention.flex_attention import (
 )
 from torch.nn.attention.varlen import varlen_attn
 
+import spmd_types as spmd
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 from torchtitan.models.common.linear import Linear
@@ -107,9 +108,9 @@ class VarlenAttention(Module):
         scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, VarlenMetadata
-        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        assert isinstance(attention_masks, VarlenMetadata), (
+            f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        )
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -221,9 +222,9 @@ class FlexAttention(Module):
         enable_gqa: bool = False,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, (BlockMask, type(None))
-        ), f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+        assert isinstance(attention_masks, (BlockMask, type(None))), (
+            f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+        )
 
         # Transpose to (bs, heads, seq, dim) for flex_attention
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
@@ -233,16 +234,22 @@ class FlexAttention(Module):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttention._compiled_flex_attn` is correct.
-        out, aux = FlexAttention._compiled_flex_attn(
-            q,
-            k,
-            v,
-            block_mask=attention_masks,
-            scale=scale,
-            enable_gqa=enable_gqa,
-            return_aux=AuxRequest(lse=return_lse),
-            kernel_options=self.kernel_options,
-        )
+        with spmd.no_typecheck():
+            out, aux = FlexAttention._compiled_flex_attn(
+                q,
+                k,
+                v,
+                block_mask=attention_masks,
+                scale=scale,
+                enable_gqa=enable_gqa,
+                return_aux=AuxRequest(lse=return_lse),
+                kernel_options=self.kernel_options,
+            )
+        if spmd.is_type_checking():
+            out_type = spmd.get_local_type(q)
+            spmd.assert_type(out, out_type)
+            if return_lse:
+                spmd.assert_type(aux.lse, out_type)
         # Transpose back to (bs, seq, heads, dim)
         if return_lse:
             return out.transpose(1, 2), aux.lse.transpose(1, 2)
@@ -472,7 +479,9 @@ class BaseAttention(Module):
             assert self.mask_type in [
                 "causal",
                 "block_causal",
-            ], f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
+            ], (
+                f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
+            )
             if (
                 isinstance(self.inner_attention, ScaledDotProductAttention.Config)
                 and self.mask_type == "block_causal"
@@ -528,11 +537,32 @@ class QKVLinear(BaseQKVLinear):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        def view_projection(y: torch.Tensor) -> torch.Tensor:
+            out_type = spmd.type_like(y)
+            if spmd.has_local_type(y):
+                local_type = dict(spmd.get_local_type(y))
+                partition_spec = spmd.get_partition_spec(y)
+                if partition_spec is not None and len(partition_spec) == 3:
+                    partition_spec = spmd.PartitionSpec(
+                        partition_spec[0],
+                        partition_spec[1],
+                        partition_spec[2],
+                        None,
+                    )
+                out_type = local_type, partition_spec
+
+            return spmd.local_map(
+                in_types=(spmd.type_like(y), None, None, None, None),
+                out_types=out_type,
+                local_typecheck=True,
+            )(torch.Tensor.view)(y, bs, seqlen, -1, self.head_dim)
+
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        xq = view_projection(xq)
+        xk = view_projection(xk)
+        xv = view_projection(xv)
         return xq, xk, xv
 
 

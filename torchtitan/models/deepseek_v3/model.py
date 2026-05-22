@@ -14,16 +14,13 @@ from torch import nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
+    FlexAttention,
     ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
-from torchtitan.models.common.token_dispatcher import (
-    DeepEPTokenDispatcher,
-    HybridEPTokenDispatcher,
-)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
@@ -77,9 +74,9 @@ class Attention(BaseAttention):
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
             self.wq = config.wq.build()
         else:
-            assert (
-                config.wq_a is not None and config.wq_b is not None
-            ), "wq_a and wq_b are required when q_lora_rank > 0"
+            assert config.wq_a is not None and config.wq_b is not None, (
+                "wq_a and wq_b are required when q_lora_rank > 0"
+            )
             self.wq_a = config.wq_a.build()
             self.q_norm = config.q_norm.build()
             self.wq_b = config.wq_b.build()
@@ -129,7 +126,7 @@ class Attention(BaseAttention):
         kv = self.wkv_b(self.kv_norm(kv))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
+        k = torch.cat([k_nope, k_pe.expand(-1, -1, k_nope.shape[-2], -1)], dim=-1)
 
         output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
@@ -218,41 +215,43 @@ class DeepSeekV3Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
+                    comm_backend = getattr(
+                        layer_cfg.moe.experts.token_dispatcher,
+                        "comm_backend",
+                        "standard",
+                    )
                     if (
-                        isinstance(
-                            token_dispatcher_cfg,
-                            (
-                                DeepEPTokenDispatcher.Config,
-                                HybridEPTokenDispatcher.Config,
-                            ),
-                        )
+                        comm_backend in ("deepep", "hybridep")
                         and parallelism.expert_parallel_degree == 1
                     ):
                         raise ValueError(
-                            f"{type(token_dispatcher_cfg).__qualname__} requires expert parallelism "
+                            f"{comm_backend.upper()} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
 
             if parallelism.context_parallel_degree > 1 and not isinstance(
                 self.layers[0].attention.inner_attention,
-                ScaledDotProductAttention.Config,
+                FlexAttention.Config,
             ):
                 raise NotImplementedError(
-                    "Context Parallel for DeepSeek V3 only supports "
-                    "ScaledDotProductAttention. Got "
+                    "SPMD Context Parallel for DeepSeek V3 only supports "
+                    "FlexAttention. Got "
                     f"{type(self.layers[0].attention.inner_attention).__name__}."
                 )
 
             from torchtitan.models.deepseek_v3.sharding import (
                 set_deepseek_v3_sharding_config,
             )
+            from torchtitan.components.loss import ChunkedCELoss
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_deepseek_v3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
         def get_nparams_and_flops(

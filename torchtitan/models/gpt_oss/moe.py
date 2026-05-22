@@ -13,10 +13,13 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+import spmd_types as spmd
+from torchtitan.distributed.spmd_state import current_mesh, set_current_mesh
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
 
+@spmd.register_autograd_function
 class ScaleBiasForward(torch.autograd.Function):
     """
     Custom autograd function that scales bias in forward pass but not in backward.
@@ -34,6 +37,17 @@ class ScaleBiasForward(torch.autograd.Function):
         return bias
 
     @staticmethod
+    def typecheck_forward(bias, tp_degree):
+        out = ScaleBiasForward.apply(bias, tp_degree)
+        local_type = dict(spmd.get_local_type(bias)) if spmd.has_local_type(bias) else {}
+        mesh_axis_names = spmd.current_mesh_names() or {}
+        if tp_degree > 1 and "tp" in mesh_axis_names:
+            local_type[mesh_axis_names["tp"]] = spmd.V
+        if local_type:
+            spmd.set_local_type(out, local_type)
+        return out
+
+    @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output):
         # Don't scale the gradient - pass it through as-is
@@ -48,6 +62,15 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)
     # Note we add an extra bias of 1 to the linear layer
     return out_glu * (x_linear + 1)
+
+
+def _tp_degree_from_current_mesh() -> int:
+    mesh = current_mesh()
+    mesh_axis_names = spmd.current_mesh_names() or {}
+    if mesh is None or "tp" not in mesh_axis_names:
+        return 1
+    assert mesh.mesh_dim_names is not None
+    return mesh.size(mesh.mesh_dim_names.index("tp"))
 
 
 class GptOssGroupedExperts(Module):
@@ -96,8 +119,10 @@ class GptOssGroupedExperts(Module):
             mlp2_weight = self.mlp2_weight
             mlp2_bias = self.mlp2_bias
 
-        # Determine tp_degree from device mesh if available
-        tp_degree = 1
+        # Determine tp_degree from device mesh if available. Local SPMD typed
+        # params are plain tensors, so use the active mesh before falling back
+        # to DTensor metadata.
+        tp_degree = _tp_degree_from_current_mesh()
         if isinstance(self.mlp1_weight, DTensor):
             mesh_dim_names = self.mlp1_weight.device_mesh.mesh_dim_names
             # pyrefly: ignore[not-iterable]
@@ -143,13 +168,23 @@ class GptOssGroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
+        combine_base: torch.Tensor | None = None,
+        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
-        routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(routed_output, metadata, x)
+        sparse_mesh = getattr(self.token_dispatcher, "sparse_mesh", None)
+        with set_current_mesh(sparse_mesh):
+            routed_output = self._experts_forward(routed_input, num_tokens_local)
+        return self.token_dispatcher.combine(
+            routed_output,
+            metadata,
+            x,
+            combine_base=combine_base,
+            shared_experts=shared_experts,
+        )
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.
@@ -165,6 +200,10 @@ class GptOssGroupedExperts(Module):
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
         )
+        if parallel_dims.ep_enabled:
+            self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
+                ["dp_replicate", "efsdp", "ep"]
+            )
 
 
 class GptOssMoE(MoE):

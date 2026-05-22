@@ -27,12 +27,10 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.tools.logging import logger
@@ -55,27 +53,15 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallelism.full_dtensor:
-        validate_config(parallel_dims, model)
-        model.parallelize(parallel_dims)
-    else:
-        if parallel_dims.cp_enabled:
-            apply_cp_to_forward(
-                # pyrefly: ignore [missing-attribute, not-callable]
-                [block.attention.inner_attention for block in model.layers.values()],
-                parallel_dims.get_mesh("cp"),
-            )
-        if parallel_dims.tp_enabled:
-            model.parallelize(parallel_dims)
+    model.parallelize(parallel_dims)
     if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
+        tp_mesh = parallel_dims.get_mesh("tp")
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -95,14 +81,17 @@ def parallelize_llama(
 
     # Always run apply_fsdp -- with shard_degree=1 it is a no-op for the
     # all-gather but still installs the MixedPrecisionPolicy.
-    if parallelism.full_dtensor:
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    else:
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(names)
-        dp_mesh_dims = None
+    mesh_names = []
+    if parallel_dims.dp_replicate_enabled:
+        mesh_names.append("dp_replicate")
+    mesh_names.append("fsdp")
+    if parallel_dims.tp_enabled:
+        mesh_names.append("tp")
+    dp_mesh = parallel_dims.get_mesh(mesh_names)
+    dp_mesh_dims = DataParallelMeshDims(
+        shard="fsdp",
+        replicate="dp_replicate" if parallel_dims.dp_replicate_enabled else None,
+    )
 
     apply_fsdp(
         model,
@@ -151,14 +140,9 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
-        dp_mesh_dims: Under full_dtensor, ``fully_shard`` must flatten
-            ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
-            needs to know which axes of the multi-D SPMD mesh are
-            data-parallel. We pass this explicitly via ``dp_mesh_dims``
-            rather than letting FSDP infer it from mesh axis names: the
-            naming contract between ``fully_shard`` and torchtitan is not
-            strong enough to infer safely, and an explicit declaration
-            avoids silent miscategorization when new mesh axes appear.
+        dp_mesh_dims: For SPMD meshes, ``fully_shard`` must flatten
+            ``fsdp`` away from non-data-parallel mesh axes. We pass this
+            explicitly rather than relying on FSDP mesh-name inference.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,

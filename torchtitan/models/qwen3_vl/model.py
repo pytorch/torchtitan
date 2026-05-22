@@ -83,11 +83,15 @@ class Qwen3VLModel(Qwen3Model):
                     )
 
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
+            from torchtitan.components.loss import ChunkedCELoss
 
+            chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_qwen3_vl_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
+                loss_parallel=chunked_loss and not parallelism.disable_loss_parallel,
+                enable_tp=parallelism.tensor_parallel_degree > 1,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+                chunked_loss=chunked_loss,
             )
 
             tp = parallelism.tensor_parallel_degree
