@@ -42,3 +42,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T15:40:00	xxxxxxx	0	0.0	crash	0.00	0	exp38 fuse_qkv_matmuls: 32 triplets fused; cuBLAS tiling diverges (K unchanged but Q/K/V rows differ) → bitwise mismatch
 2026-05-22T16:30:00	xxxxxxx	6397	75.1	discard	37.45	72	exp39 fuse_w1_w3_matmuls: numerics PASS (same-K, same-N confirms bitwise); -0.7% — fused GEMM slower + 28GiB memory penalty from cat allocations
 2026-05-22T16:50:00	xxxxxxx	0	0.0	discard	0.00	0	exp40 torch.compile RoPE subgraph: Inductor lacks complex codegen — view_as_complex/mul/view_as_real fallback to eager; compiled version 29% SLOWER due to wrapper dispatch
+2026-05-22T17:00:00	xxxxxxx	6360	47.0	discard	37.25	70	exp41 fuse_loss_exp_sum: logsumexp replaces exp→sum; numerics PASS but -1.3%; fused kernel slower than separate exp+sum; 2GB exp is short-lived (no peak memory impact)
