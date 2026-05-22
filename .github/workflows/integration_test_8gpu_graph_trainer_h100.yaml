@@ -61,7 +61,7 @@ jobs:
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         # Install DeepEP for HybridEP integration test
-        bash /install_deepep.sh
+        sudo bash /install_deepep.sh
 
         # Disable Nvlink Sharp. The CI machine seems to be in unstable state to support
         # NVLS according to several CI runs.
