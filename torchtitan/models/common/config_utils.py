@@ -27,6 +27,7 @@ from torchtitan.models.common.nn_modules import Linear, RMSNorm
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
     LocalTokenDispatcher,
 )
 from torchtitan.protocols.module import Module
@@ -216,12 +217,17 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
-    if comm_backend in ("deepep", "hybridep"):
+    if comm_backend == "deepep":
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             score_before_experts=score_before_experts,
-            comm_backend=comm_backend,
+        )
+    elif comm_backend == "hybridep":
+        return HybridEPTokenDispatcher.Config(
+            num_experts=num_experts,
+            top_k=top_k,
+            score_before_experts=score_before_experts,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
     elif comm_backend == "standard":
