@@ -127,6 +127,10 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   intra-layer barrier — the hoist target is wrong. Expect 1.5-2.0+ for
   cross-layer prefetch to be meaningful.
 
+- **Coalesced AG + producer-chain hoist gives +10% — the prefetch we couldn't achieve via reordering** (Exp 13).
+  Coalescing forward FSDP AGs alone yields zero buckets if you respect critical-path constraints: every AG's wait is immediately consumed by `mm`, so a "no consumer between bucket members" gate rejects all coalescing. The trick is to **hoist each AG's private producer chain (`_to_copy(placeholder)`) before the bucket's anchor** so the coalesced AG can issue at the layer's start with all 9 weights. NCCL transfers in parallel with the entire layer's compute — this IS the cross-layer prefetch that node-reordering (Exps 3/5/6/8) couldn't deliver, because here the coalesce is itself the single barrier point.
+  Bundling forward AG hoist+coalesce with backward RS coalesce (Exp 12 mechanism) in one pass: tps 4,641 → 5,124 (+10.4%), mfu 27.17 → 30.00, memory unchanged. Numerics bitwise-identical. This is **the largest single win of the run**, and it works because the launch overhead + the lost-overlap of 291 separate small AGs compound — once you remove BOTH, the layer's compute critical path is no longer punctuated by 9 wait_tensor blocks.
+
 - **`reduce_scatter_tensor_coalesced.default` exists as a functional collective** (Exp 12).
   Schema: `(Tensor[] inputs, str reduce_op, int group_size, Any group_name) -> Tensor[]`.
   Takes a list of input tensors and returns a list of output tensors in a single

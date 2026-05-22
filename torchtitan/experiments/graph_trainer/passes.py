@@ -542,6 +542,392 @@ def elide_split_cat_for_reduce_scatter(
     return gm
 
 
+def bucket_fsdp_collectives(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+    *,
+    max_bucket_size: int = 9,
+) -> torch.fx.GraphModule:
+    """Coalesce contiguous FSDP all-gathers (forward) and reduce-scatters
+    (backward) into ``*_coalesced`` collective calls.
+
+    FSDP at world_size=4 emits ~291 ``all_gather_into_tensor`` calls
+    (forward weight gathers) and ~291 ``reduce_scatter_tensor`` calls
+    (backward param-grad reductions) per step. NCCL launch overhead per
+    tiny tensor (e.g. RMSNorm γ at a few KiB) is non-trivial. The
+    functional collective registry exposes coalesced variants
+
+    .. code-block:: python
+
+        _c10d_functional.all_gather_into_tensor_coalesced(
+            Tensor[] inputs, int group_size, Any group_name) -> Tensor[]
+        _c10d_functional.reduce_scatter_tensor_coalesced(
+            Tensor[] inputs, str reduce_op, int group_size, Any group_name) -> Tensor[]
+
+    which issue a single collective for an entire batch of same-direction,
+    same-group inputs. We coalesce contiguous runs (in graph node order)
+    that share ``(world_size, group_name)`` and don't have any earlier
+    bucket member's ``wait_tensor`` consumed inside the bucket window.
+    The latter constraint avoids delaying a wait that is on the critical
+    path between two candidate collectives.
+
+    Each bucket replaces N collective calls with one coalesced call plus
+    N ``operator.getitem`` extractions. Existing ``wait_tensor`` nodes are
+    rewired to consume the matching getitem. Caps at ``max_bucket_size`` to
+    keep the working set per collective bounded.
+
+    Numerics are bitwise-identical to issuing the collectives separately —
+    a coalesced call performs the same per-tensor reduction/gather.
+    """
+    ag_target = torch.ops._c10d_functional.all_gather_into_tensor.default
+    rs_target = torch.ops._c10d_functional.reduce_scatter_tensor.default
+    wait_target = torch.ops._c10d_functional.wait_tensor.default
+
+    have_ag_coalesced = hasattr(
+        torch.ops._c10d_functional, "all_gather_into_tensor_coalesced"
+    )
+    have_rs_coalesced = hasattr(
+        torch.ops._c10d_functional, "reduce_scatter_tensor_coalesced"
+    )
+    ag_coalesced_target = (
+        torch.ops._c10d_functional.all_gather_into_tensor_coalesced.default
+        if have_ag_coalesced
+        else None
+    )
+    rs_coalesced_target = (
+        torch.ops._c10d_functional.reduce_scatter_tensor_coalesced.default
+        if have_rs_coalesced
+        else None
+    )
+
+    # Cache node positions for graph-position queries.
+    node_pos: dict[torch.fx.Node, int] = {
+        n: i for i, n in enumerate(gm.graph.nodes)
+    }
+
+    def _wait_node(c: torch.fx.Node) -> torch.fx.Node | None:
+        """Find the wait_tensor consumer of a collective node (single user expected)."""
+        users = list(c.users)
+        if len(users) != 1:
+            return None
+        w = users[0]
+        if w.op != "call_function" or w.target is not wait_target:
+            return None
+        return w
+
+    def _eligible(c: torch.fx.Node, world_size_arg_idx: int, ws_target: int) -> bool:
+        if len(c.args) <= world_size_arg_idx:
+            return False
+        ws = c.args[world_size_arg_idx]
+        if not isinstance(ws, int) or ws != ws_target:
+            return False
+        # Must have meta["val"] with concrete shape.
+        val = c.meta.get("val", None)
+        if val is None or not hasattr(val, "shape"):
+            return False
+        for s in val.shape:
+            if not isinstance(s, int):
+                return False
+        # Input must also have concrete meta.
+        if not isinstance(c.args[0], torch.fx.Node):
+            return False
+        in_val = c.args[0].meta.get("val", None)
+        if in_val is None or not hasattr(in_val, "shape"):
+            return False
+        for s in in_val.shape:
+            if not isinstance(s, int):
+                return False
+        # Must have a single wait_tensor user (no other consumers of the
+        # raw collective output).
+        if _wait_node(c) is None:
+            return False
+        return True
+
+    def _wait_is_simple(w: torch.fx.Node) -> bool:
+        """The wait must have at least one downstream user; bucketing
+        doesn't change the wait result's value or layout, only its
+        producer."""
+        return len(list(w.users)) >= 1
+
+    def _private_producer_chain(
+        c: torch.fx.Node,
+    ) -> list[torch.fx.Node] | None:
+        """Walk upstream from a collective's input, collecting nodes whose
+        users are all within the visited frontier or the collective itself.
+
+        Returns the producer subgraph in topological order, or ``None`` if
+        the chain is not "private" (i.e. some node has external users that
+        would be invalidated by moving the chain).
+
+        For FSDP AGs in this graph the chain is typically a single
+        ``_to_copy(placeholder)`` cast, which is trivially private.
+        """
+        in_node = c.args[0]
+        if not isinstance(in_node, torch.fx.Node):
+            return None
+        chain: list[torch.fx.Node] = []
+        visited: set[torch.fx.Node] = set()
+        # BFS upstream, only following nodes whose users are subset of
+        # {c, ...chain so far}.
+        frontier = [in_node]
+        while frontier:
+            n = frontier.pop()
+            if n in visited:
+                continue
+            if n.op == "placeholder" or n.op == "get_attr":
+                # Stop walking upstream; the placeholder is global and
+                # doesn't need to be moved.
+                continue
+            users_set = set(n.users)
+            allowed = {c} | visited | {in_node}
+            # `n` itself may not yet be in visited. Allow chain so far.
+            if not users_set.issubset(allowed):
+                return None
+            visited.add(n)
+            chain.append(n)
+            for inp in n.all_input_nodes:
+                if inp not in visited:
+                    frontier.append(inp)
+        # Sort chain by current graph position so we can move in order.
+        chain.sort(key=lambda x: node_pos.get(x, 0))
+        return chain
+
+    def _build_buckets_with_hoist(
+        nodes: list[torch.fx.Node],
+        world_size_arg_idx: int,
+        group_name_arg_idx: int,
+        hoist_producers: bool,
+    ) -> tuple[list[list[torch.fx.Node]], dict[torch.fx.Node, list[torch.fx.Node]]]:
+        """Group eligible collective nodes into buckets.
+
+        If ``hoist_producers`` is True, the producer chain of each member
+        is required to be private (cast-from-placeholder pattern). We can
+        then move all chains to a common insertion point and don't need
+        the critical-path constraint between members.
+
+        If ``hoist_producers`` is False, we apply the critical-path
+        constraint: no consumer of an earlier-bucket-member wait may lie
+        between bucket members. This protects waits that are immediately
+        consumed by compute.
+        """
+        buckets: list[list[torch.fx.Node]] = []
+        chains: dict[torch.fx.Node, list[torch.fx.Node]] = {}
+        current: list[torch.fx.Node] = []
+        current_waits: list[torch.fx.Node] = []
+        current_group: object | None = None
+
+        for c in nodes:
+            group = c.args[group_name_arg_idx]
+            w = _wait_node(c)
+            assert w is not None
+            if not _wait_is_simple(w):
+                if current:
+                    buckets.append(current)
+                current, current_waits, current_group = [], [], None
+                continue
+            chain = None
+            if hoist_producers:
+                chain = _private_producer_chain(c)
+                if chain is None:
+                    # Not hoistable; close current bucket and skip.
+                    if current:
+                        buckets.append(current)
+                    current, current_waits, current_group = [], [], None
+                    continue
+            start_new = False
+            if not current:
+                start_new = True
+            elif len(current) >= max_bucket_size:
+                start_new = True
+            elif group != current_group:
+                start_new = True
+            elif not hoist_producers:
+                last_pos = node_pos[current[-1]]
+                c_pos = node_pos[c]
+                conflict = False
+                for prev_w in current_waits:
+                    for u in prev_w.users:
+                        u_pos = node_pos.get(u, None)
+                        if u_pos is None:
+                            continue
+                        if last_pos < u_pos < c_pos:
+                            conflict = True
+                            break
+                    if conflict:
+                        break
+                if conflict:
+                    start_new = True
+
+            if start_new:
+                if current:
+                    buckets.append(current)
+                current, current_waits = [c], [w]
+                current_group = group
+            else:
+                current.append(c)
+                current_waits.append(w)
+            if chain is not None:
+                chains[c] = chain
+
+        if current:
+            buckets.append(current)
+        return [b for b in buckets if len(b) >= 2], chains
+
+    # --- Forward: all_gather_into_tensor (ws=4) -------------------------
+    ag_candidates: list[torch.fx.Node] = []
+    skipped_ag_ineligible = 0
+    for n in gm.graph.nodes:
+        if n.op != "call_function" or n.target is not ag_target:
+            continue
+        # AG signature: (Tensor input, int group_size, Any group_name).
+        if _eligible(n, world_size_arg_idx=1, ws_target=4):
+            ag_candidates.append(n)
+        else:
+            skipped_ag_ineligible += 1
+
+    ag_buckets: list[list[torch.fx.Node]] = []
+    ag_chains: dict[torch.fx.Node, list[torch.fx.Node]] = {}
+    if have_ag_coalesced and ag_candidates:
+        ag_buckets, ag_chains = _build_buckets_with_hoist(
+            ag_candidates,
+            world_size_arg_idx=1,
+            group_name_arg_idx=2,
+            hoist_producers=True,
+        )
+
+    # --- Backward: reduce_scatter_tensor (ws=4) -------------------------
+    rs_candidates: list[torch.fx.Node] = []
+    skipped_rs_ineligible = 0
+    for n in gm.graph.nodes:
+        if n.op != "call_function" or n.target is not rs_target:
+            continue
+        # RS signature: (Tensor input, str reduce_op, int group_size, Any group_name).
+        if _eligible(n, world_size_arg_idx=2, ws_target=4):
+            rs_candidates.append(n)
+        else:
+            skipped_rs_ineligible += 1
+
+    rs_buckets: list[list[torch.fx.Node]] = []
+    if have_rs_coalesced and rs_candidates:
+        rs_buckets, _ = _build_buckets_with_hoist(
+            rs_candidates,
+            world_size_arg_idx=2,
+            group_name_arg_idx=3,
+            hoist_producers=False,
+        )
+
+    def _rewrite_bucket(
+        bucket: list[torch.fx.Node],
+        coalesced_target,
+        extra_args: tuple,
+        chains: dict[torch.fx.Node, list[torch.fx.Node]] | None = None,
+    ) -> int:
+        """Insert a coalesced collective for the bucket and rewire waits.
+
+        Two modes:
+
+        - **No hoist** (``chains is None``): anchor the coalesced call
+          right before the LAST bucket member. All inputs precede the
+          last member, so they're defined. Waits are moved to right after
+          their getitems; per the critical-path constraint built at
+          bucket-construction time, no consumer of any bucket wait lies
+          before the last member, so this is safe.
+
+        - **With hoist** (``chains`` provided): anchor the coalesced call
+          right before the FIRST bucket member. Producer chains for
+          members 2..N (typically a single ``_to_copy`` cast from a
+          placeholder) are moved to just before that anchor so all
+          inputs are defined. Waits move forward (earlier) — safe since
+          the original wait positions were AFTER the first member.
+        """
+        inputs = [c.args[0] for c in bucket]
+        waits = [_wait_node(c) for c in bucket]
+        out_vals = [c.meta["val"] for c in bucket]
+        if chains is None:
+            anchor = bucket[-1]
+        else:
+            anchor = bucket[0]
+            # Hoist the producer chain of each bucket member to just
+            # before the anchor, in topological order. The first
+            # member's chain is already before the anchor by definition,
+            # but moving idempotent. Use `anchor.prepend(node)` to place
+            # each chain node immediately before the anchor; chain
+            # members are processed in dependency order so transitive
+            # dependencies precede their dependents.
+            for c in bucket[1:]:
+                chain = chains.get(c, [])
+                for node in chain:
+                    # `prepend` inserts before; chain is in topo order so
+                    # processing in order places earlier nodes earlier.
+                    anchor.prepend(node)
+
+        with gm.graph.inserting_before(anchor):
+            coalesced = gm.graph.call_function(
+                coalesced_target,
+                args=(inputs,) + extra_args,
+            )
+        coalesced.meta["val"] = list(out_vals)
+        prev = coalesced
+        getitems: list[torch.fx.Node] = []
+        for i, ov in enumerate(out_vals):
+            with gm.graph.inserting_after(prev):
+                gi = gm.graph.call_function(
+                    operator.getitem, args=(coalesced, i)
+                )
+            gi.meta["val"] = ov
+            getitems.append(gi)
+            prev = gi
+        for c, w, gi in zip(bucket, waits, getitems):
+            assert w is not None
+            gi.append(w)
+            w.args = (gi,) + w.args[1:]
+        return len(bucket)
+
+    # --- Rewrite forward AG buckets ------------------------------------
+    num_ag_coalesced = 0
+    for bucket in ag_buckets:
+        first = bucket[0]
+        group_size = first.args[1]
+        group_name = first.args[2]
+        num_ag_coalesced += _rewrite_bucket(
+            bucket, ag_coalesced_target, (group_size, group_name), ag_chains
+        )
+
+    # --- Rewrite backward RS buckets -----------------------------------
+    num_rs_coalesced = 0
+    for bucket in rs_buckets:
+        first = bucket[0]
+        reduce_op = first.args[1]
+        group_size = first.args[2]
+        group_name = first.args[3]
+        if any(c.args[1] != reduce_op for c in bucket):
+            continue
+        num_rs_coalesced += _rewrite_bucket(
+            bucket, rs_coalesced_target, (reduce_op, group_size, group_name)
+        )
+
+    if num_ag_coalesced or num_rs_coalesced:
+        gm.graph.eliminate_dead_code()
+        gm.graph.lint()
+        gm.recompile()
+
+    ag_bucket_sizes = [len(b) for b in ag_buckets]
+    rs_bucket_sizes = [len(b) for b in rs_buckets]
+    ag_avg = (sum(ag_bucket_sizes) / len(ag_bucket_sizes)) if ag_bucket_sizes else 0.0
+    rs_avg = (sum(rs_bucket_sizes) / len(rs_bucket_sizes)) if rs_bucket_sizes else 0.0
+    logger.info(
+        f"bucket_fsdp_collectives: AG ws=4 candidates={len(ag_candidates)}, "
+        f"buckets={len(ag_buckets)}, coalesced={num_ag_coalesced}, "
+        f"avg_size={ag_avg:.2f}, op_available={have_ag_coalesced}, "
+        f"skipped_ineligible={skipped_ag_ineligible} | "
+        f"RS ws=4 candidates={len(rs_candidates)}, "
+        f"buckets={len(rs_buckets)}, coalesced={num_rs_coalesced}, "
+        f"avg_size={rs_avg:.2f}, op_available={have_rs_coalesced}, "
+        f"skipped_ineligible={skipped_rs_ineligible}"
+    )
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -554,6 +940,7 @@ def construct_default_graph_passes(
         remove_identity_views,
         remove_identity_ops,
         elide_split_cat_for_reduce_scatter,
+        bucket_fsdp_collectives,
     ]
     return passes
 

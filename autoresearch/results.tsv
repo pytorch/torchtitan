@@ -12,3 +12,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T01:36:42	xxxxxxx	4587	47.0	discard	26.86	75	cse_views_and_conj: 96 view + 32 _conj + 32 clone CSE'd (matches recon prediction); +0.4% noise; <200 ops/step cleanup confirmed sub-noise
 2026-05-22T01:43:47	266cde5	4641	47.1	keep	27.17	75	elide_split_cat_for_reduce_scatter: 130/130 cats rewritten as zero-copy views; +1.58% tps; cumulative +11.5% over raw baseline
 2026-05-22T02:02:29	xxxxxxx	4678	47.0	discard	27.40	72	bucket_param_grad_reduce_scatters: 33 buckets avg 8.82, 291/291 RSes coalesced via reduce_scatter_tensor_coalesced; +0.80% (below 1% threshold)
+2026-05-22T02:24:01	fc602aa	5124	47.0	keep	30.00	71	bucket_fsdp_collectives: AG+RS coalesced (291+291 in 33+33 buckets) w/ producer-chain hoist; +10.4% tps; cumulative +23.1% over raw baseline
