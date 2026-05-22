@@ -21,6 +21,8 @@ live here.
 from dataclasses import dataclass, field
 from typing import Literal
 
+import torch
+
 
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
@@ -216,6 +218,12 @@ class ParallelismConfig:
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
                 "Use None to disable load balancing."
+            )
+        if self.enable_fsdp_symm_mem and (
+            not torch.cuda.is_available() or torch.version.hip is not None
+        ):
+            raise ValueError(
+                "parallelism.enable_fsdp_symm_mem is only supported on NVIDIA GPUs."
             )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
