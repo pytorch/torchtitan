@@ -478,19 +478,43 @@ def register_moe_load_balancing_hook(
 
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
-        if loss_mesh is not None:
-            if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
-                tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
-                    placements=[Replicate()]
-                    * tokens_per_expert_by_layer.device_mesh.ndim
-                )
-            else:
-                # Perform single all-reduce to get global statistics across all processes
-                pg = loss_mesh.get_group()
+        if parallel_dims.full_dtensor:
+            # full_dtensor: DTensor mesh includes all axes (DP/CP/TP/EP).
+            # redistribute Partial→Replicate covers everything.
+            assert isinstance(
+                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+            )
+            dtensor_mesh = tokens_per_expert_by_layer.device_mesh
+            # TODO: This incurs multiple sequential all-reduces, one per
+            # SPMD mesh axis. We should provide a utility to do a single all-reduce
+            # on the flattened global SPMD mesh.
+            tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
+                placements=[Replicate()] * dtensor_mesh.ndim
+            )
+        else:
+            # non-full_dtensor: DTensor mesh only has TP/EP (if enabled).
+            # full_tensor() reduces on TP/EP, then all-reduce on loss_mesh
+            # covers DP/CP separately.
+            is_dtensor = isinstance(
+                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+            )
+            if is_dtensor:
+                dtensor_mesh = tokens_per_expert_by_layer.device_mesh
+                tokens_per_expert_by_layer = tokens_per_expert_by_layer.full_tensor()
+            if loss_mesh is not None:
                 torch.distributed.all_reduce(
                     tokens_per_expert_by_layer,
-                    group=pg,
+                    group=loss_mesh.get_group(),
                     op=torch.distributed.ReduceOp.SUM,
+                )
+            if is_dtensor:
+                tokens_per_expert_by_layer = torch.distributed.tensor.DTensor.from_local(
+                    tokens_per_expert_by_layer,
+                    # pyrefly: ignore [unbound-name]
+                    device_mesh=dtensor_mesh,
+                    placements=[Replicate()]
+                    * dtensor_mesh.ndim,  # pyrefly: ignore [unbound-name]
+                    run_check=False,
                 )
 
         moe_layer_idx = 0
