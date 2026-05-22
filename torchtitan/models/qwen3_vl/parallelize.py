@@ -12,19 +12,15 @@ This module applies PT-D parallelisms and various training techniques
 """
 
 import torch
-import torch._inductor.config
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import distribute_tensor, Replicate, Shard
-from torch.distributed.tensor.experimental import local_map
+from torch.distributed.tensor import distribute_tensor, Replicate
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
-    PrepareModuleInput,
     RowwiseParallel,
-    SequenceParallel,
 )
 
 from torchtitan.config import (
@@ -39,128 +35,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.distributed.tensor_parallel import NoParallel
-from torchtitan.models.common.attention import FusedQKVLinear
-from torchtitan.models.llama4.parallelize import apply_fsdp, apply_moe_ep_tp
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.models.llama4.parallelize import apply_fsdp
+from torchtitan.models.qwen3_vl.model import Qwen3VLModel
 from torchtitan.tools.logging import logger
-
-
-def _apply_non_moe_tp_to_decoder(
-    model: nn.Module,
-    tp_mesh: DeviceMesh,
-    loss_parallel: bool,
-    enable_async_tp: bool,
-):
-    """Apply tensor parallelism to the decoder without SequenceParallel.
-
-    Hidden states flow as DTensor(Replicate) between blocks. No SequenceParallel
-    is used because the VLM needs full-sequence access for vision scatter and
-    DeepStack.
-    """
-    top_level_plan = {
-        "tok_embeddings": RowwiseParallel(
-            input_layouts=Replicate(),
-            output_layouts=Replicate(),
-            use_local_output=False,
-        ),
-        "norm": NoParallel(),
-        "lm_head": ColwiseParallel(
-            input_layouts=Replicate(),
-            output_layouts=Shard(-1) if loss_parallel else Replicate(),
-            use_local_output=not loss_parallel,
-        ),
-    }
-    # pyrefly: ignore [bad-argument-type]
-    parallelize_module(model, tp_mesh, top_level_plan)
-
-    # Detect whether fused QKV is used by checking the first layer
-    # pyrefly: ignore [not-callable]
-    first_block = next(iter(model.layers.values()))
-    use_fused_qkv = isinstance(
-        first_block.attention.qkv_linear,  # pyrefly: ignore [missing-attribute]
-        FusedQKVLinear,
-    )
-
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
-        if use_fused_qkv:
-            qkv_plan = {
-                "attention.qkv_linear.wqkv": ColwiseParallel(use_local_output=False),
-            }
-        else:
-            qkv_plan = {
-                "attention.qkv_linear.wq": ColwiseParallel(use_local_output=False),
-                "attention.qkv_linear.wk": ColwiseParallel(use_local_output=False),
-                "attention.qkv_linear.wv": ColwiseParallel(use_local_output=False),
-            }
-
-        layer_plan = {
-            "attention_norm": NoParallel(),
-            "ffn_norm": NoParallel(),
-            "attention": PrepareModuleInput(
-                input_layouts=(Replicate(), Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
-            ),
-            **qkv_plan,
-            "attention.q_norm": SequenceParallel(
-                sequence_dim=2, use_local_output=False
-            ),
-            "attention.k_norm": SequenceParallel(
-                sequence_dim=2, use_local_output=False
-            ),
-            "attention.wo": RowwiseParallel(
-                output_layouts=Replicate(),
-                use_local_output=False,
-            ),
-        }
-
-        # pyrefly: ignore [missing-attribute]
-        if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "feed_forward.w1": ColwiseParallel(use_local_output=False),
-                    "feed_forward.w2": RowwiseParallel(
-                        output_layouts=Replicate(),
-                        use_local_output=False,
-                    ),
-                    "feed_forward.w3": ColwiseParallel(use_local_output=False),
-                }
-            )
-
-        parallelize_module(
-            # pyrefly: ignore [bad-argument-type]
-            module=transformer_block,
-            device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
-            parallelize_plan=layer_plan,
-        )
-
-        # qwen3_vl is not yet migrated to config-based sharding, so the
-        # inner_attention's forward is not auto-wrapped by Module.parallelize.
-        # The other TP layers above use ``use_local_output=False``, so q/k/v
-        # arrive at the kernel as TP DTensors. Wrap forward with ``local_map``
-        # to convert to local before the FlexAttention/SDPA/Varlen kernel and
-        # back to DTensor afterwards. q/k/v are (bs, seq, heads, head_dim) with
-        # heads sharded on TP -> Shard(2).
-        # pyrefly: ignore [missing-attribute]
-        inner_attn = transformer_block.attention.inner_attention
-        qkv_placements = (Shard(2),)
-        inner_attn.forward = local_map(
-            inner_attn.forward,
-            in_placements=(qkv_placements, qkv_placements, qkv_placements),
-            out_placements=(qkv_placements,),
-            in_grad_placements=(qkv_placements, qkv_placements, qkv_placements),
-            device_mesh=tp_mesh,
-            redistribute_inputs=True,
-        )
-
-    if enable_async_tp:
-        torch._inductor.config._micro_pipeline_tp = True
-
-    logger.info(
-        f"Applied {'Async ' if enable_async_tp else ''}"
-        "Tensor Parallelism to the decoder (no SequenceParallel)"
-    )
 
 
 def _apply_tp_to_vision_encoder(
@@ -264,7 +142,7 @@ def _apply_fsdp_to_vision_encoder(
 
 
 def parallelize_qwen3_vl(
-    model: nn.Module,
+    model: Qwen3VLModel,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
@@ -280,44 +158,28 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallel_dims.cp_enabled:
-        raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
+    if parallelism.full_dtensor:
+        raise NotImplementedError("full_dtensor is not supported yet.")
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
 
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
+
     if parallel_dims.tp_enabled:
-        if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
-            raise RuntimeError("Async TP requires torch.compile")
-
-        tp_mesh = parallel_dims.get_mesh("tp")
-
-        # Apply TP to vision encoder
+        # TODO(@fegin): Apply TP to vision encoder (still uses parallelize_module path)
         if model.vision_encoder is not None:
-            # pyrefly: ignore [bad-argument-type]
-            _apply_tp_to_vision_encoder(model.vision_encoder, tp_mesh)
+            _apply_tp_to_vision_encoder(
+                model.vision_encoder, parallel_dims.get_mesh("tp")
+            )
 
-        # Apply TP to decoder without SequenceParallel.
-        # Hidden states flow as DTensor(Replicate) between blocks.
-        # VLM needs full-sequence access for vision scatter and DeepStack.
-        _apply_non_moe_tp_to_decoder(
-            model,
-            tp_mesh,
-            loss_parallel=not parallelism.disable_loss_parallel,
-            enable_async_tp=parallelism.enable_async_tensor_parallel,
-        )
-
-    # Apply MoE parallelism to decoder layers.
-    # enable_sp=False because Qwen3-VL keeps hidden states as Replicate
-    # (not Shard(1)) — no SequenceParallel for vision scatter and DeepStack.
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            enable_sp=False,
-        )
+        model.parallelize(parallel_dims)
+
+    if parallel_dims.tp_enabled:
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Apply activation checkpointing
     if ac_config.mode != "none":
@@ -329,7 +191,6 @@ def parallelize_qwen3_vl(
         )
         if model.vision_encoder is not None:
             apply_ac(
-                # pyrefly: ignore [bad-argument-type]
                 model.vision_encoder,
                 ac_config,
                 model_compile_enabled=model_compile_enabled,
@@ -340,7 +201,6 @@ def parallelize_qwen3_vl(
     if model_compile_enabled:
         apply_compile(model, compile_config)
         if model.vision_encoder is not None:
-            # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_encoder, compile_config)
 
     # Apply FSDP / HSDP unconditionally (fully_shard handles dp_shard=1)
@@ -362,7 +222,6 @@ def parallelize_qwen3_vl(
     # FSDP the vision encoder as a single unit (see _apply_fsdp_to_vision_encoder)
     if model.vision_encoder is not None:
         _apply_fsdp_to_vision_encoder(
-            # pyrefly: ignore [bad-argument-type]
             model.vision_encoder,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
