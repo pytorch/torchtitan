@@ -84,6 +84,7 @@ class ShardingConfig:
 
     def axes(self) -> set[str]:
         """Return mesh axes referenced by this sharding config."""
+
         def add_axes(named: NamedPlacement | None) -> None:
             if named is None:
                 return

@@ -33,6 +33,7 @@ from torchtitan.protocols.sharding import (
     NamedPlacement,
     ShardingConfig,
 )
+from torchtitan.protocols.types import MeshAxisName
 
 
 @contextmanager
@@ -280,13 +281,12 @@ class Module(nn.Module, Configurable):
 
         1. Shard states (parameters and buffers).
         2. Wrap the forward with:
-            ``reshard inputs -> [optional local_map] forward -> reshard outputs``.
+            ``reshard inputs -> [optional local_spmd] forward -> reshard outputs``.
 
         ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
 
         Each ``ShardingConfig`` field resolves its mesh independently via
-        ``resolve_mesh()`` and resolves its placements independently via
-        ``resolve_placements()``.
+        ``resolve_mesh()`` and resolves SPMD placements per axis.
         """
         if self._parallelized:
             raise ValueError(
