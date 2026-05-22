@@ -95,7 +95,7 @@ The +23.1% we achieved is the FX-pass-side improvement on top of this
 flag-constrained measurement, but is real and persists when the flag is
 disabled. The remaining ~7% is not addressable from `passes.py`.
 
-## Run summary (UPDATED: after Exp 41, 2026-05-22 ~17:00 UTC)
+## Run summary (FINAL: after Exp 44, 2026-05-22 ~18:00 UTC)
 
 **Cumulative tps: 4,161 → 6,442 = +54.8%** over raw deterministic baseline
 (+23.1% from FX passes, +23.5% from dropping --debug.deterministic, +1.71% from cleanup bundle), via five committed passes + one config change:
@@ -106,7 +106,32 @@ disabled. The remaining ~7% is not addressable from `passes.py`.
 5. `cleanup_bundle` (Exp 27, +1.71%) — detach removal + view/conj/clone CSE.
 6. Config: dropped `--debug.deterministic` from benchmark (+23.5%) — NaN fills were 7% overhead.
 
-35 of 41 experiments discarded/crashed. The decisive structural wins (Exps 11 & 13) came from finding zero-copy / launch-collapsing rewrites grounded in byte-layout proofs (Exp 11) and placeholder-rooted hoist trees (Exp 13). Pure-cleanup bundles ceiling at +0.6% (Exp 17). Metadata peephole well is dry. Collective-coalescing without hoistable producers is dead (Exps 12/15/16). FX-level AG reordering doesn't translate to runtime overlap (Exps 3/5/6/8). Bitwise-numerics constraint forbids RoPE fp32 round-trip elimination and any precision-modifying rewrite. Further wins explored post-Exp 18 and all discarded:
+38 of 44 experiments discarded/crashed/no_target.
+
+**Stability**: n=48 benchmark samples, mean=6,398 tps, stddev≈35, CV=0.6%.
+**MFU**: 37.5% sustained (from 24.4% at raw baseline).
+
+## Directions explored and ruled out (post-Exp 18)
+
+| Category | Experiments | Outcome |
+|---|---|---|
+| Matmul fusion (QKV, w1/w3) | 38, 39 | QKV crashes bitwise; w1/w3 bitwise-safe but slower (H100 parallelizes separate GEMMs) |
+| torch.compile on subgraph | 40 | Inductor lacks complex codegen; wrapper dispatch overhead |
+| Loss path fusion (logsumexp) | 41 | Bitwise-safe but fused kernel slower than separate exp+sum |
+| Lazy conj (skip clone) | 42 | Bitwise-safe but 32 clones is sub-noise |
+| CUDA graph capture | 43 | Can't capture at compile-time; `use_cudagraph` infra exists but needs runtime wiring |
+| Inductor config toggles | 44 | Irrelevant in aot_fx_trace mode |
+| TP RS-FSDP AG overlap | 35 | Disrupted natural casts-in-FFN overlap; regressed |
+| Mega bwd RS coalesce | 36 | Bwd RSes already async fire-and-forget; borderline +0.7% |
+| RoPE freq CSE | 34 | 155 ops but sub-noise +0.17% |
+| mm→linear rewrite | 37 | cuBLAS selects worse algorithm for linear |
+
+## Future directions (out of passes.py scope)
+
+1. **Enable `cudagraph_pass`** — the `compile_time_passes` function has `use_cudagraph: bool = False` already. Wire it through and enable regional CUDA graph capture in the aot_fx_trace runtime.
+2. **Switch to `FusedQKVLinear`** — the model code has it; a config-level change fuses 3 separate Q/K/V matmuls into 1, avoiding the cat overhead we saw in Exp 39.
+3. **Custom Triton RoPE kernel** — fuse the bf16→f32→complex_mul→f32→bf16 block into one kernel, eliminating ~700 dispatch ops/step and ~7.5 GiB/step of f32 traffic.
+4. **NCCL tuning for TP collectives** — the 130+130 TP RS/AG calls dominate NCCL time; tuning NCCL_ALGO, channel count, or tree topology might reduce per-call latency. The decisive structural wins (Exps 11 & 13) came from finding zero-copy / launch-collapsing rewrites grounded in byte-layout proofs (Exp 11) and placeholder-rooted hoist trees (Exp 13). Pure-cleanup bundles ceiling at +0.6% (Exp 17). Metadata peephole well is dry. Collective-coalescing without hoistable producers is dead (Exps 12/15/16). FX-level AG reordering doesn't translate to runtime overlap (Exps 3/5/6/8). Bitwise-numerics constraint forbids RoPE fp32 round-trip elimination and any precision-modifying rewrite. Further wins explored post-Exp 18 and all discarded:
 - Matmul fusion (Exps 37-39): mm→linear regresses; QKV fusion breaks bitwise; w1/w3 fusion passes bitwise but fused GEMM is slower.
 - torch.compile on subgraph (Exp 40): Inductor lacks complex codegen; compiled RoPE 29% SLOWER.
 - Loss fusion (Exp 41): logsumexp replaces exp→sum; bitwise PASSES but -1.3% regression (fused kernel slower for this shape).
