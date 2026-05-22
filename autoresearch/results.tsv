@@ -24,3 +24,4 @@ timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
 2026-05-22T03:45:00	xxxxxxx	5139	47.0	discard	30.09	73	aggressive_view_chain_shortcut: 1/1482 shortcuts (386 rank_mismatch, 1095 no_inner_view); view-of-view-that-undoes-itself essentially doesn't exist; +0.29%
 2026-05-22T03:55:00	xxxxxxx	0	0.0	discard	0.00	0	exp23 batched specks: pass reorder + unsafe_view + t.default + bwd AG-split mirror; all no_target/sub-noise (Exp 11 already absorbed bwd splits)
 2026-05-22T04:00:00	xxxxxxx	0	0.0	discard	0.00	0	exp24 profile-driven: top 5 kernels - NCCL coalesced AG/RS done, SDPA/GEMM compute-only, FillFunctor 3065/step from --debug.deterministic (invisible to FX, ~7% step overhead)
+2026-05-22T04:05:00	xxxxxxx	0	0.0	discard	0.00	0	exp25 addmm fusion: 0 direct add(c,mm(a,b)) patterns - mm always flows through view/wait_tensor before any add
