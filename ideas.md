@@ -3213,6 +3213,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no CUTE/Flash lowering errors. Risk is a vendored-source/API mismatch inside the CUTE DSL kernels even though imports pass.
   Result: crash at source state `41b60a8`; the vendored source resolves `block_sparsity`, but the run fails before step 1 in `flash_attn/cute/block_sparse_utils.py` with `TypeError: 'NoneType' object is not subscriptable` while handling the SM100 block-sparse empty-tile correction. Restore SDPA; this path now appears blocked by a FlashAttention/PyTorch CUTE API or shape mismatch rather than an install-only problem.
 
+- Idea: final SDPA stack with CUTE DSL GEMM autotune backend
+  Current best source commit: aae710c
+  Source: compile-backend follow-up after default GEMM max autotune and FlexAttention CUTE probes
+  Expected mechanism: Enable Inductor GEMM autotune with `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=ATEN,CUTEDSL` and `CUTEDSL_ENABLE_AUTOTUNING=1` so Blackwell CUTE DSL GEMM candidates can compete against the default ATen path. This directly tests whether the profiler-dominant GEMM work can use a better generated backend without changing Qwen source or the durable SDPA attention path.
+  Supporting evidence: Run327 enabled GEMM max autotune with the default `ATEN,TRITON,CPP` backend set and regressed, mostly selecting existing `mm`. The current environment now has PyTorch-known-good `nvidia-cutlass-dsl[cu13]==4.4.2`; Inductor's config advertises `CUTEDSL` as a Blackwell SM100-SM109 GEMM autotune backend.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix the exact current-best command with `CUTEDSL_ENABLE_AUTOTUNING=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=ATEN,CUTEDSL` and keep `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss. Risk is longer compile time, CUTE DSL lowering failure, or another memory-heavy max-autotune regression.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
