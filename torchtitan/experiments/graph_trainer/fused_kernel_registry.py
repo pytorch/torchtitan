@@ -189,6 +189,12 @@ _VIEW_OPS = frozenset({
     "aten.detach.default",
     "aten.contiguous.default",
     "aten.clone.default",
+    # Tuple-returning view: returns a list of slices (no data movement).
+    # The downstream getitem nodes index into the tuple to get tensors.
+    "aten.split_with_sizes.default",
+    "aten.split.Tensor",
+    "aten.chunk.default",
+    "aten.unbind.int",
     "<built-in function getitem>",
 })
 
