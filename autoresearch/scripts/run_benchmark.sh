@@ -23,7 +23,6 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
     --debug.seed 42 \
-    --debug.deterministic \
     --training.steps 20 \
     "$@" \
     > run.log 2>&1
