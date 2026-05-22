@@ -3253,6 +3253,15 @@
   Success criteria and expected risk: Success is step-10 tps above 10,658 with finite overall-decreasing loss and no allocator/OOM. Risk is higher memory above the preferred envelope or worse overlap from overly coarse all-gathers.
   Result: discarded at source state `4e5f0e2`; 10,528 tps with finite overall-decreasing loss and 172.50 GiB peak memory (96.72%). Triples fit but are slower than per-layer FSDP and push memory above the preferred risk envelope, so restore the durable per-layer groups.
 
+- Idea: OptimizerInBackward for Qwen3 14B
+  Current best source commit: e7429d5
+  Source: memory/scheduling follow-up after direct GEMM and FSDP grouping probes failed
+  Expected mechanism: Replace the normal optimizer container with `OptimizersInBackwardContainer` so parameter updates run from post-accumulate-grad hooks. This may reduce optimizer-step scheduling overhead or memory residency after backward, and if it saves memory without hurting throughput it may create room for a later larger-batch conversion.
+  Supporting evidence: TorchTitan supports optimizer-in-backward for non-EP, non-PP training, which matches this DP-only Qwen3 command. This is narrower than changing optimizer type or learning rate and keeps model math, FSDP layout, compile, and loss chunking unchanged.
+  Planned source/config changes: Inside `qwen3_14b()`, locally import `OptimizersInBackwardContainer` and set `optimizer=OptimizersInBackwardContainer.Config(lr=8e-4)`.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, local batch size 160, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Success is step-10 tps above 10,658 or a clean memory saving that can be converted into higher batch throughput. Risk is many tiny optimizer objects/hooks adding overhead or changing step ordering enough to slow training.
+
 - Idea: metrics log frequency 1 with NCCL_ALGO=NVLS,Ring
   Current best source commit: 3c77e96b
   Source: algorithm-selection probe after NVLS-specific chunk and channel knobs did not move the current command
