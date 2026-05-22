@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from collections.abc import Sequence
 from typing import Any, cast
 
 import torch
-import dataclasses
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -301,15 +301,38 @@ def cp_shard(
                     f"Must be one of: 'headtail', 'ptrr', or None"
                 )
 
-    inputs = cast(
-        tuple[torch.Tensor, ...],
-        _context_parallel_shard(
-            mesh=cp_mesh,
-            buffers=inputs,
-            seq_dims=tuple(input_seq_dim for _ in inputs),
-            load_balancer=load_balancer,
-        ),
-    )
+    batch_size = inputs[0].size(0)
+    match attention_masks:
+        case None | BlockMask() | dict():
+            inputs = cast(
+                tuple[torch.Tensor, ...],
+                _context_parallel_shard(
+                    mesh=cp_mesh,
+                    buffers=inputs,
+                    seq_dims=tuple(input_seq_dim for _ in inputs),
+                    load_balancer=load_balancer,
+                ),
+            )
+        case VarlenMetadata():
+            # Instead of sharding directly in the sequence length dimension,
+            # we first reshape to [1, batch_size * seq_len] and shard.
+            # this let us treat the entire batch as a single sequence, which is necessary for
+            # correct sharding with variable-length inputs.
+            inputs = cast(
+                tuple[torch.Tensor, ...],
+                _context_parallel_shard(
+                    mesh=cp_mesh,
+                    buffers=tuple(buf.reshape(1, -1) for buf in inputs),
+                    seq_dims=tuple(input_seq_dim for _ in inputs),
+                    load_balancer=None,  # VarlenMetadata sharding is handled separately in _shard_varlen_metadata
+                ),
+            )
+        case _:
+            raise ValueError(
+                f"Unsupported attention_masks type for CP sharding: "
+                f"{type(attention_masks)}. Must be None, VarlenMetadata, "
+                f"BlockMask, or dict[str, BlockMask]."
+            )
 
     # BlockMask, has shape, [B, H, Q, KV], and we can only shard
     # on the Q seq dimension, not KV.
@@ -319,7 +342,7 @@ def cp_shard(
         case VarlenMetadata():
             assert load_balancer is None, "Load balancer must be disabled for variable-length attention"
             attention_masks = _shard_varlen_metadata(
-                attention_masks, cp_mesh, seq_len, cp_world_size
+                attention_masks, cp_mesh, seq_len * batch_size, cp_world_size
             )
         case BlockMask() | dict():
             assert isinstance(attention_masks, (BlockMask, dict))
