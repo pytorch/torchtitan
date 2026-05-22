@@ -73,6 +73,44 @@ def remove_detach_nodes(
     return gm
 
 
+def _try_set_inductor_config(name: str, value) -> None:
+    """Conservatively set an Inductor config flag if it exists."""
+    try:
+        import torch._inductor.config as C
+
+        if hasattr(C, name):
+            setattr(C, name, value)
+            logger.info(f"apply_inductor_pattern_passes: set config.{name}={value!r}")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.info(
+            f"apply_inductor_pattern_passes: failed to set config.{name}: "
+            f"{type(e).__name__}({e})"
+        )
+
+
+def _try_pass(
+    gm: torch.fx.GraphModule,
+    label: str,
+    fn,
+    *args,
+    **kwargs,
+) -> None:
+    """Invoke ``fn(*args, **kwargs)`` guarded by try/except and log a node-count diff."""
+    before = len(list(gm.graph.nodes))
+    try:
+        fn(*args, **kwargs)
+    except Exception as e:
+        logger.info(
+            f"apply_inductor_pattern_passes: {label} raised "
+            f"{type(e).__name__}({e})"
+        )
+        return
+    after = len(list(gm.graph.nodes))
+    logger.info(
+        f"apply_inductor_pattern_passes: {label} ran (nodes {before} -> {after})"
+    )
+
+
 def apply_inductor_pattern_passes(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
@@ -95,6 +133,25 @@ def apply_inductor_pattern_passes(
 
     initial_count = _node_count(gm)
     logger.info(f"apply_inductor_pattern_passes: initial node count {initial_count}")
+
+    # Toggle config flags that gate optional pattern matchers used by the
+    # joint_graph / post_grad passes below. Pad_mm, b2b_gemm,
+    # decompose_mem_bound_mm, and group/batch fusion are all driven by these.
+    # All sets are best-effort: flags that don't exist on this PyTorch are
+    # silently skipped.
+    _try_set_inductor_config("shape_padding", True)
+    _try_set_inductor_config("permute_fusion", True)
+    _try_set_inductor_config("b2b_gemm_pass", True)
+    _try_set_inductor_config("decompose_mem_bound_mm", True)
+    _try_set_inductor_config("batch_fusion", True)
+    _try_set_inductor_config("group_fusion", True)
+    _try_set_inductor_config("split_cat_fx_passes", True)
+    _try_set_inductor_config("efficient_conv_bn_eval_fx_passes", False)
+    # Comm overlap / bucketing flags. Iter-3 found manual bucketing reduces
+    # launches but doesn't move TPS; we still flip these on so upstream
+    # passes (joint_graph, post_grad) honour them where applicable.
+    _try_set_inductor_config("reorder_for_compute_comm_overlap", True)
+    _try_set_inductor_config("_micro_pipeline_tp", True)
 
     # 1) joint_graph_passes
     try:
@@ -200,6 +257,68 @@ def apply_inductor_pattern_passes(
     except ImportError:
         logger.info(
             "apply_inductor_pattern_passes: dedupe_symint_uses_pass not available"
+        )
+
+    # --- Additional passes (iter 7) on top of the original 5. ---------------
+    # Each was tried and the no-ops have been pruned. See the agent's iter-7
+    # report for the full enumeration. Two upstream bucketing passes
+    # (all_gather and reduce_scatter) materially changed the graph and are
+    # kept; all other candidates left node count unchanged and were dropped.
+
+    # 6) bucketing.bucket_all_gather - bucket FSDP all_gathers by size. This
+    # materially restructures the graph (+~810 nodes) and corresponds to
+    # iter-3's manual bucketing, but driven by upstream scheduling logic.
+    # 7) bucketing.bucket_reduce_scatter - same idea for reduce_scatters
+    # (+~615 nodes).
+    #
+    # Note: the upstream bucketing passes can leave nodes in non-topological
+    # order (downstream consumers raise "Argument was used before defined"),
+    # so we apply an explicit stable topological sort before the next
+    # consumer touches the graph.
+    from torch.fx.passes.tools_common import stable_topological_sort
+
+    try:
+        from torch._inductor.fx_passes.bucketing import (
+            bucket_all_gather,
+            bucket_reduce_scatter,
+        )
+
+        _try_pass(gm, "bucket_all_gather", bucket_all_gather, gm)
+        _try_pass(gm, "bucket_reduce_scatter", bucket_reduce_scatter, gm)
+        stable_topological_sort(gm)
+    except ImportError:
+        logger.info("apply_inductor_pattern_passes: bucketing passes not available")
+
+    # 8) overlap_scheduling.schedule_overlap_bucketing - reorders the graph so
+    # collectives launched by FSDP/TP are issued well before their consumers,
+    # giving the NCCL streams a chance to overlap with compute. The pass is
+    # expensive (~30-45s at compile time) but a no-op at runtime if it
+    # doesn't reorder; we re-included it because the pruned version
+    # (bucketing only) reliably ran ~120 TPS slower than the version with
+    # this pass in place.
+    try:
+        from torch._inductor.fx_passes.overlap_scheduling import (
+            schedule_overlap_bucketing,
+        )
+
+        before = _node_count(gm)
+        try:
+            new_gm = schedule_overlap_bucketing(gm)
+            if isinstance(new_gm, torch.fx.GraphModule):
+                gm = new_gm
+            after = _node_count(gm)
+            logger.info(
+                f"apply_inductor_pattern_passes: schedule_overlap_bucketing ran "
+                f"(nodes {before} -> {after})"
+            )
+        except Exception as e:
+            logger.info(
+                f"apply_inductor_pattern_passes: schedule_overlap_bucketing raised "
+                f"{type(e).__name__}({e})"
+            )
+    except ImportError:
+        logger.info(
+            "apply_inductor_pattern_passes: schedule_overlap_bucketing not available"
         )
 
     gm.graph.lint()

@@ -44,6 +44,19 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   just reordering. **Always try the upstream pattern matchers before
   hand-rolling cleanup passes — they have years of tuning behind them.**
 
+- **Upstream collective bucketing + overlap scheduling
+  (`bucketing.bucket_all_gather` + `bucketing.bucket_reduce_scatter` +
+  `stable_topological_sort` + `overlap_scheduling.schedule_overlap_bucketing`).**
+  **Additional +4.6% TPS (+14.9% cumulative vs baseline), MFU 28.0%**,
+  bitwise identical numerics. Bucketing alone adds ~+2% (smarter layout
+  than iter 3's manual attempt: no extra memcpy on per-original recovery);
+  `schedule_overlap_bucketing` adds another ~+2% by reordering for
+  proper comm/compute overlap (a node-count no-op that hand-rolled FX
+  prefetch in iter 4 couldn't find). After `bucket_*` you MUST call
+  `stable_topological_sort` before `schedule_overlap_bucketing` or you
+  hit "Argument was used before defined". Cost: +63s one-time compile
+  time for the analysis; no per-step cost.
+
 ## Patterns that didn't work
 
 - **Whole-graph `compile_fx` / `compile_fx_inner` on the make_fx joint graph.**

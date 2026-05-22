@@ -28,6 +28,27 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## expanded apply_inductor_pattern_passes (bucketing + overlap scheduling) — keep (pending)
+
+- **Idea**: `torch._inductor.fx_passes` exposes 30+ submodules. Iter 5 only used `joint_graph_passes` + `post_grad_passes`. The submodules `bucketing`, `overlap_scheduling`, `micro_pipeline_tp`, `low_contention_collectives`, `fsdp`, `fuse_attention`, `pad_mm`, `b2b_gemm`, `decompose_mem_bound_mm`, `group_batch_fusion`, etc. should give additional gains specific to distributed and matmul-heavy graphs.
+- **Changes**: Expanded `apply_inductor_pattern_passes`. After iter 5's pattern matchers, added (in order): config-flag setup, then `bucketing.bucket_all_gather(gm)`, `bucketing.bucket_reduce_scatter(gm)`, `stable_topological_sort(gm)`, `overlap_scheduling.schedule_overlap_bucketing(gm)`. Discovered candidates via `dir(module)`, tried plausible entry points with try/except, kept only ones that changed node count OR improved TPS, dropped all no-ops.
+- **Result**: keep. 4 runs: tps=4,781 / 4,777 / 4,793 / 4,800 → **avg 4,788, mfu=28.0%**, memory=49.1 GiB. Loss=9.21808, grad_norm=4.5867 (bitwise identical). Numerics test passes. Wall time 140s (compile got ~63s longer than iter 5 due to `schedule_overlap_bucketing`'s analysis — one-time, not per-step).
+- **TPS gain attribution**:
+  - Without `schedule_overlap_bucketing`: tps drops to ~4,690 (just bucketing alone gives ~+2-3% over iter 5).
+  - With `schedule_overlap_bucketing`: tps reaches ~4,780 (extra +2% from reorder).
+  - Together: **+4.6% on top of iter 5, +14.9% vs baseline.**
+- **Modules tried that did nothing useful here**:
+  - `micro_pipeline_tp.micro_pipeline_tp_pass`: ran but no-op. Theory: the 68 TP `all_reduce` nodes don't match its AG+mm / mm+RS patterns — it expects `_c10d_functional.all_gather`/`reduce_scatter`, not `all_reduce`.
+  - `fsdp.dedup_fsdp_reduce_scatter`, `bucketing.bucket_all_reduce`, `low_contention_collectives.replace_collectives_with_low_contention`, `reinplace.*`, `group_batch_fusion.group_batch_fusion_passes(pre_grad=False)`, `misc_patterns.numpy_compat_normalization`: all no-ops on this graph.
+  - `pad_mm`, `b2b_gemm`, `decompose_mem_bound_mm`, `fuse_attention`: no directly-callable pass entry points in this PyTorch — they're handler/registration modules driven via `joint_graph_passes` config flags. We set the config flags but didn't see additional node changes beyond what joint_graph already did.
+- **Lessons**:
+  - **`schedule_overlap_bucketing` is the real win** — node-count is unchanged but reordering for comm/compute overlap moved TPS by ~+2%. Iter 3/4's manual FX reordering couldn't find this; the upstream pass does proper dependency analysis.
+  - **Upstream `bucketing.*` works where iter 3 didn't**: it knows how to bucket AGs into contiguous-recoverable layouts (no slow reshape-copy).
+  - **Iter 5's `binary_folding_pass` and `dedupe_symint_uses_pass` are silent ImportError no-ops** on this PyTorch build — kept the try/except so they activate if a future PyTorch upgrade exposes them.
+  - **The `+810` and `+615` node deltas from the bucketing passes are not "more work" but graph restructure**: they add cat / wait / slice / reshape nodes around the bucketed collectives. Net effect on runtime is positive because the per-launch fixed cost goes down.
+
+---
+
 ## compile_fx_inductor (whole-graph) — discard (xxxxxxx)
 
 - **Idea**: Route the cleaned joint fwd+bwd graph through Inductor's full pipeline (`compile_fx_inner` / `compile_fx`) to get **Triton kernel codegen**. Iter 5's pattern passes did FX-level rewrites; the next lever is full kernel codegen.
