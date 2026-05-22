@@ -15,14 +15,14 @@ set -ex
 DEEPEP_COMMIT=${DEEPEP_COMMIT:-1b8f467}
 
 # Dependencies for DeepEP compilation (NVSHMEM needs libcudacxx, IB headers).
-apt-get update -qq && apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
-apt-get autoclean && apt-get clean
-rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+sudo apt-get update -qq && apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
+sudo apt-get autoclean && apt-get clean
+sudo rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # CCCL headers live under include/cccl/ in CUDA 13+ — symlink so
 # NVSHMEM's #include "cuda/std/tuple" resolves correctly.
 if [ -d /usr/local/cuda/include/cccl/cuda ] && [ ! -e /usr/local/cuda/include/cuda ]; then
-    ln -sf /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda
+    sudo ln -sf /usr/local/cuda/include/cccl/cuda /usr/local/cuda/include/cuda
 fi
 
 # Non-fatal: DeepEP may fail to compile against newer PyTorch
