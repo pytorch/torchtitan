@@ -67,7 +67,7 @@ def _shard_varlen_metadata(
     local_end = (cp_rank + 1) * seq_len // cp_world_size
 
     local_cu_seq_q, count_cu_seq_q = metadata.cu_seq_q.clamp(local_start, local_end).unique_consecutive(return_counts=True)
-    local_cu_seq_k = metadata.cu_seq_k[count_cu_seq_q[0]-1 : (-count_cu_seq_q[-1]+1) or None]
+    local_cu_seq_k = metadata.cu_seq_k[count_cu_seq_q[0]-1 : (-count_cu_seq_q[-1]+1) or None].clamp(max=local_end)
     local_max_q = int(local_cu_seq_q.diff().max().item())
     local_max_k = int(local_cu_seq_k.diff().max().item())
 
@@ -340,7 +340,8 @@ def cp_shard(
 
     match attention_masks:
         case VarlenMetadata():
-            assert load_balancer is None, "Load balancer must be disabled for variable-length attention"
+            if load_balancer is not None:
+                raise ValueError("Load balancer must be disabled for variable-length attention")
             attention_masks = _shard_varlen_metadata(
                 attention_masks, cp_mesh, seq_len * batch_size, cp_world_size
             )
