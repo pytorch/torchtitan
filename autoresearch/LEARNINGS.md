@@ -42,6 +42,16 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   downstream pattern matchers see a clean graph and aren't tripped up by
   identity-view chains separating producer and consumer.
 
+## Run summary (after Exp 18, 2026-05-22 ~03:20 UTC)
+
+**Cumulative tps: 4,161 → 5,124 = +23.1%** over raw baseline, via four committed passes:
+1. `remove_identity_views` (Exp 1, +7.2%) — drop ~2k identity DTensor views.
+2. `remove_identity_ops` (Exp 7, +2.4%) — full-range slice + double-transpose cancellation.
+3. `elide_split_cat_for_reduce_scatter` (Exp 11, +1.58%) — TP cat-as-view.
+4. `bucket_fsdp_collectives` (Exp 13, +10.4%) — coalesced AG/RS + producer-chain hoist.
+
+13 of 18 experiments discarded. The decisive structural wins (Exps 11 & 13) came from finding zero-copy / launch-collapsing rewrites grounded in byte-layout proofs (Exp 11) and placeholder-rooted hoist trees (Exp 13). Pure-cleanup bundles ceiling at +0.6% (Exp 17). Metadata peephole well is dry. Collective-coalescing without hoistable producers is dead (Exps 12/15/16). FX-level AG reordering doesn't translate to runtime overlap (Exps 3/5/6/8). Bitwise-numerics constraint forbids RoPE fp32 round-trip elimination and any precision-modifying rewrite. The next significant wins would require either (a) custom HOPs with backing kernels (out of scope), (b) FSDP/model config changes (out of scope), or (c) a structurally novel pattern not yet identified — Exp 18's open-ended search returned no_target.
+
 ## Patterns that didn't work
 
 - **Don't trust the pre-pass graph dump for "dead outputs" ideas** (Exp 2).
