@@ -26,6 +26,7 @@ the beginning:
 - [ ] **Kernel fusions**: Find regions worth fusing and generate fused kernels. torch.compile, Triton kernels, or custom kernels could all help.
 - [ ] **Collective coalescing**: Bucket many small NCCL launches into fewer large ones to reduce launch overhead.
 - [ ] **Profile-driven optimization**: Profile the model, analyze the trace, and look for opportunities to optimize.
-- [ ] **Graph inspection**: Dump and study the FX graph to find optimization opportunities not covered by the ideas above.
+- [~] **Graph inspection**: Dump and study the FX graph to find optimization opportunities not covered by the ideas above.
+  - 2026-05-22 14:44 — Counted FX nodes by op (recon pass; see LEARNINGS.md snapshot). 11.9k nodes total. Largest collective categories: 421 all_gather_into_tensor, 421 reduce_scatter_tensor, 68 all_reduce — bucketing/overlap is the biggest single target. 196 detach.default and 842 _to_copy look like cheap cleanup targets.
 - [ ] **Study other frameworks**: Look at other pretraining frameworks (e.g. https://github.com/apple/axlearn, https://github.com/openxla/xla, Megatron-LM, DeepSpeed, etc.) for optimization ideas.
 - [ ] **Literature research**: When the above ideas are exhausted, search online for recent papers and blog posts on LLM training optimization to find new directions.
