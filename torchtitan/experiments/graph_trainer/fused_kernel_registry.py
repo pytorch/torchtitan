@@ -84,6 +84,104 @@ _METADATA_OPS = {
     "<built-in function getitem>",
 }
 
+# Pointwise/elementwise ops — fully fusible into a single triton kernel.
+_POINTWISE_OPS = frozenset({
+    "aten.add.Tensor", "aten.add.Scalar",
+    "aten.sub.Tensor", "aten.sub.Scalar",
+    "aten.mul.Tensor", "aten.mul.Scalar",
+    "aten.div.Tensor", "aten.div.Scalar",
+    "aten.rsub.Scalar",
+    "aten.neg.default",
+    "aten.abs.default",
+    "aten.exp.default", "aten.log.default", "aten.log1p.default",
+    "aten.sin.default", "aten.cos.default", "aten.tan.default",
+    "aten.tanh.default", "aten.sigmoid.default",
+    "aten.silu.default", "aten.silu_backward.default",
+    "aten.gelu.default", "aten.gelu_backward.default",
+    "aten.relu.default", "aten.threshold_backward.default",
+    "aten.rsqrt.default", "aten.sqrt.default",
+    "aten.reciprocal.default",
+    "aten.pow.Tensor_Scalar", "aten.pow.Scalar", "aten.pow.Tensor_Tensor",
+    "aten.where.self",
+    "aten.maximum.default", "aten.minimum.default",
+    "aten.clamp.default", "aten.clamp_min.default", "aten.clamp_max.default",
+    "aten.eq.Tensor", "aten.eq.Scalar",
+    "aten.ne.Tensor", "aten.ne.Scalar",
+    "aten.lt.Tensor", "aten.lt.Scalar",
+    "aten.gt.Tensor", "aten.gt.Scalar",
+    "aten.le.Tensor", "aten.le.Scalar",
+    "aten.ge.Tensor", "aten.ge.Scalar",
+    "aten.bitwise_and.Tensor", "aten.bitwise_or.Tensor",
+    "aten.bitwise_not.default", "aten.logical_not.default",
+    "aten.fill.Scalar", "aten.fill.Tensor",
+    "aten.zeros_like.default", "aten.ones_like.default",
+    "aten.full.default", "aten.full_like.default",
+    "aten._to_copy.default",
+    "aten.copy.default",
+    "prims.convert_element_type.default",
+    "prims.broadcast_in_dim.default",
+    # Indexing/gather — inductor fuses these with pointwise ops.
+    "aten.index.Tensor",
+    "aten.gather.default",
+    "aten.scatter.value", "aten.scatter.src",
+})
+
+# Reduction ops — fusible (inductor groups them with pointwise epilogs).
+_REDUCTION_OPS = frozenset({
+    "aten.sum.default", "aten.sum.dim_IntList",
+    "aten.mean.default", "aten.mean.dim",
+    "aten.amax.default", "aten.amax.dim",
+    "aten.amin.default", "aten.amin.dim",
+    "aten.max.default", "aten.max.dim",
+    "aten.min.default", "aten.min.dim",
+    "aten.prod.default", "aten.prod.dim_int",
+    "aten.std.default", "aten.std.dim",
+    "aten.var.default", "aten.var.dim",
+    "aten.argmax.default", "aten.argmin.default",
+    "aten.any.default", "aten.any.dim",
+    "aten.all.default", "aten.all.dim",
+})
+
+# Norm/softmax ops — decompose to pointwise+reduction, treat as fusible.
+_FUSIBLE_DECOMPOSABLE_OPS = frozenset({
+    "aten._fused_rms_norm.default",
+    "aten._fused_rms_norm_backward.default",
+    "aten.rms_norm.default",
+    "aten.native_layer_norm.default",
+    "aten.native_layer_norm_backward.default",
+    "aten.layer_norm.default",
+    "aten._softmax.default",
+    "aten._softmax_backward_data.default",
+    "aten._log_softmax.default",
+    "aten._log_softmax_backward_data.default",
+    "aten.softmax.int",
+    "aten.log_softmax.int",
+    "aten.nll_loss_forward.default",
+    "aten.nll_loss_backward.default",
+})
+
+# View ops — don't block fusion, but a partition of only views isn't a kernel.
+_VIEW_OPS = frozenset({
+    "aten.view.default",
+    "aten.view.dtype",
+    "aten._unsafe_view.default",
+    "aten.reshape.default",
+    "aten.expand.default",
+    "aten.slice.Tensor",
+    "aten.select.int",
+    "aten.transpose.int",
+    "aten.t.default",
+    "aten.permute.default",
+    "aten.unsqueeze.default",
+    "aten.squeeze.default",
+    "aten.squeeze.dim", "aten.squeeze.dims",
+    "aten.alias.default",
+    "aten.detach.default",
+    "aten.contiguous.default",
+    "aten.clone.default",
+    "<built-in function getitem>",
+})
+
 _DTYPE_MAP = {
     torch.bfloat16: "torch.bfloat16",
     torch.float16: "torch.float16",
@@ -131,6 +229,55 @@ def _is_unfusable(node: torch.fx.Node) -> bool:
     # Block entire namespaces (collectives, offload, bucketing)
     ns = target_str.split(".")[0] if "." in target_str else ""
     return ns in _UNFUSABLE_NAMESPACES
+
+
+def _classify_node(node: torch.fx.Node) -> str:
+    """Classify a node as one of:
+
+      ``"unfusable"`` — collectives, embedding, flash attention, etc.
+      ``"matmul"``    — mm/bmm/addmm (already optimized, not standalone fusible)
+      ``"view"``      — pure view/reshape (doesn't block fusion, isn't a kernel)
+      ``"pointwise"`` — elementwise ops, dtype convert, etc.
+      ``"reduction"`` — sum/mean/amax/etc.
+      ``"decomposable"`` — _fused_rms_norm/layernorm/softmax/nll (decompose
+                          into pointwise+reduction and are fusible as a whole)
+      ``"other"``     — anything not on our allow-list
+
+    This is a graph_trainer-specific classifier, deliberately independent
+    of inductor's ``is_fusible_node`` which expects a post-decomposition
+    graph and miscategorizes many of our pre-decomp nodes (e.g.
+    ``bucketing.*`` tagged True, ``_to_copy`` / ``silu`` tagged False).
+    """
+    if node.op != "call_function":
+        return "other"
+    if _is_unfusable(node):
+        return "unfusable"
+    target_str = str(node.target)
+    if target_str in _ALREADY_OPTIMIZED_OPS:
+        return "matmul"
+    if target_str in _POINTWISE_OPS:
+        return "pointwise"
+    if target_str in _REDUCTION_OPS:
+        return "reduction"
+    if target_str in _FUSIBLE_DECOMPOSABLE_OPS:
+        return "decomposable"
+    if target_str in _VIEW_OPS:
+        return "view"
+    return "other"
+
+
+def is_fusible_node(node: torch.fx.Node) -> bool:
+    """Whether a node can be part of a fused triton kernel.
+
+    Pointwise, reductions, decomposable norms/softmax/loss, and views
+    are fusible. Matmul, attention, collectives, embedding, and other
+    ops are not.
+    """
+    return _classify_node(node) in ("pointwise", "reduction", "decomposable", "view")
+
+
+def is_view_node(node: torch.fx.Node) -> bool:
+    return _classify_node(node) == "view"
 
 
 def _iter_node_args(node: torch.fx.Node):
@@ -298,51 +445,32 @@ def tag_fusible_nodes_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
-    """Tag each call_function node with its ``is_fusible_node`` result.
+    """Tag each call_function node with its fusibility classification.
 
-    Sets ``node.meta["custom"]["is_fusible"]`` so the classification
-    shows up in ``print_readable`` / tlparse output.  Useful for
-    debugging which nodes ``InductorRegionExtractor`` will group into
-    fusion regions.
-
-    No-op if ``torch._inductor.fx_passes.fusion_regions`` isn't
-    available.
+    Uses ``_classify_node`` (graph_trainer-specific) which is more
+    reliable than inductor's ``is_fusible_node`` for pre-decomp graphs.
+    Stores the result under ``node.meta["custom"]["fusion_class"]`` and
+    ``["is_fusible"]`` so it shows up in tlparse dumps.
     """
-    try:
-        from torch._inductor.fx_passes.fusion_regions import (
-            is_fusible_node,
-            is_view_node,
-        )
-    except ImportError:
-        return gm
-
-    n_fusible = n_view = n_unfusable = 0
+    counts: dict[str, int] = {}
+    # Track meta["custom"] dict identity to detect shared references
+    custom_id_to_nodes: dict[int, list[str]] = {}
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
-        try:
-            fusible = bool(is_fusible_node(node))
-        except Exception:
-            fusible = None
-        try:
-            view = bool(is_view_node(node))
-        except Exception:
-            view = False
-        custom = node.meta.setdefault("custom", {})
-        custom["is_fusible"] = fusible
-        if view:
-            custom["is_view"] = True
-        if _is_unfusable(node):
-            custom["graph_trainer_unfusable"] = True
-            n_unfusable += 1
-        elif view:
-            n_view += 1
-        elif fusible:
-            n_fusible += 1
-    logger.info(
-        f"tag_fusible_nodes: {n_fusible} fusible, {n_view} view, "
-        f"{n_unfusable} unfusable (graph_trainer-filtered)"
-    )
+        cls = _classify_node(node)
+        counts[cls] = counts.get(cls, 0) + 1
+        # Always allocate a FRESH custom dict — if the bucketing pass (or
+        # similar) inserted nodes that share a meta["custom"] dict by
+        # reference, our per-node update would clobber siblings.
+        existing = node.meta.get("custom", {})
+        node.meta["custom"] = dict(existing)
+        node.meta["custom"]["fusion_class"] = cls
+        node.meta["custom"]["is_fusible"] = cls in (
+            "pointwise", "reduction", "decomposable", "view"
+        )
+    summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+    logger.info(f"tag_fusible_nodes: {summary}")
     return gm
 
 
@@ -734,17 +862,13 @@ class InductorRegionExtractor(RegionExtractor):
         import time as _time
 
         try:
-            from torch._inductor.fx_passes.fusion_regions import (
-                is_fusible_node,
-                is_view_node,
-            )
             from torch.fx.passes.infra.partitioner import (
                 CapabilityBasedPartitioner,
             )
             from torch.fx.passes.operator_support import create_op_support
         except ImportError:
             logger.warning(
-                "InductorRegionExtractor: inductor/partitioner not available, "
+                "InductorRegionExtractor: partitioner not available, "
                 "falling back to FqnRegionExtractor"
             )
             return FqnRegionExtractor().extract(gm)
