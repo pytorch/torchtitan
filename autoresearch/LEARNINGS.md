@@ -127,6 +127,23 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   intra-layer barrier — the hoist target is wrong. Expect 1.5-2.0+ for
   cross-layer prefetch to be meaningful.
 
+- **`reduce_scatter_tensor_coalesced.default` exists as a functional collective** (Exp 12).
+  Schema: `(Tensor[] inputs, str reduce_op, int group_size, Any group_name) -> Tensor[]`.
+  Takes a list of input tensors and returns a list of output tensors in a single
+  collective launch — no cat/split overhead required. Use when bucketing
+  same-direction RSes. Equivalent op likely exists for AG (verify by
+  `dir(torch.ops._c10d_functional)`); look for `all_gather_into_tensor_coalesced`.
+
+- **Bandwidth-bound coalesced collectives on NVLink-FSDP=4 hit a ceiling around +1%**
+  (Exp 12). 291 RSes → 33 coalesced calls (avg bucket size 8.82), 100% coverage,
+  no overhead. Win: only +0.80% — just below the +1% noise threshold. NCCL
+  apparently still issues per-tensor reductions internally, so the FX-level
+  launch-count reduction doesn't fully translate to NCCL-level launch savings.
+  Implication: **forward AG coalescing (same mechanism) likely faces the same
+  ceiling**. To clear +1% via coalescing, bundle forward AG + backward RS in
+  one pass so the gains compound. Don't expect a standalone forward AG coalesce
+  to do better than backward RS coalesce did.
+
 - **TP `split→cat→reduce_scatter` cat is provably a view** (Exp 11, +1.58% tps).
   When the split source `x` is contiguous, `cat([split[0], split[1]], dim=0)`
   has byte-layout identical to `x.view([W, N, D])` for `W=2, N=split_size, D`.
@@ -195,3 +212,12 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   (421→0) make their respective recon ideas already-explored; ops that
   *didn't* shrink (e.g. `_to_copy` 842→841, `transpose.int` 256→256) are
   the surviving structural patterns worth a fresh pass.
+- **To find what dtype a collective traffics in, grep its input shape.**
+  `grep -B1 "reduce_scatter_tensor.default.*'sum', 4," file | grep -oE
+  '"(f32|bf16)\[[^]]+\]' | sort | uniq -c | sort -rn` instantly reveals
+  the per-shape distribution (and total bytes). Caught the post-Exp11
+  finding that all 291 param-grad RSes are **f32** (preceded by a bf16→f32
+  cast for FSDP's reduce_dtype=f32 policy), totalling ~10 GiB/step of RS
+  bandwidth — twice what bf16 would cost. The same recipe applied to
+  AG-ws-2 (TP fwd activations) shows them all as bf16, confirming where
+  the dtype-policy boundary sits.
