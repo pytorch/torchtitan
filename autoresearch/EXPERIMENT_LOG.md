@@ -28,7 +28,7 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
-## remove bucketing from apply_inductor_pattern_passes — keep (pending)
+## remove bucketing from apply_inductor_pattern_passes — keep (e47a29c)
 
 - **Idea**: Iter-22 ablation found that disabling `bucket_all_gather` + `bucket_reduce_scatter` improved tps by ~3% (5,876 → 6,051 in a single run). Verify and keep.
 - **Changes**: Removed the two bucketing calls + `stable_topological_sort` from `apply_inductor_pattern_passes`. Kept `schedule_overlap_bucketing` (still load-bearing per iter-22 ablation note: pruning it drops tps by ~120).
