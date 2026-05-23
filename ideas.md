@@ -162,6 +162,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command with `--optimizer.implementation=fused_opt_states_bf16`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, nonzero grad norm, and tps above 11,202. Risk is no effect because training dtype and FSDP already dominate memory, or slower optimizer state handling.
+  Result: discarded at source state `8d6d195e`; completed cleanly with nonzero grad norm and loss 12.46396 -> 5.63749, but throughput was only 11,078 tps with unchanged 168.94 GiB memory.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2

@@ -8619,3 +8619,30 @@ Interpretation:
 - Optimizer-in-backward does not reduce memory enough to make MXFP8 batch144 viable.
 - The batch144 memory cliff is dominated by activation/loss/FSDP/MXFP8 runtime state rather than retained optimizer gradients alone.
 - Restore the normal optimizer before continuing.
+
+## Experiment 356: MXFP8 With Fused BF16 Optimizer States
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=8 --optimizer.implementation=fused_opt_states_bf16 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run356-mxfp8-fused-opt-states-bf16-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs136-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,078.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.94 GiB, 94.72%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.46396 at step 1 to 5.63749 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- BF16 optimizer states do not reduce the reported MXFP8 peak memory and do not improve throughput.
+- Optimizer work is too small in the profile for this knob to matter; the remaining bottlenecks are MXFP8 GEMMs/casts, FSDP collectives, and eager launch overhead.
