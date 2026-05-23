@@ -192,6 +192,19 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   pre-CUDA-graph levers that matter are ones that change node
   COUNT/IDENTITY (CSE, fusion, removal), not ones that change ORDER.
 
+- **Regional Inductor compile is ANTI-synergistic with CUDA graphs.**
+  Iter-32 re-tested the iter-14 mechanism on the iter-22 graph: 472/708
+  pure-ATen regions Triton-fused (avg size 7.8 nodes, 3,687 nodes total).
+  Numerics PASS bitwise. **8-run mean tps=5,742 vs baseline 6,040 →
+  −298 tps (−4.9%, ~58σ regression).** iter-14's +14 tps on iter-12 was
+  3-run sampling noise. Mechanism for regression: under CUDA graph
+  capture, launches are already amortized; Inductor's per-region
+  codegen (a) can't see the outer memory-layout decisions and
+  re-introduces materializations that CUDA graphs had eliminated, and
+  (b) Triton kernels still carry per-kernel overhead in capture. **Rule:
+  do not Triton-compile sub-regions of a graph that we're going to
+  CUDA-graph-capture.** The two strategies fight each other.
+
 ## Tooling tips
 
 - A debug pass can call `with open("/tmp/recon_graph_stats.txt", "w") as f`

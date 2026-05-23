@@ -28,6 +28,23 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter32 regional_inductor_compile re-attempt — discard (xxxxxxx)
+
+- **Idea**: iter-31's σ=4 baseline reclassified iter-14's +14 tps as 3.5σ above mean — possibly real. Re-implement `regional_inductor_compile` for the iter-22 graph (no bucketing) and measure with an 8-run average to detect σ-level effects.
+- **Implementation**: 708 candidate regions (pure-ATen, no collectives/wait/in-place, ≥4 nodes). Drained 73 decomp entries (suffix-match against `_to_copy`, `t`, `transpose.int`, `silu`, `arange`, `zeros_like`, `ones_like`, `_fused_rms_norm_backward`, `silu_backward`, `embedding_dense_backward`) + cleared `fast_random_decomps` cache. Used `compile_fx_inner` per sub-GraphModule; outputs spliced back via `operator.getitem` (CompiledFxGraph always returns a sequence). Fix-ups: `aten.scatter_.default` doesn't exist on this PyTorch → string-based in-place filter; single-output regions still need a getitem wrapper.
+- **Result**: 472/708 regions compiled (66.7%, avg size 7.8 nodes, 3,687 nodes total Triton-fused); 236 skipped (Inductor lowering failures). Numerics PASS bitwise (loss=9.21808, grad_norm=4.5867). Compile time +134s.
+  - **8-run TPS: 5741 / 5750 / 5744 / 5739 / 5737 / 5739 / 5735 / 5748 → mean 5,741.6, σ=5.3.**
+  - **Δ vs 6,040 baseline: −298 tps (−4.9%)**, ~58σ below mean — **regression discard**.
+- **Analysis**:
+  - **iter-14's +14 tps on the iter-12 graph was 3-run sampling noise.** On a wider 8-run measurement, regional Inductor compile is solidly negative.
+  - **Mechanism for regression**: Triton-fused kernels are slower than the unfused ATen sequence under CUDA graph capture. Three plausible reasons: (a) Inductor's per-region codegen can't see the outer memory-layout decisions, re-introducing materializations that CUDA graphs had eliminated; (b) Triton kernels have their own per-kernel overhead that doesn't go away even in capture; (c) the 472 fused kernels each have launch overhead within the CUDA graph that's not lower than the 3,687 source kernels'.
+  - **Region size is the wrong knob**: avg 7.8 nodes is too small for Triton arithmetic intensity to win.
+- **Lessons (added to LEARNINGS.md)**:
+  - **Regional Inductor compile is anti-synergistic with CUDA graphs.** The iter-8 capture amortizes launches so well that even tiny per-kernel overhead from Inductor's lowering becomes a NET regression.
+  - **Don't trust 3-run "noise" calls.** Iter-14 (and possibly iter-15) measured +14 within iter-12's ~σ=10-15 tps band, called it noise correctly even though we now know σ=4 there might have been narrower. The lesson is to verify with 8-run when a single sub-3% delta could be load-bearing — but ALSO accept that iter-14's measurement was honest.
+
+---
+
 ## iter31 baseline variance characterization — info-only (xxxxxxx)
 
 - **Idea**: Iter-22's "stable" baseline used 3-run averages (6,052 / 6,041 / 6,051 → 6,048). If actual run-to-run σ is much smaller than the ±1.5% (±90 tps) noise threshold used in iter-23+ discards, we may have rejected real-signal +14 tps deltas (iter-14, iter-15) as noise.
