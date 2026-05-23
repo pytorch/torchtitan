@@ -132,6 +132,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run347/run349 command with `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
   Success criteria and expected risk: Success is a completed profiled 10-step run and a concrete bottleneck summary. Do not compare profiled tps directly to unprofiled runs.
+  Result: kept as profile data at source state `a86eeab1`; rank0 step9 wall time was about 1.58s, with rank0 kernel-duration buckets led by MXFP8 nvjet GEMMs (~611 ms), NCCL reduce-scatter/all-gather (~594 ms), MXFP8 cast kernels (~247 ms), elementwise/copy/cat/layernorm overhead, and CUDA launch runtime (~446 ms). Attention, optimizer, and softmax/loss were small.
+
+- Idea: exclude small WKV projections from MXFP8Linear
+  Current best source commit: a86eeab1
+  Source: profile-driven MXFP8 coverage change.
+  Expected mechanism: Keep MXFP8 on the large FFN, WQ, WO, and lm_head linears, but leave the small `attention.qkv_linear.wkv` projections in BF16. The WKV linears have output size 1024 and may not amortize dynamic MXFP8 cast and launch overhead well. Removing 40 small MXFP8 linears should reduce cast/launch overhead while preserving MXFP8 acceleration for the large GEMMs that dominate useful compute.
+  Supporting evidence: Run353 shows MXFP8 cast kernels are a substantial bucket (~247 ms on rank0, similar on other ranks), CUDA launch overhead is large (~408-446 ms per rank), and attention compute itself is small. The converter supports an `fqns` inclusion list, so this is a narrow config-only coverage change.
+  Planned source/config changes: In `qwen3_14b()`, set `MXFP8LinearConverter.Config(..., fqns=["lm_head", "attention.qkv_linear.wq", "attention.wo", "feed_forward"])`.
+  Planned command or config overrides: Use the current best unprofiled batch136 chunks8 command.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that BF16 WKV GEMMs are slower than the saved MXFP8 overhead, or that mixed BF16/MXFP8 coverage changes memory and FSDP behavior unfavorably.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2

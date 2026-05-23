@@ -8532,3 +8532,35 @@ Interpretation:
 - Batch128 chunks2 is too large for the loss/lm_head memory envelope despite the lower batch.
 - The viable loss-chunk settings for the MXFP8 path are now bracketed: chunks8 is the best clean batch136 path, chunks4 is near peak only at batch128 or risky at batch132, and chunks2/chunks4-at-batch136 fall into allocator retries.
 - Pivot to profiling the current MXFP8 best before making another source-level change.
+
+## Experiment 353: Profile MXFP8 Current Best
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run353-profile-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs136-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: keep as profile data; do not compare the profiled tps against unprofiled runs.
+- Step 10 `tps`: 11,028.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.94 GiB, 94.72%.
+- The profiled step completed and wrote rank traces under `profiling/traces/iteration_10/`.
+
+Profile notes:
+
+- Rank0 `ProfilerStep#9` wall time was about 1.58 s.
+- Rank0 kernel-duration buckets: MXFP8 nvjet GEMMs ~611 ms, NCCL reduce-scatter ~424 ms, NCCL all-gather ~170 ms, MXFP8 dim1 casts ~187 ms, MXFP8 dim0 casts ~60 ms, elementwise miscellaneous ~263 ms, copy/cast kernels ~122 ms, cat/split ~103 ms, layernorm ~106 ms, flash attention ~48 ms, optimizer ~17 ms, softmax/loss ~15 ms.
+- Other ranks show the same shape, with GEMMs about 575-609 ms, MXFP8 casts about 240-247 ms total, CUDA launch runtime about 408-447 ms, and NCCL collective kernel sums varying by rank. Ranks 6-7 have the largest reduce-scatter buckets (~702-736 ms), so communication imbalance remains visible.
+
+Roofline interpretation:
+
+- The profiled MXFP8 best is mixed compute/communication/launch overhead, not attention-bound or optimizer-bound.
+- The model is eager because compiled MXFP8 backward hits the Inductor fake-tensor recursion, so CUDA launch overhead and unfused elementwise/cast work are expected to be larger than the non-MXFP8 compiled model path.
+- A targeted next experiment is to reduce MXFP8 dynamic-quantization overhead on small GEMMs. The `attention.qkv_linear.wkv` projections are much smaller than WQ/WO/FFN/lm_head and may not amortize MXFP8 dim casts well; exclude only WKV from the converter while keeping MXFP8 on large linears.
