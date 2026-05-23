@@ -8505,3 +8505,30 @@ Interpretation:
 - Batch132 chunks4 is effectively tied with the 11,202 tps peak but does not exceed it, and it sits above the preferred 95% memory-risk line.
 - The chunks4 interpolation shows a narrow memory/performance ridge: batch128 is safe and near peak, batch132 is near peak but risky, batch136 falls off the allocator cliff.
 - A safer next attempt is batch128 chunks2. That keeps the smaller batch but cuts loss chunks again, testing whether loss overhead rather than batch size can recover the last few tps without crossing the memory cliff.
+
+## Experiment 352: MXFP8 Linear Batch128 Loss Chunks 2
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=2 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run352-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks2-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 7,823.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 171.26 GiB, 96.02%.
+- The allocator warned `expandable_segments: memory mapping failed with OOM` and TorchTitan reported allocation retries on every step after step 1.
+- Loss moved from 12.54062 at step 1 to 11.18875 at step 10 after spiking to 17.19223, so the short-run loss trend is weak.
+
+Interpretation:
+
+- Batch128 chunks2 is too large for the loss/lm_head memory envelope despite the lower batch.
+- The viable loss-chunk settings for the MXFP8 path are now bracketed: chunks8 is the best clean batch136 path, chunks4 is near peak only at batch128 or risky at batch132, and chunks2/chunks4-at-batch136 fall into allocator retries.
+- Pivot to profiling the current MXFP8 best before making another source-level change.

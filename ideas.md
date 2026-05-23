@@ -122,6 +122,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run350 command with `--loss.num_chunks=2`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, no allocator retries, and tps above 11,202. Risk is that larger loss chunks push memory into the same allocator cliff as batch136 chunks4.
+  Result: discarded at source state `43367b5c`; batch128 chunks2 completed but hit allocator retries every step after step1, peaked at 171.26 GiB, ended at 7,823 tps, and loss only moved 12.54062 -> 11.18875 after spiking. Keep chunks4/chunks8 as the viable loss settings.
+
+- Idea: profile MXFP8Linear current best
+  Current best source commit: 43367b5c
+  Source: profiler/roofline pivot after the nearby MXFP8 loss-chunk sweep found the memory cliff.
+  Expected mechanism: Profile the validated batch136 chunks8 MXFP8 command to identify whether the new best is dominated by eager MXFP8 linear casts/GEMMs, FSDP collectives, loss/lm_head, optimizer, or launch overhead. This should guide the next source-level idea instead of further local loss-chunk sweeps.
+  Supporting evidence: Run349 validated batch136 chunks8 at 11,065 tps and 168.94 GiB with no retries. Chunks4/chunks2 variants reveal a memory cliff, so another blind memory/batch knob is less likely than a profiler-directed source change.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run347/run349 command with `--profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1`.
+  Success criteria and expected risk: Success is a completed profiled 10-step run and a concrete bottleneck summary. Do not compare profiled tps directly to unprofiled runs.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
