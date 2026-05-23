@@ -12,6 +12,7 @@ TorchTitan models for vLLM.
 """
 
 import dataclasses
+from dataclasses import dataclass
 
 import torch
 import torch._dynamo
@@ -182,19 +183,16 @@ class VLLMModelWrapper(Module):
 
         # Fill sharding configs on the config BEFORE build so every sub-module
         # is constructed with its ShardingConfig attached (required by the
-        # declarative model.parallelize() API).
-        # Translate vLLM's max_model_len to TrainingConfig.seq_len so the
-        # RoPE cache is sized to exactly what vLLM needs. The seq_len >
-        # rope.max_seq_len check in update_from_config will catch invalid
-        # configs (max_model_len exceeding the model's intrinsic maximum).
-        from types import SimpleNamespace
+        # declarative model.parallelize() API). Need to be called after Attention
+        # module replacement.
+        # Matches the shape of trainer_config (has .parallelism) so
+        # update_from_config can extract parallelism uniformly.
+        @dataclass(kw_only=True, slots=True)
+        class _InferenceConfig:
+            parallelism: ParallelismConfig
 
-        max_model_len = vllm_config.model_config.max_model_len
         self.config.update_from_config(
-            trainer_config=SimpleNamespace(
-                training=TrainingConfig(seq_len=max_model_len),
-                parallelism=parallelism,
-            )
+            trainer_config=_InferenceConfig(parallelism=parallelism)
         )
 
         # TODO: Check if it's possible to apply meta init
