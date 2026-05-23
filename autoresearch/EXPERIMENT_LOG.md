@@ -28,6 +28,24 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter31 baseline variance characterization — info-only (xxxxxxx)
+
+- **Idea**: Iter-22's "stable" baseline used 3-run averages (6,052 / 6,041 / 6,051 → 6,048). If actual run-to-run σ is much smaller than the ±1.5% (±90 tps) noise threshold used in iter-23+ discards, we may have rejected real-signal +14 tps deltas (iter-14, iter-15) as noise.
+- **Procedure**: Ran `bash autoresearch/scripts/run_benchmark.sh` 8 times back-to-back at the current pass list (iter-22 best). No code change.
+- **Result**: 8 runs at 6,047 / 6,039 / 6,035 / 6,040 / 6,035 / 6,044 / 6,041 / 6,041 tps.
+  - **Mean: 6,040.25 tps. σ: 4.1 tps. Range: 12 tps. ±2σ ≈ ±8 tps.**
+  - All runs: bitwise-identical loss=9.21808, grad_norm=4.5867, memory=49.24 GiB.
+- **Analysis**:
+  - **Real noise is ~σ=4 tps, not the ±90 tps band we'd been using.** A +14 tps observation is 3.5σ above the mean — almost certainly real signal.
+  - **The reported iter-22 "best" of 6,048 was 2σ above the long-run mean (6,040).** Three-run averages are too noisy to anchor decisions.
+  - **Reclassification**: iter-29 sink_waits at 6,049 was 2.3σ above the true baseline — could be real (or could be lucky tail). Re-tests with 8-run avg needed to confirm any marginal claim.
+- **Lessons**:
+  - **Always use 8-run averages for ablation/keep decisions on this workload.** A 3-run average has ~σ_mean = σ/√3 ≈ 2.4 tps, meaning even the *mean of 3* runs varies by ~5 tps. An 8-run mean has σ_mean ≈ 1.4 tps, tight enough to detect +14 deltas.
+  - **The σ=4 noise band is small enough that small consistent wins compound visibly.** Several discarded +3 / +9 tps results MAY have been real but were dismissed by the wide threshold.
+  - **Update operating procedure: any new pass must beat baseline by >8 tps over an 8-run average to be considered a "keep"; <8 is discard.**
+
+---
+
 ## iter30 literature research — info-only (xxxxxxx)
 
 - **Idea**: With the FX-level optimization surface seeming exhausted, do focused web research for any recent (2024-2026) FSDP+TP+CUDA-graphs Llama3 H100 optimization techniques we haven't tried.

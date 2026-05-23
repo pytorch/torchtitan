@@ -25,6 +25,12 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   collective launches, etc. are *necessary but not sufficient*. We've
   seen 23% fewer launches and 7-position prefetches that didn't move
   TPS. Always benchmark, don't trust topology metrics.
+- **Use 8-run averages for ablation/keep decisions.** Run-to-run σ on
+  this workload is ~4 tps (measured iter-31 over 8 runs). A 3-run
+  average has σ_mean ≈ 2.4 tps; an 8-run mean has σ_mean ≈ 1.4 tps.
+  The prior ±1.5% threshold (±90 tps) was *much* wider than real noise
+  and may have rejected real-signal +14 tps deltas. **Threshold for
+  keep: >+8 tps (2σ) over 8-run mean of current best.**
 
 ## Patterns that worked
 
