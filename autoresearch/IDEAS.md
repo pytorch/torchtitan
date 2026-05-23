@@ -50,4 +50,5 @@ the beginning:
 - [ ] **Literature research**: When the above ideas are exhausted, search online for recent papers and blog posts on LLM training optimization to find new directions.
 - [~] **Inductor fx_passes coverage**: Sweep remaining untested submodules.
   - 2026-05-23 12:08 — `replace_random_passes`, `fuse_seed_creation_pass`, `fuse_offset_creation_pass` all node-count no-ops (no rand/dropout/bernoulli in inference-style training graph). `auto_chunker` import errors (uses missing `prims.fma`). `comms.*` reorder fns (`sink_waits`, `raise_comms`, `reorder_compute_and_comm_for_overlap`, `reorder_communication_preserving_peak_memory`) all take `BaseSchedulerNode` not FX nodes — not usable as FX passes.
-- [ ] **_to_copy CSE/dedupe**: Recon found 649 _to_copy nodes (420 bf16→fp32, 228 fp32→bf16). If multiple share same input + target dtype, can collapse to one.
+- [x] **_to_copy CSE/dedupe**: Recon found 649 _to_copy nodes (420 bf16→fp32, 228 fp32→bf16). If multiple share same input + target dtype, can collapse to one.
+  - 2026-05-23 12:18 — 0/649 dedup groups with >1 member. `joint_graph_passes` CSE already catches every duplicate. All 649 _to_copy have distinct inputs (genuine conversions, not redundancy). The ~74 ms / 4.6% step cost is real work.

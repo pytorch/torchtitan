@@ -28,6 +28,18 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter28 dedupe_to_copy — discard (xxxxxxx)
+
+- **Idea**: Iter-27 recon found 649 `_to_copy.default` nodes after all pattern passes. If `joint_graph_passes`' CSE misses any (different code paths, layout normalization, etc.), deduping pairs sharing the same `(input, kwargs)` would cut redundant `direct_copy_kernel` launches.
+- **Changes**: Added `dedupe_to_copy` pass between `apply_inductor_pattern_passes` and `disable_uninitialized_memory_fill`. Groups nodes by `(input_node, target_dtype, target_layout, target_device, target_memory_format)`; picks topo-earliest canonical; replaces uses + erases duplicates.
+- **Result**: discard. Scanned 649 `_to_copy` nodes; **0 dedup groups with >1 member** found. Pass was a no-op. tps=6,041 (≡6,048 within noise), numerics bitwise PASS.
+- **Analysis**: `joint_graph_passes`' CSE is thorough — every duplicate cast is already collapsed before we run. All 649 remaining `_to_copy` calls have distinct inputs (genuine intermediate-tensor conversions). The ~74 ms / 4.6% they cost is from genuine work, not redundancy.
+- **Lessons**:
+  - **Don't expect to out-CSE `joint_graph_passes`** — it does pure-op CSE thoroughly, including `_to_copy`.
+  - To reduce the `_to_copy` cost further requires either (a) eliminating the surrounding dtype boundary (e.g. doing RMSNorm in bf16 — bitwise-blocked), (b) fusing the cast into adjacent kernels (Inductor codegen, bitwise-blocked per iter-21), or (c) running 2+ casts in parallel on a side stream (FX-unfriendly).
+
+---
+
 ## iter27 untried_random_passes + post-iter-22 recon — discard (xxxxxxx)
 
 - **Idea**: Three callables in `torch._inductor.fx_passes.replace_random` (`replace_random_passes`, `fuse_seed_creation_pass`, `fuse_offset_creation_pass`) hadn't been tried. Bundle with a recon dump of the post-iter-22 graph (final form after all current passes run) to surface any newly-actionable patterns.
