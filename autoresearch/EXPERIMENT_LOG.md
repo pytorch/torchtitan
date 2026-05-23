@@ -28,6 +28,22 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## remove bucketing from apply_inductor_pattern_passes — keep (pending)
+
+- **Idea**: Iter-22 ablation found that disabling `bucket_all_gather` + `bucket_reduce_scatter` improved tps by ~3% (5,876 → 6,051 in a single run). Verify and keep.
+- **Changes**: Removed the two bucketing calls + `stable_topological_sort` from `apply_inductor_pattern_passes`. Kept `schedule_overlap_bucketing` (still load-bearing per iter-22 ablation note: pruning it drops tps by ~120).
+- **Result**: keep. 3-run check: tps=6,052 / 6,041 / 6,051 → **avg 6,048, mfu=35.42%**, memory=49.24 GiB. Loss=9.21808, grad_norm=4.5867 (bitwise identical). Numerics test PASS. Wall time 143s.
+  - **+2.9% over iter 12, +45.4% over baseline.**
+- **Analysis**:
+  - At iter 7 when bucketing was added, the launch-overhead savings (~+5% tps) dominated the +810/+615 cat/slice/reshape node cost.
+  - **Iter 8 (CUDA graphs) flipped the equation**: it amortizes ALL per-launch overhead, so the launch-count reduction is no longer valuable. But the extra graph nodes (cat/slice/reshape needed to split bucketed outputs) still cost runtime as kernels in the captured graph.
+  - **`schedule_overlap_bucketing` is independently valuable**: it reorders nodes for comm/compute overlap on the NCCL stream (a node-count no-op). Pruning it drops tps ~120, so it stays.
+- **Lessons**:
+  - **Re-ablation matters after new passes are added.** A pass that was helpful at one stage may become counterproductive after later passes change the cost-benefit calculus. The iter-22 ablation surfaced this for bucketing.
+  - **Bucketing-only-when-CUDA-graphs-not-available** is the right policy. If a future iteration disables CUDA graphs (e.g. for shape-changing workloads), bucketing should return.
+
+---
+
 ## unblock_inductor_codegen (bitwise-strict configs) — discard (xxxxxxx)
 
 - **Idea**: Iter 19's codegen drift might come from one of Inductor's many fusion/scheduling flags. Try the maximally-conservative bitwise mode.

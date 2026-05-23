@@ -272,19 +272,11 @@ def apply_inductor_pattern_passes(
     # order (downstream consumers raise "Argument was used before defined"),
     # so we apply an explicit stable topological sort before the next
     # consumer touches the graph.
-    from torch.fx.passes.tools_common import stable_topological_sort
-
-    try:
-        from torch._inductor.fx_passes.bucketing import (
-            bucket_all_gather,
-            bucket_reduce_scatter,
-        )
-
-        _try_pass(gm, "bucket_all_gather", bucket_all_gather, gm)
-        _try_pass(gm, "bucket_reduce_scatter", bucket_reduce_scatter, gm)
-        stable_topological_sort(gm)
-    except ImportError:
-        logger.info("apply_inductor_pattern_passes: bucketing passes not available")
+    # Iter-22 ablation finding: removing bucket_all_gather + bucket_reduce_scatter
+    # improves tps by ~3% post iter-12 (CUDA graphs already amortize launch
+    # overhead, so the +810/+615 nodes the bucketing passes add are pure
+    # cost). schedule_overlap_bucketing alone is enough.
+    from torch.fx.passes.tools_common import stable_topological_sort  # noqa: F401
 
     # 8) overlap_scheduling.schedule_overlap_bucketing - reorders the graph so
     # collectives launched by FSDP/TP are issued well before their consumers,

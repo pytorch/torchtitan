@@ -57,6 +57,19 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   hit "Argument was used before defined". Cost: +63s one-time compile
   time for the analysis; no per-step cost.
 
+- **Removing `bucket_all_gather` + `bucket_reduce_scatter` once
+  CUDA graphs are in place.**
+  **Additional +2.9% TPS (+45.4% cumulative vs baseline), MFU 35.4%**,
+  bitwise identical numerics. Bucketing was helpful before CUDA graphs
+  (iter 7: +5% from reduced launch count), but iter-8's CUDA graph
+  capture amortizes ALL per-launch overhead, so the +810/+615
+  cat/slice/reshape nodes that bucketing adds become pure runtime cost
+  in the captured graph. `schedule_overlap_bucketing` (which only
+  reorders nodes, no node-count change) is independently valuable and
+  must stay. **Generalizable rule**: re-ablate kept passes after major
+  new passes (especially capture/codegen passes) — the cost-benefit can
+  flip.
+
 - **Disabling `torch.utils.deterministic.fill_uninitialized_memory`
   for the captured graph (`disable_uninitialized_memory_fill`).**
   **Additional +5.5% TPS (+41.2% cumulative vs baseline), MFU 34.4%**,
