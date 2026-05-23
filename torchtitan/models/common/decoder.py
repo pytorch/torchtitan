@@ -19,11 +19,9 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     VarlenAttention,
 )
-from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.nn_modules import Embedding, Linear, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
