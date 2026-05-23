@@ -28,6 +28,21 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## tune_aten_distributed_optimizations — discard (xxxxxxx)
+
+- **Idea**: `schedule_overlap_bucketing` (load-bearing per iter-23 ablation) runs with all `torch._inductor.config.aten_distributed_optimizations.*` knobs at their `None` defaults. We have ~31 GiB of GPU memory headroom; raising the memory budget for prefetch and using a more accurate compute estimator might give the scheduler more reordering opportunities.
+- **Changes**: Before calling `schedule_overlap_bucketing(gm)`, set (each in its own try/except): `max_memory_increase_gb=20.0`, `max_in_flight_gb=10.0`, `max_compute_pre_fetch=200`, `compute_estimator="benchmark"`. All 4 attrs existed on this PyTorch build.
+- **Result**: discard. 2 runs: tps=6,040 / 6,038 → avg 6,039 (mfu 35.37%), memory=49.24 GiB. Numerics bitwise PASS (loss=9.21808, grad_norm=4.5867). −0.15% vs iter-22 baseline (within noise).
+- **Analysis**:
+  - `compute_estimator` already defaults to `"benchmark"` on this PyTorch build (verified at `pytorch/torch/_inductor/config.py:1215`) — that knob was a no-op.
+  - Peak memory stayed at 49.24 GiB identical to baseline, confirming the prefetch budget was never the binding constraint at the `None` defaults.
+  - The scheduler must already be finding all overlap opportunities the graph affords. Raising the memory budget and lookahead window doesn't unlock additional reordering.
+- **Lessons**:
+  - **The overlap scheduling surface is saturated.** `schedule_overlap_bucketing` at its default settings already extracts all the overlap this graph affords; tuning its budget/lookahead knobs doesn't help.
+  - **Pre-flight check the defaults first.** Half our knobs (`compute_estimator`) were already at the value we tried to set. Future PyTorch config-tuning experiments should diff against current defaults to avoid no-op assignments.
+
+---
+
 ## replace_overwritten_zeros_with_empty — discard (xxxxxxx)
 
 - **Idea**: Iter-24 re-profile noted ~74 hidden `FillFunctor<float>` invocations (~18 ms) on top of 88 raw ones (~19 ms). Iter-12 only covered `aten.empty.*`; maybe `aten.zeros/full/ones/.*_like` with full-overwrite users would qualify too.
