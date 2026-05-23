@@ -293,6 +293,18 @@ def _get_tensor_info(node: torch.fx.Node) -> tuple[tuple[int, ...], torch.dtype 
     return (), None
 
 
+def _is_complex_node(node: torch.fx.Node) -> bool:
+    """True if the node's val (or any element of a tuple val) is a complex tensor."""
+    val = node.meta.get("val")
+    if isinstance(val, torch.Tensor):
+        return val.dtype.is_complex
+    if isinstance(val, (tuple, list)):
+        return any(
+            isinstance(v, torch.Tensor) and v.dtype.is_complex for v in val
+        )
+    return False
+
+
 def _is_unfusable(node: torch.fx.Node) -> bool:
     target_str = str(node.target)
     if target_str in _UNFUSABLE_OPS:
@@ -879,6 +891,11 @@ class InductorRegionExtractor(RegionExtractor):
             if all(is_view_node(n) or n.op != "call_function" for n in comp):
                 continue
             if any(_is_unfusable(n) for n in comp if n.op == "call_function"):
+                continue
+
+            # Skip complex-tensor regions — triton kernels can't reliably
+            # handle complex dtypes (conjugate views break at runtime).
+            if any(_is_complex_node(n) for n in comp):
                 continue
 
             result = _extract_subgraph(comp, gm)
