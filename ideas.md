@@ -152,6 +152,7 @@
   Planned source/config changes: In `qwen3_14b()`, switch `optimizer` from `OptimizersContainer.Config` to `OptimizersInBackwardContainer.Config`.
   Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command with `--training.local_batch_size=144`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that memory savings are insufficient, throughput falls from per-parameter optimizer hooks, or `grad_norm` becomes unavailable/zero as in prior optimizer-in-backward tests.
+  Result: crashed/OOM at source state `d52e1242`; batch144 still entered allocator retries immediately, `grad_norm` was zero, and rank 6 SIGABRTed after step 4. Optimizer-in-backward does not rescue the MXFP8 batch144 memory cliff.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2

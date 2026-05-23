@@ -8592,3 +8592,30 @@ Interpretation:
 - WKV MXFP8 conversion is still worth keeping for this workload. Excluding WKV avoids a small amount of memory but does not improve throughput.
 - The profile's cast/launch overhead cannot be reduced profitably by this simple small-linear coverage filter.
 - Restore full MXFP8 coverage before continuing.
+
+## Experiment 355: MXFP8 Optimizer-In-Backward Batch144
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=144 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run355-mxfp8-optimizer-in-backward-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs144-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Switched `qwen3_14b()` optimizer from `OptimizersContainer.Config` to `OptimizersInBackwardContainer.Config`.
+
+Result:
+
+- Status: OOM/crash.
+- Reached step 4, then rank 6 SIGABRTed and torchrun terminated the job.
+- Step 4 `tps`: 9,232, before failure.
+- Max logged memory: 173.96 GiB, 97.54%.
+- The allocator warned `expandable_segments: memory mapping failed with OOM` before every logged step.
+- `grad_norm` was reported as 0.0000, matching the known optimizer-in-backward metric caveat.
+
+Interpretation:
+
+- Optimizer-in-backward does not reduce memory enough to make MXFP8 batch144 viable.
+- The batch144 memory cliff is dominated by activation/loss/FSDP/MXFP8 runtime state rather than retained optimizer gradients alone.
+- Restore the normal optimizer before continuing.
