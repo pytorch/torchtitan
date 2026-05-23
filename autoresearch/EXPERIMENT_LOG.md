@@ -28,6 +28,26 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## cleanup_redundant_ops — discard (xxxxxxx)
+
+- **Idea**: Look for survivors after iter-5 passes: redundant double-transpose, redundant clone, view-of-view collapse, identity permute/squeeze/unsqueeze/expand.
+- **Recon counts** (iter-12 graph): double_transpose=450, redundant_clone=354, view_of_view=257; permute_identity / squeeze_unsqueeze / dead_to_copy / expand_identity = 0 each.
+- **Result**: discard. Only double_transpose was safely applicable (numerics pass after 450 removals). tps=5,879 ≈ iter-12 5,876 (+0.05%, noise). Clone and view-of-view removal **broke runtime** with "view size is not compatible with input tensor's size and stride" — surviving clones serve as contiguity canonicalizations, surviving views depend on inner-view strides. Inductor preserves both intentionally.
+- **Lessons**:
+  - **450 double-transpose removals = 0 TPS win** because Inductor's downstream codegen already collapses them during lowering. FX-level removal is redundant work.
+  - The clone / view-of-view "survivors" are NOT bugs — they encode stride/layout requirements that downstream consumers depend on. Removing them silently breaks numerics or runtime.
+  - **The graph after iter-5 passes is essentially fully optimized at the FX level for low-risk pattern rewrites.** Future wins require either deeper transforms (kernel-level fusion, codegen) or attacking different categories (numerics-blocked or out-of-graph items).
+
+---
+
+## collapse_cat_of_upcasts — discard (xxxxxxx)
+
+- **Idea**: Iter-11 recon (on the bare make_fx graph) found 290 `_to_copy(bf16→fp32) → shape_op → cat.default(...)` chains. Collapse: `cat([_to_copy(x_i, fp32) for x_i])` → `_to_copy(cat([x_i]), fp32)` when all cat inputs share an upcast and source dtype.
+- **Result**: discard. **0 patterns found** in the post-iter-5 graph (260 cat nodes and 551 `_to_copy` nodes exist but no `_to_copy → cat` adjacency remains). `joint_graph_passes` already collapsed them upstream.
+- **Lessons**: The iter-11 recon was on the bare make_fx graph; the iter-12 graph is post-iter-5 and post-iter-7. Inductor's pattern matchers run early in our pipeline and have already done this work. **Recon counts at one pipeline stage do not predict opportunities at later stages.**
+
+---
+
 ## regional_inductor_compile — discard (xxxxxxx)
 
 - **Idea**: Whole-graph `compile_fx` is blocked by DTensor's `_get_submesh` and `compile_fx`'s reinplace pass. Compile only **pure-ATen connected subgraphs** (no collectives, no `wait_tensor`, no `_get_submesh`, no in-place) via `compile_fx_inner`, replace nodes with `call_function(compiled_fn, ...)`.
