@@ -219,9 +219,9 @@ class TokenChoiceTopKRouter(Module):
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 - top_scores (torch.Tensor):
-                    Routing scores for selected experts with shape ``(N, top_k)``.
+                    Routing scores for selected experts with shape ``(bs, slen, top_k)``.
                 - selected_experts_indices (torch.Tensor):
-                    Expert indices selected for each token with shape ``(N, top_k)``.
+                    Expert indices selected for each token with shape ``(bs, slen, top_k)``.
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
@@ -384,9 +384,10 @@ class MoE(Module):
 
             sync_combine()
 
+        out = out.reshape(bs, slen, dim)
         if shared_out is not None:
             out = out + shared_out
-        return out.reshape(bs, slen, dim)
+        return out
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
