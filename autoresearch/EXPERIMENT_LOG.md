@@ -28,6 +28,25 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## functionalize_collectives_and_compile_fx — discard (xxxxxxx)
+
+- **Idea**: The blocker for Inductor codegen (iter 6) was the in-place `_c10d_functional.all_reduce_.default` collective. Swap all in-place functional collectives for their functional+wait_tensor equivalents, then try `compile_fx_inner` again to unlock Triton kernel codegen.
+- **Changes**: Added `functionalize_collectives_and_compile_fx` pass with helpers `_swap_inplace_collective_node` and `_try_compile_fx_codegen`. Registered AFTER `apply_inductor_pattern_passes` and BEFORE `install_cuda_graph`.
+- **Result**: discard. 3-run avg tps=5,480 (mfu=32.08%) vs iter-8 5,566 → **−1.5% regression**. Loss/grad_norm bitwise identical. Numerics PASS.
+- **Outcomes per phase**:
+  - **Collective swap**: 133 in-place ops swapped (68 `all_reduce_` + 65 `all_gather_into_tensor_out`; 0 `reduce_scatter_tensor_out`). Numerics OK on swap alone, but adds 133 extra `wait_tensor` dispatches (one per swap) → small TPS regression.
+  - **`compile_fx_inner`**: drained 10 "both a fallback and a decomp" assertions by deleting offending ops from `L.decompositions` (`_to_copy`, `t`, `transpose.int`, `silu`, `arange`, `zeros_like`, `ones_like`, `_fused_rms_norm_backward`, `silu_backward`, `embedding_dense_backward`). Then hit unrecoverable `AssertionError: device_mesh._get_submesh is not an OpOverload` — a non-ATen DTensor compile-time helper in the joint graph.
+  - **`fx_codegen_and_compile`**: same root cause.
+  - **`compile_fx`**: Inductor's `post_grad` reinplace pass resurrects the in-place collectives → fails again. Re-introduced after our swap.
+  - **Net codegen impact**: zero (every entry point blocked).
+- **Lessons**:
+  - **`compile_fx`'s reinplace pass re-introduces in-place collectives** even after we explicitly swapped them. The reinplace machinery treats functional+wait as redundant.
+  - **`compile_fx_inner` decomp/fallback conflicts can be drained** by deleting offending entries from `torch._inductor.lowering.decompositions`, but you only delay the wall, you don't move it.
+  - **The real structural blocker is `device_mesh._get_submesh`** — DTensor's redistribute emits this non-ATen Python op into the joint graph. Inductor refuses any non-`OpOverload` op. **To unlock codegen, either (a) re-trace with a graph that doesn't emit `_get_submesh`, or (b) replace `_get_submesh` nodes with their resolved literal value (a sub-mesh constant) before codegen.**
+  - **Free `wait_tensor` dispatches aren't free** — adding 133 of them cost −1.5% TPS. The fewer the collective sync points, the better. So the iter-7 bucketing's reduction of total collectives is doubly valuable.
+
+---
+
 ## install_cuda_graph — keep (63c54ff)
 
 - **Idea**: After iter 7's pattern passes, the graph is largely static — same ops, same shapes every step. Wrap the joint fwd+bwd graph in a `torch.cuda.CUDAGraph` and replay each step to eliminate CPU launch overhead. Functional collectives in recent PyTorch are cuda-graph-friendly.

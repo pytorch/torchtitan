@@ -81,11 +81,28 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
     custom (non-ATen) operator whose output has alias annotations".
   - `compile_fx_inner` (after iter 5's pattern passes) fails with
     "_to_copy.default registered twice" in Inductor's decomp/fallback
-    registry — likely because joint_graph_passes left state.
-  - **Takeaway**: routing this graph through Inductor codegen requires
-    either regional compile (subgraphs without collectives), or a fresh
-    re-trace path that avoids the in-place collective. Don't expect
-    drop-in whole-graph compile to work.
+    registry. **Drainable** by deleting offending entries from
+    `torch._inductor.lowering.decompositions` for these ops:
+    `_to_copy, t, transpose.int, silu, arange, zeros_like, ones_like,
+    _fused_rms_norm_backward, silu_backward, embedding_dense_backward`.
+  - After draining decomp conflicts, the **real wall** is `device_mesh._get_submesh`
+    in the joint graph — a non-ATen Python op emitted by DTensor's
+    redistribute. Inductor refuses any non-`OpOverload` op with
+    `AssertionError: ... is not an OpOverload`.
+  - `compile_fx`'s `post_grad` reinplace pass **resurrects in-place
+    collectives** even when we explicitly swapped them out beforehand.
+  - **Takeaway**: to unlock Inductor codegen on this graph, we must
+    either (a) replace `_get_submesh` nodes with their resolved sub-mesh
+    constant before invoking codegen, OR (b) compile only **regions**
+    that exclude DTensor helpers and in-place collectives. Drop-in
+    whole-graph codegen on the make_fx joint graph won't work.
+
+- **Functionalizing in-place collectives by adding `wait_tensor`.**
+  Swapping 133 in-place ops (`all_reduce_`, `all_gather_into_tensor_out`)
+  to functional + wait cost **−1.5% TPS** despite preserving numerics:
+  each extra `wait_tensor` dispatch has measurable per-step cost. The
+  fewer the collective sync points, the better (this also explains why
+  iter-7 bucketing's reduction of total collectives is doubly valuable).
 
 - **Same-dtype `_to_copy.default` elimination.** All 842 `_to_copy.default`
   nodes are genuine fp32↔bf16 mixed-precision casts; none satisfy the
