@@ -42,8 +42,10 @@ class CPVarlenMetadata(VarlenMetadata):
     ``_shard_varlen_metadata`` (outside the model loop) to avoid GPU→CPU
     synchronizations inside ``cp_forward``.
     """
+
     k_slice_start: int  # start index into allgathered global K
     k_slice_end: int  # end index into allgathered global K
+
 
 def _shard_varlen_metadata(
     metadata: VarlenMetadata,
@@ -66,8 +68,12 @@ def _shard_varlen_metadata(
     local_start = cp_rank * seq_len // cp_world_size
     local_end = (cp_rank + 1) * seq_len // cp_world_size
 
-    local_cu_seq_q, count_cu_seq_q = metadata.cu_seq_q.clamp(local_start, local_end).unique_consecutive(return_counts=True)
-    local_cu_seq_k = metadata.cu_seq_k[count_cu_seq_q[0]-1 : (-count_cu_seq_q[-1]+1) or None].clamp(max=local_end)
+    local_cu_seq_q, count_cu_seq_q = metadata.cu_seq_q.clamp(
+        local_start, local_end
+    ).unique_consecutive(return_counts=True)
+    local_cu_seq_k = metadata.cu_seq_k[
+        count_cu_seq_q[0] - 1 : (-count_cu_seq_q[-1] + 1) or None
+    ].clamp(max=local_end)
     local_max_q = int(local_cu_seq_q.diff().max().item())
     local_max_k = int(local_cu_seq_k.diff().max().item())
 
@@ -157,14 +163,20 @@ def apply_cp_to_forward(
 
                 def cp_forward(q, k, v, **kwargs):
                     attn_masks = kwargs.get("attention_masks")
-                    assert isinstance(attn_masks, CPVarlenMetadata), "Expected CPVarlenMetadata in attention_masks"
+                    assert isinstance(attn_masks, CPVarlenMetadata), (
+                        "Expected CPVarlenMetadata in attention_masks"
+                    )
                     k = k.contiguous()
                     v = v.contiguous()
                     global_k, global_v = flex_cp_allgather(k, v, 1, pg_name)
                     # k_slice_start / k_slice_end are plain Python ints
                     # pre-computed in _shard_varlen_metadata — no GPU→CPU sync.
-                    global_k = global_k[:, attn_masks.k_slice_start:attn_masks.k_slice_end]
-                    global_v = global_v[:, attn_masks.k_slice_start:attn_masks.k_slice_end]
+                    global_k = global_k[
+                        :, attn_masks.k_slice_start : attn_masks.k_slice_end
+                    ]
+                    global_v = global_v[
+                        :, attn_masks.k_slice_start : attn_masks.k_slice_end
+                    ]
                     return orig_fn(q, global_k, global_v, **kwargs)
 
                 return cp_forward
@@ -314,17 +326,26 @@ def cp_shard(
                 ),
             )
         case VarlenMetadata():
-            # Instead of sharding directly in the sequence length dimension,
-            # we first reshape to [1, batch_size * seq_len] and shard.
-            # this let us treat the entire batch as a single sequence, which is necessary for
-            # correct sharding with variable-length inputs.
+            # Reshape [batch_size, seq_len] → [1, batch_size * seq_len] before
+            # sharding so the entire batch is treated as a single packed sequence.
+            # This preserves document boundaries that span sample boundaries, which
+            # is required for correct varlen sharding.
+            # NOTE: after this reshape the model operates with effective batch_size=1
+            # and a longer sequence. This is safe because the model is batch-invariant,
+            # but requires (batch_size * seq_len) to be divisible by cp_world_size.
+            total_tokens = batch_size * seq_len
+            if total_tokens % cp_world_size != 0:
+                raise ValueError(
+                    f"For VarlenAttention CP, batch_size * seq_len ({total_tokens}) "
+                    f"must be divisible by context_parallel_degree ({cp_world_size})."
+                )
             inputs = cast(
                 tuple[torch.Tensor, ...],
                 _context_parallel_shard(
                     mesh=cp_mesh,
                     buffers=tuple(buf.reshape(1, -1) for buf in inputs),
                     seq_dims=tuple(input_seq_dim for _ in inputs),
-                    load_balancer=None,  # VarlenMetadata sharding is handled separately in _shard_varlen_metadata
+                    load_balancer=None,
                 ),
             )
         case _:
@@ -341,7 +362,10 @@ def cp_shard(
     match attention_masks:
         case VarlenMetadata():
             if load_balancer is not None:
-                raise ValueError("Load balancer must be disabled for variable-length attention")
+                raise ValueError(
+                    "Load balancer must be disabled for VarlenAttention CP. "
+                    "Set --parallelism.context_parallel_load_balancer=none in your config."
+                )
             attention_masks = _shard_varlen_metadata(
                 attention_masks, cp_mesh, seq_len * batch_size, cp_world_size
             )

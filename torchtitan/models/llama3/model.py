@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
+from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.tools.logging import logger

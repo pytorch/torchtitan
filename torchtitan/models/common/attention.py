@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -108,9 +108,9 @@ class VarlenAttention(Module):
         scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, VarlenMetadata
-        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        assert isinstance(attention_masks, VarlenMetadata), (
+            f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        )
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -224,9 +224,9 @@ class FlexAttention(Module):
         enable_gqa: bool = False,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, (BlockMask, type(None))
-        ), f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+        assert isinstance(attention_masks, (BlockMask, type(None))), (
+            f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+        )
 
         # Transpose to (bs, heads, seq, dim) for flex_attention
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
@@ -475,7 +475,9 @@ class BaseAttention(Module):
             assert self.mask_type in [
                 "causal",
                 "block_causal",
-            ], f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
+            ], (
+                f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
+            )
             if (
                 isinstance(self.inner_attention, ScaledDotProductAttention.Config)
                 and self.mask_type == "block_causal"
