@@ -3,12 +3,21 @@
 
 Eager is truth. torch.compile is trusted as "good enough" — we measure
 its drift from eager but always mark it PASS. The triton kernel is
-accepted if its drift from eager is no worse than torch.compile's drift
-(or within the tolerance tier, whichever is looser).
+accepted if it satisfies an effective allclose against eager:
+
+    |triton - eager| <= atol_eff + rtol * |eager|
+
+where ``atol_eff = max(tol_tier_atol, compile_max_abs_err)`` — the tier
+floor expanded to whatever compile already drifts to. This collapses
+"within tolerance" and "no worse than compile" into a single test and
+avoids the rel_err blow-up at the bf16 noise floor.
+
+Errors are reported as ``max_tol_units = max(|a-b| / (atol+rtol*|b|))``:
+unitless, ``<= 1.0`` means PASS.
 
 For each kernel in <dir>/<name>/:
-  1. Measure torch.compile vs eager → record drift, status=PASS.
-  2. Measure triton vs eager → accept if <= max(tol, compile_drift).
+  1. Measure torch.compile vs eager → record max_abs / max_tol_units, PASS.
+  2. Measure triton vs eager under atol_eff → PASS iff max_tol_units <= 1.
   3. Benchmark eager, triton (if PASS), and compile (if PASS).
   4. Write benchmark.json with per-backend status + timings + errors.
 
@@ -102,51 +111,48 @@ def _benchmark_fn(fn, inputs, warmup=WARMUP, iters=BENCH_ITERS):
     return start_event.elapsed_time(end_event) / iters
 
 
-# When computing relative error, ignore elements whose reference magnitude
-# is below this threshold — they cause meaningless huge ratios (1e-7 / 1e-12).
-_REL_ERR_REF_FLOOR = 1e-3
+def _pairwise_errors(
+    a: torch.Tensor, b: torch.Tensor, atol: float, rtol: float
+) -> tuple[float, float]:
+    """Return (max_abs_err, max_tol_units) for a vs reference b.
 
-
-def _pairwise_errors(a: torch.Tensor, b: torch.Tensor) -> tuple[float, float]:
-    """Return (max_abs_err, max_rel_err) for a vs reference b.
-
-    max_rel_err is computed only over elements where |b| >= _REL_ERR_REF_FLOOR,
-    avoiding the |a-b|/|b|→∞ blow-up near zero.
+    Uses the standard allclose formula: an element passes iff
+    ``|a-b| <= atol + rtol * |b|``. ``max_tol_units`` is the worst-case
+    ``|a-b| / (atol + rtol*|b|)`` across all elements — a unitless
+    "how far over budget" number. ``<= 1.0`` means every element
+    satisfies allclose. Naturally handles near-zero |b| because the
+    ``atol`` term floors the denominator.
     """
     diff = (a - b).abs()
     max_abs = diff.max().item() if diff.numel() else 0.0
-    mask = b.abs() >= _REL_ERR_REF_FLOOR
-    if mask.any():
-        rel = diff[mask] / b.abs()[mask]
-        max_rel = rel.max().item()
-    else:
-        max_rel = 0.0
-    return max_abs, max_rel
+    budget = atol + rtol * b.abs()
+    units = diff / budget  # budget >= atol > 0 so no division-by-zero
+    max_units = units.max().item() if units.numel() else 0.0
+    return max_abs, max_units
 
 
-def _compute_errors(out_candidate, out_ref) -> tuple[float, float, str | None]:
-    """Compute (max_abs_err, max_rel_err, error_message_or_None).
-
-    Walks tuples/lists pairwise, casts to float32 for comparison, returns
-    max errors across all elements. max_rel_err uses _pairwise_errors
-    (only counts elements above the reference floor).
+def _compute_errors(
+    out_candidate, out_ref, atol: float, rtol: float
+) -> tuple[float, float, str | None]:
+    """Compute (max_abs_err, max_tol_units, error_message_or_None) over
+    a possibly-nested tuple of tensors. Casts to float32 for comparison.
     """
     if isinstance(out_ref, (tuple, list)):
         if not isinstance(out_candidate, (tuple, list)):
             return 0.0, 0.0, "candidate returned Tensor, expected tuple"
         if len(out_candidate) != len(out_ref):
             return 0.0, 0.0, f"tuple length mismatch: {len(out_candidate)} vs {len(out_ref)}"
-        max_abs, max_rel = 0.0, 0.0
+        max_abs, max_units = 0.0, 0.0
         for i, (k, r) in enumerate(zip(out_candidate, out_ref)):
             if not isinstance(k, torch.Tensor) or not isinstance(r, torch.Tensor):
                 continue
             if k.shape != r.shape:
-                return max_abs, max_rel, f"output[{i}] shape mismatch: {k.shape} vs {r.shape}"
+                return max_abs, max_units, f"output[{i}] shape mismatch: {k.shape} vs {r.shape}"
             a, b = k.float().to(r.device), r.float()
-            abs_err, rel_err = _pairwise_errors(a, b)
+            abs_err, units = _pairwise_errors(a, b, atol, rtol)
             max_abs = max(max_abs, abs_err)
-            max_rel = max(max_rel, rel_err)
-        return max_abs, max_rel, None
+            max_units = max(max_units, units)
+        return max_abs, max_units, None
 
     if isinstance(out_candidate, tuple):
         if len(out_candidate) == 1:
@@ -156,18 +162,20 @@ def _compute_errors(out_candidate, out_ref) -> tuple[float, float, str | None]:
     if out_candidate.shape != out_ref.shape:
         return 0.0, 0.0, f"shape mismatch: {out_candidate.shape} vs {out_ref.shape}"
     a, b = out_candidate.float().to(out_ref.device), out_ref.float()
-    abs_err, rel_err = _pairwise_errors(a, b)
-    return abs_err, rel_err, None
+    abs_err, units = _pairwise_errors(a, b, atol, rtol)
+    return abs_err, units, None
 
 
-def _measure_diff(candidate_fn, eager_fn, get_inputs) -> dict:
+def _measure_diff(
+    candidate_fn, eager_fn, get_inputs, atol: float, rtol: float
+) -> dict:
     """Run NUM_CORRECTNESS_TRIALS trials comparing candidate to eager.
 
-    Returns max_abs_err / max_rel_err across trials plus the last input
-    tuple. Does NOT decide pass/fail — that's the caller's job. On
-    execution or shape error, sets ``_exec_error`` and stops early.
+    Returns max_abs_err / max_tol_units across trials plus the last input
+    tuple. Does NOT decide pass/fail — caller does. On execution or
+    shape error, sets ``_exec_error`` and stops early.
     """
-    max_abs, max_rel = 0.0, 0.0
+    max_abs, max_units = 0.0, 0.0
     last_inputs = None
     for trial in range(NUM_CORRECTNESS_TRIALS):
         torch.manual_seed(trial * 137 + 42)
@@ -181,23 +189,23 @@ def _measure_diff(candidate_fn, eager_fn, get_inputs) -> dict:
         except Exception as e:
             return {
                 "max_abs_err": max_abs,
-                "max_rel_err": max_rel,
+                "max_tol_units": max_units,
                 "_last_inputs": last_inputs,
                 "_exec_error": f"execution (trial {trial}): {e}",
             }
-        abs_err, rel_err, err_msg = _compute_errors(cand_out, ref_out)
+        abs_err, units, err_msg = _compute_errors(cand_out, ref_out, atol, rtol)
         if err_msg:
             return {
                 "max_abs_err": max_abs,
-                "max_rel_err": max_rel,
+                "max_tol_units": max_units,
                 "_last_inputs": last_inputs,
                 "_exec_error": err_msg,
             }
         max_abs = max(max_abs, abs_err)
-        max_rel = max(max_rel, rel_err)
+        max_units = max(max_units, units)
     return {
         "max_abs_err": max_abs,
-        "max_rel_err": max_rel,
+        "max_tol_units": max_units,
         "_last_inputs": last_inputs,
     }
 
@@ -230,60 +238,69 @@ def run_one(name: str) -> dict:
     model = model_cls()
 
     # --- Measure torch.compile drift from eager (trusted, always PASS) ---
+    # Reported with the tier (atol, rtol); status is PASS regardless.
     compiled_fn = None
-    compile_abs, compile_rel = 0.0, 0.0
+    compile_abs = 0.0
     compile_result: dict
     try:
         compiled_fn = torch.compile(model.forward, fullgraph=True)
-        res = _measure_diff(compiled_fn, model, get_inputs)
+        res = _measure_diff(compiled_fn, model, get_inputs, atol, rtol)
         compile_inputs = res.pop("_last_inputs", None)
         exec_err = res.pop("_exec_error", None)
-        compile_abs, compile_rel = res["max_abs_err"], res["max_rel_err"]
+        compile_abs = res["max_abs_err"]
+        compile_units = res["max_tol_units"]
         if exec_err is not None:
             compile_result = {
                 "status": "ERROR", "tol_tier": tol_tier,
-                "max_abs_err": compile_abs, "max_rel_err": compile_rel,
+                "max_abs_err": compile_abs, "max_tol_units": compile_units,
                 "reason": exec_err,
             }
         else:
             compile_result = {
                 "status": "PASS", "tol_tier": tol_tier,
-                "max_abs_err": compile_abs, "max_rel_err": compile_rel,
+                "max_abs_err": compile_abs, "max_tol_units": compile_units,
                 "note": "trusted baseline",
             }
     except Exception as e:
         compile_inputs = None
         compile_result = {
             "status": "ERROR", "tol_tier": tol_tier,
-            "max_abs_err": 0.0, "max_rel_err": 0.0,
+            "max_abs_err": 0.0, "max_tol_units": 0.0,
             "reason": f"torch.compile failed: {e}",
         }
 
-    # --- Measure triton drift from eager; accept if no worse than compile ---
-    abs_bound = max(atol, compile_abs)
-    rel_bound = max(rtol, compile_rel)
-    res = _measure_diff(kernel_fn, model, get_inputs)
+    # --- Measure triton drift from eager; accept via effective allclose ---
+    # Effective atol is loosened to whatever compile already drifts to, so
+    # "no worse than compile" passes automatically. rtol stays as the tier
+    # value. PASS iff every element satisfies |triton-eager| <= atol_eff +
+    # rtol*|eager|, i.e. max_tol_units <= 1.0.
+    atol_eff = max(atol, compile_abs)
+    res = _measure_diff(kernel_fn, model, get_inputs, atol_eff, rtol)
     triton_inputs = res.pop("_last_inputs", None)
     exec_err = res.pop("_exec_error", None)
-    triton_abs, triton_rel = res["max_abs_err"], res["max_rel_err"]
+    triton_abs = res["max_abs_err"]
+    triton_units = res["max_tol_units"]
     if exec_err is not None:
         triton_result = {
             "status": "FAIL", "tol_tier": tol_tier,
-            "max_abs_err": triton_abs, "max_rel_err": triton_rel,
+            "max_abs_err": triton_abs, "max_tol_units": triton_units,
             "reason": exec_err,
         }
-    elif (triton_abs <= abs_bound) and (triton_rel <= rel_bound):
+    elif triton_units <= 1.0:
         triton_result = {
             "status": "PASS", "tol_tier": tol_tier,
-            "max_abs_err": triton_abs, "max_rel_err": triton_rel,
+            "max_abs_err": triton_abs, "max_tol_units": triton_units,
+            "atol_eff": atol_eff, "rtol": rtol,
         }
     else:
         triton_result = {
             "status": "FAIL", "tol_tier": tol_tier,
-            "max_abs_err": triton_abs, "max_rel_err": triton_rel,
+            "max_abs_err": triton_abs, "max_tol_units": triton_units,
+            "atol_eff": atol_eff, "rtol": rtol,
             "reason": (
-                f"triton drift ({triton_abs:.4e}/{triton_rel:.4e}) exceeds "
-                f"max(tol, compile_drift)=({abs_bound:.4e}/{rel_bound:.4e})"
+                f"max_tol_units={triton_units:.3f} > 1.0 "
+                f"(atol_eff={atol_eff:.4e}, rtol={rtol:.4e}, "
+                f"max_abs_err={triton_abs:.4e})"
             ),
         }
     bench_inputs = triton_inputs or compile_inputs
@@ -347,13 +364,18 @@ def _print_row(r):
     eager = _fmt(eager_ms)
     tri_t = _fmt(triton.get("time_ms")) if triton.get("status") == "PASS" else "-"
     cmp_t = _fmt(compile_.get("time_ms")) if compile_.get("status") == "PASS" else "-"
-    tri_err = f"{triton.get('max_abs_err', 0):.2e}" if "max_abs_err" in triton else "-"
-    cmp_err = f"{compile_.get('max_abs_err', 0):.2e}" if "max_abs_err" in compile_ else "-"
+
+    def err_str(d):
+        if "max_tol_units" not in d:
+            return "-"
+        u = d["max_tol_units"]
+        a = d.get("max_abs_err", 0.0)
+        return f"{u:.2f}u/{a:.2e}"
 
     print(
         f"  {name:<14} eager={eager:>7}ms  "
-        f"triton={tri_s:<14} {tri_t:>7}ms err={tri_err:<10}  "
-        f"compile={cmp_s:<14} {cmp_t:>7}ms err={cmp_err}"
+        f"triton={tri_s:<14} {tri_t:>7}ms err={err_str(triton):<18}  "
+        f"compile={cmp_s:<14} {cmp_t:>7}ms err={err_str(compile_)}"
     )
 
 
