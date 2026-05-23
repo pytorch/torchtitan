@@ -224,6 +224,16 @@
   Success criteria and expected risk: Success is tps above 11,386 with finite overall-decreasing loss and lower memory. Risk is lower useful work per step reducing reported tps.
   Result: discarded at source state `d05e782e`; batch124 chunks4 completed cleanly at 11,134 tps and 161.67 GiB, below batch128. The no-cast chunks4 batch-size curve turns over by batch124, so keep batch128.
 
+- Idea: profile MXFP8 no-cast batch128 chunks4
+  Current best source commit: 6074a43
+  Source: profiler follow-up after batch128 chunks4 replaced batch132 chunks4 as the safer throughput peak.
+  Expected mechanism: Profile the new active best to verify whether lowering memory changed the bottleneck balance and to guide the next source/command idea.
+  Supporting evidence: Batch128 chunks4 improved tps and memory versus batch132, but the previous profile was on batch132.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the no-cast batch128 chunks4 command with TorchTitan profiler active on step 10.
+  Success criteria and expected risk: Success is completed traces and updated bottleneck summary. Profiled tps is not used for ranking.
+  Result: kept as profile data at source state `6074a430`; profile completed and showed the same bottleneck mix as batch132 with lower wall time: MXFP8 GEMMs, rank-skewed FSDP collectives, copy/cast kernels, MXFP8 casts, and launch overhead. Keep targeting those buckets.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.

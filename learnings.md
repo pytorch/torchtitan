@@ -8936,3 +8936,36 @@ Interpretation:
 
 - Batch124 chunks4 is clean and much lower memory, but it gives up too much useful work per step.
 - The no-cast chunks4 batch-size sweep now brackets batch128 as the best point among 124/128/132.
+
+## Experiment 367: Profile MXFP8 No-Cast Batch128 Chunks4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run367-profile-mxfp8-no-fsdp-forward-input-casts-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as profile data; do not compare profiled tps against unprofiled runs.
+- Step 10 `tps`: 11,179.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.26 GiB, 93.22%.
+- The profiled step completed and wrote rank traces under `profiling/traces/iteration_10/`.
+- The FSDP2 MXFP8 view-output warning remained present.
+
+Profile notes:
+
+- Rank0 `ProfilerStep` wall time was about 1.46 s.
+- Rank0 kernel-duration buckets: MXFP8 nvjet GEMMs ~573 ms, NCCL reduce-scatter ~246 ms, NCCL all-gather ~180 ms, MXFP8 dim1 casts ~175 ms, MXFP8 dim0 casts ~55 ms, copy/cast kernels ~258 ms, cat/split/view ~54 ms, and other kernels ~236 ms.
+- Rank-skewed collectives remain: rank6 has ~699 ms reduce-scatter and ~278 ms all-gather, rank7 has ~647 ms reduce-scatter, and rank4 has ~479 ms reduce-scatter plus ~283 ms all-gather.
+- CUDA launch runtime remains ~366-377 ms per rank with about 9,274 kernel events per rank.
+
+Roofline interpretation:
+
+- Lowering from batch132 to batch128 reduced memory and shortened the profiled step, but did not change the fundamental bottleneck mix.
+- The current best is still mixed MXFP8 GEMM, FSDP communication imbalance, cast/copy overhead, and launch overhead. Attention, loss, and RMSNorm-only compile remain lower-priority targets.
