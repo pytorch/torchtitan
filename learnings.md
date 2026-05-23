@@ -8816,3 +8816,37 @@ Interpretation:
 - RMSNorm-only model-side compile is valid and avoids the full-model MXFP8 Inductor crash, but it is slower than the uncompiled-norm no-cast chunks4 peak.
 - The remaining useful model-side compile opportunity is not in the RMSNorm modules alone. Full block/model compile remains blocked by MXFP8 linears, and a narrower safe compile boundary did not improve throughput.
 - Restore the no-cast source without `"norms"` compilation.
+
+## Experiment 363: Profile MXFP8 No-Cast Batch132 Chunks4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=132 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run363-profile-mxfp8-no-fsdp-forward-input-casts-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs132-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept no-cast source.
+
+Result:
+
+- Status: keep as profile data; do not compare profiled tps against unprofiled runs.
+- Step 10 `tps`: 11,165.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 170.30 GiB, 95.49%.
+- The profiled step completed and wrote rank traces under `profiling/traces/iteration_10/`.
+- The FSDP2 MXFP8 view-output warning remained present.
+
+Profile notes:
+
+- Rank0 `ProfilerStep` wall time was about 1.51 s.
+- Rank0 kernel-duration buckets: MXFP8 nvjet GEMMs ~594 ms, NCCL reduce-scatter ~390 ms, NCCL all-gather ~200 ms, MXFP8 dim1 casts ~180 ms, MXFP8 dim0 casts ~56 ms, copy/cast kernels ~266 ms, cat/split/view ~54 ms, and other kernels ~243 ms.
+- Ranks 4, 6, and 7 show the largest exposed collective time: rank6 has ~764 ms reduce-scatter and ~302 ms all-gather, rank4 has ~686 ms reduce-scatter, and rank7 has ~594 ms reduce-scatter.
+- CUDA launch runtime remains around 382-399 ms per rank with about 9,274 kernel events per rank.
+
+Roofline interpretation:
+
+- The no-cast chunks4 peak is still a mixed GEMM/communication/cast/launch workload.
+- Attention and loss are not the limiting buckets. RMSNorm-only compile was correctly deprioritized by the profile.
+- The most plausible remaining source directions are reducing MXFP8 cast/copy overhead, changing FSDP collective exposure/imbalance, or reducing kernel launch count. Simple attention backend or loss-only compile tweaks are unlikely to move the peak.

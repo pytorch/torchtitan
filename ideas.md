@@ -184,6 +184,16 @@
   Success criteria and expected risk: Success is tps above 11,381 with finite overall-decreasing loss and no full-model compile crash. Risk is extra Dynamo/Inductor overhead around small RMSNorm modules or no useful fusion.
   Result: discarded at source state `8328dba6`; RMSNorm-only compile completed without the MXFP8 model-compile crash, but reached only 11,235 tps with the same 170.30 GiB peak. Restore the no-cast source without norm compilation.
 
+- Idea: profile MXFP8 no-cast batch132 chunks4
+  Current best source commit: 283701c
+  Source: profiler/roofline follow-up after no-cast batch132 chunks4 became a memory-risky throughput peak and RMSNorm-only compile regressed.
+  Expected mechanism: Profile the active peak to identify whether the next source idea should attack MXFP8 GEMMs/casts, FSDP collectives, launch overhead, attention, loss, or memory stalls.
+  Supporting evidence: Run361 reached 11,381 tps but stayed at 170.30 GiB and had severe mid-run fwd/bwd stalls. Run362 showed compiling RMSNorm modules is valid but slower, so a new bottleneck read is needed.
+  Planned source/config changes: None; keep no-cast source.
+  Planned command or config overrides: Use the no-cast batch132 chunks4 command with TorchTitan profiler active on step 10.
+  Success criteria and expected risk: Success is completed traces and a concrete bottleneck summary. Profiled tps is not used for ranking. Risk is profiler overhead changing timings or adding memory pressure.
+  Result: kept as profile data at source state `283701c`; rank0 step10 tps was 11,165 under profiler, traces were written for all ranks, and the profile remains dominated by MXFP8 GEMMs, FSDP collectives, MXFP8 casts, copy/cast kernels, and launch overhead. Attention and loss are still not the primary bottlenecks.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.
