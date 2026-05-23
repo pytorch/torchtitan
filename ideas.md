@@ -32,6 +32,16 @@
   Planned source/config changes: Extend the run340 MXFP8 helper to disable Inductor post-grad passes for this MXFP8 experiment.
   Planned command or config overrides: Use the run342 `--loss.num_chunks=8` command.
   Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss. Risk is lower throughput from weaker Inductor optimization, or a later MXFP8/FSDP backward issue after compilation proceeds.
+  Result: discarded before full run; a minimal compiled MXFP8 linear failed earlier in Inductor codegen with `triton_kernel_wrapper_functional is not an OpOverload` when post-grad passes were disabled. Reverted the post-grad-pass change.
+
+- Idea: MXFP8Linear Triton dim1 with loss-only compile and smaller batch
+  Current best source commit: 131374fa
+  Source: follow-up to run343 after loss-only compile avoided the model-backward Inductor recursion but OOMed at local batch 160.
+  Expected mechanism: Keep the model eager to avoid Inductor's MXFP8 backward recursion, keep the loss compiled to avoid the uncompiled CE memory blow-up, and reduce local batch size to fit the eager model memory envelope.
+  Supporting evidence: Run343 OOMed with about 177.31 GiB in use and a 1.45 GiB allocation request; reducing local batch should directly reduce activation and loss-chunk memory. The eager MXFP8 linear smoke test passed for a 2,560-row gradient shape.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run343's loss-only compile and `loss.num_chunks=8`, but reduce `--training.local_batch_size` to 128.
+  Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss. Risk is low throughput from eager model execution, or another FSDP/MXFP8 backward issue after the OOM is removed.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
