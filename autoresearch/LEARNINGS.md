@@ -173,6 +173,19 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   workload.** The win has to come from compute-side optimizations
   (fusion, CUDA graphs, whole-graph compile).
 
+- **FX-level `sink_waits` (move wait_tensor to its earliest user).**
+  Iter-29 moved 325 of 622 wait_tensor nodes (max 4430-position move),
+  numerics bitwise pass, **TPS unchanged (+0.02%)**. Structural reason:
+  `schedule_overlap_bucketing` produces the actual stream-aware op
+  ordering used at runtime; the captured CUDA graph then freezes the
+  stream/event sequence. FX list order of `wait_tensor` after that
+  point is cosmetic — it doesn't determine the runtime sync structure.
+  **Generalizable rule: any FX-level reordering that runs AFTER
+  `schedule_overlap_bucketing` and BEFORE `install_cuda_graph` is a
+  no-op for runtime, even if the move surface looks large.** The only
+  pre-CUDA-graph levers that matter are ones that change node
+  COUNT/IDENTITY (CSE, fusion, removal), not ones that change ORDER.
+
 ## Tooling tips
 
 - A debug pass can call `with open("/tmp/recon_graph_stats.txt", "w") as f`

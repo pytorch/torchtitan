@@ -28,6 +28,22 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter29 sink_waits (custom FX) — discard (xxxxxxx)
+
+- **Idea**: iter-4 noted "move waits LATER toward consumers" as an overlap lever; `schedule_overlap_bucketing` does some of this at the scheduler level but its bucketing/memory budgets may leave residual slack. Custom FX-level pass: for each `wait_tensor`, find its earliest topo user and `prepend` the wait to that user.
+- **Changes**: Added `sink_waits` pass between `apply_inductor_pattern_passes` and `disable_uninitialized_memory_fill`. Pre-computed topo indices, then iterated all 622 waits and called `target_user.prepend(wait_node)` when there was slack.
+- **Result**: discard. **Pass moved 325 of 622 wait_tensor nodes** (52%), with **max move distance 4430 positions** (a huge gap). Numerics bitwise PASS (loss=9.21808, grad_norm=4.5867). tps=6,049 vs baseline 6,048 → **+0.02% (≡ noise)**. mem=49.32 GiB.
+- **Analysis**:
+  - `schedule_overlap_bucketing` does NOT optimally place waits at the FX level — half of them sit far earlier than their earliest consumer.
+  - **But moving them gave 0 TPS change.** Two structural reasons:
+    1. **CUDA graph capture freezes the actual runtime stream/event structure.** Once captured, the sequence of NCCL launches on the comm stream and the corresponding events on the compute stream is fixed. FX-level "where the wait appears in the graph" only matters for pre-capture scheduling decisions — which `schedule_overlap_bucketing` already locked in.
+    2. **Waits sitting between collectives don't block the compute stream.** They live on the NCCL stream; the compute stream sees only the corresponding sync events. Moving the FX wait_tensor later in topo order doesn't change those events.
+- **Lessons (added to LEARNINGS.md)**:
+  - **FX node order after `schedule_overlap_bucketing` is irrelevant for runtime overlap.** The actual overlap structure is determined by the scheduler's stream-aware op placement, not by where a wait_tensor appears in `gm.graph.nodes`. Any "sink_waits"-style FX-level pass we write after this point is purely cosmetic.
+  - **Don't conflate "FX wait node position" with "runtime sync point".** The functional `wait_tensor` op IS the sync, but its scheduled position on the stream is determined by Inductor's overlap scheduler, not by FX list order.
+
+---
+
 ## iter28 dedupe_to_copy — discard (xxxxxxx)
 
 - **Idea**: Iter-27 recon found 649 `_to_copy.default` nodes after all pattern passes. If `joint_graph_passes`' CSE misses any (different code paths, layout normalization, etc.), deduping pairs sharing the same `(input, kwargs)` would cut redundant `direct_copy_kernel` launches.
