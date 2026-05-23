@@ -192,15 +192,7 @@ def qwen3_14b() -> Trainer.Config:
             "14B",
             attn_backend="sdpa",
             converters=[
-                MXFP8LinearConverter.Config(
-                    model_compile_enabled=True,
-                    fqns=[
-                        "lm_head",
-                        "attention.qkv_linear.wq",
-                        "attention.wo",
-                        "feed_forward",
-                    ],
-                ),
+                MXFP8LinearConverter.Config(model_compile_enabled=True),
             ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
