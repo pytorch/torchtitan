@@ -28,6 +28,18 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter36 high-priority capture stream — discard (xxxxxxx)
+
+- **Idea**: `install_cuda_graph` captures on a side stream created with `torch.cuda.Stream()` (default priority 0). Recorded kernels may inherit the stream's priority at replay. Use `Stream(priority=-1)` (highest priority) to see if recorded comm/compute kernels get scheduling preference.
+- **Changes**: Wrapped the `s = torch.cuda.Stream()` call in `_do_capture` to try `Stream(priority=-1)` first, fall back to default on exception.
+- **Result**: discard. **8-run mean tps=6,035.1, σ=6.2** vs baseline 6,040.25 → **−5 tps (within noise band)**. Numerics bitwise PASS. Memory unchanged.
+- **Analysis**: Captured kernels do not appear to inherit elevated stream priority at replay, OR the priority doesn't influence kernel scheduling in this configuration (GPU at 98% utilization, kernels run sequentially anyway). One outlier at 6,022 in run 5 widened the variance slightly.
+- **Lessons**:
+  - **CUDA stream priorities don't affect captured-graph replay TPS on this workload.** No need to revisit.
+  - **The σ=6.2 (vs baseline σ=4.1) hints that priority changes may add slight variance**, possibly from kernel scheduling reordering on the SM scheduler. But no mean improvement.
+
+---
+
 ## iter35 remaining ADO knobs — discard (xxxxxxx)
 
 - **Idea**: iter-26 only tuned 4 of the `aten_distributed_optimizations` knobs. 5 more remain untried: `compute_overlap_multipler`, `max_coll_distance`, `bucket_exposed_first`, `prioritize_bucketing_during_scheduling`, `insert_overlap_deps`. Set all 5 to more aggressive values before `schedule_overlap_bucketing`.
