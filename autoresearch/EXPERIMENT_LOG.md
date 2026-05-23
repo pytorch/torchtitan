@@ -28,6 +28,28 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter27 untried_random_passes + post-iter-22 recon — discard (xxxxxxx)
+
+- **Idea**: Three callables in `torch._inductor.fx_passes.replace_random` (`replace_random_passes`, `fuse_seed_creation_pass`, `fuse_offset_creation_pass`) hadn't been tried. Bundle with a recon dump of the post-iter-22 graph (final form after all current passes run) to surface any newly-actionable patterns.
+- **Result**: discard. All 3 random passes ran cleanly with 0 node-count delta (no rand/dropout/bernoulli/philox nodes — Llama3 8B training without dropout). tps=6,043, mfu=35.38%, memory=49.24 GiB. Numerics bitwise PASS (loss=9.21808, grad_norm=4.5867).
+- **Post-iter-22 graph recon** (9,893 call_function nodes total, dumped to /tmp/recon_iter22.txt):
+  - **`_to_copy.default`: 649** (vs 842 at baseline). Breakdown: 420 bf16→fp32, 228 fp32→bf16, 1 bool→fp32. Down from 551 at iter-12 (but the iter-12 count was pre-bucket-removal; restructuring slightly changed the count).
+  - **`cat.default`: 226** (130 bf16, 96 fp32) — concentrated in attention/rotary plumbing.
+  - **Collectives**: 229 AG + 293 RS + 68 AR (was 421 + 421 + 68 at baseline). The reductions from joint_graph_passes / post_grad_passes / schedule_overlap_bucketing are larger than expected — apparently some collective coalescing or dedup happens inside these passes even after iter-22 removed the explicit `bucket_*` calls.
+  - 622 `wait_tensor` (vs 910 baseline) consistent with reduced collective count.
+  - 2022 `view`, 1125 `t`, 675 `mm`, 256 `clone`, 32 `empty.memory_format`, 32 `copy_.default`, 128+128 `view_as_complex`/`view_as_real` (RoPE — unchanged).
+- **Analysis**:
+  - Random passes correctly identified the graph has no random ops to fuse — expected null result.
+  - **The collective count dropped 421→229 AG and 421→293 RS, a much larger reduction than previously documented.** This is a structural finding: iter-22 might have looked at the wrong baseline graph for some of its reasoning.
+  - **New patterns to attack (saved for future iters)**:
+    - 649 `_to_copy` with 65/35 bf16↔fp32 split. Some are likely RMSNorm/SDPA mixed-precision boundaries; if any pair has the same input + same target dtype, we could CSE-dedupe.
+    - 130 bf16 cat + 96 fp32 cat — most cats are bf16-uniform. iter-11's "cat-of-upcasts" target was 0 here (joint_graph already collapsed). But might be cat-with-shared-input patterns worth a look.
+- **Lessons**:
+  - **Bundled recon + cheap attempt is good iteration economics.** Even when the optimization is a no-op, the recon dump grounds future iterations in current graph state, not stale baseline numbers.
+  - **The `_inductor.fx_passes.replace_random` family is dead-on-arrival for inference-only training graphs.** Don't waste iterations re-trying.
+
+---
+
 ## tune_aten_distributed_optimizations — discard (xxxxxxx)
 
 - **Idea**: `schedule_overlap_bucketing` (load-bearing per iter-23 ablation) runs with all `torch._inductor.config.aten_distributed_optimizations.*` knobs at their `None` defaults. We have ~31 GiB of GPU memory headroom; raising the memory budget for prefetch and using a more accurate compute estimator might give the scheduler more reordering opportunities.

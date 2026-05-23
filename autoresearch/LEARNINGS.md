@@ -197,6 +197,29 @@ Llama3 8B, FSDP=4 TP=2 bs=1, joint fwd+bwd graph from make_fx:
   128 view_as_complex+128 view_as_real (RoPE)
 - Other: 842 _to_copy (dtype casts), 196 detach.default, 68 clone
 
+## Graph shape snapshot (post-iter-22, 2026-05-23 — current best config)
+
+After `remove_detach_nodes` + `apply_inductor_pattern_passes`
+(joint_graph_passes + post_grad_passes + schedule_overlap_bucketing) +
+`disable_uninitialized_memory_fill`, before `install_cuda_graph`:
+
+- Total `call_function` nodes: **9,893**
+- Collectives (down 35% from baseline; joint_graph / overlap consolidated
+  more than expected):
+  - all_gather_into_tensor: **229** (was 421)
+  - reduce_scatter_tensor: **293** (was 421)
+  - all_reduce: **68** (unchanged)
+  - wait_tensor: 622 (was 910)
+- Compute hotpaths: 675 mm, 65 _fused_rms_norm, 65 _fused_rms_norm_backward
+- Layout ops: 2022 view, 1125 t, 256 transpose, 417 _unsafe_view, 453 slice,
+  256 clone, 128 view_as_complex + 128 view_as_real, 64 _conj
+- **`_to_copy.default`: 649** (was 842): **420 bf16→fp32**, **228 fp32→bf16**,
+  1 bool→fp32. Mostly mixed-precision boundaries (RMSNorm in fp32, mm in bf16).
+- **`cat.default`: 226** (130 bf16, 96 fp32) — concentrated in attention/rotary.
+- 225 add.Tensor, 225 mul.Tensor (sequential residual+grad chains).
+- 32 empty.memory_format + 32 copy_.default (down from 65 empty — also
+  consolidated by passes).
+
 Implications for ideas:
 - 421 FSDP all-gathers ≈ 13 per layer × 32 layers — strong **bucketing**
   and **prefetch/overlap** target.
