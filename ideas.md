@@ -174,6 +174,15 @@
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is lower overlap or worse collective scheduling than the fixed policy.
   Result: discarded at source state `fbc1965c`; default NCCL CTA policy completed cleanly but reached only 11,095 tps with unchanged memory. Keep `NCCL_CTA_POLICY=2`.
 
+- Idea: MXFP8 with NCCL CTA policy 1
+  Current best source commit: ea1f6c1b
+  Source: communication knob closure after default CTA policy was slower than policy 2.
+  Expected mechanism: Test the other explicit NCCL CTA policy value to see whether it gives better collective overlap for the eager MXFP8 compute/communication mix than policy 2 or default.
+  Supporting evidence: Run353 shows NCCL collectives remain a large bucket; run357 shows the default policy is slower than policy 2, but policy 1 has not been tested on the MXFP8 path.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command with `NCCL_CTA_POLICY=1`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is lower tps or invalid/unsupported NCCL policy behavior.
+
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
   Source: agent-generated setup finding
