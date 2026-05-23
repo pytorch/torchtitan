@@ -966,88 +966,240 @@ def _load_kernel_fn(kernel_dir: Path, filename: str = "kernel.py") -> Callable |
         return None
 
 
-def _try_compile(fn: Callable, mode: str | None = None) -> Callable | None:
-    """Try to torch.compile a function. Returns None on failure."""
+# Single library for all fused-kernel ops, persisting for process lifetime.
+_FUSED_KERNEL_LIB: torch.library.Library | None = None
+_FUSED_KERNEL_OPS: dict[str, Callable] = {}
+
+
+def _wrap_as_custom_op(
+    kernel_fn: Callable, region: Region, hash_str: str
+) -> Callable:
+    """Register kernel_fn as a ``torch.library`` custom op so make_fx /
+    inductor see it as an opaque node with a known fake impl.
+
+    The fake impl returns empty tensors with the correct shape / stride /
+    dtype / device from ``region.output_nodes``' fake meta, so tracing
+    through ``compile_fx_inner._apply_decompositions`` (which re-runs the
+    graph with FakeTensors) doesn't actually launch the triton kernel.
+
+    Falls back to returning ``kernel_fn`` unwrapped if the region lacks
+    fake-meta on its outputs.
+    """
+    global _FUSED_KERNEL_LIB, _FUSED_KERNEL_OPS
+
+    if hash_str in _FUSED_KERNEL_OPS:
+        return _FUSED_KERNEL_OPS[hash_str]
+
+    output_metas: list = []
+    for n in region.output_nodes:
+        v = n.meta.get("val")
+        if v is None:
+            logger.warning(
+                f"Region {hash_str}: output {n.name} has no fake meta; "
+                "skipping custom-op wrap (may fail under torch.compile)."
+            )
+            return kernel_fn
+        output_metas.append(v)
+
+    num_inputs = len(region.external_inputs)
+    op_name = f"fused_{hash_str}"
+
+    if _FUSED_KERNEL_LIB is None:
+        _FUSED_KERNEL_LIB = torch.library.Library("graph_trainer", "FRAGMENT")
+
+    inp_schema = ", ".join(f"Tensor t{i}" for i in range(num_inputs))
+    if len(output_metas) == 1:
+        out_schema = "Tensor"
+    else:
+        out_schema = "(" + ", ".join("Tensor" for _ in output_metas) + ")"
+    _FUSED_KERNEL_LIB.define(f"{op_name}({inp_schema}) -> {out_schema}")
+
+    full_name = f"graph_trainer::{op_name}"
+
+    def _match_stride(t: torch.Tensor, meta) -> torch.Tensor:
+        if t.stride() == tuple(meta.stride()):
+            return t
+        dst = torch.empty_strided(
+            meta.shape, meta.stride(), dtype=meta.dtype, device=meta.device
+        )
+        dst.copy_(t)
+        return dst
+
+    def _cuda_impl(*args):
+        out = kernel_fn(*args)
+        if isinstance(out, (tuple, list)):
+            matched = [_match_stride(o, m) for o, m in zip(out, output_metas)]
+            return tuple(matched) if isinstance(out, tuple) else matched
+        return _match_stride(out, output_metas[0])
+
+    _FUSED_KERNEL_LIB.impl(op_name, _cuda_impl, "CUDA")
+
+    def _fake_impl(*args):
+        outs = [
+            torch.empty_strided(
+                v.shape, v.stride(), dtype=v.dtype, device=v.device
+            )
+            for v in output_metas
+        ]
+        if len(outs) == 1:
+            return outs[0]
+        return tuple(outs)
+
+    torch.library.register_fake(full_name)(_fake_impl)
+
+    op_overload = getattr(torch.ops.graph_trainer, op_name).default
+    _FUSED_KERNEL_OPS[hash_str] = op_overload
+    return op_overload
+
+
+_PREWARMED_HASHES: set[str] = set()
+
+
+def _prewarm_callable(fn: Callable, region: Region, hash_str: str) -> None:
+    """Run ``fn`` once with example inputs derived from ``region.inputs_info``.
+
+    Triggers any first-call codegen (torch.compile inductor lowering,
+    triton autotune) at registration time instead of inside the cudagraph
+    capture stream, where non-captureable operations would cause
+    ``cudaErrorStreamCaptureInvalidated``.
+
+    No-op if the region lacks ``inputs_info``, if pre-warm has already
+    happened for this hash, or if any tensor construction fails.
+    """
+    if hash_str in _PREWARMED_HASHES:
+        return
+    if region.inputs_info is None:
+        return
     try:
-        kwargs = {"fullgraph": True}
+        inputs = []
+        for info in region.inputs_info:
+            dtype_str = info["dtype"].removeprefix("torch.")
+            dtype = getattr(torch, dtype_str)
+            device = torch.device(info["device"])
+            shape = info["shape"]
+            stride = info.get("stride") or []
+            if stride:
+                t = torch.empty_strided(shape, stride, dtype=dtype, device=device)
+            else:
+                t = torch.empty(shape, dtype=dtype, device=device)
+            # Fill with real values via in-place ops that respect the
+            # tensor's view (any stride pattern). Kernels that use int
+            # tensors as indices must not see garbage values.
+            if dtype.is_floating_point:
+                t.normal_()
+            elif dtype.is_complex:
+                t.real.normal_()
+                t.imag.normal_()
+            else:
+                t.zero_()
+            inputs.append(t)
+        with torch.no_grad():
+            fn(*inputs)
+        torch.cuda.synchronize()
+        _PREWARMED_HASHES.add(hash_str)
+    except Exception as e:
+        logger.warning(f"Prewarm failed for region {hash_str}: {e}")
+
+
+def _make_compile_callable(
+    region: Region, mode: str | None
+) -> Callable | None:
+    """Build a torch.compile'd wrapper around ``region.subgraph_gm``.
+
+    Wrapped in a plain Python function so FX/inductor see a normal
+    callable (``OptimizedModule`` has no ``__name__``).
+    """
+    if region.subgraph_gm is None:
+        return None
+    try:
+        kwargs: dict = {"fullgraph": True}
         if mode is not None:
             kwargs["mode"] = mode
-        return torch.compile(fn, **kwargs)
-    except Exception:
+        compiled = torch.compile(region.subgraph_gm, **kwargs)
+
+        def _wrapper(*args):
+            return compiled(*args)
+
+        _wrapper.__name__ = f"compiled_{mode or 'default'}"
+        return _wrapper
+    except Exception as e:
+        logger.debug(f"torch.compile(mode={mode!r}) failed for region: {e}")
         return None
 
 
 def _select_best_backend(
     region_dir: Path,
-    eager_fn: Callable | None = None,
-    *,
-    min_speedup: float = 1.1,
+    region: Region,
 ) -> tuple[Callable | None, str]:
-    """Select the fastest backend from offline benchmark results.
+    """Pick the fastest of the four backends from benchmark.json.
 
-    Picks the minimum-time backend among:
-      - kernelagent_triton_opt     (optimized_kernel.py, NCU-tuned)
-      - kernelagent_triton         (kernel.py, initial)
-      - torch_compile              (re-compiled at runtime from eager_fn)
-      - torch_compile_max_autotune (re-compiled with mode="max-autotune")
+    Backends, in priority order if times tie:
+      - kernelagent_triton_opt     -> load optimized_kernel.py
+      - kernelagent_triton         -> load kernel.py
+      - torch_compile              -> torch.compile(region.subgraph_gm)
+      - torch_compile_max_autotune -> torch.compile(..., mode='max-autotune')
 
-    A backend is eligible only if benchmark.json shows status=PASS and
-    its loadable fn exists. If the fastest eligible backend beats eager
-    by ``min_speedup``, return it; otherwise fall back to eager.
+    A backend is eligible only if benchmark.json shows ``status=='PASS'``
+    and its callable loader succeeds. We always return one of the four
+    when any is eligible — there is no "eager" fallback unless every
+    backend fails to load.
 
-    Returns (best_fn_or_None, backend_name).
+    Returns (best_fn, backend_name). ``backend_name`` is one of
+    "triton_opt" / "triton" / "compile" / "compile_max_autotune" /
+    "eager" (last only when no callable is available).
     """
     import json
 
     bench_path = region_dir / "benchmark.json"
     if not bench_path.exists():
         return None, "eager"
-
     try:
         bench_data = json.loads(bench_path.read_text())
     except Exception:
         return None, "eager"
 
-    eager_ms = bench_data.get("eager_ms", float("inf")) or float("inf")
-
-    # Collect (time_ms, name, loader) for each PASSing backend.
-    candidates: list[tuple[float, str, Callable[[], Callable | None]]] = []
-
-    def _add(key: str, name: str, loader: Callable[[], Callable | None]) -> None:
+    def _passing_time(key: str) -> float:
         info = bench_data.get(key, {}) or {}
         if info.get("status") != "PASS":
-            return
+            return float("inf")
         t = info.get("time_ms")
-        if t is None:
-            return
-        candidates.append((t, name, loader))
+        return t if t is not None else float("inf")
 
-    _add(
-        "kernelagent_triton_opt",
-        "triton_opt",
-        lambda: _load_kernel_fn(region_dir, "optimized_kernel.py"),
-    )
-    _add(
-        "kernelagent_triton",
-        "triton",
-        lambda: _load_kernel_fn(region_dir, "kernel.py"),
-    )
-    _add(
-        "torch_compile",
-        "compile",
-        lambda: _try_compile(eager_fn) if eager_fn is not None else None,
-    )
-    _add(
-        "torch_compile_max_autotune",
-        "compile_max_autotune",
-        lambda: _try_compile(eager_fn, mode="max-autotune") if eager_fn is not None else None,
-    )
+    # Honor an opt-out for the compile-backed paths via env var so we can
+    # bisect cudagraph-capture issues.
+    import os
+    skip_compile = os.environ.get("GRAPH_TRAINER_SKIP_COMPILE_BACKEND") == "1"
 
-    # Sort by measured time; take the first one whose loader returns a fn.
+    candidates: list[tuple[float, str, Callable[[], Callable | None]]] = [
+        (
+            _passing_time("kernelagent_triton_opt"),
+            "triton_opt",
+            lambda: _load_kernel_fn(region_dir, "optimized_kernel.py"),
+        ),
+        (
+            _passing_time("kernelagent_triton"),
+            "triton",
+            lambda: _load_kernel_fn(region_dir, "kernel.py"),
+        ),
+    ]
+    if not skip_compile:
+        candidates.extend([
+            (
+                _passing_time("torch_compile"),
+                "compile",
+                lambda: _make_compile_callable(region, mode=None),
+            ),
+            (
+                _passing_time("torch_compile_max_autotune"),
+                "compile_max_autotune",
+                lambda: _make_compile_callable(region, mode="max-autotune"),
+            ),
+        ])
     candidates.sort(key=lambda x: x[0])
+
     for t, name, loader in candidates:
-        if t * min_speedup >= eager_ms:
-            break  # remaining candidates are even slower
+        if t == float("inf"):
+            break
         fn = loader()
         if fn is not None:
             return fn, name
@@ -1498,17 +1650,38 @@ def fused_kernel_pass(
     # Regions without kernels or where eager is fastest stay untouched.
     hash_best: dict[str, tuple[Callable, str]] = {}
     backend_counts: Counter[str] = Counter()
+    hash_instance_counts: dict[str, int] = dict(hash_counts)
 
-    for h in seen_hashes:
+    per_region_log: list[str] = []
+    for h in sorted(seen_hashes):
         region_dir = kdir / h
         rep = hash_to_rep.get(h)
-        eager_fn = rep.subgraph_gm if rep is not None else None
-        best_fn, backend_name = _select_best_backend(region_dir, eager_fn)
+        if rep is None:
+            backend_counts["eager"] += 1
+            per_region_log.append(
+                f"  {h} x{hash_instance_counts.get(h, 1):>3} -> eager (no rep)"
+            )
+            continue
+        best_fn, backend_name = _select_best_backend(region_dir, rep)
         if backend_name != "eager" and best_fn is not None:
+            # Wrap as a torch.library custom op so make_fx / inductor
+            # treats the call as opaque, and pre-warm to trigger any lazy
+            # compilation (torch.compile codegen, triton autotune) before
+            # cudagraph capture begins.
+            best_fn = _wrap_as_custom_op(best_fn, rep, h)
+            _prewarm_callable(best_fn, rep, h)
             hash_best[h] = (best_fn, backend_name)
             backend_counts[backend_name] += 1
         else:
             backend_counts["eager"] += 1
+        per_region_log.append(
+            f"  {h} x{hash_instance_counts.get(h, 1):>3} -> {backend_name}"
+        )
+
+    logger.info(
+        "Fused kernel backend selection (sorted by hash):\n"
+        + "\n".join(per_region_log)
+    )
 
     # Only replace instances whose hash has a non-eager winner.
     # Inserts call_function(kernel_fn) directly — no call_module wrapper.

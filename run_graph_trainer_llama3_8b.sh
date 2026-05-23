@@ -45,9 +45,6 @@ FUSED_KERNEL_FLAGS=""
 INDUCTOR_MODE="${INDUCTOR_MODE:-regional}"
 if [ -n "${FUSED_KERNEL_DIR:-}" ]; then
     FUSED_KERNEL_FLAGS="--compile.fused_kernel_dir $FUSED_KERNEL_DIR --compile.fused_kernel_extractor inductor"
-    # Fused kernels are opaque calls that inductor can't compile;
-    # force regional inductor so they run interpreted.
-    INDUCTOR_MODE="regional"
 fi
 
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
