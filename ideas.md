@@ -214,6 +214,16 @@
   Success criteria and expected risk: Success is tps near or above 11,381 with peak memory below the preferred risk line and finite overall-decreasing loss. Risk is lower throughput from smaller batch.
   Result: kept at source state `a49a6292`; batch128 chunks4 reached 11,386 tps, peak memory 166.26 GiB (93.22%), no allocator retries, and finite overall-decreasing loss. This replaces batch132 chunks4 as the better active target because it is both slightly faster and substantially less memory-risky.
 
+- Idea: MXFP8 no-cast batch124 chunks4 lower bracket
+  Current best source commit: d05e782
+  Source: batch-size bracket after lowering from batch132 to batch128 improved both tps and memory.
+  Expected mechanism: Lower local batch from 128 to 124 while preserving chunks4 row tiling. If batch128 was still mildly memory- or scheduling-limited, batch124 could improve step time enough to offset fewer tokens.
+  Supporting evidence: Batch132 chunks4 was memory-risky and batch128 chunks4 became faster with lower memory. Batch124 remains valid for Triton dim1 because `124 * 32 = 31 * 128`.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the no-cast chunks4 command with `--training.local_batch_size=124`.
+  Success criteria and expected risk: Success is tps above 11,386 with finite overall-decreasing loss and lower memory. Risk is lower useful work per step reducing reported tps.
+  Result: discarded at source state `d05e782e`; batch124 chunks4 completed cleanly at 11,134 tps and 161.67 GiB, below batch128. The no-cast chunks4 batch-size curve turns over by batch124, so keep batch128.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.

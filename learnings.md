@@ -8908,3 +8908,31 @@ Interpretation:
 - Batch128 chunks4 under the no-cast source is now the best active target: it slightly beats the batch132 chunks4 tps while using about 4 GiB less memory and staying below the preferred memory-risk line.
 - The result suggests the batch132 tps lead was limited by memory pressure and step-time variance rather than useful extra work.
 - Future experiments should use batch128 chunks4 as the safer current-best command unless specifically testing memory-boundary behavior.
+
+## Experiment 366: MXFP8 No-Cast Batch124 Chunks4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=124 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run366-mxfp8-no-fsdp-forward-input-casts-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs124-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,134.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 161.67 GiB, 90.65%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.35701 at step 1 to 6.68045 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+- The same FSDP2 MXFP8 view-output warning appeared as in the no-cast source.
+
+Interpretation:
+
+- Batch124 chunks4 is clean and much lower memory, but it gives up too much useful work per step.
+- The no-cast chunks4 batch-size sweep now brackets batch128 as the best point among 124/128/132.
