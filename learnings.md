@@ -8291,3 +8291,31 @@ Interpretation:
 
 - MXFP8 dense linear can run eagerly with the Triton dim1 override, but at local batch 160 the uncompiled model path OOMs even with the loss compiled.
 - Try a smaller local batch with the same loss-only compile path to establish a full 10-step working MXFP8 run before returning to performance tuning.
+
+## Experiment 344: MXFP8 Linear Triton Dim1 Loss-Only Compile Local Batch 128
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run344-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: keep.
+- First complete MXFP8 Qwen3 14B training run.
+- Step 10 `tps`: 10,960.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 161.90 GiB, 90.78%.
+- Loss moved from 12.48496 at step 1 to 6.46998 at step 10; finite and overall decreasing, although early steps were noisy.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- MXFP8 works for the full training loop when the model is eager, the loss remains compiled, dim1 MXFP8 casting uses Triton, and the loss chunking shape satisfies Triton dim1's 128-row tile.
+- This run beats the prior best reported tps despite using local batch 128, but MFU is unavailable under this MXFP8 path, so compare primarily by reported tps and memory.
+- There is memory headroom versus the failed batch160 loss-only compile. Try a higher local batch that is still a multiple of 8 so `batch * 16` remains divisible by 128 for `loss.num_chunks=8`; local batch 152 is a plausible near-boundary probe.

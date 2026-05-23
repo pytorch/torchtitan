@@ -42,6 +42,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run343's loss-only compile and `loss.num_chunks=8`, but reduce `--training.local_batch_size` to 128.
   Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss. Risk is low throughput from eager model execution, or another FSDP/MXFP8 backward issue after the OOM is removed.
+  Result: kept at source state `4ef7d090`; local batch 128 completed 10 steps with 10,960 tps, 161.90 GiB peak memory, nonzero grad norm, and finite overall-decreasing loss. This is the first working full MXFP8 Qwen3 run.
+
+- Idea: MXFP8Linear loss-only compile local batch 152
+  Current best source commit: 4ef7d090
+  Source: memory-headroom follow-up after run344 completed at local batch 128 and run343 OOMed at local batch 160.
+  Expected mechanism: Increase local batch while keeping the loss chunking shape valid for Triton dim1. With `loss.num_chunks=8`, each chunk covers 16 sequence positions; local batch 152 gives 2,432 rows per chunk, exactly 19 * 128.
+  Supporting evidence: Run344 used 161.90 GiB at batch128, leaving ~16.45 GiB total headroom. Run343 at batch160 OOMed around 177.31 GiB with a 1.45 GiB request. Batch152 may fit while raising useful work and possibly tps.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run344 command with `--training.local_batch_size=152`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 10,960. Risk is OOM or lower tps from less favorable batch shape.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
