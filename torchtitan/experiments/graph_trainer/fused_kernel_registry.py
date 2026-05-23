@@ -1003,6 +1003,10 @@ def _select_best_backend(
     except Exception:
         return None, "eager"
 
+    # Skip kernels that failed correctness validation.
+    if bench_data.get("status") == "FAIL":
+        return None, "eager"
+
     eager_ms = bench_data.get("eager_ms", float("inf"))
 
     # Check triton (must beat eager by min_speedup threshold)
