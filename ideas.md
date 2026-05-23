@@ -234,6 +234,16 @@
   Success criteria and expected risk: Success is completed traces and updated bottleneck summary. Profiled tps is not used for ranking.
   Result: kept as profile data at source state `6074a430`; profile completed and showed the same bottleneck mix as batch132 with lower wall time: MXFP8 GEMMs, rank-skewed FSDP collectives, copy/cast kernels, MXFP8 casts, and launch overhead. Keep targeting those buckets.
 
+- Idea: MXFP8 no-cast batch128 chunks4 with default NCCL CTA policy
+  Current best source commit: 80ce2fe
+  Source: current-shape NCCL scheduling check after the active best changed from batch136 chunks8 to no-cast batch128 chunks4.
+  Expected mechanism: Let NCCL use its default CTA policy instead of forcing `NCCL_CTA_POLICY=2`. The new lower-memory chunks4 shape may overlap collectives differently from the earlier chunks8 policy tests.
+  Supporting evidence: Run367 still showed rank-skewed reduce-scatter/all-gather, so the collective scheduling axis deserves one check on the active shape.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the no-cast batch128 chunks4 command and omit `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is tps above 11,386 with finite overall-decreasing loss and no allocator retries. Risk is the same regression seen on prior MXFP8 chunks8 policy tests.
+  Result: discarded at source state `80ce2fe5`; default CTA policy completed cleanly but reached only 11,294 tps. Keep `NCCL_CTA_POLICY=2`.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.
