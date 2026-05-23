@@ -2,8 +2,8 @@
 """Benchmark and validate generated kernels against eager.
 
 Eager is truth. torch.compile is trusted as "good enough" — we measure
-its drift from eager but always mark it PASS. The triton kernel is
-accepted if it satisfies an effective allclose against eager:
+its drift from eager but always mark it PASS. Triton kernels are
+accepted if they satisfy an effective allclose against eager:
 
     |triton - eager| <= atol_eff + rtol * |eager|
 
@@ -15,11 +15,13 @@ avoids the rel_err blow-up at the bf16 noise floor.
 Errors are reported as ``max_tol_units = max(|a-b| / (atol+rtol*|b|))``:
 unitless, ``<= 1.0`` means PASS.
 
-For each kernel in <dir>/<name>/:
-  1. Measure torch.compile vs eager → record max_abs / max_tol_units, PASS.
-  2. Measure triton vs eager under atol_eff → PASS iff max_tol_units <= 1.
-  3. Benchmark eager, triton (if PASS), and compile (if PASS).
-  4. Write benchmark.json with per-backend status + timings + errors.
+Three backends are evaluated per problem in <dir>/<name>/:
+  - torch_compile        : torch.compile(model.forward), trusted baseline.
+  - kernelagent_triton   : initial kernel.py from KernelAgent.
+  - kernelagent_triton_opt : NCU-optimized optimized_kernel.py (if present).
+
+Each backend gets a status / max_abs_err / max_tol_units / time_ms entry
+in benchmark.json.
 
 Usage:
   python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark [--problems P1 ...]
@@ -210,11 +212,53 @@ def _measure_diff(
     }
 
 
+def _validate_triton(
+    kernel_fn, model, get_inputs, atol_eff: float, rtol: float, tol_tier: str
+) -> tuple[dict, object]:
+    """Run triton vs eager with effective atol; return (result_dict, last_inputs).
+
+    PASS iff every element satisfies the effective allclose, equivalently
+    ``max_tol_units <= 1.0`` with ``atol=atol_eff``.
+    """
+    res = _measure_diff(kernel_fn, model, get_inputs, atol_eff, rtol)
+    last_inputs = res.pop("_last_inputs", None)
+    exec_err = res.pop("_exec_error", None)
+    abs_err = res["max_abs_err"]
+    units = res["max_tol_units"]
+    if exec_err is not None:
+        return {
+            "status": "FAIL", "tol_tier": tol_tier,
+            "max_abs_err": abs_err, "max_tol_units": units,
+            "reason": exec_err,
+        }, last_inputs
+    if units <= 1.0:
+        return {
+            "status": "PASS", "tol_tier": tol_tier,
+            "max_abs_err": abs_err, "max_tol_units": units,
+            "atol_eff": atol_eff, "rtol": rtol,
+        }, last_inputs
+    return {
+        "status": "FAIL", "tol_tier": tol_tier,
+        "max_abs_err": abs_err, "max_tol_units": units,
+        "atol_eff": atol_eff, "rtol": rtol,
+        "reason": (
+            f"max_tol_units={units:.3f} > 1.0 "
+            f"(atol_eff={atol_eff:.4e}, rtol={rtol:.4e}, "
+            f"max_abs_err={abs_err:.4e})"
+        ),
+    }, last_inputs
+
+
 def run_one(name: str) -> dict:
-    """Validate + benchmark both backends for a single problem."""
+    """Validate + benchmark all backends for a single problem.
+
+    Backends: torch_compile, kernelagent_triton (kernel.py),
+    kernelagent_triton_opt (optimized_kernel.py, if present).
+    """
     problem_dir = GENERATED_DIR / name
     problem_path = problem_dir / "problem.py"
     kernel_path = problem_dir / "kernel.py"
+    opt_kernel_path = problem_dir / "optimized_kernel.py"
 
     if not kernel_path.exists():
         return {"name": name, "status": "SKIP", "reason": "no kernel.py"}
@@ -233,12 +277,22 @@ def run_one(name: str) -> dict:
     if model_cls is None or get_inputs is None or kernel_fn is None:
         return {"name": name, "status": "ERROR", "reason": "missing Model/get_inputs/kernel_function"}
 
+    opt_kernel_fn = None
+    opt_load_error = None
+    if opt_kernel_path.exists():
+        try:
+            opt_mod = _load_module(opt_kernel_path, f"kernel_opt_{name}")
+            opt_kernel_fn = getattr(opt_mod, "kernel_function", None)
+            if opt_kernel_fn is None:
+                opt_load_error = "missing kernel_function"
+        except Exception as e:
+            opt_load_error = f"import: {e}"
+
     tols, tol_tier = _detect_tolerance(problem_path)
     atol, rtol = tols["atol"], tols["rtol"]
     model = model_cls()
 
     # --- Measure torch.compile drift from eager (trusted, always PASS) ---
-    # Reported with the tier (atol, rtol); status is PASS regardless.
     compiled_fn = None
     compile_abs = 0.0
     compile_result: dict
@@ -269,41 +323,29 @@ def run_one(name: str) -> dict:
             "reason": f"torch.compile failed: {e}",
         }
 
-    # --- Measure triton drift from eager; accept via effective allclose ---
-    # Effective atol is loosened to whatever compile already drifts to, so
-    # "no worse than compile" passes automatically. rtol stays as the tier
-    # value. PASS iff every element satisfies |triton-eager| <= atol_eff +
-    # rtol*|eager|, i.e. max_tol_units <= 1.0.
+    # --- Validate triton kernels against eager via effective allclose ---
+    # atol_eff = max(tier_atol, compile_drift); rtol stays the tier value.
     atol_eff = max(atol, compile_abs)
-    res = _measure_diff(kernel_fn, model, get_inputs, atol_eff, rtol)
-    triton_inputs = res.pop("_last_inputs", None)
-    exec_err = res.pop("_exec_error", None)
-    triton_abs = res["max_abs_err"]
-    triton_units = res["max_tol_units"]
-    if exec_err is not None:
-        triton_result = {
-            "status": "FAIL", "tol_tier": tol_tier,
-            "max_abs_err": triton_abs, "max_tol_units": triton_units,
-            "reason": exec_err,
+    triton_result, triton_inputs = _validate_triton(
+        kernel_fn, model, get_inputs, atol_eff, rtol, tol_tier
+    )
+
+    if opt_kernel_fn is not None:
+        opt_result, opt_inputs = _validate_triton(
+            opt_kernel_fn, model, get_inputs, atol_eff, rtol, tol_tier
+        )
+    elif opt_load_error is not None:
+        opt_result = {
+            "status": "ERROR", "tol_tier": tol_tier,
+            "max_abs_err": 0.0, "max_tol_units": 0.0,
+            "reason": f"load optimized_kernel.py: {opt_load_error}",
         }
-    elif triton_units <= 1.0:
-        triton_result = {
-            "status": "PASS", "tol_tier": tol_tier,
-            "max_abs_err": triton_abs, "max_tol_units": triton_units,
-            "atol_eff": atol_eff, "rtol": rtol,
-        }
+        opt_inputs = None
     else:
-        triton_result = {
-            "status": "FAIL", "tol_tier": tol_tier,
-            "max_abs_err": triton_abs, "max_tol_units": triton_units,
-            "atol_eff": atol_eff, "rtol": rtol,
-            "reason": (
-                f"max_tol_units={triton_units:.3f} > 1.0 "
-                f"(atol_eff={atol_eff:.4e}, rtol={rtol:.4e}, "
-                f"max_abs_err={triton_abs:.4e})"
-            ),
-        }
-    bench_inputs = triton_inputs or compile_inputs
+        opt_result = {"status": "SKIP", "reason": "no optimized_kernel.py"}
+        opt_inputs = None
+
+    bench_inputs = triton_inputs or opt_inputs or compile_inputs
 
     # --- Benchmark eager (always, as the reference time) ---
     eager_ms = None
@@ -314,24 +356,23 @@ def run_one(name: str) -> dict:
             eager_ms = None
 
     # --- Benchmark each backend that PASSED correctness ---
-    if triton_result["status"] == "PASS" and bench_inputs is not None:
-        try:
-            triton_result["time_ms"] = _benchmark_fn(kernel_fn, bench_inputs)
-        except Exception as e:
-            triton_result["status"] = "FAIL"
-            triton_result["reason"] = f"benchmark failed: {e}"
+    def _maybe_bench(result: dict, fn) -> None:
+        if result.get("status") == "PASS" and bench_inputs is not None and fn is not None:
+            try:
+                result["time_ms"] = _benchmark_fn(fn, bench_inputs)
+            except Exception as e:
+                result["status"] = "FAIL"
+                result["reason"] = f"benchmark failed: {e}"
 
-    if compile_result["status"] == "PASS" and bench_inputs is not None and compiled_fn is not None:
-        try:
-            compile_result["time_ms"] = _benchmark_fn(compiled_fn, bench_inputs)
-        except Exception as e:
-            compile_result["status"] = "FAIL"
-            compile_result["reason"] = f"benchmark failed: {e}"
+    _maybe_bench(triton_result, kernel_fn)
+    _maybe_bench(opt_result, opt_kernel_fn)
+    _maybe_bench(compile_result, compiled_fn)
 
     # --- Save benchmark.json ---
     bench_data = {
         "eager_ms": eager_ms,
         "kernelagent_triton": triton_result,
+        "kernelagent_triton_opt": opt_result,
         "torch_compile": compile_result,
     }
     (problem_dir / "benchmark.json").write_text(json.dumps(bench_data, indent=2))
@@ -347,6 +388,7 @@ def _print_row(r):
     name = r["name"]
     eager_ms = r.get("eager_ms")
     triton = r.get("kernelagent_triton", {})
+    triton_opt = r.get("kernelagent_triton_opt", {})
     compile_ = r.get("torch_compile", {})
 
     if r.get("status") in ("SKIP", "ERROR"):
@@ -359,23 +401,16 @@ def _print_row(r):
             return f"PASS({d.get('tol_tier', '?')})"
         return s
 
-    tri_s = status_str(triton)
-    cmp_s = status_str(compile_)
     eager = _fmt(eager_ms)
     tri_t = _fmt(triton.get("time_ms")) if triton.get("status") == "PASS" else "-"
+    opt_t = _fmt(triton_opt.get("time_ms")) if triton_opt.get("status") == "PASS" else "-"
     cmp_t = _fmt(compile_.get("time_ms")) if compile_.get("status") == "PASS" else "-"
-
-    def err_str(d):
-        if "max_tol_units" not in d:
-            return "-"
-        u = d["max_tol_units"]
-        a = d.get("max_abs_err", 0.0)
-        return f"{u:.2f}u/{a:.2e}"
 
     print(
         f"  {name:<14} eager={eager:>7}ms  "
-        f"triton={tri_s:<14} {tri_t:>7}ms err={err_str(triton):<18}  "
-        f"compile={cmp_s:<14} {cmp_t:>7}ms err={err_str(compile_)}"
+        f"triton={status_str(triton):<14} {tri_t:>7}ms  "
+        f"triton_opt={status_str(triton_opt):<14} {opt_t:>7}ms  "
+        f"compile={status_str(compile_):<14} {cmp_t:>7}ms"
     )
 
 
@@ -404,18 +439,21 @@ def main():
         results.append(r)
         _print_row(r)
 
-    triton_pass = sum(
+    def _count_pass(key):
+        return sum(
+            1 for r in results
+            if isinstance(r.get(key), dict) and r[key].get("status") == "PASS"
+        )
+
+    n = len(results)
+    n_opt = sum(
         1 for r in results
-        if isinstance(r.get("kernelagent_triton"), dict)
-        and r["kernelagent_triton"].get("status") == "PASS"
+        if isinstance(r.get("kernelagent_triton_opt"), dict)
+        and r["kernelagent_triton_opt"].get("status") != "SKIP"
     )
-    compile_pass = sum(
-        1 for r in results
-        if isinstance(r.get("torch_compile"), dict)
-        and r["torch_compile"].get("status") == "PASS"
-    )
-    print(f"\nkernelagent_triton: {triton_pass}/{len(results)} pass")
-    print(f"torch_compile:      {compile_pass}/{len(results)} pass")
+    print(f"\nkernelagent_triton:     {_count_pass('kernelagent_triton')}/{n} pass")
+    print(f"kernelagent_triton_opt: {_count_pass('kernelagent_triton_opt')}/{n_opt} pass")
+    print(f"torch_compile:          {_count_pass('torch_compile')}/{n} pass")
 
 
 if __name__ == "__main__":

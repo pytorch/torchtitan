@@ -169,7 +169,7 @@ def generate_kernel(
         agent.cleanup()
 
 
-_DEFAULT_MODEL = "claude-opus-4-7"
+_DEFAULT_MODEL = "claude-opus-4-6"
 
 # GPU names recognized by KernelAgent's spec database.
 _GPU_NAME_MAP = {
@@ -220,6 +220,67 @@ def _find_test_code(problem_dir: Path) -> str | None:
     return None
 
 
+_SYNTH_TEST_TEMPLATE = '''\
+"""Synthesized correctness test: triton kernel vs eager Model."""
+import torch
+from problem import Model, get_inputs
+
+
+def _close(a, b, atol=8e-2, rtol=1e-2):
+    a = a.float() if isinstance(a, torch.Tensor) else a
+    b = b.float() if isinstance(b, torch.Tensor) else b
+    diff = (a - b).abs()
+    budget = atol + rtol * b.abs()
+    return (diff <= budget).all().item(), float(diff.max())
+
+
+def test_kernel():
+    from kernel import kernel_function
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    inputs = get_inputs()
+    model = Model()
+    with torch.no_grad():
+        expected = model(*inputs)
+        result = kernel_function(*inputs)
+
+    if not isinstance(expected, (tuple, list)):
+        expected = (expected,)
+        if isinstance(result, torch.Tensor):
+            result = (result,)
+        elif isinstance(result, tuple) and len(result) == 1:
+            pass
+    if len(expected) != len(result):
+        print(f"FAIL: tuple length mismatch {len(expected)} vs {len(result)}")
+        return False
+    for i, (e, r) in enumerate(zip(expected, result)):
+        if not isinstance(e, torch.Tensor) or not isinstance(r, torch.Tensor):
+            continue
+        if e.shape != r.shape:
+            print(f"FAIL: output[{i}] shape {e.shape} vs {r.shape}")
+            return False
+        ok, max_abs = _close(r, e)
+        if not ok:
+            print(f"FAIL: output[{i}] max_abs={max_abs:.4e}")
+            return False
+    print("PASS")
+    return True
+
+
+if __name__ == "__main__":
+    test_kernel()
+'''
+
+
+def _make_test_code(problem_path: Path) -> str:
+    """Synthesize a minimal test_code that compares kernel_function to Model.
+
+    Used when no auto-generated test_0.py exists (e.g. problems extracted
+    from a live FX graph rather than generated via TritonKernelAgent).
+    """
+    return _SYNTH_TEST_TEMPLATE
+
+
 def optimize_kernel(
     kernel_code: str,
     problem_path: str | Path,
@@ -265,9 +326,7 @@ def optimize_kernel(
     if test_code is None:
         test_code = _find_test_code(problem_path.parent)
     if test_code is None:
-        raise ValueError(
-            f"No test code provided and none found in {problem_path.parent}/logs/"
-        )
+        test_code = _make_test_code(problem_path)
 
     if gpu_name is None:
         gpu_name = _detect_gpu_name()
