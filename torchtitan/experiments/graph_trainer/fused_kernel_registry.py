@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Callable
 
 import torch
-
 from torchtitan.tools.logging import logger
 
 
@@ -93,110 +92,161 @@ _METADATA_OPS = {
 }
 
 # Pointwise/elementwise ops — fully fusible into a single triton kernel.
-_POINTWISE_OPS = frozenset({
-    "aten.add.Tensor", "aten.add.Scalar",
-    "aten.sub.Tensor", "aten.sub.Scalar",
-    "aten.mul.Tensor", "aten.mul.Scalar",
-    "aten.div.Tensor", "aten.div.Scalar",
-    "aten.rsub.Scalar",
-    "aten.neg.default",
-    "aten.abs.default",
-    "aten.exp.default", "aten.log.default", "aten.log1p.default",
-    "aten.sin.default", "aten.cos.default", "aten.tan.default",
-    "aten.tanh.default", "aten.sigmoid.default",
-    "aten.silu.default", "aten.silu_backward.default",
-    "aten.gelu.default", "aten.gelu_backward.default",
-    "aten.relu.default", "aten.threshold_backward.default",
-    "aten.rsqrt.default", "aten.sqrt.default",
-    "aten.reciprocal.default",
-    "aten.pow.Tensor_Scalar", "aten.pow.Scalar", "aten.pow.Tensor_Tensor",
-    "aten.where.self",
-    "aten.maximum.default", "aten.minimum.default",
-    "aten.clamp.default", "aten.clamp_min.default", "aten.clamp_max.default",
-    "aten.eq.Tensor", "aten.eq.Scalar",
-    "aten.ne.Tensor", "aten.ne.Scalar",
-    "aten.lt.Tensor", "aten.lt.Scalar",
-    "aten.gt.Tensor", "aten.gt.Scalar",
-    "aten.le.Tensor", "aten.le.Scalar",
-    "aten.ge.Tensor", "aten.ge.Scalar",
-    "aten.bitwise_and.Tensor", "aten.bitwise_or.Tensor",
-    "aten.bitwise_not.default", "aten.logical_not.default",
-    "aten.fill.Scalar", "aten.fill.Tensor",
-    "aten.zeros_like.default", "aten.ones_like.default",
-    "aten.full.default", "aten.full_like.default",
-    "aten._to_copy.default",
-    "aten.copy.default",
-    "aten.clone.default",
-    "prims.convert_element_type.default",
-    "prims.broadcast_in_dim.default",
-    # Indexing/gather — inductor fuses these with pointwise ops.
-    "aten.index.Tensor",
-    "aten.gather.default",
-    "aten.scatter.value", "aten.scatter.src",
-    "aten.embedding.default",
-    "aten.embedding_dense_backward.default",
-})
+_POINTWISE_OPS = frozenset(
+    {
+        "aten.add.Tensor",
+        "aten.add.Scalar",
+        "aten.sub.Tensor",
+        "aten.sub.Scalar",
+        "aten.mul.Tensor",
+        "aten.mul.Scalar",
+        "aten.div.Tensor",
+        "aten.div.Scalar",
+        "aten.rsub.Scalar",
+        "aten.neg.default",
+        "aten.abs.default",
+        "aten.exp.default",
+        "aten.log.default",
+        "aten.log1p.default",
+        "aten.sin.default",
+        "aten.cos.default",
+        "aten.tan.default",
+        "aten.tanh.default",
+        "aten.sigmoid.default",
+        "aten.silu.default",
+        "aten.silu_backward.default",
+        "aten.gelu.default",
+        "aten.gelu_backward.default",
+        "aten.relu.default",
+        "aten.threshold_backward.default",
+        "aten.rsqrt.default",
+        "aten.sqrt.default",
+        "aten.reciprocal.default",
+        "aten.pow.Tensor_Scalar",
+        "aten.pow.Scalar",
+        "aten.pow.Tensor_Tensor",
+        "aten.where.self",
+        "aten.maximum.default",
+        "aten.minimum.default",
+        "aten.clamp.default",
+        "aten.clamp_min.default",
+        "aten.clamp_max.default",
+        "aten.eq.Tensor",
+        "aten.eq.Scalar",
+        "aten.ne.Tensor",
+        "aten.ne.Scalar",
+        "aten.lt.Tensor",
+        "aten.lt.Scalar",
+        "aten.gt.Tensor",
+        "aten.gt.Scalar",
+        "aten.le.Tensor",
+        "aten.le.Scalar",
+        "aten.ge.Tensor",
+        "aten.ge.Scalar",
+        "aten.bitwise_and.Tensor",
+        "aten.bitwise_or.Tensor",
+        "aten.bitwise_not.default",
+        "aten.logical_not.default",
+        "aten.fill.Scalar",
+        "aten.fill.Tensor",
+        "aten.zeros_like.default",
+        "aten.ones_like.default",
+        "aten.full.default",
+        "aten.full_like.default",
+        "aten._to_copy.default",
+        "aten.copy.default",
+        "aten.clone.default",
+        "prims.convert_element_type.default",
+        "prims.broadcast_in_dim.default",
+        # Indexing/gather — inductor fuses these with pointwise ops.
+        "aten.index.Tensor",
+        "aten.gather.default",
+        "aten.scatter.value",
+        "aten.scatter.src",
+        "aten.embedding.default",
+        "aten.embedding_dense_backward.default",
+    }
+)
 
 # Reduction ops — fusible (inductor groups them with pointwise epilogs).
-_REDUCTION_OPS = frozenset({
-    "aten.sum.default", "aten.sum.dim_IntList",
-    "aten.mean.default", "aten.mean.dim",
-    "aten.amax.default", "aten.amax.dim",
-    "aten.amin.default", "aten.amin.dim",
-    "aten.max.default", "aten.max.dim",
-    "aten.min.default", "aten.min.dim",
-    "aten.prod.default", "aten.prod.dim_int",
-    "aten.std.default", "aten.std.dim",
-    "aten.var.default", "aten.var.dim",
-    "aten.argmax.default", "aten.argmin.default",
-    "aten.any.default", "aten.any.dim",
-    "aten.all.default", "aten.all.dim",
-})
+_REDUCTION_OPS = frozenset(
+    {
+        "aten.sum.default",
+        "aten.sum.dim_IntList",
+        "aten.mean.default",
+        "aten.mean.dim",
+        "aten.amax.default",
+        "aten.amax.dim",
+        "aten.amin.default",
+        "aten.amin.dim",
+        "aten.max.default",
+        "aten.max.dim",
+        "aten.min.default",
+        "aten.min.dim",
+        "aten.prod.default",
+        "aten.prod.dim_int",
+        "aten.std.default",
+        "aten.std.dim",
+        "aten.var.default",
+        "aten.var.dim",
+        "aten.argmax.default",
+        "aten.argmin.default",
+        "aten.any.default",
+        "aten.any.dim",
+        "aten.all.default",
+        "aten.all.dim",
+    }
+)
 
 # Norm/softmax ops — decompose to pointwise+reduction, treat as fusible.
-_FUSIBLE_DECOMPOSABLE_OPS = frozenset({
-    "aten._fused_rms_norm.default",
-    "aten._fused_rms_norm_backward.default",
-    "aten.rms_norm.default",
-    "aten.native_layer_norm.default",
-    "aten.native_layer_norm_backward.default",
-    "aten.layer_norm.default",
-    "aten._softmax.default",
-    "aten._softmax_backward_data.default",
-    "aten._log_softmax.default",
-    "aten._log_softmax_backward_data.default",
-    "aten.softmax.int",
-    "aten.log_softmax.int",
-    "aten.nll_loss_forward.default",
-    "aten.nll_loss_backward.default",
-})
+_FUSIBLE_DECOMPOSABLE_OPS = frozenset(
+    {
+        "aten._fused_rms_norm.default",
+        "aten._fused_rms_norm_backward.default",
+        "aten.rms_norm.default",
+        "aten.native_layer_norm.default",
+        "aten.native_layer_norm_backward.default",
+        "aten.layer_norm.default",
+        "aten._softmax.default",
+        "aten._softmax_backward_data.default",
+        "aten._log_softmax.default",
+        "aten._log_softmax_backward_data.default",
+        "aten.softmax.int",
+        "aten.log_softmax.int",
+        "aten.nll_loss_forward.default",
+        "aten.nll_loss_backward.default",
+    }
+)
 
 # View ops — don't block fusion, but a partition of only views isn't a kernel.
-_VIEW_OPS = frozenset({
-    "aten.view.default",
-    "aten.view.dtype",
-    "aten._unsafe_view.default",
-    "aten.reshape.default",
-    "aten.expand.default",
-    "aten.slice.Tensor",
-    "aten.select.int",
-    "aten.transpose.int",
-    "aten.t.default",
-    "aten.permute.default",
-    "aten.unsqueeze.default",
-    "aten.squeeze.default",
-    "aten.squeeze.dim", "aten.squeeze.dims",
-    "aten.alias.default",
-    "aten.detach.default",
-    "aten.contiguous.default",
-    # Tuple-returning view: returns a list of slices (no data movement).
-    # The downstream getitem nodes index into the tuple to get tensors.
-    "aten.split_with_sizes.default",
-    "aten.split.Tensor",
-    "aten.chunk.default",
-    "aten.unbind.int",
-    "<built-in function getitem>",
-})
+_VIEW_OPS = frozenset(
+    {
+        "aten.view.default",
+        "aten.view.dtype",
+        "aten._unsafe_view.default",
+        "aten.reshape.default",
+        "aten.expand.default",
+        "aten.slice.Tensor",
+        "aten.select.int",
+        "aten.transpose.int",
+        "aten.t.default",
+        "aten.permute.default",
+        "aten.unsqueeze.default",
+        "aten.squeeze.default",
+        "aten.squeeze.dim",
+        "aten.squeeze.dims",
+        "aten.alias.default",
+        "aten.detach.default",
+        "aten.contiguous.default",
+        # Tuple-returning view: returns a list of slices (no data movement).
+        # The downstream getitem nodes index into the tuple to get tensors.
+        "aten.split_with_sizes.default",
+        "aten.split.Tensor",
+        "aten.chunk.default",
+        "aten.unbind.int",
+        "<built-in function getitem>",
+    }
+)
 
 _DTYPE_MAP = {
     torch.bfloat16: "torch.bfloat16",
@@ -211,14 +261,19 @@ _DTYPE_MAP = {
 }
 
 _RANDN_DTYPES = {
-    torch.bfloat16, torch.float16, torch.float32, torch.float64,
-    torch.complex64, torch.complex128,
+    torch.bfloat16,
+    torch.float16,
+    torch.float32,
+    torch.float64,
+    torch.complex64,
+    torch.complex128,
 }
 
 
 # ---------------------------------------------------------------------------
 # Node helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_node_fqn(node: torch.fx.Node) -> str:
     custom = node.meta.get("custom", {})
@@ -310,6 +365,7 @@ def _iter_node_args(node: torch.fx.Node):
 # Region: a fusible subgraph with inputs and outputs
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Region:
     """A fusible subgraph discovered by a RegionExtractor.
@@ -334,7 +390,8 @@ class Region:
     def num_compute_ops(self) -> int:
         if self.subgraph_gm is not None:
             return sum(
-                1 for n in self.subgraph_gm.graph.nodes
+                1
+                for n in self.subgraph_gm.graph.nodes
                 if n.op == "call_function" and str(n.target) not in _METADATA_OPS
             )
         return sum(1 for n in self.nodes if str(n.target) not in _METADATA_OPS)
@@ -363,7 +420,8 @@ def _compute_region_hash(region: Region) -> str:
     if region.subgraph_gm is not None:
         # Position-independent op set + per-input shape/stride/dtype
         ops = sorted(
-            str(n.target) for n in region.subgraph_gm.graph.nodes
+            str(n.target)
+            for n in region.subgraph_gm.graph.nodes
             if n.op == "call_function"
         )
         parts.extend(ops)
@@ -444,7 +502,8 @@ def _build_region(comp: list[torch.fx.Node], norm_fqn: str = "") -> Region:
         output_nodes = [comp[-1]]
 
     return Region(
-        nodes=comp, norm_fqn=norm_fqn,
+        nodes=comp,
+        norm_fqn=norm_fqn,
         external_inputs=external_inputs,
         output_nodes=output_nodes,
     )
@@ -476,7 +535,10 @@ def tag_fusible_nodes_pass(
         node.meta["custom"] = dict(existing)
         node.meta["custom"]["fusion_class"] = cls
         node.meta["custom"]["is_fusible"] = cls in (
-            "pointwise", "reduction", "decomposable", "view"
+            "pointwise",
+            "reduction",
+            "decomposable",
+            "view",
         )
     summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
     logger.info(f"tag_fusible_nodes: {summary}")
@@ -529,7 +591,9 @@ class FqnRegionExtractor(RegionExtractor):
             for comp in _split_connected(chunk):
                 if any(_is_unfusable(n) for n in comp):
                     continue
-                compute = {str(n.target) for n in comp if str(n.target) not in _METADATA_OPS}
+                compute = {
+                    str(n.target) for n in comp if str(n.target) not in _METADATA_OPS
+                }
                 if compute and compute <= _ALREADY_OPTIMIZED_OPS:
                     continue
                 all_regions.append(_build_region(comp, norm_fqn))
@@ -610,6 +674,7 @@ def _merge_shared_input_reductions(
                 union(ci, cj)
 
     from collections import defaultdict
+
     groups: dict[int, list[int]] = defaultdict(list)
     for i in range(len(components)):
         groups[find(i)].append(i)
@@ -657,9 +722,7 @@ def _extract_subgraph(
     needed: set[torch.fx.Node] = set(origin_nodes)
     output_nodes: list[torch.fx.Node] = []
     for n in origin_nodes:
-        has_internal_user = any(
-            u in needed and u.op != "output" for u in n.users
-        )
+        has_internal_user = any(u in needed and u.op != "output" for u in n.users)
         if not has_internal_user:
             output_nodes.append(n)
     if not output_nodes:
@@ -674,14 +737,16 @@ def _extract_subgraph(
         val = meta.get("val", None)
         if isinstance(val, torch.Tensor):
             stride = list(val.stride()) if not val.is_contiguous() else []
-            placeholder_info.append({
-                "name": name,
-                "shape": list(val.shape),
-                "stride": stride,
-                "dtype": str(val.dtype),
-                "device": str(val.device),
-                "orig_node": orig_node,
-            })
+            placeholder_info.append(
+                {
+                    "name": name,
+                    "shape": list(val.shape),
+                    "stride": stride,
+                    "dtype": str(val.dtype),
+                    "device": str(val.device),
+                    "orig_node": orig_node,
+                }
+            )
 
     def _ensure(x):
         if isinstance(x, torch.fx.Node):
@@ -770,9 +835,7 @@ class InductorRegionExtractor(RegionExtractor):
         import time as _time
 
         try:
-            from torch.fx.passes.infra.partitioner import (
-                CapabilityBasedPartitioner,
-            )
+            from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner
             from torch.fx.passes.operator_support import create_op_support
         except ImportError:
             logger.warning(
@@ -789,7 +852,9 @@ class InductorRegionExtractor(RegionExtractor):
 
         support = create_op_support(_is_supported)
         partitioner = CapabilityBasedPartitioner(
-            gm, support, allows_single_node_partition=True,
+            gm,
+            support,
+            allows_single_node_partition=True,
         )
         partitions = partitioner.propose_partitions()
         components: list[list[torch.fx.Node]] = [
@@ -800,7 +865,8 @@ class InductorRegionExtractor(RegionExtractor):
         components = _merge_shared_input_reductions(components)
         merged_msg = (
             f" (merged {n_before} → {len(components)})"
-            if n_before != len(components) else ""
+            if n_before != len(components)
+            else ""
         )
         logger.info(
             f"InductorRegionExtractor: {len(list(gm.graph.nodes))} nodes, "
@@ -877,6 +943,7 @@ def _filter_regions(
 # ---------------------------------------------------------------------------
 # Kernel loading + backend selection
 # ---------------------------------------------------------------------------
+
 
 def _load_kernel_fn(kernel_dir: Path) -> Callable | None:
     """Load kernel_function from kernel.py if it exists."""
@@ -955,6 +1022,7 @@ def _select_best_backend(
 # Problem file generation
 # ---------------------------------------------------------------------------
 
+
 def _format_arg_for_problem(
     arg: object,
     input_map: dict[str, str],
@@ -1003,9 +1071,7 @@ def _input_creation_line(name: str, info: dict) -> str:
 
     if stride and shape:
         # Allocate minimum storage that covers the strided view
-        storage_size = sum(
-            s * (d - 1) for s, d in zip(stride, shape) if d > 1
-        ) + 1
+        storage_size = sum(s * (d - 1) for s, d in zip(stride, shape) if d > 1) + 1
         if is_int:
             return (
                 f"    {name} = torch.randint(0, 100, ({storage_size},), "
@@ -1040,7 +1106,6 @@ def _format_subgraph_as_model(subgraph_gm: torch.fx.GraphModule) -> str:
         include_stride=True,
         include_device=True,
         expanded_def=True,
-        additional_meta=["autograd_backward"],
     )
     code = code.replace("class GraphModule(", "class Model(", 1)
     return code
@@ -1075,13 +1140,10 @@ def _write_problem_from_subgraph(
     model_code = _format_subgraph_as_model(subgraph_gm)
 
     # Get placeholder names in declaration order
-    ph_names = [
-        n.name for n in subgraph_gm.graph.nodes if n.op == "placeholder"
-    ]
+    ph_names = [n.name for n in subgraph_gm.graph.nodes if n.op == "placeholder"]
     info_by_name = {info["name"]: info for info in info_list}
     input_lines = [
-        _input_creation_line(name, info_by_name.get(name, {}))
-        for name in ph_names
+        _input_creation_line(name, info_by_name.get(name, {})) for name in ph_names
     ]
 
     compute_ops = [
@@ -1103,7 +1165,9 @@ def _write_problem_from_subgraph(
         f"outputs: {n_outputs}.\n"
     )
 
-    problem = desc + f"""
+    problem = (
+        desc
+        + f"""
 import torch
 import torch.nn as nn
 
@@ -1116,6 +1180,7 @@ def get_inputs():
 def get_init_inputs():
     return []
 """
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "problem.py").write_text(problem)
 
@@ -1143,7 +1208,10 @@ def _write_problem_from_orig(
             body_lines.append(f"        {var} = {src}[{idx}]{comment}")
         else:
             fargs = [_format_arg_for_problem(a, input_map, var_map) for a in n.args]
-            fkwargs = {k: _format_arg_for_problem(v, input_map, var_map) for k, v in n.kwargs.items()}
+            fkwargs = {
+                k: _format_arg_for_problem(v, input_map, var_map)
+                for k, v in n.kwargs.items()
+            }
             all_args = list(fargs) + [f"{k}={v}" for k, v in fkwargs.items()]
             shape, dtype = _get_tensor_info(n)
             comment = f"  # {dtype} {list(shape)}" if shape else ""
@@ -1171,22 +1239,36 @@ def _write_problem_from_orig(
         if shape and dtype:
             torch_dtype = _DTYPE_MAP.get(dtype, "torch.float32")
             if dtype in _RANDN_DTYPES:
-                input_lines.append(f"    {pname} = torch.randn({shape!r}, dtype={torch_dtype}, device='cuda')")
+                input_lines.append(
+                    f"    {pname} = torch.randn({shape!r}, dtype={torch_dtype}, device='cuda')"
+                )
             elif dtype == torch.bool:
-                input_lines.append(f"    {pname} = torch.randint(0, 2, {shape!r}, dtype={torch_dtype}, device='cuda')")
+                input_lines.append(
+                    f"    {pname} = torch.randint(0, 2, {shape!r}, dtype={torch_dtype}, device='cuda')"
+                )
             else:
-                input_lines.append(f"    {pname} = torch.randint(0, 10, {shape!r}, dtype={torch_dtype}, device='cuda')")
+                input_lines.append(
+                    f"    {pname} = torch.randint(0, 10, {shape!r}, dtype={torch_dtype}, device='cuda')"
+                )
         else:
-            input_lines.append(f"    {pname} = torch.randn((1,), dtype=torch.float32, device='cuda')")
+            input_lines.append(
+                f"    {pname} = torch.randn((1,), dtype=torch.float32, device='cuda')"
+            )
 
     compute_ops = [
-        str(n.target).replace("aten.", "").replace(".default", "").replace(".Tensor", "")
-        for n in nodes if str(n.target) not in _METADATA_OPS
+        str(n.target)
+        .replace("aten.", "")
+        .replace(".default", "")
+        .replace(".Tensor", "")
+        for n in nodes
+        if str(n.target) not in _METADATA_OPS
     ]
     desc = f"# Fused region ({region.norm_fqn}): {' -> '.join(compute_ops) if compute_ops else 'reshape chain'}\n"
     desc += f"# Instances: {count}. Ops: {len(nodes)}, compute: {len(compute_ops)}, outputs: {num_outputs}.\n"
 
-    problem = desc + f"""
+    problem = (
+        desc
+        + f"""
 import torch
 import torch.nn as nn
 
@@ -1201,6 +1283,7 @@ def get_inputs():
 def get_init_inputs():
     return []
 """
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "problem.py").write_text(problem)
 
@@ -1208,6 +1291,7 @@ def get_init_inputs():
 # ---------------------------------------------------------------------------
 # Graph replacement
 # ---------------------------------------------------------------------------
+
 
 def _replace_region_with_kernel(
     gm: torch.fx.GraphModule,
@@ -1254,14 +1338,10 @@ def _replace_region_with_kernel(
     if external_inputs and latest_input_pos >= 0:
         latest_input_node = max(external_inputs, key=lambda n: node_order.get(n, -1))
         with graph.inserting_after(latest_input_node):
-            call_node = graph.call_function(
-                kernel_fn, args=tuple(external_inputs)
-            )
+            call_node = graph.call_function(kernel_fn, args=tuple(external_inputs))
     else:
         with graph.inserting_before(nodes[0]):
-            call_node = graph.call_function(
-                kernel_fn, args=tuple(external_inputs)
-            )
+            call_node = graph.call_function(kernel_fn, args=tuple(external_inputs))
 
     if len(output_nodes) == 1:
         call_node.meta = output_nodes[0].meta.copy()
@@ -1274,9 +1354,7 @@ def _replace_region_with_kernel(
         last = call_node
         for out_idx, out_node in enumerate(output_nodes):
             with graph.inserting_after(last):
-                gi = graph.call_function(
-                    operator.getitem, args=(call_node, out_idx)
-                )
+                gi = graph.call_function(operator.getitem, args=(call_node, out_idx))
                 gi.meta = out_node.meta.copy()
             out_node.replace_all_uses_with(gi)
             last = gi
@@ -1289,6 +1367,7 @@ def _replace_region_with_kernel(
 # ---------------------------------------------------------------------------
 # Main pass
 # ---------------------------------------------------------------------------
+
 
 def fused_kernel_pass(
     gm: torch.fx.GraphModule,
@@ -1334,7 +1413,9 @@ def fused_kernel_pass(
         work_gm, all_regions = extractor_cls().extract(gm)
 
     unique_regions, hash_counts = _filter_regions(
-        all_regions, min_ops=min_ops, min_compute_ops=min_compute_ops,
+        all_regions,
+        min_ops=min_ops,
+        min_compute_ops=min_compute_ops,
     )
 
     if not unique_regions:
