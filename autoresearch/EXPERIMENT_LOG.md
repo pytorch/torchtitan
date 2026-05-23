@@ -28,6 +28,18 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter35 remaining ADO knobs — discard (xxxxxxx)
+
+- **Idea**: iter-26 only tuned 4 of the `aten_distributed_optimizations` knobs. 5 more remain untried: `compute_overlap_multipler`, `max_coll_distance`, `bucket_exposed_first`, `prioritize_bucketing_during_scheduling`, `insert_overlap_deps`. Set all 5 to more aggressive values before `schedule_overlap_bucketing`.
+- **Changes**: Added a config-setattr block before the `schedule_overlap_bucketing(gm)` call. Values: `compute_overlap_multipler=2.0`, `max_coll_distance=400`, `bucket_exposed_first=True`, `prioritize_bucketing_during_scheduling=True`, `insert_overlap_deps=True`. All 5 setattr calls succeeded (attrs exist on this PyTorch).
+- **Result**: discard. **8-run mean tps=6,040.0, σ=3.6** — identical to baseline (6,040.25, σ=4.1). Numerics bitwise PASS. Memory 49.24 GiB, MFU ~35.37%.
+- **Analysis**: All 5 knobs either default to effectively-equivalent values, or describe opportunities that don't apply to our graph at the iter-22 baseline. `schedule_overlap_bucketing`'s output is invariant to these settings on our graph.
+- **Lessons**:
+  - **The `aten_distributed_optimizations` config surface is fully explored.** Iter-26 (4 knobs) + iter-35 (5 knobs) = all 9 numeric/bool knobs in the config block. None move TPS.
+  - **The overlap scheduler is operating at its true ceiling for this graph.** Further config tuning is hopeless.
+
+---
+
 ## iter34 coalesced bucket_reduce_scatter — discard (xxxxxxx)
 
 - **Idea**: iter-22 removed `bucket_reduce_scatter` because default `bucket_mode` adds +615 cat/slice/reshape nodes, net-negative under CUDA graphs. But config doc claims `bucket_mode="coalesced"` uses `reduce_scatter_tensor_coalesced` (single multi-tensor op) — should be zero-copy. Untried combination.
