@@ -28,6 +28,33 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## Session checkpoint (after iter 33)
+
+**Final stable configuration unchanged**: pass list `[remove_detach_nodes, apply_inductor_pattern_passes, disable_uninitialized_memory_fill, install_cuda_graph]`. iter-22 keep at 6,048 (3-run) revised to **8-run mean = 6,040 tps, σ = 4.1**.
+
+**Iters 26-33 summary** (all discards under tighter 8-run measurement):
+| # | Idea | Status | Result | Mechanism |
+|---|---|---|---|---|
+| 26 | tune `aten_distributed_optimizations` (memory budget, lookahead, compute_estimator) | discard | tps=6,039 (≡baseline) | scheduler isn't memory-bound; `compute_estimator` already defaults to "benchmark" |
+| 27 | untried `replace_random_passes` + recon | discard | 0 node delta | no random ops in inference-style training graph |
+| 28 | dedupe_to_copy CSE for 649 nodes | discard | 0 dupes found | `joint_graph_passes` CSE catches them all |
+| 29 | custom FX `sink_waits` (move waits to earliest user) | discard | 325/622 moved, max 4430 pos, **0 TPS change** | FX node order after `schedule_overlap_bucketing` is cosmetic; CUDA graphs freeze the runtime structure |
+| 30 | literature research | info | all leads bitwise-blocked or out-of-scope | async-TP needs SP-TP (we have non-SP), NCCL env vars too late |
+| 31 | 8-run baseline variance | info | σ=4.1, mean=6,040 | true noise band 16× tighter than prior threshold |
+| 32 | regional_inductor_compile re-test on iter-22 graph | discard | 472/708 regions, **REGRESSION -298 tps (-4.9%)** | Inductor codegen anti-synergistic with CUDA graphs |
+| 33 | graph motif analysis | info | top motifs are zero-cost metadata | no hand-rolled fusion target |
+
+**Structural ceilings reaffirmed**:
+1. **Inductor codegen ⇄ bitwise**: incompatible kernel selection (iter-19, 21, 32).
+2. **Inductor codegen ⇄ CUDA graphs**: even when codegen works (regional), it's a regression because per-kernel overhead survives CUDA graph capture while the amortization benefit fights it (NEW: iter-32 evidence).
+3. **FX node order ⇄ runtime**: post-`schedule_overlap_bucketing`, FX list order is cosmetic — CUDA graph freezes the stream/event structure (NEW: iter-29 evidence).
+4. **bf16 grad RS / async-TP**: blocked by bitwise constraint or TP layout (need SP-TP).
+5. **GPU at 98% utilization**: maximum +2% headroom from filling bubbles.
+
+**Final reflective conclusion**: The `passes.py`-only surface under the bitwise constraint is genuinely exhausted. Future improvements would require either (a) relaxing bitwise to loss-equivalent, (b) changing TP layout to enable async-TP, or (c) modifying `trainer.py` / parallelism code to e.g., include optimizer in the captured graph.
+
+---
+
 ## iter33 graph motif analysis — info-only (xxxxxxx)
 
 - **Idea**: With FX-pass surface seemingly exhausted, look one level deeper. Maybe there's a high-frequency 3- or 4-node motif that could be hand-rolled-fused into a single op.
