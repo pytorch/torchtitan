@@ -28,6 +28,18 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter30 literature research — info-only (xxxxxxx)
+
+- **Idea**: With the FX-level optimization surface seeming exhausted, do focused web research for any recent (2024-2026) FSDP+TP+CUDA-graphs Llama3 H100 optimization techniques we haven't tried.
+- **Searches performed** (via web search, time-boxed): PyTorch Async-TP / SymmetricMemory, micro_pipeline_tp pass mechanics, NCCL channel tuning, Triton-distributed (arXiv 2504.19442), CUDA graph extensions, RMSNorm/RoPE custom kernels.
+- **Surviving candidates**:
+  - **A. SymmetricMemory async-TP (`_fused_all_gather_matmul` / `_fused_matmul_reduce_scatter`)**: Documented in https://discuss.pytorch.org/t/distributed-w-torchtitan-introducing-async-tensor-parallelism-in-pytorch/209487 . Activated by `micro_pipeline_tp_pass`, which looks for `all_gather → matmul` or `matmul → reduce_scatter` adjacency. **Blocked**: iter-7 already confirmed `micro_pipeline_tp_pass` is a no-op on our graph because our TP uses `_c10d_functional.all_reduce_` (the 68 AR nodes), not AG+matmul/matmul+RS. Async-TP requires sequence-parallel TP layout, which `simple_fsdp` doesn't emit.
+  - **B. NCCL channel/SM tuning (`NCCL_MIN_NCHANNELS`, `NCCL_NTHREADS`, `NCCL_PROTO`)**: Out of `passes.py` scope (NCCL env vars are read at communicator init time, before `passes.py` runs). Setting them inside a pass is too late.
+- **Dead ends**: Triton-distributed (replaces NCCL with custom kernels → non-bitwise); RMSNorm/RoPE custom Triton (external-library prohibition + non-bitwise); zero-bubble PP (no PP in our config); CUDA graph cross-step capture (already captured joint graph); bf16 collectives (bitwise-blocked).
+- **Lesson**: **The optimization surface accessible from `passes.py` under bitwise constraint is genuinely exhausted at this point.** All remaining levers either require: (a) graph rewrites to enable async-TP (substantial, breaks if mis-done); (b) non-FX-level config (NCCL env vars, pre-init); (c) numerics relaxation (Inductor codegen, bf16 grads). Future iterations should treat known leads as null-hypothesis and look only for genuinely-novel exploits.
+
+---
+
 ## iter29 sink_waits (custom FX) — discard (xxxxxxx)
 
 - **Idea**: iter-4 noted "move waits LATER toward consumers" as an overlap lever; `schedule_overlap_bucketing` does some of this at the scheduler level but its bucketing/memory budgets may leave residual slack. Custom FX-level pass: for each `wait_tensor`, find its earliest topo user and `prepend` the wait to that user.
