@@ -8367,3 +8367,30 @@ Interpretation:
 
 - Batch144 technically completes, but it is memory-risky and much slower than batch128.
 - The eager MXFP8 path has a sharp degradation near the memory boundary. Try batch136, which is still shape-valid for Triton dim1 (`136 * 16 = 2,176 = 17 * 128`) but should avoid the allocator retry regime.
+
+## Experiment 347: MXFP8 Linear Loss-Only Compile Local Batch 136
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run347-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs136-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: keep.
+- Step 10 `tps`: 11,202.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.94 GiB, 94.72%.
+- Loss moved from 12.39753 at step 1 to 7.89560 at step 10; finite and overall decreasing, although noisy.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Batch136 is the best measured MXFP8 configuration so far and beats the prior non-MXFP8 measured peak by reported tps.
+- Batch144 shows the memory cliff; batch136 appears to be the largest safe batch multiple of 8 tested so far for `loss.num_chunks=8`.
+- Next likely improvement is reducing loss chunk overhead while keeping Triton dim1 row shapes valid. At batch136, `loss.num_chunks=4` gives 32 sequence positions per chunk and `136 * 32 = 4,352 = 34 * 128`, so it preserves Triton dim1 compatibility with fewer loss chunks.

@@ -72,6 +72,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run344 command with `--training.local_batch_size=136`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 10,960. Risk is lower tps than batch128 or residual allocator retries.
+  Result: kept at source state `0002b8cb`; batch136 completed cleanly with 11,202 tps, 168.94 GiB peak memory, nonzero grad norm, and finite overall-decreasing loss. This is the best measured MXFP8 configuration so far.
+
+- Idea: MXFP8Linear batch136 with loss chunks 4
+  Current best source commit: 0002b8cb
+  Source: loss-overhead follow-up after batch136 with chunk8 became the best MXFP8 configuration.
+  Expected mechanism: Reduce the number of loss chunks from 8 to 4 to reduce repeated lm_head/loss overhead while preserving Triton dim1 row compatibility. With seq_len 128, chunk4 means 32 sequence positions per chunk; local batch 136 gives 4,352 rows, exactly 34 * 128.
+  Supporting evidence: Batch136 chunk8 is memory-safe at 168.94 GiB. Fewer chunks may increase peak memory but there is roughly 9 GiB headroom before reported capacity and no allocator retry warnings in run347.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run347 command with `--loss.num_chunks=4`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is OOM from larger loss chunks or lower throughput if larger chunks worsen scheduling.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
