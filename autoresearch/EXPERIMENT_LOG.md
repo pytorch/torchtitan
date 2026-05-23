@@ -28,6 +28,30 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## regional_inductor_compile — discard (xxxxxxx)
+
+- **Idea**: Whole-graph `compile_fx` is blocked by DTensor's `_get_submesh` and `compile_fx`'s reinplace pass. Compile only **pure-ATen connected subgraphs** (no collectives, no `wait_tensor`, no `_get_submesh`, no in-place) via `compile_fx_inner`, replace nodes with `call_function(compiled_fn, ...)`.
+- **Changes**: Added `regional_inductor_compile` pass. Found 97 regions by maximal consecutive-run topo-sort grouping (convex by construction). Drained decomp conflicts: `_to_copy`, `t`, `transpose.int`, `silu`, `arange`, `zeros_like`, `ones_like`, `_fused_rms_norm_backward`, `silu_backward`, `embedding_dense_backward`. Cleared `fast_random_decomps`'s `@functools.cache` (otherwise pop doesn't propagate). All 97 regions compiled successfully.
+- **Result**: discard. tps=5,890 vs iter-12 5,876 → **+0.24%** (within noise). Numerics PASS bitwise. Wall time 161s (compile +11s for 97 regions).
+- **Analysis**:
+  - Regions are small (20-39 nodes, avg 31). The graph is fragmented by collectives every ~30 nodes; Triton fusion can't span a useful fraction of the graph.
+  - CUDA graphs (iter 8) already amortize per-launch overhead. Compiling small pointwise runs recovers very little arithmetic intensity on top.
+  - **Mechanism works** (compile_fx_inner succeeds on cleaned regions, replaced cleanly in outer graph, numerics survive). It just doesn't pay back when individual regions are too small.
+- **Lessons**:
+  - **Region size matters**: <40-node pointwise regions don't recoup compile overhead post-CUDA-graphs.
+  - **Decomp drain + cache clear** unblocks `compile_fx_inner` on subgraphs. Future iterations can reuse this technique.
+  - **The graph's collective density (~30 nodes between collectives) is the structural limit** for Triton coverage. Larger regions would require bypassing collectives — e.g., compile across collective boundaries by treating collectives as opaque calls inside Triton (probably needs custom inductor lowerings, out of scope).
+
+---
+
+## expanded apply_inductor_pattern_passes attempt #2 — discard (xxxxxxx)
+
+- **Idea**: Try untried `torch._inductor.fx_passes.*` submodules (`fsdp.dedup_fsdp_reduce_scatter`, `reduced_atomic_contention.partitioned_scatter_optimization_pass`, `ddp_fusion.schedule_comm_wait`, plus 8 others).
+- **Result**: discard. All 3 callable rewrites ran cleanly but were node-count no-ops. tps=5,883 ≈ iter-12 5,876 (within noise).
+- **Lessons**: After iter-7's `bucket_*` + `schedule_overlap_bucketing` the graph is already in these passes' "post-pass" form. Other untried modules are utilities (memory_estimator, node_runtime_estimation, etc.), require driver context we don't have (overlap_manual_scheduling needs module_bucket_plans; overlap_preserving_bucketer needs scheduled set; control_dependencies needs additional_deps_map), or are in the wrong domain (apply_gumbel_max_trick=RL, efficient_conv_bn_eval=CNN, quantization=N/A, mkldnn_fusion=CPU, freezing_patterns=inference). Inductor's fx_passes surface for this workload is fully explored.
+
+---
+
 ## disable_uninitialized_memory_fill — keep (d99dce8)
 
 - **Idea**: Profile shows 4,061 FillFunctor zero-init kernels / step (~95 ms, 5.9%). Investigate the source and eliminate where safe.
