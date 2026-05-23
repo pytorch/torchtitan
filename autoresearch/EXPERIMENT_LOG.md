@@ -28,6 +28,21 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter34 coalesced bucket_reduce_scatter — discard (xxxxxxx)
+
+- **Idea**: iter-22 removed `bucket_reduce_scatter` because default `bucket_mode` adds +615 cat/slice/reshape nodes, net-negative under CUDA graphs. But config doc claims `bucket_mode="coalesced"` uses `reduce_scatter_tensor_coalesced` (single multi-tensor op) — should be zero-copy. Untried combination.
+- **Changes**: Added `bucket_reduce_scatter(gm)` + `stable_topological_sort(gm)` call inside `apply_inductor_pattern_passes`, preceded by `C.aten_distributed_optimizations.bucket_mode = "coalesced"`.
+- **Result**: discard. Pass succeeded, **added 645 nodes (vs +1425 in default mode)** — better than default but still substantial. **8-run mean tps=5,846, σ=7.6 → REGRESSION -194 tps (-3.2%)**. Numerics bitwise PASS.
+- **Analysis**: Coalesced mode IS structurally different from default (less than half the node delta), but still net-negative because:
+  - Wrapper nodes are still needed to gather inputs into the coalesced call and route outputs to original consumers.
+  - `schedule_overlap_bucketing` running after has more nodes to schedule and apparently picks a worse ordering.
+  - The bucketed reduce_scatter call itself may be slower under CUDA graph replay than the per-shard launches it replaces.
+- **Lessons**:
+  - **The structural conclusion from iter-22 extends to coalesced mode: post-CUDA-graphs, ANY form of `reduce_scatter` bucketing is counterproductive.** The mechanism (CUDA graph amortizes launches, so launch-count savings from bucketing don't matter) is invariant to the bucketing implementation.
+  - **"Zero-copy" claims in config docs are misleading.** The collective op itself may be zero-copy, but the surrounding FX-graph rewrite still adds wrapper nodes.
+
+---
+
 ## Session checkpoint (after iter 33)
 
 **Final stable configuration unchanged**: pass list `[remove_detach_nodes, apply_inductor_pattern_passes, disable_uninitialized_memory_fill, install_cuda_graph]`. iter-22 keep at 6,048 (3-run) revised to **8-run mean = 6,040 tps, σ = 4.1**.
