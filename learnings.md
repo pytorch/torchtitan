@@ -8449,3 +8449,31 @@ Interpretation:
 - The batch136 chunks8 MXFP8 path is robust enough to keep: a second clean run lands in the same high-throughput band and improves loss normally.
 - The 11,202 tps from run347 remains the measured peak; run349 validates the source state at 11,065 tps.
 - Since batch136 chunks4 crossed the memory cliff, the next chunks4 test should lower batch to 128. That preserves Triton dim1 validity (`128 * 32 = 4,096`) and should keep peak memory closer to the clean range.
+
+## Experiment 350: MXFP8 Linear Batch128 Loss Chunks 4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run350-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: keep as near-peak lower-memory variant, but not a new measured peak.
+- Step 10 `tps`: 11,171.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.01 GiB, 93.08%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.36306 at step 1 to 5.61501 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Loss chunks4 is not inherently bad for MXFP8; the batch136 chunks4 failure was memory-pressure driven.
+- Batch128 chunks4 is close to the current measured peak and uses about 2.9 GiB less memory than batch136 chunks8.
+- Interpolate with batch132 chunks4 next. It is Triton-row-valid (`132 * 32 = 4,224 = 33 * 128`) and should test whether the chunks4 lower-overhead path can recover enough batch work without hitting the allocator cliff.
