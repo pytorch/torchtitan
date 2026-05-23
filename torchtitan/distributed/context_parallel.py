@@ -163,9 +163,9 @@ def apply_cp_to_forward(
 
                 def cp_forward(q, k, v, **kwargs):
                     attn_masks = kwargs.get("attention_masks")
-                    assert isinstance(attn_masks, CPVarlenMetadata), (
-                        "Expected CPVarlenMetadata in attention_masks"
-                    )
+                    assert isinstance(
+                        attn_masks, CPVarlenMetadata
+                    ), "Expected CPVarlenMetadata in attention_masks"
                     k = k.contiguous()
                     v = v.contiguous()
                     global_k, global_v = flex_cp_allgather(k, v, 1, pg_name)

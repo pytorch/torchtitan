@@ -12,10 +12,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    GQAttention,
-)
+from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
