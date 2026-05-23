@@ -186,8 +186,13 @@ class GradAccumulator:
     this uses a pre-allocated buffer with in-place copies for better memory efficiency.
 
     Args:
-        reference: Reference tensor to derive shape, device, and DTensor metadata.
-            If a DTensor, result() returns a DTensor with matching placements.
+        reference: Reference tensor for shape, device, and DTensor-ness. If a
+            DTensor, only its device mesh is reused; the placement of the
+            returned DTensor is taken from the first added chunk (see add()),
+            not from this reference, so the buffer is labeled with the actual
+            gradient placement (e.g. Partial(sum) on the TP axis when the
+            forward used a Replicate input with a Shard(0) weight, as in
+            ColwiseParallel lm_head) rather than the activation placement.
         num_chunks: Number of chunks that will be added.
         seq_dim: The sequence dimension along which chunks are accumulated.
         dtype: Dtype for the buffer.
@@ -214,12 +219,11 @@ class GradAccumulator:
         self.seq_dim = seq_dim
         self._next_idx = 0
         self._device_mesh: DeviceMesh | None = None
+        # Captured from the first added chunk; see __init__ docstring.
         self._placements: tuple[Placement, ...] | None = None
 
-        # Track DTensor metadata for transparent wrap-back in result()
         if isinstance(reference, DTensor):
             self._device_mesh = reference.device_mesh
-            self._placements = reference.placements
             local = reference.to_local()
         else:
             local = reference
@@ -236,9 +240,25 @@ class GradAccumulator:
         if self._next_idx >= self.num_chunks:
             raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
 
-        # Extract local tensor if DTensor
         if isinstance(chunk_grad, DTensor):
+            if self._placements is None:
+                self._placements = chunk_grad.placements
+            elif chunk_grad.placements != self._placements:
+                # All chunks come from the same op chain and must share a
+                # placement. Otherwise the buffer mixes frames and result()
+                # would mislabel them.
+                raise ValueError(
+                    f"chunk_grad placement {chunk_grad.placements} does not "
+                    f"match first chunk's placement {self._placements}"
+                )
             chunk_grad = chunk_grad.to_local()
+        elif self._placements is not None:
+            # Earlier chunks were DTensor but this one is a plain tensor;
+            # mixing the two would silently drop the implied reduction.
+            raise ValueError(
+                "chunk_grad is a plain tensor but earlier chunks were "
+                f"DTensor with placement {self._placements}"
+            )
 
         if chunk_grad.dtype != self._buffer.dtype:
             chunk_grad = chunk_grad.to(self._buffer.dtype)
@@ -254,10 +274,21 @@ class GradAccumulator:
         self._next_idx += 1
 
     def result(self) -> torch.Tensor:
-        """Return the accumulated gradient tensor, wrapped as DTensor if needed."""
+        """Return the accumulated gradient tensor, wrapped as DTensor if needed.
+
+        When the chunks were Partial(sum), the returned DTensor is also
+        Partial(sum); autograd performs the implied reduction once when this
+        gradient lands on the decoder-side leaf.
+        """
         from torch.distributed.tensor import DTensor
 
         if self._device_mesh is not None:
+            if self._placements is None:
+                raise ValueError(
+                    "No DTensor chunk was added; cannot wrap the buffer as "
+                    "DTensor without a known placement. Either pass DTensor "
+                    "chunks to add(), or use a plain reference tensor."
+                )
             return DTensor.from_local(
                 self._buffer,
                 device_mesh=self._device_mesh,
