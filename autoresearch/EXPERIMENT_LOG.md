@@ -28,6 +28,62 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## Session checkpoint (after iter 38) — saturation confirmed
+
+Final 8-run measured baseline: **mean = 6,040.25 tps, σ = 4.1 tps** (iter-22 pass list). Pass list unchanged throughout the session.
+
+### Per-pass contributions (8-run ablation, definitive)
+
+| Pass | Contribution (TPS) | Memory | Mechanism |
+|---|---|---|---|
+| `remove_detach_nodes` (iter-37) | **+18 tps** | -2 GiB | 196 detach nodes; dispatcher overhead + held tensor refs |
+| `apply_inductor_pattern_passes` whole | **+~1880 tps** (compound) | unchanged | joint_graph + post_grad + overlap scheduling |
+| ├ `joint_graph_passes + post_grad_passes` (iter-5) | +400 tps (+9.9%) | — | 11.5k → 9.1k nodes; semantic fusion + CSE |
+| └ `schedule_overlap_bucketing` (iter-23) | +543 tps | — | Stream-aware comm/compute reordering |
+| `disable_uninitialized_memory_fill` (iter-38) | **+303 tps** | unchanged | Eliminates 4,061 FillFunctor kernels/step |
+| `install_cuda_graph` (iter-8 historical) | **+~1300 tps** | unchanged | Amortizes per-step CPU launch overhead |
+| **Total vs baseline 4,161 tps** | **+1,879 tps (+45.2%)** | -2 GiB | All passes load-bearing |
+
+### Session 26-38: all 13 iterations confirmed saturation
+
+| # | Idea | Status | Result (vs 8-run mean 6,040 σ=4) |
+|---|---|---|---|
+| 26 | tune `aten_distributed_optimizations` (4 knobs) | discard | -1 tps (noise) |
+| 27 | `replace_random_passes` + recon | discard | 0 effect (no random ops) |
+| 28 | dedupe_to_copy CSE | discard | 0/649 dupes (CSE already done) |
+| 29 | custom FX `sink_waits` | discard | 325 moves, 0 TPS (FX order is cosmetic post-overlap) |
+| 30 | literature research | info | no actionable leads under bitwise |
+| 31 | 8-run variance baseline | info | σ=4.1 tps (16× tighter than prior threshold) |
+| 32 | regional_inductor_compile re-test | discard | **-298 tps regression** (Inductor anti-synergistic with CUDA graphs) |
+| 33 | graph motif analysis | info | top motifs are zero-cost metadata |
+| 34 | coalesced `bucket_reduce_scatter` | discard | **-194 tps regression** (bucketing in any form negative post-CUDA-graphs) |
+| 35 | remaining ADO knobs (5 more) | discard | 0 tps effect |
+| 36 | high-priority capture stream | discard | -5 tps (noise) |
+| 37 | ablate `remove_detach_nodes` | info | -18 tps + 2 GiB confirms load-bearing |
+| 38 | ablate `disable_uninitialized_memory_fill` | info | -303 tps confirms massive contribution |
+
+### Structural ceilings (definitive list)
+
+1. **Bitwise numerics ⇄ Inductor codegen.** Confirmed iter-19, iter-21, iter-32. Inductor codegen produces numerically-correct-but-not-bitwise kernels. Drift starts at step 1.
+2. **CUDA graphs ⇄ Inductor codegen (anti-synergy).** Confirmed iter-32. Even when codegen works (regional compile), it's a regression because per-kernel overhead survives CUDA graph capture while amortization benefit fights it.
+3. **FX node order ⇄ runtime.** Confirmed iter-29. Post-`schedule_overlap_bucketing`, FX list order is cosmetic — CUDA graph capture freezes stream/event structure.
+4. **bf16 grad RS ⇄ bitwise.** Confirmed iter-10 profile. Largest single non-irreducible lever (~9% TPS) blocked by numerics.
+5. **Async-TP ⇄ TP layout.** Confirmed iter-30. `micro_pipeline_tp_pass` needs AG+matmul pattern; our TP uses `all_reduce`. Requires SP-TP that simple_fsdp doesn't emit.
+6. **GPU 98% busy.** Maximum +2% headroom from filling bubbles, but `schedule_overlap_bucketing` already extracts essentially all of it (per iter-26/35 ADO knob tests).
+
+### Conclusion
+
+The optimization surface accessible from `passes.py` under the bitwise constraint is **definitively exhausted**. Future improvements require:
+- **(a) Relaxing bitwise to loss-equivalent** → unlocks Inductor codegen (+~3% per iter-19), bf16 grad RS (+~9%).
+- **(b) Modifying TP layout to sequence-parallel** → unlocks async-TP (+~2-5%).
+- **(c) Modifying `trainer.py` / parallelism code** → optimizer in captured graph (+~2.7%), fp8, etc.
+
+All of these are explicitly out of scope per `autoresearch.md`'s "modify only `torchtitan/experiments/graph_trainer/passes.py`" constraint.
+
+**Reproducibility**: every keep is in a `[autoresearch]` commit; iter-31 onward used 8-run measurement (σ_mean ≈ 1.4 tps) for tight detection.
+
+---
+
 ## iter38 ablate disable_uninitialized_memory_fill (8-run) — info-only (xxxxxxx)
 
 - **Idea**: iter-23 3-run ablation said -305 tps without `disable_uninitialized_memory_fill`. Confirm precise 8-run contribution.
