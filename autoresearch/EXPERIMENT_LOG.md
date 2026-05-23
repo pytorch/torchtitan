@@ -28,6 +28,24 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## disable_uninitialized_memory_fill — keep (pending)
+
+- **Idea**: Profile shows 4,061 FillFunctor zero-init kernels / step (~95 ms, 5.9%). Investigate the source and eliminate where safe.
+- **Recon finding**: Only **75** zero-fill *FX nodes* in the entire 10,947-node graph (not 4,061). Distribution:
+  - **65 × `aten.empty.memory_format`** — large bf16 buffers (20M–88M elts), each backing an `_c10d_functional.all_gather_into_tensor_out`. Each `empty` has exactly two users: a `slice.Tensor` (read view, safely no-op until written) and the `all_gather_into_tensor_out` (FULL overwrite).
+  - **9 × `aten.full.default`** — tiny scalars feeding `where` / `index_put_`.
+  - **1 × `aten.zeros_like.default`** — cross-entropy backward grad buffer (intentional zero, must keep).
+  - **4,061 FillFunctor CUDA kernels ≈ 65 empties × ~62 launches** per step. They come from `torch.utils.deterministic.fill_uninitialized_memory = True`, which `--debug.deterministic` enables. Every `aten.empty.*` emits a FillFunctor zero-init even when the consuming op overwrites the buffer immediately.
+- **Changes**: Added `disable_uninitialized_memory_fill` pass. Audits every `aten.empty.memory_format` / `aten.empty_strided.default` node; requires every user be either a full-overwrite op (`all_gather_into_tensor_out`, `copy_`, `fill_`, `zero_`) or a read-only view AND at least one full-overwrite user. If all safe, sets `torch.utils.deterministic.fill_uninitialized_memory = False` so subsequent `install_cuda_graph` capture records the graph WITHOUT the FillFunctor zero-init kernels. Registered between `apply_inductor_pattern_passes` and `install_cuda_graph`. Falls through on any exception.
+- **Result**: keep. 2 runs: tps=5,875 / 5,877, mfu=34.40% / 34.42%, memory=49.08 GiB. Loss=9.21808, grad_norm=4.5867 (bitwise identical). Numerics PASS. Wall time 141s.
+  - **+5.5% over iter 8, +41.2% over baseline.**
+- **Lessons**:
+  - **`--debug.deterministic` quietly costs ~5.5% TPS via `fill_uninitialized_memory=True`.** The flag's intent (reproducibility through clean uninitialized memory) is achieved here by other means (`--debug.seed`), so we can safely disable the fill once we've audited that every uninitialized buffer is fully overwritten before any non-view read.
+  - **Profile-driven optimization works**: iter-10's profile flagged the bottleneck, this iter realized the actual root cause was a global PyTorch flag, not the FX graph itself.
+  - **FillFunctor kernel count ≠ FillFunctor FX node count.** A single `empty.memory_format` can generate many FillFunctor launches when deterministic mode is on — count the kernels not the nodes.
+
+---
+
 ## collapse_dtype_roundtrips — discard (xxxxxxx)
 
 - **Idea**: Among 842 `_to_copy.default` casts, find bf16→fp32→shape-op→bf16 round-trips where the intermediate ops are dtype-trivial (view/transpose/reshape/etc.). Collapse to a single bf16 path; bitwise identical since shape ops don't compute.

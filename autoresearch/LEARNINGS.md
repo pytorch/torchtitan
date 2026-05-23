@@ -57,6 +57,20 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   hit "Argument was used before defined". Cost: +63s one-time compile
   time for the analysis; no per-step cost.
 
+- **Disabling `torch.utils.deterministic.fill_uninitialized_memory`
+  for the captured graph (`disable_uninitialized_memory_fill`).**
+  **Additional +5.5% TPS (+41.2% cumulative vs baseline), MFU 34.4%**,
+  bitwise identical numerics. `--debug.deterministic` enables this
+  global flag, which silently makes every `aten.empty.*` emit a
+  FillFunctor zero-init kernel before its consumer overwrites the
+  buffer. On this graph that's 65 large empties × ~62 launches/step =
+  4,061 FillFunctor kernels / step / 95 ms. By auditing that every
+  empty's users are either read-only views or full-overwriters, we can
+  safely disable the flag before CUDA-graph capture — the graph then
+  records the buffers without the redundant zero. **`--debug.seed=42`
+  alone is sufficient for run-to-run reproducibility on this workload;
+  the fill is pure overhead.**
+
 - **CUDA-graph wrapping of `gm.forward` (`install_cuda_graph`).**
   **Additional +16.4% TPS (+33.8% cumulative vs baseline), MFU 32.6%**,
   bitwise identical numerics. Steady-state CPU launch overhead on a

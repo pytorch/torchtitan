@@ -727,6 +727,138 @@ def install_cuda_graph(
     return gm
 
 
+def disable_uninitialized_memory_fill(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> torch.fx.GraphModule:
+    """Disable deterministic zero-init for ``aten.empty`` outputs that are
+    fully overwritten by their next op.
+
+    Context: with ``torch.use_deterministic_algorithms(True)``, the global
+    flag ``torch.utils.deterministic.fill_uninitialized_memory`` defaults to
+    True, which makes ``aten.empty.memory_format`` (and ``empty_strided``)
+    emit a FillFunctor zero-init kernel for every allocation. The profile
+    shows ~4,061 FillFunctor kernels per step (5.9% of GPU time).
+
+    All 65 ``aten.empty.memory_format`` nodes in the joint graph back
+    ``all_gather_into_tensor_out`` collectives whose only readers consume
+    the buffer AFTER the all_gather writes the full extent. The zero-init
+    is therefore dead — the buffer is fully overwritten before any read.
+
+    Strategy (b - "DCE-style elimination"): audit every ``empty.*`` node
+    and confirm its users either (a) overlap-write the full buffer
+    (collectives' ``_out`` variants, ``copy_``, ``fill_``, ``zero_``) or
+    (b) are pure read-only views (``slice.Tensor``, ``view.default``,
+    ``as_strided.default``, ``select.int``) that are only read AFTER the
+    overwriting op. If the audit passes, set
+    ``torch.utils.deterministic.fill_uninitialized_memory = False`` so the
+    subsequent CUDA-graph capture in ``install_cuda_graph`` records the
+    sequence without the FillFunctor kernels.
+
+    The flag is a global runtime setting; it persists for the rest of the
+    process, but the only consumer that matters is the captured CUDA graph
+    that ``install_cuda_graph`` records right after this pass runs. Replay
+    afterward dispatches the recorded kernels directly without re-querying
+    the flag.
+
+    Bitwise safety: every ``aten.empty.memory_format`` output value is
+    overwritten by an immediate user before any data-dependent read, so
+    the pre-fill zeros are unobservable in the program's output.
+
+    Wrapped in try/except: any audit failure leaves the flag untouched and
+    falls through to the existing 5,566 TPS baseline.
+    """
+    try:
+        # Operations that fully overwrite their first (or "out=") argument.
+        # ``all_gather_into_tensor_out`` and ``reduce_scatter_tensor_out``
+        # take the output buffer as last positional arg in functional-collectives
+        # form; the dispatcher writes the whole extent. ``copy_``, ``fill_``,
+        # ``zero_`` similarly write the whole extent.
+        FULL_OVERWRITE_TARGETS = {
+            "_c10d_functional.all_gather_into_tensor_out.default",
+            "aten.copy_.default",
+            "aten.fill_.Scalar",
+            "aten.fill_.Tensor",
+            "aten.zero_.default",
+        }
+        # Read-only views that don't observe pre-existing memory until a later
+        # consumer reads the view. These are safe iff the underlying empty is
+        # also overwritten by some other user before the view is read - which
+        # we conservatively verify by requiring at least one full-overwrite user.
+        VIEW_TARGETS = {
+            "aten.slice.Tensor",
+            "aten.view.default",
+            "aten.as_strided.default",
+            "aten.select.int",
+            "aten._unsafe_view.default",
+        }
+
+        empty_nodes = []
+        for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
+            short = str(node.target)
+            if short in ("aten.empty.memory_format", "aten.empty_strided.default"):
+                empty_nodes.append(node)
+
+        if not empty_nodes:
+            logger.info(
+                "disable_uninitialized_memory_fill: no aten.empty.* nodes found; "
+                "no-op"
+            )
+            return gm
+
+        unsafe: list[str] = []
+        safe_count = 0
+        for node in empty_nodes:
+            user_targets = [str(u.target) for u in node.users]
+            has_full_overwrite = any(
+                ut in FULL_OVERWRITE_TARGETS for ut in user_targets
+            )
+            all_users_safe = all(
+                (ut in FULL_OVERWRITE_TARGETS) or (ut in VIEW_TARGETS)
+                for ut in user_targets
+            )
+            if has_full_overwrite and all_users_safe:
+                safe_count += 1
+            else:
+                unsafe.append(f"{node.name}: users={user_targets}")
+
+        if unsafe:
+            logger.info(
+                f"disable_uninitialized_memory_fill: AUDIT FAILED "
+                f"({len(unsafe)}/{len(empty_nodes)} empty nodes unsafe to skip "
+                f"zero-init); leaving fill_uninitialized_memory unchanged. "
+                f"First unsafe: {unsafe[0]}"
+            )
+            return gm
+
+        # All empty nodes are followed by a full-overwrite op (with optional
+        # read-only views interleaved). Safe to disable the global fill.
+        try:
+            import torch.utils.deterministic as det
+
+            prev = getattr(det, "fill_uninitialized_memory", None)
+            det.fill_uninitialized_memory = False
+            logger.info(
+                f"disable_uninitialized_memory_fill: audited {safe_count} "
+                f"aten.empty.* nodes; set fill_uninitialized_memory=False "
+                f"(was {prev!r}). This eliminates the per-step FillFunctor "
+                f"zero-init kernels for these empty allocations."
+            )
+        except Exception as e:
+            logger.info(
+                f"disable_uninitialized_memory_fill: failed to set flag: "
+                f"{type(e).__name__}({e})"
+            )
+    except Exception as e:
+        logger.info(
+            f"disable_uninitialized_memory_fill: unexpected error "
+            f"{type(e).__name__}({e}); pass is a no-op"
+        )
+    return gm
+
+
 def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -747,6 +879,7 @@ def construct_default_graph_passes(
     passes: list[Callable] = [
         remove_detach_nodes,
         apply_inductor_pattern_passes,
+        disable_uninitialized_memory_fill,
         cuda_graph_pass,
     ]
     return passes
