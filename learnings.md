@@ -8728,3 +8728,32 @@ Interpretation:
 - The batch136 chunks4 cliff is not fixed by removing MXFP8 from `lm_head`.
 - BF16 `lm_head` reduces neither peak memory nor allocator pressure enough, and it removes useful MXFP8 acceleration from a very large output projection.
 - Restore full MXFP8 coverage and keep `loss.num_chunks=8` for batch136.
+
+## Experiment 360: MXFP8 With FSDP Forward Input Casts Disabled
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run360-mxfp8-no-fsdp-forward-input-casts-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs136-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Set `cast_forward_inputs=False` in the Qwen3 FSDP `MixedPrecisionPolicy`.
+
+Result:
+
+- Status: keep as a tiny measured peak with a warning.
+- Step 10 `tps`: 11,206.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 169.29 GiB, 94.92%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.31507 at step 1 to 7.91526 at step 10; finite and overall decreasing despite mid-run noise.
+- `grad_norm` remained nonzero.
+- The run emitted an FSDP2 warning that `FSDPMXFP8Linear` returned a view tensor whose pre-backward hook could be dropped if an in-place op consumes it.
+
+Interpretation:
+
+- Disabling FSDP forward input casts slightly improves the MXFP8 eager path and directly attacks part of the copy/cast overhead seen in the profile.
+- The gain over the previous 11,202 tps peak is only 4 tps, so this is a marginal keep rather than a robust lead.
+- The view-output warning needs to remain visible in future comparisons. The Qwen3 block uses out-of-place residual adds, so the immediate run's nonzero grad norm and decreasing loss are reassuring, but the warning means this source state should not be treated as risk-free.

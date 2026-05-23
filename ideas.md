@@ -154,6 +154,16 @@
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, no allocator retries, peak memory below the risk line, and tps above 11,202. Risk is that BF16 `lm_head` is slower and still does not relieve the chunks4 memory cliff.
   Result: discarded at source state `9200ffb3`; the run completed but still hit allocator mapping OOM warnings from step 2 onward, peaked at 173.16 GiB, and reached only 8,305 tps. Restore full MXFP8 coverage and keep batch136 chunks8.
 
+- Idea: MXFP8 with FSDP forward input casts disabled
+  Current best source commit: 8a13c9c
+  Source: MXFP8 profile follow-up after rank traces showed a nontrivial copy/cast bucket and the model remains eager because full model compile is blocked by Inductor's MXFP8 backward path.
+  Expected mechanism: FSDP's `MixedPrecisionPolicy(cast_forward_inputs=True)` casts floating inputs at each wrapped module. The MXFP8 current-best command already runs BF16 activations and BF16 parameters, so disabling that cast may remove redundant copies or dispatch overhead while preserving the loss-only compile path.
+  Supporting evidence: Run353 showed copy/cast kernels around 122 ms on rank0 in addition to MXFP8-specific cast kernels. A prior BF16 SDPA no-cast experiment was safe but did not win; the MXFP8 eager path has a different overhead mix and should be tested separately.
+  Planned source/config changes: In `parallelize_qwen3()`, pass `cast_forward_inputs=False` to `MixedPrecisionPolicy`.
+  Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, no allocator retries, and tps above 11,202. Risk is exposing a view-output FSDP warning or hidden dtype path that the cast previously masked.
+  Result: kept at source state `acd7635d`; the run completed cleanly with 11,206 tps, 169.29 GiB peak memory, no allocator retries, and finite overall-decreasing loss. It emitted an FSDP2 warning that `FSDPMXFP8Linear` returned a view tensor that could drop pre-backward hooks if followed by in-place ops, so treat this as a tiny measured peak with a source-level warning to watch.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.
