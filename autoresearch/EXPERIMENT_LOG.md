@@ -28,6 +28,14 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter40 post_grad_fusion_options enabled — crash (xxxxxxx)
+
+- **Idea**: `torch._inductor.config.post_grad_fusion_options` defaults empty (= no fusion). `list_group_batch_fusions(False)` returns 9 fusions: `batch_linear_post_grad, group_linear, batch_aten_{tanh,sigmoid,relu,add,sub,div,mul}`. Set the dict to enable all 9.
+- **Result**: **CRASH on numerics test**. Model hash mismatch: eager `d8c4495b...` vs aot_fx_trace `e96d8975...`. At least one of these fusions changes reduction order or precision (likely `batch_aten_add` / `batch_aten_mul` rebalancing reduction tree).
+- **Lesson**: **Post-grad group/batch fusions are not bitwise-safe** under the current constraint. The `batch_fusion=True` / `group_fusion=True` flags from iter-7 must be no-ops because `post_grad_fusion_options` defaulted empty — we never actually triggered the fusions. Enabling them deliberately breaks bitwise. **Add to ceiling list.**
+
+---
+
 ## Session checkpoint (after iter 38) — saturation confirmed
 
 Final 8-run measured baseline: **mean = 6,040.25 tps, σ = 4.1 tps** (iter-22 pass list). Pass list unchanged throughout the session.

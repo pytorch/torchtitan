@@ -192,6 +192,16 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   pre-CUDA-graph levers that matter are ones that change node
   COUNT/IDENTITY (CSE, fusion, removal), not ones that change ORDER.
 
+- **`post_grad_fusion_options` group/batch fusions are NOT bitwise-safe.**
+  Iter-40 set the dict to enable all 9 available fusions
+  (`batch_linear_post_grad`, `group_linear`,
+  `batch_aten_{tanh,sigmoid,relu,add,sub,div,mul}`). Numerics test CRASHED
+  with model hash mismatch on first comparison. At least one fusion
+  rebalances reduction order or changes precision. The `batch_fusion=True`
+  and `group_fusion=True` config flags set in iter-7 were no-ops because
+  `post_grad_fusion_options` defaulted empty — the fusions never actually
+  ran. Don't try to enable them.
+
 - **Regional Inductor compile is ANTI-synergistic with CUDA graphs.**
   Iter-32 re-tested the iter-14 mechanism on the iter-22 graph: 472/708
   pure-ATen regions Triton-fused (avg size 7.8 nodes, 3,687 nodes total).
