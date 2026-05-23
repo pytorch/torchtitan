@@ -28,7 +28,7 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
-## disable_uninitialized_memory_fill — keep (pending)
+## disable_uninitialized_memory_fill — keep (d99dce8)
 
 - **Idea**: Profile shows 4,061 FillFunctor zero-init kernels / step (~95 ms, 5.9%). Investigate the source and eliminate where safe.
 - **Recon finding**: Only **75** zero-fill *FX nodes* in the entire 10,947-node graph (not 4,061). Distribution:
