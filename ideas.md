@@ -172,6 +172,7 @@
   Planned source/config changes: None.
   Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command, but omit `NCCL_CTA_POLICY=2`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is lower overlap or worse collective scheduling than the fixed policy.
+  Result: discarded at source state `fbc1965c`; default NCCL CTA policy completed cleanly but reached only 11,095 tps with unchanged memory. Keep `NCCL_CTA_POLICY=2`.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
