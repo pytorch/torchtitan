@@ -593,7 +593,6 @@ def run_traced(
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     _validate_runtime: bool = False,
-    interpreter_cls: type | None = None,
 ) -> Callable[..., Any]:
     """Return a runner that executes a traced graph against live module/optimizer state.
 
@@ -615,9 +614,6 @@ def run_traced(
     spec as trace time; any mismatch raises. Off by default to keep the
     per-step path overhead-free; the caller must pass kwargs in trace-time
     order.
-
-    If ``interpreter_cls`` is provided, the traced graph is executed via that
-    FX interpreter instead of called directly; used by activation tracing.
     """
     _check_optimizer_has_module(module, optimizer)
 
@@ -654,10 +650,7 @@ def run_traced(
         flat_inputs, _ = _unwrap_subclasses(all_args)
 
         with torch.no_grad():
-            if interpreter_cls is not None:
-                flat_outputs = interpreter_cls(traced_result.gm).run(*flat_inputs)
-            else:
-                flat_outputs = traced_result.gm(*flat_inputs)
+            flat_outputs = traced_result.gm(*flat_inputs)
         wrapped = _wrap_subclasses(
             flat_outputs,
             traced_result.num_flat_outputs,

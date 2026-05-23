@@ -348,13 +348,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
     ) -> None:
         if last_compute is None or not picked:
             return
-        ancestors = self.node_ancestors
-        # TODO(ivankobzarev): remove OrderedSet fallback after nightly picks up BitsetAncestors
-        if hasattr(ancestors, "is_ancestor"):
-            blocked = any(ancestors.is_ancestor(ag, last_compute) for ag in picked)
-        else:
-            blocked = bool(OrderedSet(picked) & OrderedSet(ancestors[last_compute]))
-        if blocked:
+        if OrderedSet(picked) & OrderedSet(self.node_ancestors[last_compute]):
             return
         for ag in picked:
             overlap_deps[last_compute].add(ag)
