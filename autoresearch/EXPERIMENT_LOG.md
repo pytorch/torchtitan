@@ -28,6 +28,40 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## replace_overwritten_zeros_with_empty — discard (xxxxxxx)
+
+- **Idea**: Iter-24 re-profile noted ~74 hidden `FillFunctor<float>` invocations (~18 ms) on top of 88 raw ones (~19 ms). Iter-12 only covered `aten.empty.*`; maybe `aten.zeros/full/ones/.*_like` with full-overwrite users would qualify too.
+- **Recon**: post-iter-22 graph contains 9× `aten.full.default` (scalars, fill 0), 1× `aten.zeros_like.default` (CE backward, shape 8192×64128 f32), 1× `aten.ones_like.default` (scalar). 0 zeros / new_zeros / new_full / full_like / ones.
+- **Result**: discard. 0 substitutions safely applicable.
+  - The 9 `aten.full(0)` scalars feed `where.self` (reads the scalar value) or `index_put_` (PARTIAL overwrite — untargeted positions must stay zero).
+  - The `zeros_like` IS the CE-backward grad buffer feeding `index_put_` (iter-20 finding — semantically required).
+  - `ones_like` has non-zero fill — skipped.
+- **TPS**: 6,057 ≈ 6,048 (noise; pass adds ~15 ms compile but zero substitutions).
+- **Lessons**: The iter-24 profile's "74 hidden FillFunctor invocations" are not from FX-level fill ops we can attack from `passes.py`. They're internal launches from `index_put_` partial writes, `where.self` scalar broadcasts, and other op-internal bookkeeping that doesn't appear as a fill node in FX. The fill-elimination surface is exhausted.
+
+---
+
+## iter-24 re-profile (post-iter-22) — info-only (xxxxxxx)
+
+- **Idea**: iter-15 profile was on the pre-iter-22 graph. Re-profile now that bucketing is removed.
+- **Top categories (rank 0, iteration_20, 1,493 ms total kernel time)**:
+  - GEMM: 485 ms (32.5%, up from 29.5%) — irreducible.
+  - FlashAttn: 373 ms (25.0%, up from 22.5%) — irreducible.
+  - **ReduceScatter**: 259 ms (17.3%, down from 23.9%): **195 ms fp32 (326 calls)** + 64 ms bf16 (238 calls).
+  - AllGather (bf16): 91 ms (6.1%, up from 4.9%).
+  - elementwise_other: 68 ms (4.5%).
+  - elementwise_mul: 44 ms (2.9%).
+  - elementwise_add: 41 ms (2.7%, sequential residual+grad chains).
+  - optimizer (multi_tensor): 40 ms (2.7%, out of graph).
+  - CatArrayBatchedCopy: 21 ms (1.4%, down from 2.9% — bucketing slice/cat gone).
+  - FillFunctor (raw): 19 ms (1.3%) + ~18 ms hidden in vectorized_elementwise template.
+  - RMSNorm: 17 ms (1.2%). SiLU: 17 ms (1.2%).
+- **Key new finding**: ReduceScatter is split fp32 + bf16. The fp32 RS alone is 195 ms / 13% — **single biggest non-irreducible lever** but blocked by bitwise numerics. The bf16 RS (64 ms / 4.3%) is closer to ideal.
+- **Candidate next ideas**: (a) bf16 grad RS (blocked), (b) more FillFunctor elimination (iter 25), (c) direct_copy_kernel fusion (820 + 373 launches, ~55 ms, untried).
+- **Surprises**: GEMM/FlashAttn grew proportionally because the saved launch overhead was a denominator effect; absolute kernel times unchanged. Optimizer at 2.7% is the largest out-of-graph category.
+
+---
+
 ## re-ablation after iter 22 — info-only (xxxxxxx)
 
 Re-test each remaining pass on the iter-22 graph (with bucketing removed). 3 runs per variant; bitwise numerics preserved on all.
