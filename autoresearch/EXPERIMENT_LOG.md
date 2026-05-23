@@ -28,6 +28,25 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## unblock_inductor_codegen — discard (xxxxxxx)
+
+- **Idea**: Iter-9's compile_fx_inner blocker was `_get_submesh`. Remove it + drain decomp conflicts + call compile_fx_inner. If the whole-graph codegen works, it composes with CUDA graphs for potentially +10-20% TPS.
+- **Recon**: 1325 non-OpOverload call_functions — ALL are `_operator.getitem` (Python tuple unpack), which Inductor handles natively (not actual blockers). The REAL blocker `device_mesh._get_submesh` has target = `OpOverloadPacket` (not detected by `isinstance(target, OpOverload)`). Only **1** `_get_submesh` node in the graph, whose sole user is the `output` node.
+- **Changes**: Added `unblock_inductor_codegen` pass (toggled by `enable_compile_fx_codegen` flag). Rewires the output slot of `_get_submesh` to its mesh input, erases the node; drains the 10-op decomp list (from iter-14 recipe); calls `compile_fx_inner(gm, list(example_inputs))`; overrides `gm.forward` with adapter `lambda *args: compiled_fn(args)`.
+- **Result**: discard.
+  - `compile_fx_inner` SUCCEEDED end-to-end (compile time +33s, no decomp errors). CUDA-graph capture on top also succeeded.
+  - With toggle ON: tps=6,042 (+2.8% on iter 12), mfu=35.38%, memory=46.23 GiB.
+  - With toggle OFF: tps=5,879 (≡ iter 12 baseline). Toggle defaults to OFF.
+  - **Numerics**: Llama3 debugmodel `test_aot_fx_trace_vs_eager` PASSES in both configs (model is too small to trigger the diverging lowerings). But Llama3-8B benchmark **fails bitwise**: step 1 loss 12.24426 → grad_norm 4.2603 → 4.2606 (drift starts immediately); by step 20 loss has drifted 9.21808 → 9.11513 and grad_norm 4.5867 → 22.9803.
+- **Analysis**: Inductor's whole-graph lowering substitutes ATen ops with Triton-fused equivalents that aren't bitwise-equivalent (matmul reduction order or fused-kernel-selection differences). The bitwise test on the debugmodel doesn't exercise these because the graph is too small. **This is a structural property of Inductor codegen: kernels may be numerically correct (loss-equivalent over a training run) but not bitwise.**
+- **Lessons**:
+  - **`_get_submesh` removal IS feasible** for this graph — only 1 node, only consumed by `output`, so rewiring to its mesh input is safe and preserves the output spec.
+  - **Inductor codegen and bitwise numerics are fundamentally incompatible** for the 8B model. To use Inductor codegen we'd need to relax to loss-equivalent numerics (out of scope for this experiment).
+  - **The debugmodel bitwise test is necessary but not sufficient** — it can mask precision drift that only emerges in larger models. For a future run, the experimenter could augment the test with a model-scale numerics check.
+  - Pass left in `passes.py` toggled OFF so a future iteration (or relaxed numerics regime) can flip the toggle. Reverted via `git checkout` — toggle removed entirely from the committed state.
+
+---
+
 ## coalesce_independent_adds (recon-only) — discard (xxxxxxx)
 
 - **Idea**: Profile shows 435 `elementwise_add` kernels (2.5% / 41 ms). If many are independent same-shape adds, coalesce into `aten._foreach_add` to cut kernel count.

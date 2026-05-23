@@ -89,6 +89,20 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
 
 ## Patterns that didn't work
 
+- **Whole-graph `compile_fx_inner` IS reachable but breaks bitwise on 8B.**
+  Iter-19 successfully unlocked `compile_fx_inner` by (a) rewiring the
+  single `_get_submesh` node to its mesh input + erasing (its sole user
+  was `output`), (b) draining the 10-op decomp list, and (c) clearing
+  `D.fast_random_decomps`'s `@functools.cache`. The compiled callable
+  composed with CUDA graphs and delivered **+2.8% TPS (to 6,042)**.
+  However the resulting kernels are not bitwise-equivalent on the 8B
+  model: loss drifts 9.21808 → 9.11513 and grad_norm 4.5867 → 22.9803
+  by step 20 (drift starts at step 1). The debug-model bitwise test
+  PASSES (the model is too small to exercise the diverging lowerings)
+  but the benchmark loss check fails. **Inductor codegen produces
+  numerically-correct-but-not-bitwise-equivalent kernels.** Under the
+  bitwise constraint this is a hard ceiling.
+
 - **Whole-graph `compile_fx` / `compile_fx_inner` on the make_fx joint graph.**
   - `compile_fx` re-functionalizes and rejects `_c10d_functional.all_reduce_.default`
     (in-place collective baked in by DTensor redistribute) with "Found a
