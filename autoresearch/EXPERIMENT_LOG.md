@@ -28,7 +28,7 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
-## install_cuda_graph — keep (pending)
+## install_cuda_graph — keep (63c54ff)
 
 - **Idea**: After iter 7's pattern passes, the graph is largely static — same ops, same shapes every step. Wrap the joint fwd+bwd graph in a `torch.cuda.CUDAGraph` and replay each step to eliminate CPU launch overhead. Functional collectives in recent PyTorch are cuda-graph-friendly.
 - **Changes**: Added `install_cuda_graph(gm, example_inputs, *, num_static_inputs)` registered last in `construct_default_graph_passes`. Uses `functools.partial` to plumb `traced_result.num_static_inputs` so the wrapper can skip persistent buffers for the leading FSDP-stable inputs (avoids OOM). Standard PyTorch capture pattern: non-default stream, ≥1 warmup, capture inside `with torch.cuda.graph(g):`. **Crucial detail**: after capture, also call `g.replay()` once so `state["outputs"]` reflects executed values before they're returned (otherwise the first real call returns warmup leftovers and training diverges). Self-aliasing skip via `data_ptr()` for callers that already pass the static buffer. Failure paths fall through and restore the iter-7 baseline.
