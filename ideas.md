@@ -194,6 +194,16 @@
   Success criteria and expected risk: Success is completed traces and a concrete bottleneck summary. Profiled tps is not used for ranking. Risk is profiler overhead changing timings or adding memory pressure.
   Result: kept as profile data at source state `283701c`; rank0 step10 tps was 11,165 under profiler, traces were written for all ranks, and the profile remains dominated by MXFP8 GEMMs, FSDP collectives, MXFP8 casts, copy/cast kernels, and launch overhead. Attention and loss are still not the primary bottlenecks.
 
+- Idea: MXFP8 no-cast pairwise FSDP groups
+  Current best source commit: f888e37
+  Source: profile-driven FSDP collective follow-up after run363 showed rank-skewed reduce-scatter/all-gather exposure.
+  Expected mechanism: Group adjacent transformer layers with `fully_shard(layers[i : i + 2], ...)` to reduce FSDP group count and collective launch count. If the rank-skewed reduce-scatter/all-gather buckets dominate exposed time, fewer larger collectives may improve overlap despite higher unsharded parameter residency.
+  Supporting evidence: Run363 showed rank6 with ~764 ms reduce-scatter and ~302 ms all-gather, rank4 with ~686 ms reduce-scatter, and rank7 with ~594 ms reduce-scatter. Pairwise grouping is a direct way to reduce FSDP collective count.
+  Planned source/config changes: In `parallelize_qwen3()`, replace per-layer FSDP wrapping with pairwise grouped wrapping while preserving the existing prefetch chain and no-cast mixed-precision policy.
+  Planned command or config overrides: Use the no-cast batch132 chunks4 command.
+  Success criteria and expected risk: Success is tps above 11,381 with finite overall-decreasing loss and no allocator retries. Risk is memory rising further above the preferred 95% line or larger all-gathers reducing overlap.
+  Result: discarded at source state `f23af524`; pairwise grouping completed with finite decreasing loss but reached only 11,277 tps and raised peak memory to 171.61 GiB (96.22%). Restore per-layer FSDP groups.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.

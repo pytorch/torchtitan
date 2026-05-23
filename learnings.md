@@ -8850,3 +8850,32 @@ Roofline interpretation:
 - The no-cast chunks4 peak is still a mixed GEMM/communication/cast/launch workload.
 - Attention and loss are not the limiting buckets. RMSNorm-only compile was correctly deprioritized by the profile.
 - The most plausible remaining source directions are reducing MXFP8 cast/copy overhead, changing FSDP collective exposure/imbalance, or reducing kernel launch count. Simple attention backend or loss-only compile tweaks are unlikely to move the peak.
+
+## Experiment 364: MXFP8 No-Cast Pairwise FSDP Groups
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=132 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run364-mxfp8-pairwise-fsdp-no-fsdp-forward-input-casts-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs132-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Changed transformer layer FSDP wrapping from one layer per `fully_shard()` call to adjacent pairs via `fully_shard(layers[i : i + 2], **fsdp_config)`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,277.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 171.61 GiB, 96.22%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.40640 at step 1 to 4.26498 at step 10; finite and decreasing.
+- `grad_norm` remained nonzero.
+- The same FSDP2 MXFP8 view-output warning appeared as in the no-cast source.
+
+Interpretation:
+
+- Pairwise FSDP grouping does not improve the MXFP8 no-cast current shape. It increases unsharded parameter residency and still lands below the per-layer FSDP throughput peak.
+- The rank-skewed collective bucket is not solved by coarsening FSDP groups in pairs.
+- Restore per-layer FSDP wrapping.
