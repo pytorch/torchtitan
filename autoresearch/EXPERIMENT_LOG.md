@@ -28,6 +28,21 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## coalesce_independent_adds (recon-only) — discard (xxxxxxx)
+
+- **Idea**: Profile shows 435 `elementwise_add` kernels (2.5% / 41 ms). If many are independent same-shape adds, coalesce into `aten._foreach_add` to cut kernel count.
+- **Recon**: 225 FX `aten.add.Tensor` nodes (≠435 kernels — discrepancy from cuda-graph internal binding). Distribution:
+  - ~64 forward residual connections (`x = x + sublayer(x)`): each LHS = prior add's output, **strict sequential chain** across 32 layers × 2 adds/layer. Inherently uncoalescable.
+  - ~161 backward grad accumulators (`"Gradient addition node due to multiple use of tensor"` stack_trace): also chained — each extends the prior accumulator.
+  - 128/225 have multi-user LHS (skipped anyway).
+  - Independent-group analysis (greedy, same shape/dtype, distinct LHS): **0 groups of size ≥ 2**.
+- **Result**: discard. No worthwhile coalescing pattern; pass not implemented.
+- **Lessons**:
+  - **`_foreach_add` requires INDEPENDENT inputs.** Sequential residual / grad accumulator chains can't be parallelized this way regardless of multi-tensor packing.
+  - **To reduce the elementwise_add cost would require either (a) fusing each add with its surrounding compute (e.g. residual-add into attention output projection's epilogue, grad-accum into the preceding view/mm) — Inductor pattern-matching territory, OR (b) rewiring backward to a tree-reduction structure** — substantial complexity, out of scope for this experiment.
+
+---
+
 ## iter17 exploration batch — discard (xxxxxxx)
 
 - **Idea**: Try a batch of cheap exploratory tweaks: apply `joint_graph_passes` twice, add `post_grad_passes(is_inference=True)`, toggle `epilogue_fusion`/`coordinate_descent_tuning` etc., find `dedupe_symint_uses` / `binary_folding` under alternate module paths, call `joint_graph_passes` after bucketing.
