@@ -164,6 +164,15 @@
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, nonzero grad norm, and tps above 11,202. Risk is no effect because training dtype and FSDP already dominate memory, or slower optimizer state handling.
   Result: discarded at source state `8d6d195e`; completed cleanly with nonzero grad norm and loss 12.46396 -> 5.63749, but throughput was only 11,078 tps with unchanged 168.94 GiB memory.
 
+- Idea: MXFP8 with default NCCL CTA policy
+  Current best source commit: c575291a
+  Source: profile-driven communication knob after MXFP8 profile showed rank-skewed reduce-scatter/all-gather time.
+  Expected mechanism: Remove the inherited `NCCL_CTA_POLICY=2` override and let NCCL choose the default CTA policy. The MXFP8 path is eager and has different compute/communication overlap than the compiled BF16 path where prior NCCL tuning was done, so the fixed CTA policy may no longer be optimal.
+  Supporting evidence: Run353 shows NCCL reduce-scatter and all-gather are still large buckets, with rank6/rank7 reduce-scatter much larger than rank0. Nearby MXFP8 model/loss/optimizer changes have not beaten the current peak.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command, but omit `NCCL_CTA_POLICY=2`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is lower overlap or worse collective scheduling than the fixed policy.
+
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
   Source: agent-generated setup finding
