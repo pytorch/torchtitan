@@ -82,10 +82,6 @@ class GroupedExperts(Module):
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        ``x`` is 3-D ``(bs, slen, dim)`` from the MoE caller.
-        Internally everything runs in 2-D; ``MoE.forward`` reshapes the
-        output back to 3-D.
-
         When parallelized, ``local_map`` (from ``sharding_config``) handles
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
