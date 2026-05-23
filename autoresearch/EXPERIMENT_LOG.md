@@ -28,6 +28,15 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter38 ablate disable_uninitialized_memory_fill (8-run) — info-only (xxxxxxx)
+
+- **Idea**: iter-23 3-run ablation said -305 tps without `disable_uninitialized_memory_fill`. Confirm precise 8-run contribution.
+- **Result**: 8-run TPS 5738/5741/5733/5740/5741/5731/5737/5736 → **mean 5,737.1, σ=3.7**. Δ vs baseline 6,040.25 = **-303 tps (-5.0%, ~57σ regression)**. Memory unchanged at 49.24 GiB. Numerics bitwise PASS.
+- **Per-pass contribution: +303 tps** — the single largest individual contribution in the current pass list (apart from compound contributions of `apply_inductor_pattern_passes` and `install_cuda_graph`).
+- **Mechanism reaffirmed**: With `--debug.deterministic`, `torch.utils.deterministic.fill_uninitialized_memory=True` makes every `aten.empty.*` emit a FillFunctor zero-init kernel before its consumer overwrites it. iter-12 audits these as safe (all 65 empties' users either fully overwrite or are read-only views) and disables the flag, eliminating ~4,061 FillFunctor kernels/step. The pass essentially recovers the wall-clock cost of `--debug.deterministic` for our specific overwrite pattern.
+
+---
+
 ## iter37 ablate remove_detach_nodes (8-run) — info-only (xxxxxxx)
 
 - **Idea**: iter-23 3-run ablation found -16 tps without `remove_detach_nodes` ("borderline noise"). With true σ=4, -16 is 4σ. Confirm with 8-run avg whether the pass is genuinely load-bearing.
