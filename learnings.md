@@ -8342,3 +8342,28 @@ Interpretation:
 
 - Local batch 152 is just over the safe memory boundary for the eager-model MXFP8 path.
 - Try local batch 144 next. It remains valid for `loss.num_chunks=8` because `144 * 16 = 2,304 = 18 * 128`, and should give several GiB more headroom than batch152.
+
+## Experiment 346: MXFP8 Linear Loss-Only Compile Local Batch 144
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=144 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run346-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs144-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 6,483.
+- Step 10 peak memory: 173.74 GiB; max reported was 173.96 GiB.
+- The allocator repeatedly warned `expandable_segments: memory mapping failed with OOM`, and TorchTitan reported 18 CUDA memory allocation retries by step 10.
+- Loss moved from 12.52519 at step 1 to 20.50687 at step 10, so the short run was not overall-decreasing.
+
+Interpretation:
+
+- Batch144 technically completes, but it is memory-risky and much slower than batch128.
+- The eager MXFP8 path has a sharp degradation near the memory boundary. Try batch136, which is still shape-valid for Triton dim1 (`136 * 16 = 2,176 = 17 * 128`) but should avoid the allocator retry regime.

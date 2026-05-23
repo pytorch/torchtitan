@@ -62,6 +62,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run344 command with `--training.local_batch_size=144`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 10,960. Risk is still OOM or lower tps from batch-shape effects.
+  Result: discarded at source state `c31ca0d1`; batch144 completed but hit repeated allocator OOM-retry warnings, dropped to 6,483 tps, and loss increased overall from 12.52519 to 20.50687.
+
+- Idea: MXFP8Linear loss-only compile local batch 136
+  Current best source commit: c31ca0d1
+  Source: memory-boundary follow-up after batch144 completed but entered allocator retry and loss-instability territory.
+  Expected mechanism: Use a smaller shape-valid batch that should keep peak memory below the retry regime while doing more work than batch128. With `loss.num_chunks=8`, local batch 136 gives 2,176 rows per chunk, exactly 17 * 128.
+  Supporting evidence: Batch128 completed cleanly at 161.90 GiB and 10,960 tps; batch144 completed but at ~174 GiB with allocator retries and bad throughput/loss. Batch136 should interpolate closer to the stable side.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run344 command with `--training.local_batch_size=136`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 10,960. Risk is lower tps than batch128 or residual allocator retries.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
