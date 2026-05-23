@@ -12,6 +12,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Exact run340 command except `--loss.num_chunks=5`.
   Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss and any reported throughput. Risk is OOM because each loss chunk is larger, or very low throughput from MXFP8/Triton cast overhead and FSDP view-tensor warnings.
+  Result: crashed at source state `03fc0ca2`; `loss.num_chunks=5` still violates Triton dim1's 128-row tile in backward. Chunked loss appears to split along sequence, producing row counts like local_batch_size times per-chunk sequence length, so chunk counts must make each sequence slice length a multiple of 4.
+
+- Idea: MXFP8Linear converter with Triton dim1 cast and loss chunks 8
+  Current best source commit: 03fc0ca2
+  Source: follow-up to run341 after identifying that sequence-slice chunk sizes, not flat token rows, control the Triton dim1 row count.
+  Expected mechanism: Keep MXFP8 dense linear enabled and use `--loss.num_chunks=8`. With seq_len 128 and local batch 160, each chunk should cover 16 sequence positions and produce 2,560 rows, which is divisible by TorchAO Triton dim1's 128-row tile.
+  Supporting evidence: Runs 340 and 341 both got past the broken CUDA dim1 op and failed specifically at `triton_to_mxfp8_dim1` row divisibility. `160 * 16 = 2560` satisfies the asserted tile constraint.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Exact run340 command except `--loss.num_chunks=8`.
+  Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss and any reported throughput. Risk is additional loss-chunk overhead, FSDP view-tensor backward issues, or another TorchAO layout constraint after the row tile constraint is satisfied.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2

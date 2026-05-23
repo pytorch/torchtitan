@@ -8202,3 +8202,32 @@ Interpretation:
 - The CUDA-to-Triton dim1 change is directionally correct but not sufficient for the durable command with `loss.num_chunks=6`.
 - The loss chunking path likely creates gradient chunks whose row count is not a multiple of Triton's current 128-row dim1 tile. With local batch 160 and sequence length 128, each rank has 20,480 token rows; chunk6 gives non-128-divisible chunk sizes.
 - Try `loss.num_chunks=5` next: 20,480 / 5 = 4,096 rows per chunk, which satisfies the Triton dim1 128-row tile constraint while keeping the same target workload.
+
+## Experiment 341: MXFP8 Linear Triton Dim1 With Loss Chunks 5
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=5 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run341-mxfp8-linear-triton-dim1-loss-chunks5-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: crash.
+- No training step completed.
+- The same Triton dim1 tile assertion fired in backward:
+
+```text
+assert n_rows % max_row_tile_size == 0, "unsupported"
+AssertionError: unsupported
+```
+
+Interpretation:
+
+- The prior flat-token-row assumption was incomplete. Chunked loss appears to split along sequence positions, then multiply by local batch.
+- With local batch 160 and sequence length 128, chunk5 creates per-chunk row counts such as `160 * 25` or `160 * 26`. These are not necessarily divisible by Triton's 128-row tile.
+- A chunk count whose sequence slice lengths are multiples of 4 should satisfy the constraint because `gcd(160, 128) = 32`. Try `loss.num_chunks=8`: each chunk has 16 sequence positions, so each gradient chunk has 2,560 rows, divisible by 128.
