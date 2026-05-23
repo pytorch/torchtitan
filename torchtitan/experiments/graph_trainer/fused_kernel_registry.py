@@ -948,15 +948,14 @@ def _filter_regions(
 # ---------------------------------------------------------------------------
 
 
-def _load_kernel_fn(kernel_dir: Path) -> Callable | None:
-    """Load kernel_function from kernel.py if it exists."""
-    kernel_path = kernel_dir / "kernel.py"
+def _load_kernel_fn(kernel_dir: Path, filename: str = "kernel.py") -> Callable | None:
+    """Load kernel_function from <kernel_dir>/<filename> if it exists."""
+    kernel_path = kernel_dir / filename
     if not kernel_path.exists():
         return None
     try:
-        spec = importlib.util.spec_from_file_location(
-            f"_kernel_{kernel_dir.name}", str(kernel_path)
-        )
+        mod_id = f"_kernel_{kernel_dir.name}_{filename.rsplit('.', 1)[0]}"
+        spec = importlib.util.spec_from_file_location(mod_id, str(kernel_path))
         if spec is None or spec.loader is None:
             return None
         mod = importlib.util.module_from_spec(spec)
@@ -983,16 +982,18 @@ def _select_best_backend(
 ) -> tuple[Callable | None, str]:
     """Select the fastest backend from offline benchmark results.
 
-    Reads benchmark.json (produced by benchmark.py) and picks the
-    winner. Only returns a non-eager backend if it's proven faster
-    by the offline benchmark. Returns (None, "eager") when eager wins
-    or no benchmark data exists.
+    Picks the minimum-time backend among:
+      - kernelagent_triton_opt (optimized_kernel.py, NCU-tuned)
+      - kernelagent_triton     (kernel.py, initial)
+      - torch_compile          (re-compiled at runtime from eager_fn)
+
+    A backend is eligible only if benchmark.json shows status=PASS and
+    its loadable fn exists. If the fastest eligible backend beats eager
+    by ``min_speedup``, return it; otherwise fall back to eager.
 
     Returns (best_fn_or_None, backend_name).
     """
     import json
-
-    triton_fn = _load_kernel_fn(region_dir)
 
     bench_path = region_dir / "benchmark.json"
     if not bench_path.exists():
@@ -1004,30 +1005,43 @@ def _select_best_backend(
         return None, "eager"
 
     eager_ms = bench_data.get("eager_ms", float("inf")) or float("inf")
-    triton_info = bench_data.get("kernelagent_triton", {}) or {}
-    compile_info = bench_data.get("torch_compile", {}) or {}
 
-    # Each backend must have status=PASS AND beat eager by min_speedup.
-    triton_ms = (
-        triton_info.get("time_ms", float("inf"))
-        if triton_info.get("status") == "PASS"
-        else float("inf")
+    # Collect (time_ms, name, loader) for each PASSing backend.
+    candidates: list[tuple[float, str, Callable[[], Callable | None]]] = []
+
+    def _add(key: str, name: str, loader: Callable[[], Callable | None]) -> None:
+        info = bench_data.get(key, {}) or {}
+        if info.get("status") != "PASS":
+            return
+        t = info.get("time_ms")
+        if t is None:
+            return
+        candidates.append((t, name, loader))
+
+    _add(
+        "kernelagent_triton_opt",
+        "triton_opt",
+        lambda: _load_kernel_fn(region_dir, "optimized_kernel.py"),
     )
-    compile_ms = (
-        compile_info.get("time_ms", float("inf"))
-        if compile_info.get("status") == "PASS"
-        else float("inf")
+    _add(
+        "kernelagent_triton",
+        "triton",
+        lambda: _load_kernel_fn(region_dir, "kernel.py"),
+    )
+    _add(
+        "torch_compile",
+        "compile",
+        lambda: _try_compile(eager_fn) if eager_fn is not None else None,
     )
 
-    if triton_fn is not None and triton_ms * min_speedup < eager_ms \
-            and triton_ms <= compile_ms:
-        return triton_fn, "triton"
-
-    if compile_ms * min_speedup < eager_ms:
-        if eager_fn is not None:
-            compiled_fn = _try_compile(eager_fn)
-            if compiled_fn is not None:
-                return compiled_fn, "compile"
+    # Sort by measured time; take the first one whose loader returns a fn.
+    candidates.sort(key=lambda x: x[0])
+    for t, name, loader in candidates:
+        if t * min_speedup >= eager_ms:
+            break  # remaining candidates are even slower
+        fn = loader()
+        if fn is not None:
+            return fn, name
 
     return None, "eager"
 
@@ -1456,11 +1470,15 @@ def fused_kernel_pass(
     problems_written = 0
 
     # Phase 1: Write problem.py for every unique region (no graph modification)
+    # Also remember one representative Region per hash so phase 2 can use its
+    # standalone subgraph_gm as the eager_fn for torch.compile fallback.
     seen_hashes: set[str] = set()
+    hash_to_rep: dict[str, Region] = {}
     for _, h, r in instances:
         if h in seen_hashes:
             continue
         seen_hashes.add(h)
+        hash_to_rep[h] = r
         region_dir = kdir / h
         if not (region_dir / "problem.py").exists():
             count = hash_counts.get(h, 1)
@@ -1474,7 +1492,8 @@ def fused_kernel_pass(
 
     for h in seen_hashes:
         region_dir = kdir / h
-        eager_fn = None  # placeholder, not needed if we skip eager
+        rep = hash_to_rep.get(h)
+        eager_fn = rep.subgraph_gm if rep is not None else None
         best_fn, backend_name = _select_best_backend(region_dir, eager_fn)
         if backend_name != "eager" and best_fn is not None:
             hash_best[h] = (best_fn, backend_name)
