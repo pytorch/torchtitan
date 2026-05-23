@@ -966,10 +966,13 @@ def _load_kernel_fn(kernel_dir: Path, filename: str = "kernel.py") -> Callable |
         return None
 
 
-def _try_compile(fn: Callable) -> Callable | None:
+def _try_compile(fn: Callable, mode: str | None = None) -> Callable | None:
     """Try to torch.compile a function. Returns None on failure."""
     try:
-        return torch.compile(fn, fullgraph=True)
+        kwargs = {"fullgraph": True}
+        if mode is not None:
+            kwargs["mode"] = mode
+        return torch.compile(fn, **kwargs)
     except Exception:
         return None
 
@@ -983,9 +986,10 @@ def _select_best_backend(
     """Select the fastest backend from offline benchmark results.
 
     Picks the minimum-time backend among:
-      - kernelagent_triton_opt (optimized_kernel.py, NCU-tuned)
-      - kernelagent_triton     (kernel.py, initial)
-      - torch_compile          (re-compiled at runtime from eager_fn)
+      - kernelagent_triton_opt     (optimized_kernel.py, NCU-tuned)
+      - kernelagent_triton         (kernel.py, initial)
+      - torch_compile              (re-compiled at runtime from eager_fn)
+      - torch_compile_max_autotune (re-compiled with mode="max-autotune")
 
     A backend is eligible only if benchmark.json shows status=PASS and
     its loadable fn exists. If the fastest eligible backend beats eager
@@ -1032,6 +1036,11 @@ def _select_best_backend(
         "torch_compile",
         "compile",
         lambda: _try_compile(eager_fn) if eager_fn is not None else None,
+    )
+    _add(
+        "torch_compile_max_autotune",
+        "compile_max_autotune",
+        lambda: _try_compile(eager_fn, mode="max-autotune") if eager_fn is not None else None,
     )
 
     # Sort by measured time; take the first one whose loader returns a fn.

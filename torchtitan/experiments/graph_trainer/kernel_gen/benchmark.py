@@ -15,10 +15,11 @@ avoids the rel_err blow-up at the bf16 noise floor.
 Errors are reported as ``max_tol_units = max(|a-b| / (atol+rtol*|b|))``:
 unitless, ``<= 1.0`` means PASS.
 
-Three backends are evaluated per problem in <dir>/<name>/:
-  - torch_compile        : torch.compile(model.forward), trusted baseline.
-  - kernelagent_triton   : initial kernel.py from KernelAgent.
-  - kernelagent_triton_opt : NCU-optimized optimized_kernel.py (if present).
+Four backends are evaluated per problem in <dir>/<name>/:
+  - torch_compile              : torch.compile(model.forward), trusted baseline.
+  - torch_compile_max_autotune : torch.compile with mode="max-autotune".
+  - kernelagent_triton         : initial kernel.py from KernelAgent.
+  - kernelagent_triton_opt     : NCU-optimized optimized_kernel.py (if present).
 
 Each backend gets a status / max_abs_err / max_tol_units / time_ms entry
 in benchmark.json.
@@ -293,35 +294,40 @@ def run_one(name: str) -> dict:
     model = model_cls()
 
     # --- Measure torch.compile drift from eager (trusted, always PASS) ---
-    compiled_fn = None
-    compile_abs = 0.0
-    compile_result: dict
-    try:
-        compiled_fn = torch.compile(model.forward, fullgraph=True)
-        res = _measure_diff(compiled_fn, model, get_inputs, atol, rtol)
-        compile_inputs = res.pop("_last_inputs", None)
-        exec_err = res.pop("_exec_error", None)
-        compile_abs = res["max_abs_err"]
-        compile_units = res["max_tol_units"]
-        if exec_err is not None:
-            compile_result = {
+    # Two compile variants: default and max-autotune. Both treated as trusted
+    # baselines (status=PASS regardless of drift).
+    def _measure_compile(mode: str | None) -> tuple[object, dict, object]:
+        try:
+            kwargs = {"fullgraph": True}
+            if mode is not None:
+                kwargs["mode"] = mode
+            fn = torch.compile(model.forward, **kwargs)
+            res = _measure_diff(fn, model, get_inputs, atol, rtol)
+            inputs = res.pop("_last_inputs", None)
+            exec_err = res.pop("_exec_error", None)
+            if exec_err is not None:
+                result = {
+                    "status": "ERROR", "tol_tier": tol_tier,
+                    "max_abs_err": res["max_abs_err"], "max_tol_units": res["max_tol_units"],
+                    "reason": exec_err,
+                }
+            else:
+                result = {
+                    "status": "PASS", "tol_tier": tol_tier,
+                    "max_abs_err": res["max_abs_err"], "max_tol_units": res["max_tol_units"],
+                    "note": "trusted baseline",
+                }
+            return fn, result, inputs
+        except Exception as e:
+            return None, {
                 "status": "ERROR", "tol_tier": tol_tier,
-                "max_abs_err": compile_abs, "max_tol_units": compile_units,
-                "reason": exec_err,
-            }
-        else:
-            compile_result = {
-                "status": "PASS", "tol_tier": tol_tier,
-                "max_abs_err": compile_abs, "max_tol_units": compile_units,
-                "note": "trusted baseline",
-            }
-    except Exception as e:
-        compile_inputs = None
-        compile_result = {
-            "status": "ERROR", "tol_tier": tol_tier,
-            "max_abs_err": 0.0, "max_tol_units": 0.0,
-            "reason": f"torch.compile failed: {e}",
-        }
+                "max_abs_err": 0.0, "max_tol_units": 0.0,
+                "reason": f"torch.compile(mode={mode!r}) failed: {e}",
+            }, None
+
+    compiled_fn, compile_result, compile_inputs = _measure_compile(None)
+    compiled_ma_fn, compile_ma_result, compile_ma_inputs = _measure_compile("max-autotune")
+    compile_abs = compile_result.get("max_abs_err", 0.0)
 
     # --- Validate triton kernels against eager via effective allclose ---
     # atol_eff = max(tier_atol, compile_drift); rtol stays the tier value.
@@ -345,7 +351,7 @@ def run_one(name: str) -> dict:
         opt_result = {"status": "SKIP", "reason": "no optimized_kernel.py"}
         opt_inputs = None
 
-    bench_inputs = triton_inputs or opt_inputs or compile_inputs
+    bench_inputs = triton_inputs or opt_inputs or compile_inputs or compile_ma_inputs
 
     # --- Benchmark eager (always, as the reference time) ---
     eager_ms = None
@@ -367,6 +373,7 @@ def run_one(name: str) -> dict:
     _maybe_bench(triton_result, kernel_fn)
     _maybe_bench(opt_result, opt_kernel_fn)
     _maybe_bench(compile_result, compiled_fn)
+    _maybe_bench(compile_ma_result, compiled_ma_fn)
 
     # --- Save benchmark.json ---
     bench_data = {
@@ -374,6 +381,7 @@ def run_one(name: str) -> dict:
         "kernelagent_triton": triton_result,
         "kernelagent_triton_opt": opt_result,
         "torch_compile": compile_result,
+        "torch_compile_max_autotune": compile_ma_result,
     }
     (problem_dir / "benchmark.json").write_text(json.dumps(bench_data, indent=2))
 
@@ -390,27 +398,37 @@ def _print_row(r):
     triton = r.get("kernelagent_triton", {})
     triton_opt = r.get("kernelagent_triton_opt", {})
     compile_ = r.get("torch_compile", {})
+    compile_ma = r.get("torch_compile_max_autotune", {})
 
     if r.get("status") in ("SKIP", "ERROR"):
         print(f"  {name:<14} {r['status']:<6} {r.get('reason', '')}")
         return
 
-    def status_str(d):
+    def short_status(d):
         s = d.get("status", "?")
         if s == "PASS":
-            return f"PASS({d.get('tol_tier', '?')})"
+            return "PASS"
+        if s == "FAIL":
+            return "FAIL"
+        if s == "ERROR":
+            return "ERR"
+        if s == "SKIP":
+            return "-"
         return s
 
-    eager = _fmt(eager_ms)
-    tri_t = _fmt(triton.get("time_ms")) if triton.get("status") == "PASS" else "-"
-    opt_t = _fmt(triton_opt.get("time_ms")) if triton_opt.get("status") == "PASS" else "-"
-    cmp_t = _fmt(compile_.get("time_ms")) if compile_.get("status") == "PASS" else "-"
+    def cell(d):
+        t = d.get("time_ms")
+        if d.get("status") == "PASS" and t is not None:
+            return f"{t:>8.3f}"
+        return f"{short_status(d):>8}"
 
+    eager = _fmt(eager_ms)
     print(
         f"  {name:<14} eager={eager:>7}ms  "
-        f"triton={status_str(triton):<14} {tri_t:>7}ms  "
-        f"triton_opt={status_str(triton_opt):<14} {opt_t:>7}ms  "
-        f"compile={status_str(compile_):<14} {cmp_t:>7}ms"
+        f"triton={cell(triton)}  "
+        f"opt={cell(triton_opt)}  "
+        f"compile={cell(compile_)}  "
+        f"compile_ma={cell(compile_ma)}"
     )
 
 
@@ -451,9 +469,10 @@ def main():
         if isinstance(r.get("kernelagent_triton_opt"), dict)
         and r["kernelagent_triton_opt"].get("status") != "SKIP"
     )
-    print(f"\nkernelagent_triton:     {_count_pass('kernelagent_triton')}/{n} pass")
-    print(f"kernelagent_triton_opt: {_count_pass('kernelagent_triton_opt')}/{n_opt} pass")
-    print(f"torch_compile:          {_count_pass('torch_compile')}/{n} pass")
+    print(f"\nkernelagent_triton:         {_count_pass('kernelagent_triton')}/{n} pass")
+    print(f"kernelagent_triton_opt:     {_count_pass('kernelagent_triton_opt')}/{n_opt} pass")
+    print(f"torch_compile:              {_count_pass('torch_compile')}/{n} pass")
+    print(f"torch_compile_max_autotune: {_count_pass('torch_compile_max_autotune')}/{n} pass")
 
 
 if __name__ == "__main__":
