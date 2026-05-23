@@ -17,6 +17,44 @@ from torchtitan.tools.utils import has_cuda_capability
 from .utils import swap_token_dispatcher
 
 
+def _enable_triton_dim1_for_mxfp8_linear() -> None:
+    import torch
+
+    from torchao.prototype.moe_training import tensor as mxfp8_tensor
+    from torchao.prototype.mx_formats.config import (
+        MXFP8Dim0CastKernelChoice,
+        MXFP8Dim1CastKernelChoice,
+    )
+    from torchao.prototype.mx_formats.mx_linear import mx_mm
+
+    if getattr(mxfp8_tensor, "_torchtitan_triton_dim1_enabled", False):
+        return
+
+    def _to_mxfp8_then_scaled_mm_triton_dim1(
+        input_hp,
+        weight_hp,
+        kernel_preference,
+        scale_calculation_mode,
+        wgrad_with_hp=False,
+    ):
+        return mx_mm.apply(
+            input_hp,
+            weight_hp,
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fn,
+            32,
+            kernel_preference,
+            MXFP8Dim0CastKernelChoice.TRITON,
+            MXFP8Dim1CastKernelChoice.TRITON,
+            scale_calculation_mode,
+            wgrad_with_hp,
+        )
+
+    mxfp8_tensor._to_mxfp8_then_scaled_mm = _to_mxfp8_then_scaled_mm_triton_dim1
+    mxfp8_tensor._torchtitan_triton_dim1_enabled = True
+
+
 class MXFP8Linear(Linear):
     """Linear that applies MXFP8 quantization in its constructor."""
 
@@ -28,6 +66,7 @@ class MXFP8Linear(Linear):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        _enable_triton_dim1_for_mxfp8_linear()
         from torchao.prototype.moe_training.config import (
             MXFP8TrainingOpConfig,
             MXFP8TrainingRecipe,

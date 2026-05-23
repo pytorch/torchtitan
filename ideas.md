@@ -4,6 +4,15 @@
 
 ## Manager Generated Ideas
 
+- Idea: MXFP8Linear converter with Triton dim1 cast and loss chunks 5
+  Current best source commit: b7914812
+  Source: follow-up to run340 after the CUDA-to-Triton dim1 patch got past the prior TorchAO CUDA invalid-argument crash but failed in Triton dim1 backward on a non-128-divisible gradient chunk.
+  Expected mechanism: Keep MXFP8 dense linear enabled, but use `--loss.num_chunks=5` so each rank's 20,480 token rows split into 4,096-row chunks. That satisfies TorchAO Triton dim1's `n_rows % 128 == 0` constraint and may allow full forward/backward without falling back to the broken CUDA dim1 op.
+  Supporting evidence: Minimal compiled MXFP8 linear forward/backward works with the Triton dim1 override. Run340 fails only at `triton_to_mxfp8_dim1`'s tile divisibility assertion, not at the earlier CUDA extension failure.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Exact run340 command except `--loss.num_chunks=5`.
+  Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss and any reported throughput. Risk is OOM because each loss chunk is larger, or very low throughput from MXFP8/Triton cast overhead and FSDP view-tensor warnings.
+
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
   Source: agent-generated setup finding

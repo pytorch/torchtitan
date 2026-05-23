@@ -8170,3 +8170,35 @@ Interpretation:
 - Compiling the loss is required for the durable batch160 memory envelope.
 - The uncompiled chunked cross-entropy path OOMs even with `loss.num_chunks=6`.
 - Keep the durable `compile.components=["model", "loss"]` behavior.
+
+## Experiment 340: MXFP8 Linear With Triton Dim1 Cast
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=6 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run340-mxfp8-linear-triton-dim1-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-loss-chunks6-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Enabled `MXFP8LinearConverter` for `qwen3_14b()`.
+- Added a TorchTitan-side MXFP8 linear override that calls TorchAO `mx_mm.apply(...)` with `MXFP8Dim1CastKernelChoice.TRITON` instead of the default CUDA dim1 cast.
+
+Result:
+
+- Status: crash.
+- No training step completed.
+- The original TorchAO CUDA extension failure was avoided: there was no `mxfp8_quantize.cuh:367 invalid argument`.
+- The run failed in backward through the Triton dim1 cast:
+
+```text
+File ".../torchao/prototype/mx_formats/kernels.py", line 938, in triton_to_mxfp8_dim1
+assert n_rows % max_row_tile_size == 0, "unsupported"
+AssertionError: unsupported
+```
+
+Interpretation:
+
+- The CUDA-to-Triton dim1 change is directionally correct but not sufficient for the durable command with `loss.num_chunks=6`.
+- The loss chunking path likely creates gradient chunks whose row count is not a multiple of Triton's current 128-row dim1 tile. With local batch 160 and sequence length 128, each rank has 20,480 token rows; chunk6 gives non-128-divisible chunk sizes.
+- Try `loss.num_chunks=5` next: 20,480 / 5 = 4,096 rows per chunk, which satisfies the Triton dim1 128-row tile constraint while keeping the same target workload.
