@@ -145,6 +145,11 @@ class GptOssGroupedExperts(Module):
         selected_experts_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
+        x = x.reshape(-1, x.size(-1))
+        top_scores = top_scores.reshape(-1, top_scores.size(-1))
+        selected_experts_indices = selected_experts_indices.reshape(
+            -1, selected_experts_indices.size(-1)
+        )
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
