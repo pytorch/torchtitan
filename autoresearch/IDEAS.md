@@ -23,7 +23,8 @@ the beginning:
 - [~] **Graph cleanup**: Remove no-ops from the graph to make it cleaner and easier for future optimizations.
   - 2026-05-22 14:52 — Removed 196 `aten.detach.default` nodes (autograd no-op under runtime no_grad). TPS delta within noise but memory dropped ~2 GiB. Still TODO: investigate 842 `_to_copy.default` round-trips and any redundant view/transpose chains.
   - 2026-05-22 14:58 — `_to_copy.default` same-dtype/device elimination: 0 of 841 qualified — they are all real fp32↔bf16 mixed-precision casts. Plain elimination won't help; need bf16→fp32→bf16 round-trip collapse or fuse-into-producer/consumer.
-- [ ] **CUDA graphs**: If the model is CPU-bound, CUDA graphs remove CPU overhead.
+- [x] **CUDA graphs**: If the model is CPU-bound, CUDA graphs remove CPU overhead.
+  - 2026-05-22 18:20 — Wrapped gm.forward in `torch.cuda.CUDAGraph`. **+16.4% TPS on top of iter 7, +33.8% vs baseline. MFU 24.4% → 32.6%.** Critical fixes during implementation: replay-after-capture before returning, use `num_static_inputs` to skip copying stable FSDP params (memory stays flat at 49 GiB), monkey-patch `destroy_process_group` for clean NCCL teardown.
 - [x] **Computation/communication overlap**: If there are exposed communications, see if they can be overlapped with computations.
   - 2026-05-22 15:50 — FX-level prefetch of AGs (move node up to earliest valid input dependency) only buys 7-position max move for 65/421 AGs. `make_fx` already places AGs right after their input shards. To make this work we'd need to also hoist the AG input ops (`_to_copy`, `view`) earlier, OR move waits LATER toward their consumers, OR rely on Inductor compile to do scheduling.
   - 2026-05-22 17:00 — Inductor's `overlap_scheduling.schedule_overlap_bucketing` does the right thing: ~+2% TPS on its own, no node-count change. It performs proper dependency analysis that hand-rolled FX reordering missed. Together with bucketing, +4.6% on iter 5.

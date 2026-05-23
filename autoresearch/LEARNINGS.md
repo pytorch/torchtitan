@@ -57,6 +57,22 @@ actionable — per-experiment details belong in `EXPERIMENT_LOG.md`.
   hit "Argument was used before defined". Cost: +63s one-time compile
   time for the analysis; no per-step cost.
 
+- **CUDA-graph wrapping of `gm.forward` (`install_cuda_graph`).**
+  **Additional +16.4% TPS (+33.8% cumulative vs baseline), MFU 32.6%**,
+  bitwise identical numerics. Steady-state CPU launch overhead on a
+  ~10k-node graph turns out to be a much bigger lever than expected
+  on this H100 setup. Three implementation gotchas:
+  (1) Replay once after the `with torch.cuda.graph(g):` capture block
+  before returning outputs — capture only records ops, doesn't execute
+  them, and warmup leftovers in the output buffers will corrupt training.
+  (2) Use `TracedResult.num_static_inputs` (plumbed via
+  `functools.partial` from `construct_default_graph_passes`) to skip
+  persistent buffers for FSDP-stable inputs; allocating a buffer per
+  flat input doubles model-state memory.
+  (3) Monkey-patch `torch.distributed.destroy_process_group` to release
+  the graph + buffers + caches before NCCL teardown, else the elastic
+  launcher hangs for ~22 min until SIGTERM.
+
 ## Patterns that didn't work
 
 - **Whole-graph `compile_fx` / `compile_fx_inner` on the make_fx joint graph.**

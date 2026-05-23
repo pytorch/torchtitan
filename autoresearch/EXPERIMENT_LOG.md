@@ -28,6 +28,24 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## install_cuda_graph — keep (pending)
+
+- **Idea**: After iter 7's pattern passes, the graph is largely static — same ops, same shapes every step. Wrap the joint fwd+bwd graph in a `torch.cuda.CUDAGraph` and replay each step to eliminate CPU launch overhead. Functional collectives in recent PyTorch are cuda-graph-friendly.
+- **Changes**: Added `install_cuda_graph(gm, example_inputs, *, num_static_inputs)` registered last in `construct_default_graph_passes`. Uses `functools.partial` to plumb `traced_result.num_static_inputs` so the wrapper can skip persistent buffers for the leading FSDP-stable inputs (avoids OOM). Standard PyTorch capture pattern: non-default stream, ≥1 warmup, capture inside `with torch.cuda.graph(g):`. **Crucial detail**: after capture, also call `g.replay()` once so `state["outputs"]` reflects executed values before they're returned (otherwise the first real call returns warmup leftovers and training diverges). Self-aliasing skip via `data_ptr()` for callers that already pass the static buffer. Failure paths fall through and restore the iter-7 baseline.
+- **Result**: keep. 2 runs: tps=5,566 / 5,565 → **avg 5,566, mfu=32.59%**, memory=49.08 GiB. Loss=9.21808, grad_norm=4.5867 (bitwise identical). Numerics PASS. Wall time 141s, clean shutdown.
+  - **+16.4% over iter 7, +33.8% over baseline.**
+- **Implementation gotchas resolved**:
+  - **First-call replay**: capture only records ops, doesn't execute them. The first post-capture call must `g.replay()` before returning, else outputs are warmup-stale and training diverges.
+  - **Static input copying**: naively allocating a persistent buffer for every flat input doubles model-state memory (was +8 GiB for 295 buffers). With `num_static_inputs` we keep only the varying inputs (3 persistent buffers), restoring memory to iter-7 levels.
+  - **Shutdown hang**: captured graph + buffers held NCCL state alive past process teardown for ~22 min until SIGTERM. Monkey-patched `torch.distributed.destroy_process_group` to sync, drop graph, drop buffers, `gc.collect`, `empty_cache` before NCCL teardown. Plus an `atexit` fallback.
+- **Lessons**:
+  - **CUDA graphs deliver large wins (+16%) on this workload** because steady-state CPU launch overhead is non-trivial (~10-15% of step time for ~9-11k node graphs).
+  - **`num_static_inputs` from `TracedResult` is essential** to keep memory flat when wrapping in CUDA graphs. Plumb traced_result fields into passes via `functools.partial` from `construct_default_graph_passes`.
+  - **Always replay-after-capture** before returning to the caller. Otherwise outputs are recorded references with no fresh execution.
+  - **NCCL + CUDA graphs need explicit teardown** to avoid shutdown hangs.
+
+---
+
 ## expanded apply_inductor_pattern_passes (bucketing + overlap scheduling) — keep (b9c27f1)
 
 - **Idea**: `torch._inductor.fx_passes` exposes 30+ submodules. Iter 5 only used `joint_graph_passes` + `post_grad_passes`. The submodules `bucketing`, `overlap_scheduling`, `micro_pipeline_tp`, `low_contention_collectives`, `fsdp`, `fuse_attention`, `pad_mm`, `b2b_gemm`, `decompose_mem_bound_mm`, `group_batch_fusion`, etc. should give additional gains specific to distributed and matmul-heavy graphs.
