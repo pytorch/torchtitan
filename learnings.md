@@ -8786,3 +8786,33 @@ Interpretation:
 - The no-cast source combines well with the previous near-miss chunks4 shape and produces the highest reported tps so far.
 - The memory level is above the preferred 95% guideline, and steps 6-7 had severe stalls before the run recovered to high throughput. This is a real throughput lead but not a clean, low-risk operating point.
 - Keep this as the current throughput target while preserving the no-cast batch136 chunks8 result as the safer fallback.
+
+## Experiment 362: MXFP8 No-Cast With RMSNorm-Only Compile
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss","norms"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=132 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run362-mxfp8-compile-norms-no-fsdp-forward-input-casts-loss-chunks4-sdpa-prefetch-seq128-lbs132-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Added a Qwen-local `"norms"` compile component that compiles each transformer block's attention norm, FFN norm, Q/K norms, and the final norm with `fullgraph=True`.
+- Kept MXFP8 linears eager and loss compile enabled.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,235.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 170.30 GiB, 95.49%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.32663 at step 1 to 6.33602 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+- The same FSDP2 MXFP8 view-output warning appeared as in the no-cast source.
+
+Interpretation:
+
+- RMSNorm-only model-side compile is valid and avoids the full-model MXFP8 Inductor crash, but it is slower than the uncompiled-norm no-cast chunks4 peak.
+- The remaining useful model-side compile opportunity is not in the RMSNorm modules alone. Full block/model compile remains blocked by MXFP8 linears, and a narrower safe compile boundary did not improve throughput.
+- Restore the no-cast source without `"norms"` compilation.

@@ -174,6 +174,16 @@
   Success criteria and expected risk: Success is tps above 11,206 with finite overall-decreasing loss and no allocator retries. Risk is memory above the preferred 95% line or step-time stalls from operating too close to the allocator limit.
   Result: kept as a memory-risky measured peak at source state `0b0076b8`; step 10 reached 11,381 tps with no allocator retries and loss 12.45862 -> 7.69370, but memory was 170.30 GiB (95.49%) and steps 6-7 stalled badly. Keep for throughput ranking, but the safer chunks8 shape remains the cleaner fallback.
 
+- Idea: MXFP8 no-cast source with RMSNorm-only compile
+  Current best source commit: 4d03bd7
+  Source: compile-granularity follow-up after full model compile is blocked by Inductor's MXFP8 backward path.
+  Expected mechanism: Compile only Qwen3 RMSNorm modules while keeping MXFP8 linears eager and loss compile enabled. This tests whether model-side non-GEMM overhead can be reduced without sending MXFP8 dynamic quantization through the failing full-block compile path.
+  Supporting evidence: Run353 showed layernorm and elementwise overhead in the eager MXFP8 profile. Full model compile crashes in Inductor post-grad fake-tensor recursion, so a safe compile boundary must exclude MXFP8 linears.
+  Planned source/config changes: In `parallelize_qwen3()`, compile `attention_norm`, `ffn_norm`, Q/K norms, and final norm when `--compile.components` contains `"norms"`.
+  Planned command or config overrides: Use the no-cast batch132 chunks4 command with `--compile.components='["loss","norms"]'`.
+  Success criteria and expected risk: Success is tps above 11,381 with finite overall-decreasing loss and no full-model compile crash. Risk is extra Dynamo/Inductor overhead around small RMSNorm modules or no useful fusion.
+  Result: discarded at source state `8328dba6`; RMSNorm-only compile completed without the MXFP8 model-compile crash, but reached only 11,235 tps with the same 170.30 GiB peak. Restore the no-cast source without norm compilation.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.
