@@ -68,28 +68,6 @@ def parallelize_qwen3(
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
-    if compile_config.enable and "norms" in compile_config.components:
-        for layer in model.layers.values():
-            layer.attention_norm.compile(
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
-            layer.ffn_norm.compile(
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
-            if layer.attention.q_norm is not None:
-                layer.attention.q_norm.compile(
-                    backend=compile_config.backend,
-                    fullgraph=True,
-                )
-            if layer.attention.k_norm is not None:
-                layer.attention.k_norm.compile(
-                    backend=compile_config.backend,
-                    fullgraph=True,
-                )
-        model.norm.compile(backend=compile_config.backend, fullgraph=True)
-        logger.info("Compiling Qwen3 RMSNorm modules with torch.compile")
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
