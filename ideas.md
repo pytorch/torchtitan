@@ -142,6 +142,7 @@
   Planned source/config changes: In `qwen3_14b()`, set `MXFP8LinearConverter.Config(..., fqns=["lm_head", "attention.qkv_linear.wq", "attention.wo", "feed_forward"])`.
   Planned command or config overrides: Use the current best unprofiled batch136 chunks8 command.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that BF16 WKV GEMMs are slower than the saved MXFP8 overhead, or that mixed BF16/MXFP8 coverage changes memory and FSDP behavior unfavorably.
+  Result: discarded at source state `4572676c`; excluding WKV completed cleanly but reached only 11,164 tps with 168.92 GiB, below the 11,202 tps full-MXFP8 peak. Restore full MXFP8 coverage.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2

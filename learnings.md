@@ -8564,3 +8564,31 @@ Roofline interpretation:
 - The profiled MXFP8 best is mixed compute/communication/launch overhead, not attention-bound or optimizer-bound.
 - The model is eager because compiled MXFP8 backward hits the Inductor fake-tensor recursion, so CUDA launch overhead and unfused elementwise/cast work are expected to be larger than the non-MXFP8 compiled model path.
 - A targeted next experiment is to reduce MXFP8 dynamic-quantization overhead on small GEMMs. The `attention.qkv_linear.wkv` projections are much smaller than WQ/WO/FFN/lm_head and may not amortize MXFP8 dim casts well; exclude only WKV from the converter while keeping MXFP8 on large linears.
+
+## Experiment 354: Exclude WKV From MXFP8 Linear
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run354-mxfp8-exclude-wkv-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs136-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Set the MXFP8 converter `fqns` list to `["lm_head", "attention.qkv_linear.wq", "attention.wo", "feed_forward"]`.
+- Verified this leaves exactly 40 `attention.qkv_linear.wkv` linears in BF16 and converts 201 other linears to MXFP8.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,164.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.92 GiB, 94.71%.
+- Loss moved from 12.42945 at step 1 to 6.66475 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- WKV MXFP8 conversion is still worth keeping for this workload. Excluding WKV avoids a small amount of memory but does not improve throughput.
+- The profile's cast/launch overhead cannot be reduced profitably by this simple small-linear coverage filter.
+- Restore full MXFP8 coverage before continuing.
