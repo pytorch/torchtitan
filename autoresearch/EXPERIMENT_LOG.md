@@ -28,6 +28,18 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter17 exploration batch — discard (xxxxxxx)
+
+- **Idea**: Try a batch of cheap exploratory tweaks: apply `joint_graph_passes` twice, add `post_grad_passes(is_inference=True)`, toggle `epilogue_fusion`/`coordinate_descent_tuning` etc., find `dedupe_symint_uses` / `binary_folding` under alternate module paths, call `joint_graph_passes` after bucketing.
+- **Result**: discard. All attempts no-op (deletes 0 nodes after the first fixed-point call) or noise-level TPS. `dedupe_symints` exists under the same module but is a no-op on our graph. `binary_folding_pass` doesn't exist as a callable in this PyTorch build (only `register_binary_folding_pattern` / `binary_folding_init`).
+- **Lessons**:
+  - **`joint_graph_passes` reaches fixed point in one call** on this graph. Repeated application doesn't help.
+  - **`post_grad_passes(is_inference=True)` is equivalent to `is_inference=False` here** — both no-ops on the iter-12 graph (already fully reduced).
+  - **Inductor config flags don't change FX-level pass output**; they gate codegen behavior which we bypass via CUDA graphs.
+  - **The FX-pass surface for further wins is exhausted at this configuration.** Remaining levers are at the kernel level (bf16 RS — blocked by bitwise numerics) or scheduling level — not reachable via FX pattern passes.
+
+---
+
 ## cleanup_redundant_ops — discard (xxxxxxx)
 
 - **Idea**: Look for survivors after iter-5 passes: redundant double-transpose, redundant clone, view-of-view collapse, identity permute/squeeze/unsqueeze/expand.
