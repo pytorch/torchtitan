@@ -204,6 +204,16 @@
   Success criteria and expected risk: Success is tps above 11,381 with finite overall-decreasing loss and no allocator retries. Risk is memory rising further above the preferred 95% line or larger all-gathers reducing overlap.
   Result: discarded at source state `f23af524`; pairwise grouping completed with finite decreasing loss but reached only 11,277 tps and raised peak memory to 171.61 GiB (96.22%). Restore per-layer FSDP groups.
 
+- Idea: MXFP8 no-cast batch128 chunks4 safer bracket
+  Current best source commit: a49a629
+  Source: memory-risk bracket after batch132 chunks4 became the throughput peak but remained above the preferred 95% memory line.
+  Expected mechanism: Use the same no-cast source and chunks4 loss path, but reduce local batch from 132 to 128. The lower memory pressure may remove step-time variance while preserving the chunks4 loss-loop advantage and valid Triton dim1 row tiling.
+  Supporting evidence: Run365-style batch128 chunks4 was previously clean before the no-cast source, and run361's batch132 chunks4 peak had high memory plus mid-run stalls. Lowering batch may improve stability enough to offset slightly less work per step.
+  Planned source/config changes: None; keep no-cast source with per-layer FSDP.
+  Planned command or config overrides: Use the no-cast command with `--training.local_batch_size=128` and `--loss.num_chunks=4`.
+  Success criteria and expected risk: Success is tps near or above 11,381 with peak memory below the preferred risk line and finite overall-decreasing loss. Risk is lower throughput from smaller batch.
+  Result: kept at source state `a49a6292`; batch128 chunks4 reached 11,386 tps, peak memory 166.26 GiB (93.22%), no allocator retries, and finite overall-decreasing loss. This replaces batch132 chunks4 as the better active target because it is both slightly faster and substantially less memory-risky.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.
