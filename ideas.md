@@ -112,6 +112,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run350 command with `--training.local_batch_size=132`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, no allocator retries, and tps above 11,202. Risk is that memory growth is nonlinear and still triggers allocator retries.
+  Result: discarded as a near-miss at source state `8f50844a`; batch132 chunks4 completed with no allocator retries and 11,199 tps, but did not beat 11,202 and used 170.60 GiB (95.65%), which is above the preferred memory-risk line.
+
+- Idea: MXFP8Linear batch128 with loss chunks 2
+  Current best source commit: 8f50844a
+  Source: loss-overhead follow-up after batch128 chunks4 was clean and batch132 chunks4 nearly tied but crossed the memory-risk line.
+  Expected mechanism: Reduce the loss chunk count further from 4 to 2 at the safer batch128 shape. This cuts repeated lm_head/loss chunk overhead while staying below the batch132 memory level if the memory increase from chunks4 to chunks2 is not too large. With chunks2, each chunk has 64 sequence positions and `128 * 64 = 8,192`, divisible by the Triton dim1 128-row tile.
+  Supporting evidence: Batch128 chunks4 used 166.01 GiB and no retries, leaving about 4.6 GiB before the batch132 chunks4 memory level. Batch132 chunks4 reached 11,199 tps, so reducing chunk overhead at batch128 may beat the current peak without increasing batch size.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run350 command with `--loss.num_chunks=2`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, no allocator retries, and tps above 11,202. Risk is that larger loss chunks push memory into the same allocator cliff as batch136 chunks4.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2

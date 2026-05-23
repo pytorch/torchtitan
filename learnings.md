@@ -8477,3 +8477,31 @@ Interpretation:
 - Loss chunks4 is not inherently bad for MXFP8; the batch136 chunks4 failure was memory-pressure driven.
 - Batch128 chunks4 is close to the current measured peak and uses about 2.9 GiB less memory than batch136 chunks8.
 - Interpolate with batch132 chunks4 next. It is Triton-row-valid (`132 * 32 = 4,224 = 33 * 128`) and should test whether the chunks4 lower-overhead path can recover enough batch work without hitting the allocator cliff.
+
+## Experiment 351: MXFP8 Linear Batch132 Loss Chunks 4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=132 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run351-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs132-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: discard as near-miss.
+- Step 10 `tps`: 11,199.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 170.60 GiB, 95.65%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.48811 at step 1 to 7.82859 at step 10; finite and overall decreasing, though noisy.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Batch132 chunks4 is effectively tied with the 11,202 tps peak but does not exceed it, and it sits above the preferred 95% memory-risk line.
+- The chunks4 interpolation shows a narrow memory/performance ridge: batch128 is safe and near peak, batch132 is near peak but risky, batch136 falls off the allocator cliff.
+- A safer next attempt is batch128 chunks2. That keeps the smaller batch but cuts loss chunks again, testing whether loss overhead rather than batch size can recover the last few tps without crossing the memory cliff.
