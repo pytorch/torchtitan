@@ -28,6 +28,28 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter37 ablate remove_detach_nodes (8-run) — info-only (xxxxxxx)
+
+- **Idea**: iter-23 3-run ablation found -16 tps without `remove_detach_nodes` ("borderline noise"). With true σ=4, -16 is 4σ. Confirm with 8-run avg whether the pass is genuinely load-bearing.
+- **Changes**: Commented out `remove_detach_nodes` from `construct_default_graph_passes`.
+- **Result**: ablation confirms `remove_detach_nodes` is **load-bearing**.
+  - 8-run TPS: 6030/6023/6022/6019/6015/6018/6023/6025 → **mean 6,021.9, σ=4.6**.
+  - **Δ vs baseline 6,040.25: -18.4 tps (8.8σ regression).**
+  - **Memory +2 GiB: 49.24 → 51.21 GiB.** Matches iter-1's finding (each detach node held a tensor reference).
+  - Numerics bitwise PASS.
+- **Analysis**: Confirmed iter-1's per-pass contribution. Each of the 196 detach nodes (a) holds a tensor reference that delays release (+2 GiB) and (b) contributes a small dispatcher-overhead per step that compounds to ~18 tps with CUDA graph capture. iter-23's 3-run measurement underestimated the effect — true magnitude is 18 tps (visible at 8-run), not 16.
+- **Lesson**:
+  - **Per-pass contributions (8-run, current pass list)**:
+    - `remove_detach_nodes`: **+18 tps + (-2 GiB memory)** [iter-37]
+    - `apply_inductor_pattern_passes` whole: estimated **+~1800 tps** (4,200 → 6,000+ across iters 5/7) [historical]
+      - `joint_graph_passes` + `post_grad_passes`: +9.9% per iter-5 ≈ +400 tps
+      - `schedule_overlap_bucketing` (inside): +543 tps per iter-23 ablation
+    - `disable_uninitialized_memory_fill`: **+~300 tps** [iter-12 keep result + iter-23 ablation]
+    - `install_cuda_graph`: **+~1300 tps** (5566 - 4783 ≈ 783 at iter-8; cumulative ~+1300 by iter-22)
+  - **Total improvement vs baseline 4,161 tps: +1,880 tps (+45.2%).** All passes load-bearing.
+
+---
+
 ## iter36 high-priority capture stream — discard (xxxxxxx)
 
 - **Idea**: `install_cuda_graph` captures on a side stream created with `torch.cuda.Stream()` (default priority 0). Recorded kernels may inherit the stream's priority at replay. Use `Stream(priority=-1)` (highest priority) to see if recorded comm/compute kernels get scheduling preference.
