@@ -1003,20 +1003,27 @@ def _select_best_backend(
     except Exception:
         return None, "eager"
 
-    # Skip kernels that failed correctness validation.
-    if bench_data.get("status") == "FAIL":
-        return None, "eager"
+    eager_ms = bench_data.get("eager_ms", float("inf")) or float("inf")
+    triton_info = bench_data.get("kernelagent_triton", {}) or {}
+    compile_info = bench_data.get("torch_compile", {}) or {}
 
-    eager_ms = bench_data.get("eager_ms", float("inf"))
+    # Each backend must have status=PASS AND beat eager by min_speedup.
+    triton_ms = (
+        triton_info.get("time_ms", float("inf"))
+        if triton_info.get("status") == "PASS"
+        else float("inf")
+    )
+    compile_ms = (
+        compile_info.get("time_ms", float("inf"))
+        if compile_info.get("status") == "PASS"
+        else float("inf")
+    )
 
-    # Check triton (must beat eager by min_speedup threshold)
-    triton_ms = bench_data.get("triton_ms", float("inf"))
-    if triton_fn is not None and triton_ms * min_speedup < eager_ms:
+    if triton_fn is not None and triton_ms * min_speedup < eager_ms \
+            and triton_ms <= compile_ms:
         return triton_fn, "triton"
 
-    # Check compile (must beat eager by min_speedup AND beat triton)
-    compile_ms = bench_data.get("compile_ms", float("inf"))
-    if compile_ms * min_speedup < eager_ms and compile_ms < triton_ms:
+    if compile_ms * min_speedup < eager_ms:
         if eager_fn is not None:
             compiled_fn = _try_compile(eager_fn)
             if compiled_fn is not None:

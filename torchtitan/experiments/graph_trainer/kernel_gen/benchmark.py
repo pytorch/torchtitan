@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Benchmark and validate all generated kernels against their PyTorch reference.
+"""Benchmark and validate generated kernels against their PyTorch reference.
 
-For each kernel in generated/<name>/:
-  1. Correctness: compare kernel_function output to Model.forward from problem.py
-  2. Benchmark: measure wall-clock time for both (CUDA events, 100 iterations)
-  3. Report: speedup, max error, pass/fail
+For each kernel in <dir>/<name>/:
+  1. Run Model.forward (eager) and capture reference output + time.
+  2. Validate + time the KernelAgent triton kernel against reference.
+  3. Validate + time torch.compile(model.forward) against reference.
+  4. Write benchmark.json with per-backend status + timings + errors.
 
 Usage:
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark [--problems PROB1 PROB2 ...]
-  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark  # runs all
+  python -m torchtitan.experiments.graph_trainer.kernel_gen.benchmark [--problems P1 ...]
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
-import sys
-import time
+import json
+import re as _re
 from pathlib import Path
 
 import torch
@@ -36,7 +36,6 @@ TOLERANCE_BITWISE = {"rtol": 1e-3, "atol": 8e-2}
 TOLERANCE_REDUCTION = {"rtol": 1e-2, "atol": 5e-2}
 TOLERANCE_COMPLEX = {"rtol": 1e-2, "atol": 5e-2}
 
-# Ops that involve reduction (order-dependent accumulation)
 _REDUCTION_OPS = {
     "aten.sum", "aten.mean", "aten.amax", "aten.amin", "aten.prod",
     "aten.norm", "aten.var", "aten.std", "aten._fused_rms_norm",
@@ -49,37 +48,26 @@ _COMPLEX_OPS = {
 }
 
 NUM_CORRECTNESS_TRIALS = 5
-
 WARMUP = 20
 BENCH_ITERS = 100
 
 
 def _detect_tolerance(problem_path: Path) -> tuple[dict, str]:
-    """Auto-detect the right tolerance from the ops in problem.py."""
     content = problem_path.read_text()
-    has_reduction = any(op in content for op in _REDUCTION_OPS)
-    has_complex = any(op in content for op in _COMPLEX_OPS)
-    if has_reduction:
+    if any(op in content for op in _REDUCTION_OPS):
         return TOLERANCE_REDUCTION, "reduction"
-    if has_complex:
+    if any(op in content for op in _COMPLEX_OPS):
         return TOLERANCE_COMPLEX, "complex"
     return TOLERANCE_BITWISE, "bitwise"
 
 
 def _load_module(path: Path, module_name: str):
-    """Load a Python module from path.
-
-    For problem.py files with a description preamble, writes a clean
-    temp copy then imports it via importlib (not exec) — this is required
-    because @triton.jit needs inspect.getsourcelines() to find the source.
-    """
-    import importlib.util
+    """Load a Python module from path; strip any header comments before
+    'import torch' so @triton.jit's inspect.getsourcelines() works."""
     import tempfile
-
     content = path.read_text()
     idx = content.find("import torch")
     if idx > 0:
-        # Has preamble — write a clean temp file
         clean = content[idx:]
         tmp = Path(tempfile.gettempdir()) / f"_bench_{module_name}_{path.parent.name}.py"
         tmp.write_text(clean)
@@ -96,11 +84,9 @@ def _load_module(path: Path, module_name: str):
 
 
 def _benchmark_fn(fn, inputs, warmup=WARMUP, iters=BENCH_ITERS):
-    """Benchmark a callable with CUDA event timing."""
     for _ in range(warmup):
         fn(*inputs)
     torch.cuda.synchronize()
-
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
     start_event.record()
@@ -111,55 +97,103 @@ def _benchmark_fn(fn, inputs, warmup=WARMUP, iters=BENCH_ITERS):
     return start_event.elapsed_time(end_event) / iters
 
 
-def _compare_outputs(out_kernel, out_ref, tols):
-    """Compare kernel output to reference, handling tuples/lists."""
+def _compute_errors(out_candidate, out_ref) -> tuple[float, float, str | None]:
+    """Compute (max_abs_err, max_rel_err, error_message_or_None).
+
+    Walks tuples/lists pairwise, casts to float32 for comparison, returns
+    max errors across all elements. Returns (0, 0, msg) on shape/type
+    mismatch.
+    """
     if isinstance(out_ref, (tuple, list)):
-        if not isinstance(out_kernel, (tuple, list)):
-            return False, "kernel returned Tensor, expected tuple"
-        if len(out_kernel) != len(out_ref):
-            return False, f"tuple length mismatch: {len(out_kernel)} vs {len(out_ref)}"
-        max_err = 0.0
-        for i, (k, r) in enumerate(zip(out_kernel, out_ref)):
+        if isinstance(out_candidate, tuple) and len(out_candidate) == 1 and not isinstance(out_ref, tuple) is False:
+            pass  # fall through
+        if not isinstance(out_candidate, (tuple, list)):
+            return 0.0, 0.0, "candidate returned Tensor, expected tuple"
+        if len(out_candidate) != len(out_ref):
+            return 0.0, 0.0, f"tuple length mismatch: {len(out_candidate)} vs {len(out_ref)}"
+        max_abs, max_rel = 0.0, 0.0
+        for i, (k, r) in enumerate(zip(out_candidate, out_ref)):
             if not isinstance(k, torch.Tensor) or not isinstance(r, torch.Tensor):
                 continue
             if k.shape != r.shape:
-                return False, f"output[{i}] shape mismatch: {k.shape} vs {r.shape}"
-            try:
-                k_f = k.float().to(r.device)
-                r_f = r.float()
-            except Exception:
-                k_f = k.float().cpu()
-                r_f = r.float().cpu()
-            err = (k_f - r_f).abs().max().item()
-            max_err = max(max_err, err)
-            if not torch.allclose(k_f, r_f, **tols):
-                return False, f"output[{i}] numerical mismatch (max_err={err:.4e})"
-        return True, max_err
-    else:
-        if isinstance(out_kernel, tuple):
-            if len(out_kernel) == 1:
-                out_kernel = out_kernel[0]
-            else:
-                return False, "kernel returned tuple, expected Tensor"
-        if out_kernel.shape != out_ref.shape:
-            return False, f"shape mismatch: {out_kernel.shape} vs {out_ref.shape}"
-        if out_kernel.dtype != out_ref.dtype:
-            # Allow f32 vs bf16 if close
-            pass
+                return max_abs, max_rel, f"output[{i}] shape mismatch: {k.shape} vs {r.shape}"
+            a, b = k.float().to(r.device), r.float()
+            abs_err = (a - b).abs().max().item()
+            rel_err = ((a - b).abs() / (b.abs() + 1e-12)).max().item()
+            max_abs = max(max_abs, abs_err)
+            max_rel = max(max_rel, rel_err)
+        return max_abs, max_rel, None
+
+    if isinstance(out_candidate, tuple):
+        if len(out_candidate) == 1:
+            out_candidate = out_candidate[0]
+        else:
+            return 0.0, 0.0, "candidate returned tuple, expected Tensor"
+    if out_candidate.shape != out_ref.shape:
+        return 0.0, 0.0, f"shape mismatch: {out_candidate.shape} vs {out_ref.shape}"
+    a, b = out_candidate.float().to(out_ref.device), out_ref.float()
+    abs_err = (a - b).abs().max().item()
+    rel_err = ((a - b).abs() / (b.abs() + 1e-12)).max().item()
+    return abs_err, rel_err, None
+
+
+def _validate(candidate_fn, model, get_inputs, tols, tol_tier) -> dict:
+    """Run NUM_CORRECTNESS_TRIALS random-input trials.
+
+    Returns a per-backend result dict with status / max_abs_err /
+    max_rel_err / tol_tier / (reason on FAIL).
+    """
+    max_abs, max_rel = 0.0, 0.0
+    last_inputs = None
+    for trial in range(NUM_CORRECTNESS_TRIALS):
+        torch.manual_seed(trial * 137 + 42)
+        torch.cuda.manual_seed(trial * 137 + 42)
+        inputs = get_inputs()
+        last_inputs = inputs
         try:
-            k_f = out_kernel.float().to(out_ref.device)
-            r_f = out_ref.float()
-        except Exception:
-            k_f = out_kernel.float().cpu()
-            r_f = out_ref.float().cpu()
-        max_err = (k_f - r_f).abs().max().item()
-        if not torch.allclose(k_f, r_f, **tols):
-            return False, f"numerical mismatch (max_err={max_err:.4e})"
-        return True, max_err
+            with torch.no_grad():
+                ref_out = model(*inputs)
+                cand_out = candidate_fn(*inputs)
+        except Exception as e:
+            return {
+                "status": "FAIL",
+                "tol_tier": tol_tier,
+                "max_abs_err": max_abs,
+                "max_rel_err": max_rel,
+                "reason": f"execution (trial {trial}): {e}",
+            }
+
+        abs_err, rel_err, err_msg = _compute_errors(cand_out, ref_out)
+        max_abs = max(max_abs, abs_err)
+        max_rel = max(max_rel, rel_err)
+
+        # Check tolerance: abs_err <= atol + rtol * |ref|
+        # Approximate: pass if abs_err < atol OR rel_err < rtol.
+        atol, rtol = tols["atol"], tols["rtol"]
+        passed = (abs_err <= atol) or (rel_err <= rtol)
+        if not passed:
+            return {
+                "status": "FAIL",
+                "tol_tier": tol_tier,
+                "max_abs_err": max_abs,
+                "max_rel_err": max_rel,
+                "reason": err_msg or (
+                    f"trial {trial} ({tol_tier} tol): "
+                    f"max_abs_err={abs_err:.4e}, max_rel_err={rel_err:.4e}"
+                ),
+            }
+
+    return {
+        "status": "PASS",
+        "tol_tier": tol_tier,
+        "max_abs_err": max_abs,
+        "max_rel_err": max_rel,
+        "_last_inputs": last_inputs,  # for benchmarking; popped before save
+    }
 
 
 def run_one(name: str) -> dict:
-    """Validate and benchmark a single kernel."""
+    """Validate + benchmark both backends for a single problem."""
     problem_dir = GENERATED_DIR / name
     problem_path = problem_dir / "problem.py"
     kernel_path = problem_dir / "kernel.py"
@@ -178,110 +212,104 @@ def run_one(name: str) -> dict:
     model_cls = getattr(problem_mod, "Model", None)
     get_inputs = getattr(problem_mod, "get_inputs", None)
     kernel_fn = getattr(kernel_mod, "kernel_function", None)
-
     if model_cls is None or get_inputs is None or kernel_fn is None:
         return {"name": name, "status": "ERROR", "reason": "missing Model/get_inputs/kernel_function"}
 
-    # --- Correctness (multiple trials, auto-detected tolerance) ---
-    import json
     tols, tol_tier = _detect_tolerance(problem_path)
     model = model_cls()
-    max_err = 0.0
 
-    def _save_fail(reason: str, max_err_observed: float = 0.0) -> dict:
-        fail_data = {
-            "status": "FAIL",
-            "reason": reason,
-            "tol_tier": tol_tier,
-            "max_err": max_err_observed,
-        }
-        (problem_dir / "benchmark.json").write_text(json.dumps(fail_data, indent=2))
-        return {
-            "name": name, "status": "FAIL", "reason": reason,
-            "max_err": max_err_observed,
-        }
+    # --- Validate KernelAgent triton kernel ---
+    triton_result = _validate(kernel_fn, model, get_inputs, tols, tol_tier)
+    triton_inputs = triton_result.pop("_last_inputs", None)
 
-    for trial in range(NUM_CORRECTNESS_TRIALS):
-        try:
-            torch.manual_seed(trial * 137 + 42)
-            torch.cuda.manual_seed(trial * 137 + 42)
-            inputs = get_inputs()
-            with torch.no_grad():
-                ref_out = model(*inputs)
-                kernel_out = kernel_fn(*inputs)
-        except Exception as e:
-            return _save_fail(f"execution (trial {trial}): {e}", max_err)
-
-        ok, detail = _compare_outputs(kernel_out, ref_out, tols)
-        if not ok:
-            # detail may be a tuple/str depending on path; extract numeric
-            # max_err if present in the string.
-            err_observed = max_err
-            import re as _re
-            if isinstance(detail, str):
-                m = _re.search(r"max_err=([0-9.eE+-]+)", detail)
-                if m:
-                    try:
-                        err_observed = max(err_observed, float(m.group(1)))
-                    except ValueError:
-                        pass
-            return _save_fail(
-                f"trial {trial} ({tol_tier} tol): {detail}", err_observed
-            )
-        if isinstance(detail, (int, float)):
-            max_err = max(max_err, detail)
-
-    # --- Benchmark ---
+    # --- Validate torch.compile baseline ---
+    compile_result = {"status": "SKIP", "tol_tier": tol_tier, "reason": "compile failed"}
+    compile_inputs = None
     try:
-        ref_fn = model.forward
-        ref_ms = _benchmark_fn(ref_fn, inputs)
-        kern_ms = _benchmark_fn(kernel_fn, inputs)
-        speedup = ref_ms / kern_ms if kern_ms > 0 else float("inf")
-
-        # torch.compile baseline
-        try:
-            compiled_fn = torch.compile(model.forward, fullgraph=True)
-            # warmup compile
-            compiled_fn(*inputs)
-            compiled_fn(*inputs)
-            compile_ms = _benchmark_fn(compiled_fn, inputs)
-        except Exception:
-            compile_ms = None
+        compiled_fn = torch.compile(model.forward, fullgraph=True)
+        compile_result = _validate(compiled_fn, model, get_inputs, tols, tol_tier)
+        compile_inputs = compile_result.pop("_last_inputs", None)
     except Exception as e:
-        return {
-            "name": name, "status": "PASS", "max_err": max_err,
-            "reason": f"correctness OK, benchmark failed: {e}",
+        compile_result = {
+            "status": "ERROR", "tol_tier": tol_tier,
+            "max_abs_err": 0.0, "max_rel_err": 0.0,
+            "reason": f"torch.compile failed: {e}",
         }
 
-    # Save benchmark.json for the fused op registry
+    # --- Benchmark eager (always, as the reference time) ---
+    # Pick any one set of inputs; use triton's if available else compile's.
+    bench_inputs = triton_inputs or compile_inputs
+    eager_ms = None
+    if bench_inputs is not None:
+        try:
+            eager_ms = _benchmark_fn(model.forward, bench_inputs)
+        except Exception as e:
+            eager_ms = None
+
+    # --- Benchmark each backend that PASSED correctness ---
+    if triton_result["status"] == "PASS" and bench_inputs is not None:
+        try:
+            triton_result["time_ms"] = _benchmark_fn(kernel_fn, bench_inputs)
+        except Exception as e:
+            triton_result["status"] = "FAIL"
+            triton_result["reason"] = f"benchmark failed: {e}"
+
+    if compile_result["status"] == "PASS" and bench_inputs is not None:
+        try:
+            compile_result["time_ms"] = _benchmark_fn(compiled_fn, bench_inputs)
+        except Exception as e:
+            compile_result["status"] = "FAIL"
+            compile_result["reason"] = f"benchmark failed: {e}"
+
+    # --- Save benchmark.json ---
     bench_data = {
-        "status": "PASS",
-        "eager_ms": ref_ms,
-        "triton_ms": kern_ms,
-        "max_err": max_err,
-        "tol_tier": tol_tier,
-        "num_trials": NUM_CORRECTNESS_TRIALS,
+        "eager_ms": eager_ms,
+        "kernelagent_triton": triton_result,
+        "torch_compile": compile_result,
     }
-    if compile_ms is not None:
-        bench_data["compile_ms"] = compile_ms
     (problem_dir / "benchmark.json").write_text(json.dumps(bench_data, indent=2))
 
-    return {
-        "name": name,
-        "status": "PASS",
-        "max_err": max_err,
-        "tol_tier": tol_tier,
-        "ref_ms": ref_ms,
-        "compile_ms": compile_ms,
-        "kern_ms": kern_ms,
-        "speedup": speedup,
-    }
+    return {"name": name, **bench_data}
+
+
+def _fmt(ms):
+    return f"{ms:.3f}" if isinstance(ms, (int, float)) else "-"
+
+
+def _print_row(r):
+    name = r["name"]
+    eager_ms = r.get("eager_ms")
+    triton = r.get("kernelagent_triton", {})
+    compile_ = r.get("torch_compile", {})
+
+    if r.get("status") in ("SKIP", "ERROR"):
+        print(f"  {name:<14} {r['status']:<6} {r.get('reason', '')}")
+        return
+
+    def status_str(d):
+        s = d.get("status", "?")
+        if s == "PASS":
+            return f"PASS({d.get('tol_tier', '?')})"
+        return s
+
+    tri_s = status_str(triton)
+    cmp_s = status_str(compile_)
+    eager = _fmt(eager_ms)
+    tri_t = _fmt(triton.get("time_ms")) if triton.get("status") == "PASS" else "-"
+    cmp_t = _fmt(compile_.get("time_ms")) if compile_.get("status") == "PASS" else "-"
+    tri_err = f"{triton.get('max_abs_err', 0):.2e}" if "max_abs_err" in triton else "-"
+    cmp_err = f"{compile_.get('max_abs_err', 0):.2e}" if "max_abs_err" in compile_ else "-"
+
+    print(
+        f"  {name:<14} eager={eager:>7}ms  "
+        f"triton={tri_s:<14} {tri_t:>7}ms err={tri_err:<10}  "
+        f"compile={cmp_s:<14} {cmp_t:>7}ms err={cmp_err}"
+    )
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dir", type=Path, default=None,
-                        help="Directory with problem subdirs (default: torchtitan/experiments/graph_trainer/kernel_gen/generated)")
+    parser.add_argument("--dir", type=Path, default=None)
     parser.add_argument("--problems", nargs="*")
     args = parser.parse_args()
 
@@ -298,45 +326,24 @@ def main():
         )
 
     print(f"Benchmarking {len(names)} kernels...\n")
-
     results = []
     for name in names:
-        print(f"  {name}...", end=" ", flush=True)
         r = run_one(name)
         results.append(r)
-        if r["status"] == "PASS" and "kern_ms" in r:
-            comp_str = f"  compile={r['compile_ms']:.3f}ms" if r.get("compile_ms") else ""
-            tier = r.get("tol_tier", "?")
-            print(
-                f"PASS [{tier}]  ref={r['ref_ms']:.3f}ms{comp_str}  kern={r['kern_ms']:.3f}ms  "
-                f"speedup={r['speedup']:.2f}x  max_err={r['max_err']:.2e}"
-            )
-        elif r["status"] == "PASS":
-            print(f"PASS  max_err={r['max_err']:.2e}  (no benchmark)")
-        else:
-            print(f"{r['status']}  {r.get('reason', '')}")
+        _print_row(r)
 
-    # Summary table
-    print("\n" + "=" * 115)
-    print(f"{'Kernel':<16} {'Status':<6} {'Tol':<10} {'Eager':>8} {'Compile':>8} {'Triton':>8} {'vs Eager':>9} {'vs Compile':>11} {'Max Err':>10}")
-    print("-" * 115)
-    for r in results:
-        ref = f"{r['ref_ms']:.3f}" if "ref_ms" in r else "-"
-        comp = f"{r['compile_ms']:.3f}" if r.get("compile_ms") else "-"
-        kern = f"{r['kern_ms']:.3f}" if "kern_ms" in r else "-"
-        spd = f"{r['speedup']:.2f}x" if "speedup" in r else "-"
-        if r.get("compile_ms") and r.get("kern_ms") and r["kern_ms"] > 0:
-            vs_comp = f"{r['compile_ms'] / r['kern_ms']:.2f}x"
-        else:
-            vs_comp = "-"
-        err = f"{r['max_err']:.2e}" if "max_err" in r else "-"
-        tier = r.get("tol_tier", "-")
-        reason = f"  ({r['reason'][:60]})" if r["status"] != "PASS" else ""
-        print(f"{r['name']:<16} {r['status']:<6} {tier:<10} {ref:>8} {comp:>8} {kern:>8} {spd:>9} {vs_comp:>11} {err:>10}{reason}")
-    print("=" * 115)
-
-    passed = sum(1 for r in results if r["status"] == "PASS")
-    print(f"\n{passed}/{len(results)} passed")
+    triton_pass = sum(
+        1 for r in results
+        if isinstance(r.get("kernelagent_triton"), dict)
+        and r["kernelagent_triton"].get("status") == "PASS"
+    )
+    compile_pass = sum(
+        1 for r in results
+        if isinstance(r.get("torch_compile"), dict)
+        and r["torch_compile"].get("status") == "PASS"
+    )
+    print(f"\nkernelagent_triton: {triton_pass}/{len(results)} pass")
+    print(f"torch_compile:      {compile_pass}/{len(results)} pass")
 
 
 if __name__ == "__main__":
