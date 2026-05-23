@@ -52,6 +52,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run344 command with `--training.local_batch_size=152`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 10,960. Risk is OOM or lower tps from less favorable batch shape.
+  Result: OOM at source state `ada8aff1`; step 1 completed with 173.94 GiB reported memory, then rank 0 OOMed at 177.53 GiB during later loss/lm_head work. Batch152 is above the safe eager-model MXFP8 envelope.
+
+- Idea: MXFP8Linear loss-only compile local batch 144
+  Current best source commit: ada8aff1
+  Source: memory-boundary follow-up after batch152 OOMed and batch128 completed.
+  Expected mechanism: Use a middle batch size that keeps Triton dim1 row counts valid with `loss.num_chunks=8` while reducing peak memory by several GiB relative to batch152. With local batch 144 and 16 sequence positions per chunk, each gradient chunk has 2,304 rows, divisible by 128.
+  Supporting evidence: Batch128 completed at 161.90 GiB and 10,960 tps; batch152 reached 177.53 GiB and OOMed. Batch144 should fit if memory scales roughly with batch.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run344 command with `--training.local_batch_size=144`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 10,960. Risk is still OOM or lower tps from batch-shape effects.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2

@@ -8319,3 +8319,26 @@ Interpretation:
 - MXFP8 works for the full training loop when the model is eager, the loss remains compiled, dim1 MXFP8 casting uses Triton, and the loss chunking shape satisfies Triton dim1's 128-row tile.
 - This run beats the prior best reported tps despite using local batch 128, but MFU is unavailable under this MXFP8 path, so compare primarily by reported tps and memory.
 - There is memory headroom versus the failed batch160 loss-only compile. Try a higher local batch that is still a multiple of 8 so `batch * 16` remains divisible by 128 for `loss.num_chunks=8`; local batch 152 is a plausible near-boundary probe.
+
+## Experiment 345: MXFP8 Linear Loss-Only Compile Local Batch 152
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=152 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run345-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs152-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: OOM.
+- Step 1 completed at 475 tps with 173.94 GiB reported memory.
+- The run then OOMed during subsequent loss/lm_head work, with rank 0 reporting 177.53 GiB in use and a 706 MiB allocation request.
+
+Interpretation:
+
+- Local batch 152 is just over the safe memory boundary for the eager-model MXFP8 path.
+- Try local batch 144 next. It remains valid for `loss.num_chunks=8` because `144 * 16 = 2,304 = 18 * 128`, and should give several GiB more headroom than batch152.
