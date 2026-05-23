@@ -28,6 +28,52 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## Session checkpoint (after iter 20)
+
+**Final stable configuration**: pass list `remove_detach_nodes` → `apply_inductor_pattern_passes` → `disable_uninitialized_memory_fill` → `install_cuda_graph`.
+
+3-run stability check (immediately after iter 20):
+- Run 1: tps=5,876, tflops=340.29, mfu=34.41%
+- Run 2: tps=5,872, tflops=340.08, mfu=34.39%
+- Run 3: tps=5,873, tflops=340.14, mfu=34.39%
+- avg=5,874, σ<2 tps. Bitwise: loss=9.21808, grad_norm=4.5867.
+
+**vs baseline (4,161 tps, 24.36% mfu): +41.2% tps, +10.04 pp mfu, memory ≈ unchanged.**
+
+Iteration outcomes summary (20 iters, 5 keeps):
+| # | Pass | Status | Cumulative tps | Δ tps | Mechanism |
+|---|---|---|---|---|---|
+| 0 | (baseline) | — | 4,161 | — | empty pass list |
+| 1 | remove_detach_nodes | **keep** | 4,188 | +0.6% | 196 autograd-noop nodes, also frees ~2 GiB |
+| 2 | _to_copy redundant elim | discard | — | — | 0/841 qualify; all real bf16↔fp32 casts |
+| 3 | bucket_all_gathers (manual) | discard | — | — | shape-heterogeneous → small buckets; reshape copy negates win |
+| 4 | prefetch_all_gathers (FX move) | discard | — | — | only 65/421 movable by 7 positions; make_fx already tight |
+| 5 | apply_inductor_pattern_passes | **keep** | 4,572 | +9.9% cum | joint_graph_passes + post_grad_passes (11.5k → 9.1k nodes) |
+| 6 | compile_fx_inductor (whole-graph) | discard | — | — | blocked by in-place all_reduce_ + decomp conflicts |
+| 7 | expanded inductor (bucketing+overlap) | **keep** | 4,783 | +14.9% cum | bucket_*_all_gather/RS + schedule_overlap_bucketing |
+| 8 | install_cuda_graph | **keep** | 5,566 | +33.8% cum | CUDA-graph wrap of gm.forward |
+| 9 | functionalize collectives + compile_fx | discard | — | — | decomps drainable but blocked by _get_submesh; reinplace resurrects in-place |
+| 10 | profile-driven (iter 8 graph) | info | — | — | found FillFunctor as next lever |
+| 11 | collapse_dtype_roundtrips | discard | — | — | 0/358 collapsible after iter 5 passes |
+| 12 | disable_uninitialized_memory_fill | **keep** | 5,876 | +41.2% cum | global flag (fill_uninitialized_memory) toggled off after audit |
+| 13 | untried inductor passes | discard | — | — | 0 ran effectively; iter-7 graph already in their post-pass form |
+| 14 | regional_inductor_compile | discard | — | — | 97/97 regions compile but +0.24% (regions <40 nodes; CUDA graphs already amortize) |
+| 15 | re-profile + cat-of-upcasts | discard | — | — | profile redone; cat-of-upcasts 0/290 (joint_graph already collapsed) |
+| 16 | cleanup_redundant_ops | discard | — | — | 450 double-transpose removed but +0.05%; clone/view-of-view break stride |
+| 17 | inductor passes batch #2 | discard | — | — | all no-ops; fx_passes surface exhausted |
+| 18 | coalesce_independent_adds | discard | — | — | 225 adds all sequentially data-dependent |
+| 19 | unblock_inductor_codegen | discard | — | — | compile_fx_inner works (+2.8%) but 8B numerics drift (debugmodel test masks it) |
+| 20 | residual FillFunctor recon | info | — | — | 91% from FlashAttn-internal scratch; structural |
+
+**Structural ceilings discovered** (won't move past these under bitwise constraint, see `LEARNINGS.md` for details):
+1. **bf16 ReduceScatter** would save ~9% TPS but changes numerics.
+2. **Whole-graph Inductor codegen** is reachable (`compile_fx_inner` succeeds after `_get_submesh` rewire + decomp drain) but the resulting kernels aren't bitwise-equivalent on the 8B model.
+3. **FlashAttention-internal scratch fills, CE backward zeros_like, sequential residual+grad chains** — all structurally necessary, not addressable from `passes.py`.
+
+**Reproducibility**: every "keep" is captured in a `[autoresearch]` commit with the `passes.py` change, the tracking-file updates, and a backfill commit pinning the actual hash into `results.tsv` / `EXPERIMENT_LOG.md`.
+
+---
+
 ## residual FillFunctor recon — info-only (xxxxxxx)
 
 - **Idea**: Iter-12 killed 4,061 FillFunctor zero-init kernels. Iter-15 re-profile showed 88 still remain (~22 ms / 1.35%). Find their source.
