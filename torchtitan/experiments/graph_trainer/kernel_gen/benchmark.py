@@ -97,16 +97,36 @@ def _benchmark_fn(fn, inputs, warmup=WARMUP, iters=BENCH_ITERS):
     return start_event.elapsed_time(end_event) / iters
 
 
+# When computing relative error, ignore elements whose reference magnitude
+# is below this threshold — they cause meaningless huge ratios (1e-7 / 1e-12).
+_REL_ERR_REF_FLOOR = 1e-3
+
+
+def _pairwise_errors(a: torch.Tensor, b: torch.Tensor) -> tuple[float, float]:
+    """Return (max_abs_err, max_rel_err) for a vs reference b.
+
+    max_rel_err is computed only over elements where |b| >= _REL_ERR_REF_FLOOR,
+    avoiding the |a-b|/|b|→∞ blow-up near zero.
+    """
+    diff = (a - b).abs()
+    max_abs = diff.max().item() if diff.numel() else 0.0
+    mask = b.abs() >= _REL_ERR_REF_FLOOR
+    if mask.any():
+        rel = diff[mask] / b.abs()[mask]
+        max_rel = rel.max().item()
+    else:
+        max_rel = 0.0
+    return max_abs, max_rel
+
+
 def _compute_errors(out_candidate, out_ref) -> tuple[float, float, str | None]:
     """Compute (max_abs_err, max_rel_err, error_message_or_None).
 
     Walks tuples/lists pairwise, casts to float32 for comparison, returns
-    max errors across all elements. Returns (0, 0, msg) on shape/type
-    mismatch.
+    max errors across all elements. max_rel_err uses _pairwise_errors
+    (only counts elements above the reference floor).
     """
     if isinstance(out_ref, (tuple, list)):
-        if isinstance(out_candidate, tuple) and len(out_candidate) == 1 and not isinstance(out_ref, tuple) is False:
-            pass  # fall through
         if not isinstance(out_candidate, (tuple, list)):
             return 0.0, 0.0, "candidate returned Tensor, expected tuple"
         if len(out_candidate) != len(out_ref):
@@ -118,8 +138,7 @@ def _compute_errors(out_candidate, out_ref) -> tuple[float, float, str | None]:
             if k.shape != r.shape:
                 return max_abs, max_rel, f"output[{i}] shape mismatch: {k.shape} vs {r.shape}"
             a, b = k.float().to(r.device), r.float()
-            abs_err = (a - b).abs().max().item()
-            rel_err = ((a - b).abs() / (b.abs() + 1e-12)).max().item()
+            abs_err, rel_err = _pairwise_errors(a, b)
             max_abs = max(max_abs, abs_err)
             max_rel = max(max_rel, rel_err)
         return max_abs, max_rel, None
@@ -132,8 +151,7 @@ def _compute_errors(out_candidate, out_ref) -> tuple[float, float, str | None]:
     if out_candidate.shape != out_ref.shape:
         return 0.0, 0.0, f"shape mismatch: {out_candidate.shape} vs {out_ref.shape}"
     a, b = out_candidate.float().to(out_ref.device), out_ref.float()
-    abs_err = (a - b).abs().max().item()
-    rel_err = ((a - b).abs() / (b.abs() + 1e-12)).max().item()
+    abs_err, rel_err = _pairwise_errors(a, b)
     return abs_err, rel_err, None
 
 
