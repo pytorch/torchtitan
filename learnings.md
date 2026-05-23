@@ -8421,3 +8421,31 @@ Interpretation:
 - Reducing loss chunks from 8 to 4 is shape-valid for Triton dim1, but it crosses into the allocator retry regime.
 - The larger loss chunks erase throughput and loss sanity despite completing 10 steps. Keep `loss.num_chunks=8` for batch136.
 - Next useful MXFP8 step is an exact rerun of batch136 chunks8 to validate the 11,202 tps result before trying lower-batch chunk variants.
+
+## Experiment 349: MXFP8 Linear Batch136 Loss Chunks 8 Rerun
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run349-mxfp8-linear-triton-dim1-loss-only-compile-loss-chunks8-rerun-sdpa-prefetch-seq128-lbs136-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: keep as validation, but not a new measured peak.
+- Step 10 `tps`: 11,065.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.94 GiB, 94.72%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.40767 at step 1 to 6.91462 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- The batch136 chunks8 MXFP8 path is robust enough to keep: a second clean run lands in the same high-throughput band and improves loss normally.
+- The 11,202 tps from run347 remains the measured peak; run349 validates the source state at 11,065 tps.
+- Since batch136 chunks4 crossed the memory cliff, the next chunks4 test should lower batch to 128. That preserves Triton dim1 validity (`128 * 32 = 4,096`) and should keep peak memory closer to the clean range.

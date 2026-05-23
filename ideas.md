@@ -92,6 +92,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use the exact run347 command with a fresh dump folder.
   Success criteria and expected risk: Success is another clean 10-step completion near or above 11,202 tps with finite overall-decreasing loss. Risk is normal short-run variance or a lower but still healthy sample.
+  Result: kept as validation at source state `b0ad0320`; the rerun completed cleanly with no allocator retries, 11,065 tps, 168.94 GiB peak memory, and loss 12.40767 -> 6.91462. It validates the batch136 chunks8 source but does not replace the 11,202 tps measured peak.
+
+- Idea: MXFP8Linear batch128 with loss chunks 4
+  Current best source commit: b0ad0320
+  Source: memory-safe loss-overhead follow-up after batch136 chunks4 crossed the memory cliff.
+  Expected mechanism: Reduce loss chunks from 8 to 4 to lower repeated lm_head/loss overhead, but use local batch128 so the larger chunks should fit below the allocator retry regime. With seq_len 128 and chunks4, each chunk has 32 sequence positions and `128 * 32 = 4,096`, divisible by the Triton dim1 128-row tile.
+  Supporting evidence: Batch128 chunks8 completed at 161.90 GiB and 10,960 tps, leaving substantially more memory headroom than batch136. Batch136 chunks4 added about 5 GiB over chunks8 and failed from allocator pressure, so batch128 chunks4 should plausibly stay near 167 GiB.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use run344 command with `--loss.num_chunks=4`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that smaller batch loses more throughput than chunks4 saves, or that chunks4 still causes allocator retries.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
