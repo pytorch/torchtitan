@@ -8231,3 +8231,34 @@ Interpretation:
 - The prior flat-token-row assumption was incomplete. Chunked loss appears to split along sequence positions, then multiply by local batch.
 - With local batch 160 and sequence length 128, chunk5 creates per-chunk row counts such as `160 * 25` or `160 * 26`. These are not necessarily divisible by Triton's 128-row tile.
 - A chunk count whose sequence slice lengths are multiples of 4 should satisfy the constraint because `gcd(160, 128) = 32`. Try `loss.num_chunks=8`: each chunk has 16 sequence positions, so each gradient chunk has 2,560 rows, divisible by 128.
+
+## Experiment 342: MXFP8 Linear Triton Dim1 With Loss Chunks 8
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run342-mxfp8-linear-triton-dim1-loss-chunks8-sdpa-prefetch-seq128-lbs160-compile-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Kept the run340 MXFP8Linear converter plus Triton dim1 source patch.
+
+Result:
+
+- Status: crash.
+- No training step completed.
+- The Triton dim1 row-tile assertion did not fire, so `loss.num_chunks=8` fixed the previous shape constraint.
+- The run failed compiling the model backward in Inductor post-grad passes:
+
+```text
+torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded
+...
+post_grad_passes -> reinplace_inplaceable_ops -> fake_tensor_updater.incremental_update
+```
+
+Interpretation:
+
+- MXFP8 now gets past both the CUDA dim1 invalid-argument crash and the Triton dim1 row-tiling constraint.
+- The new blocker is an Inductor backward compilation issue in the post-grad reinplace pass, likely from recursive fake tensor metadata involving MXFP8 tensor subclasses.
+- Try disabling Inductor post-grad passes when enabling the MXFP8 linear override. This may reduce fusion quality but should test whether the compiled backward can get past the recursion failure.

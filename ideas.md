@@ -22,6 +22,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Exact run340 command except `--loss.num_chunks=8`.
   Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss and any reported throughput. Risk is additional loss-chunk overhead, FSDP view-tensor backward issues, or another TorchAO layout constraint after the row tile constraint is satisfied.
+  Result: crashed at source state `00fb0456`; `loss.num_chunks=8` cleared the Triton dim1 row-tile assertion, but Inductor failed compiling the model backward in post-grad `reinplace_inplaceable_ops` with a fake-tensor metadata `RecursionError`.
+
+- Idea: MXFP8Linear Triton dim1 with Inductor post-grad passes disabled
+  Current best source commit: 00fb0456
+  Source: follow-up to run342 after row tiling was fixed and the next failure moved to Inductor's post-grad reinplace pass.
+  Expected mechanism: Set `torch._inductor.config.use_post_grad_passes = False` when enabling the MXFP8 linear override. This should bypass the post-grad reinplace fake-tensor recursion and allow AOTAutograd backward code generation to proceed, at the cost of some compiler optimizations.
+  Supporting evidence: Run342 failed specifically under `post_grad_passes -> reinplace_inplaceable_ops -> fake_tensor_updater.incremental_update`. Disabling post-grad passes is a direct isolation of that failure site.
+  Planned source/config changes: Extend the run340 MXFP8 helper to disable Inductor post-grad passes for this MXFP8 experiment.
+  Planned command or config overrides: Use the run342 `--loss.num_chunks=8` command.
+  Success criteria and expected risk: Success is completing 10 steps with finite overall-decreasing loss. Risk is lower throughput from weaker Inductor optimization, or a later MXFP8/FSDP backward issue after compilation proceeds.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
