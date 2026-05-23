@@ -28,6 +28,19 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## unblock_inductor_codegen (bitwise-strict configs) — discard (xxxxxxx)
+
+- **Idea**: Iter 19's codegen drift might come from one of Inductor's many fusion/scheduling flags. Try the maximally-conservative bitwise mode.
+- **Changes**: Same as iter 19 (rewire `_get_submesh`, drain 10-op decomp list, cache_clear `D.fast_random_decomps`, call `compile_fx_inner`) but with 17 Inductor config flags set to most-conservative values FIRST: `split_reductions=False`, `epilogue_fusion=False`, `coordinate_descent_tuning=False`, `shape_padding=False`, `pattern_matcher=False`, `realize_acc_reads_threshold=0`, `force_fuse_int_mm_with_mul=False`, `aggressive_fusion=False`, `allow_buffer_reuse=False`, `fallback_random=True`, `realize_reads_threshold=0`, `size_asserts=False`, `max_autotune*=False`, `triton.cudagraphs=False`, `fx_graph_cache=False`. All 17 flags were available on this PyTorch.
+- **Result**: discard. `compile_fx_inner` succeeded in 32s. CUDA-graph wrap succeeded. BUT step-20 numerics: loss=8.78991 (expected 9.21808), grad_norm=8.1171 (expected 4.5867). Drift starts at step 1 grad_norm 4.2603 → 4.2606. Same drift signature as iter 19. debugmodel bitwise test PASSES; 8B benchmark FAILS bitwise.
+- **Analysis**: Drift survives all reachable user-facing Inductor flags. The remaining divergence is from kernel-selection / lowering decisions not gated by config — likely cuBLAS GEMM algorithm selection or fused RMSNorm/SDPA lowering. **This confirms the bitwise constraint is structurally incompatible with Inductor whole-graph codegen on the 8B graph.**
+- **Lessons**:
+  - **Inductor codegen has bitwise-divergent kernel selection that isn't controllable by user flags.** Don't expect strict bitwise via config tuning.
+  - The drift signature (loss 9.21808 → 8.78991 at step 20, grad_norm 4.5867 → 8.1171) is reproducible across iter 19 and iter 21 — same kernels, same numerical path.
+  - Pass left in `passes.py` toggled OFF (`enable_compile_fx_codegen = False`); reverted via `git checkout` so toggle is removed from committed state.
+
+---
+
 ## Session checkpoint (after iter 20)
 
 **Final stable configuration**: pass list `remove_detach_nodes` → `apply_inductor_pattern_passes` → `disable_uninitialized_memory_fill` → `install_cuda_graph`.
