@@ -144,6 +144,15 @@
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that BF16 WKV GEMMs are slower than the saved MXFP8 overhead, or that mixed BF16/MXFP8 coverage changes memory and FSDP behavior unfavorably.
   Result: discarded at source state `4572676c`; excluding WKV completed cleanly but reached only 11,164 tps with 168.92 GiB, below the 11,202 tps full-MXFP8 peak. Restore full MXFP8 coverage.
 
+- Idea: MXFP8 optimizer-in-backward at batch144
+  Current best source commit: b8e43b8c
+  Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.
+  Expected mechanism: Use `OptimizersInBackwardContainer` to step and clear gradients during backward, reducing retained gradient/optimizer memory enough for local batch144 chunks8 to avoid the allocator retry cliff. If batch144 becomes clean, the extra batch work may beat batch136 chunks8.
+  Supporting evidence: Full MXFP8 batch144 chunks8 completed but suffered allocator retries, bad loss, and only 6,483 tps at ~173.96 GiB. The MXFP8 profile still has substantial FSDP/GEMM work, and prior non-MXFP8 optimizer-in-backward saved memory, though it made the reported `grad_norm` metric zero.
+  Planned source/config changes: In `qwen3_14b()`, switch `optimizer` from `OptimizersContainer.Config` to `OptimizersInBackwardContainer.Config`.
+  Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command with `--training.local_batch_size=144`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that memory savings are insufficient, throughput falls from per-parameter optimizer hooks, or `grad_norm` becomes unavailable/zero as in prior optimizer-in-backward tests.
+
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
   Source: agent-generated setup finding

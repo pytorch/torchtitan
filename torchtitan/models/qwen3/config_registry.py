@@ -8,7 +8,11 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedCELoss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import (
+    OptimizersContainer,
+    OptimizersInBackwardContainer,
+    ParamGroupConfig,
+)
 from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -196,7 +200,7 @@ def qwen3_14b() -> Trainer.Config:
             ],
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=OptimizersContainer.Config(lr=8e-4),
+        optimizer=OptimizersInBackwardContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
             local_batch_size=4,
