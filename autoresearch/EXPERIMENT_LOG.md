@@ -28,6 +28,35 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## iter33 graph motif analysis — info-only (xxxxxxx)
+
+- **Idea**: With FX-pass surface seemingly exhausted, look one level deeper. Maybe there's a high-frequency 3- or 4-node motif that could be hand-rolled-fused into a single op.
+- **Procedure**: Added `_recon_motifs` pass between `disable_uninitialized_memory_fill` and `cuda_graph_pass`. Walked `call_function` nodes in topo order, counted unique 3-tuples and 4-tuples of consecutive targets. Dumped top motifs + example shapes/dtypes to /tmp/recon_motifs.txt. Recon-only.
+- **Top-10 3-tuple motifs (counts)**:
+  - 258 `view → view → view` — zero-cost metadata.
+  - 194 `mm → t → t` — backward of linear (`grad_w = mm(grad_y^T, x)` style).
+  - 192 `clone → _unsafe_view → slice` — real memcpy for FSDP grad pre-aggregation.
+  - 158 `t → mm → t` — forward of linear, transpose-input variant.
+  - 149 `slice.Tensor → t → mm` — sliced-param-shard → matmul (FSDP local linear forward).
+  - 129 `getitem → cat → reduce_scatter` — collective input staging.
+  - 129 `view → slice → view`, 129 `t → t → _to_copy`, 128 `_unsafe_view → slice → t` — all metadata.
+  - 128 `_to_copy → view → view_as_complex` — RoPE bf16→fp32 → complex view (4/layer × 32 layers).
+- **Top 4-tuples**: 158 `t → mm → t → t`, 128 `clone → _unsafe_view → slice → t`, 128 `mul → view_as_real → view → _to_copy` (RoPE complex multiply → bf16 epilogue), 126 `getitem → getitem → cat → reduce_scatter`, 125 `split → getitem → getitem → cat`.
+- **Analysis**:
+  - **The top motifs are dominated by zero-cost metadata ops.** `view`, `t`, `slice`, `_unsafe_view`, `getitem` produce no GPU kernels — they're stride/layout metadata ops. The FX node count overstates the real GPU work. Eliminating them saves zero runtime cost (already proven by iter-29 `sink_waits`, iter-16 view/clone cleanup).
+  - **The genuine compute motifs are**:
+    1. RoPE (`_to_copy → view_as_complex → mul → view_as_real → _to_copy`) at 128/step. Inductor's Triton fuser WOULD collapse this into one kernel, but Inductor codegen is bitwise-blocked.
+    2. mm chains (`t/mm/t`) — irreducible.
+    3. `clone → unsafe_view → slice` (192) — real memcpy; hand-fusing requires merging clone+slice into a single strided write, non-trivial and Inductor preserves these for layout (per iter-16).
+- **Conclusion**:
+  - **The FX-layer fusion surface IS genuinely exhausted under bitwise constraints.** The remaining "high-frequency" patterns are either zero-cost metadata or are already structurally optimized.
+  - **The only concrete fusion candidate (hand-rolled fused RoPE) requires writing a custom Triton/CUDA kernel** — outside `passes.py` scope, would duplicate Inductor's existing fusion that we already can't use, and unlikely to deliver more than what Inductor would.
+- **Lessons**:
+  - **Don't be misled by FX node counts.** 9,893 `call_function` nodes sounds like a lot, but a large fraction are metadata-only and produce no kernels. The real kernel count is in the hundreds, dominated by `mm` (675), `_to_copy` (649, real kernels), collectives, and a few hundred elementwise ops.
+  - **Future iterations under the bitwise + passes.py-only constraint should expect null results.** The genuine ceiling has been reached: GPU at 98% utilization, all FX-level levers exhausted, Inductor codegen blocked, NCCL tuning out of scope.
+
+---
+
 ## iter32 regional_inductor_compile re-attempt — discard (xxxxxxx)
 
 - **Idea**: iter-31's σ=4 baseline reclassified iter-14's +14 tps as 3.5σ above mean — possibly real. Re-implement `regional_inductor_compile` for the iter-22 graph (no bucketing) and measure with an 8-run average to detect σ-level effects.
