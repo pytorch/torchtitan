@@ -154,6 +154,15 @@
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that memory savings are insufficient, throughput falls from per-parameter optimizer hooks, or `grad_norm` becomes unavailable/zero as in prior optimizer-in-backward tests.
   Result: crashed/OOM at source state `d52e1242`; batch144 still entered allocator retries immediately, `grad_norm` was zero, and rank 6 SIGABRTed after step 4. Optimizer-in-backward does not rescue the MXFP8 batch144 memory cliff.
 
+- Idea: MXFP8 with fused BF16 optimizer states
+  Current best source commit: c18e2feb
+  Source: profile and memory follow-up after optimizer-in-backward failed.
+  Expected mechanism: Use `--optimizer.implementation=fused_opt_states_bf16` to keep the fused AdamW path but store optimizer moments in BF16. This may reduce optimizer memory traffic and reserved memory without the per-parameter hook overhead or zero-grad-norm caveat of optimizer-in-backward.
+  Supporting evidence: The MXFP8 current best is near the memory-risk line at 168.94 GiB, and optimizer kernels are small but nonzero in the profile. Optimizer-in-backward was too disruptive, so this is the narrower optimizer-memory variant.
+  Planned source/config changes: None.
+  Planned command or config overrides: Use the current MXFP8 batch136 chunks8 command with `--optimizer.implementation=fused_opt_states_bf16`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, nonzero grad norm, and tps above 11,202. Risk is no effect because training dtype and FSDP already dominate memory, or slower optimizer state handling.
+
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
   Source: agent-generated setup finding
