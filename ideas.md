@@ -164,6 +164,16 @@
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, no allocator retries, and tps above 11,202. Risk is exposing a view-output FSDP warning or hidden dtype path that the cast previously masked.
   Result: kept at source state `acd7635d`; the run completed cleanly with 11,206 tps, 169.29 GiB peak memory, no allocator retries, and finite overall-decreasing loss. It emitted an FSDP2 warning that `FSDPMXFP8Linear` returned a view tensor that could drop pre-backward hooks if followed by in-place ops, so treat this as a tiny measured peak with a source-level warning to watch.
 
+- Idea: MXFP8 no-cast source with batch132 chunks4
+  Current best source commit: 0b0076b8
+  Source: combination follow-up after no-cast became a tiny peak and the earlier batch132 chunks4 run nearly tied full-MXFP8 chunks8.
+  Expected mechanism: Combine the lower loss-loop overhead of chunks4 with the FSDP input-cast removal. Batch132 chunks4 previously reached 11,199 tps without allocator retries but was memory-risky; removing redundant input casts may reduce enough overhead to exceed the new no-cast chunks8 peak.
+  Supporting evidence: Run351 showed batch132 chunks4 is the closest chunks4 shape to the peak, while batch136 chunks4 and batch128 chunks2 hit allocator retry territory. Run360 showed the no-cast source improves the MXFP8 eager path slightly.
+  Planned source/config changes: Keep `cast_forward_inputs=False` in the Qwen3 FSDP mixed-precision policy.
+  Planned command or config overrides: Use the no-cast MXFP8 command with `--training.local_batch_size=132` and `--loss.num_chunks=4`.
+  Success criteria and expected risk: Success is tps above 11,206 with finite overall-decreasing loss and no allocator retries. Risk is memory above the preferred 95% line or step-time stalls from operating too close to the allocator limit.
+  Result: kept as a memory-risky measured peak at source state `0b0076b8`; step 10 reached 11,381 tps with no allocator retries and loss 12.45862 -> 7.69370, but memory was 170.30 GiB (95.49%) and steps 6-7 stalled badly. Keep for throughput ranking, but the safer chunks8 shape remains the cleaner fallback.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.

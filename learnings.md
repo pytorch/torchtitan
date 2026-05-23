@@ -8757,3 +8757,32 @@ Interpretation:
 - Disabling FSDP forward input casts slightly improves the MXFP8 eager path and directly attacks part of the copy/cast overhead seen in the profile.
 - The gain over the previous 11,202 tps peak is only 4 tps, so this is a marginal keep rather than a robust lead.
 - The view-output warning needs to remain visible in future comparisons. The Qwen3 block uses out-of-place residual adds, so the immediate run's nonzero grad norm and decreasing loss are reassuring, but the warning means this source state should not be treated as risk-free.
+
+## Experiment 361: MXFP8 No-Cast Batch132 Chunks4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=132 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run361-mxfp8-no-fsdp-forward-input-casts-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs132-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept run360 source with `cast_forward_inputs=False`.
+
+Result:
+
+- Status: keep as a memory-risky measured peak.
+- Step 10 `tps`: 11,381.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 170.30 GiB, 95.49%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.45862 at step 1 to 7.69370 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+- The same FSDP2 MXFP8 view-output warning appeared as in run360.
+
+Interpretation:
+
+- The no-cast source combines well with the previous near-miss chunks4 shape and produces the highest reported tps so far.
+- The memory level is above the preferred 95% guideline, and steps 6-7 had severe stalls before the run recovered to high throughput. This is a real throughput lead but not a clean, low-risk operating point.
+- Keep this as the current throughput target while preserving the no-cast batch136 chunks8 result as the safer fallback.
