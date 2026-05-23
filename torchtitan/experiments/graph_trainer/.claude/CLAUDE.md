@@ -300,6 +300,11 @@ and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
 
+### Numerics Debugging
+
+For investigating numerics divergence, use the `numerics_debugging` skill at
+[`.claude/skills/numerics_debugging/SKILL.md`](../../../../.claude/skills/numerics_debugging/SKILL.md).
+
 ### Async Tensor Parallel (micro-pipeline TP)
 
 Enable with `--parallelism.enable_async_tensor_parallel`. This fuses
