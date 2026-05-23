@@ -8700,3 +8700,31 @@ Interpretation:
 
 - `NCCL_CTA_POLICY=1` is slower than both policy 2 and the current measured peak.
 - The MXFP8 CTA-policy branch is closed: keep `NCCL_CTA_POLICY=2`.
+
+## Experiment 359: Exclude LM Head From MXFP8 With Chunks4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run359-mxfp8-exclude-lm-head-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs136-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Set the MXFP8 converter `fqns` list to `["attention.qkv_linear.wq", "attention.qkv_linear.wkv", "attention.wo", "feed_forward"]`.
+- Verified this leaves exactly one plain `Linear`, `lm_head`, and converts 240 transformer linears to MXFP8.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 8,305.
+- Step 10 MFU: N/A.
+- Peak logged memory: 173.16 GiB, 97.09%.
+- The run completed 10 steps but logged allocator mapping OOM warnings and CUDA memory allocation retries from step 2 onward.
+- Loss moved from 12.43184 at step 1 to 10.76317 at step 10, but it spiked to 15.91084 at step 4 and is much weaker than the current-best chunks8 loss trend.
+
+Interpretation:
+
+- The batch136 chunks4 cliff is not fixed by removing MXFP8 from `lm_head`.
+- BF16 `lm_head` reduces neither peak memory nor allocator pressure enough, and it removes useful MXFP8 acceleration from a very large output projection.
+- Restore full MXFP8 coverage and keep `loss.num_chunks=8` for batch136.

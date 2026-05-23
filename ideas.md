@@ -144,6 +144,16 @@
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is that BF16 WKV GEMMs are slower than the saved MXFP8 overhead, or that mixed BF16/MXFP8 coverage changes memory and FSDP behavior unfavorably.
   Result: discarded at source state `4572676c`; excluding WKV completed cleanly but reached only 11,164 tps with 168.92 GiB, below the 11,202 tps full-MXFP8 peak. Restore full MXFP8 coverage.
 
+- Idea: exclude lm_head from MXFP8Linear and retry batch136 chunks4
+  Current best source commit: 1fff37df
+  Source: memory-cliff follow-up after batch136 chunks4 failed with full MXFP8 and the profile showed loss/lm_head work contributes to the eager MXFP8 cast and allocator pressure.
+  Expected mechanism: Keep MXFP8 on all transformer-layer linears but leave only `lm_head` in BF16. If the chunks4 memory cliff is driven by dynamic MXFP8 casts in the repeated output projection/loss path, BF16 `lm_head` may reduce allocator pressure enough to make batch136 chunks4 stable while still keeping MXFP8 acceleration through the transformer.
+  Supporting evidence: Batch136 chunks8 is clean at 168.94 GiB, batch136 chunks4 with full MXFP8 enters allocator-retry territory, and the converter supports a precise inclusion list. The verification script confirmed 240 transformer linears converted to MXFP8 and only `lm_head` left plain.
+  Planned source/config changes: In `qwen3_14b()`, set `MXFP8LinearConverter.Config(..., fqns=["attention.qkv_linear.wq", "attention.qkv_linear.wkv", "attention.wo", "feed_forward"])`.
+  Planned command or config overrides: Use the current MXFP8 batch136 command with `--loss.num_chunks=4`.
+  Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss, no allocator retries, peak memory below the risk line, and tps above 11,202. Risk is that BF16 `lm_head` is slower and still does not relieve the chunks4 memory cliff.
+  Result: discarded at source state `9200ffb3`; the run completed but still hit allocator mapping OOM warnings from step 2 onward, peaked at 173.16 GiB, and reached only 8,305 tps. Restore full MXFP8 coverage and keep batch136 chunks8.
+
 - Idea: MXFP8 optimizer-in-backward at batch144
   Current best source commit: b8e43b8c
   Source: memory-boundary follow-up after batch144 chunks8 and chunks4 variants crossed into allocator pressure.
