@@ -28,6 +28,24 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## re-ablation after iter 22 — info-only (xxxxxxx)
+
+Re-test each remaining pass on the iter-22 graph (with bucketing removed). 3 runs per variant; bitwise numerics preserved on all.
+
+| Variant | tps avg | Δ vs iter-22 | Verdict |
+|---|---|---|---|
+| iter-22 baseline | 6,048 | — | — |
+| drop `remove_detach_nodes` | 6,032 | -16 | within noise; keep (borderline) |
+| drop `schedule_overlap_bucketing` | 5,505 | **-543** | strongly load-bearing; KEEP |
+| add 2nd `joint_graph_passes` after overlap | 6,048 | 0 | no-op; drop |
+| move `disable_uninitialized_memory_fill` before inductor | 5,743 | -305 | empty.* nodes don't exist yet at that point — must run AFTER inductor; keep current order |
+
+**Key finding**: iter-22's pass list is a tight local optimum. `schedule_overlap_bucketing` becomes the single largest contributor post-bucketing-removal (-543 tps without it), confirming it's not just a no-op-reorder-fixup but does real comm/compute overlap work that bucketing was masking.
+
+Pass list unchanged: `[remove_detach_nodes, apply_inductor_pattern_passes, disable_uninitialized_memory_fill, install_cuda_graph]` with `schedule_overlap_bucketing` as the last step inside `apply_inductor_pattern_passes`.
+
+---
+
 ## remove bucketing from apply_inductor_pattern_passes — keep (e47a29c)
 
 - **Idea**: Iter-22 ablation found that disabling `bucket_all_gather` + `bucket_reduce_scatter` improved tps by ~3% (5,876 → 6,051 in a single run). Verify and keep.
