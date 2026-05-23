@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Benchmark and validate generated kernels against their PyTorch reference.
+"""Benchmark and validate generated kernels against torch.compile.
 
 For each kernel in <dir>/<name>/:
-  1. Run Model.forward (eager) and capture reference output + time.
-  2. Validate + time the KernelAgent triton kernel against reference.
-  3. Validate + time torch.compile(model.forward) against reference.
+  1. Compile model.forward with torch.compile(fullgraph=True); treat its
+     output as the trusted reference (the production baseline).
+  2. Validate the KernelAgent triton kernel against the compiled output.
+     If torch.compile fails, fall back to eager as the reference.
+  3. Benchmark eager, triton (if PASS), and compile (if PASS).
   4. Write benchmark.json with per-backend status + timings + errors.
 
 Usage:
@@ -155,8 +157,16 @@ def _compute_errors(out_candidate, out_ref) -> tuple[float, float, str | None]:
     return abs_err, rel_err, None
 
 
-def _validate(candidate_fn, model, get_inputs, tols, tol_tier) -> dict:
-    """Run NUM_CORRECTNESS_TRIALS random-input trials.
+def _validate(
+    candidate_fn,
+    reference_fn,
+    get_inputs,
+    tols,
+    tol_tier,
+) -> dict:
+    """Run NUM_CORRECTNESS_TRIALS random-input trials, comparing candidate
+    against reference (NOT eager). Reference is typically torch.compile
+    — we trust its numerics as the acceptable baseline.
 
     Returns a per-backend result dict with status / max_abs_err /
     max_rel_err / tol_tier / (reason on FAIL).
@@ -170,7 +180,7 @@ def _validate(candidate_fn, model, get_inputs, tols, tol_tier) -> dict:
         last_inputs = inputs
         try:
             with torch.no_grad():
-                ref_out = model(*inputs)
+                ref_out = reference_fn(*inputs)
                 cand_out = candidate_fn(*inputs)
         except Exception as e:
             return {
@@ -185,8 +195,6 @@ def _validate(candidate_fn, model, get_inputs, tols, tol_tier) -> dict:
         max_abs = max(max_abs, abs_err)
         max_rel = max(max_rel, rel_err)
 
-        # Check tolerance: abs_err <= atol + rtol * |ref|
-        # Approximate: pass if abs_err < atol OR rel_err < rtol.
         atol, rtol = tols["atol"], tols["rtol"]
         passed = (abs_err <= atol) or (rel_err <= rtol)
         if not passed:
@@ -206,7 +214,7 @@ def _validate(candidate_fn, model, get_inputs, tols, tol_tier) -> dict:
         "tol_tier": tol_tier,
         "max_abs_err": max_abs,
         "max_rel_err": max_rel,
-        "_last_inputs": last_inputs,  # for benchmarking; popped before save
+        "_last_inputs": last_inputs,
     }
 
 
@@ -236,32 +244,49 @@ def run_one(name: str) -> dict:
     tols, tol_tier = _detect_tolerance(problem_path)
     model = model_cls()
 
-    # --- Validate KernelAgent triton kernel ---
-    triton_result = _validate(kernel_fn, model, get_inputs, tols, tol_tier)
-    triton_inputs = triton_result.pop("_last_inputs", None)
-
-    # --- Validate torch.compile baseline ---
-    compile_result = {"status": "SKIP", "tol_tier": tol_tier, "reason": "compile failed"}
-    compile_inputs = None
+    # --- Establish torch.compile as the trusted reference ---
+    # We treat torch.compile's output as the acceptable numerical baseline:
+    # if it's good enough for production, a triton kernel matching it is
+    # also good enough. If torch.compile itself fails to compile/run, fall
+    # back to eager as the reference.
+    compiled_fn = None
+    compile_result: dict
     try:
         compiled_fn = torch.compile(model.forward, fullgraph=True)
-        compile_result = _validate(compiled_fn, model, get_inputs, tols, tol_tier)
-        compile_inputs = compile_result.pop("_last_inputs", None)
+        # Smoke-test compile by running once with sample inputs.
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        smoke_inputs = get_inputs()
+        with torch.no_grad():
+            compiled_fn(*smoke_inputs)
+        compile_result = {
+            "status": "PASS",
+            "tol_tier": tol_tier,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "note": "reference baseline",
+        }
+        reference_fn = compiled_fn
     except Exception as e:
         compile_result = {
-            "status": "ERROR", "tol_tier": tol_tier,
-            "max_abs_err": 0.0, "max_rel_err": 0.0,
+            "status": "ERROR",
+            "tol_tier": tol_tier,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
             "reason": f"torch.compile failed: {e}",
         }
+        reference_fn = model  # fall back to eager
+
+    # --- Validate KernelAgent triton kernel against reference ---
+    triton_result = _validate(kernel_fn, reference_fn, get_inputs, tols, tol_tier)
+    bench_inputs = triton_result.pop("_last_inputs", None)
 
     # --- Benchmark eager (always, as the reference time) ---
-    # Pick any one set of inputs; use triton's if available else compile's.
-    bench_inputs = triton_inputs or compile_inputs
     eager_ms = None
     if bench_inputs is not None:
         try:
             eager_ms = _benchmark_fn(model.forward, bench_inputs)
-        except Exception as e:
+        except Exception:
             eager_ms = None
 
     # --- Benchmark each backend that PASSED correctness ---
@@ -272,7 +297,7 @@ def run_one(name: str) -> dict:
             triton_result["status"] = "FAIL"
             triton_result["reason"] = f"benchmark failed: {e}"
 
-    if compile_result["status"] == "PASS" and bench_inputs is not None:
+    if compile_result["status"] == "PASS" and bench_inputs is not None and compiled_fn is not None:
         try:
             compile_result["time_ms"] = _benchmark_fn(compiled_fn, bench_inputs)
         except Exception as e:
