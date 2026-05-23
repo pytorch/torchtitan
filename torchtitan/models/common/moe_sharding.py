@@ -65,8 +65,8 @@ def _shared_expert_colwise_config(enable_ep: bool, enable_sp: bool) -> ShardingC
     """Colwise shared-expert FFN (w1/w3).
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
-    to Replicate for the column-sharded matmul; output is Shard(-1)
-    (the feature dim, i.e. dim 2 for 3-D activations from MoE).
+    to Replicate for the column-sharded matmul; output is Shard(2)
+    (feature dim of for 3-D activations from MoE).
     """
     sp_layout = Shard(1) if enable_sp else Replicate()
     input_layout = Replicate() if not enable_ep else sp_layout
@@ -121,6 +121,7 @@ def _router_gate_config(*, enable_ep: bool) -> ShardingConfig:
     else:
         return ShardingConfig(
             state_shardings=state,
+            in_dst_shardings={"input": dense_activation_placement(tp=Replicate())},
             out_dst_shardings=dense_activation_placement(tp=Replicate()),
         )
 
@@ -233,8 +234,8 @@ def set_moe_sharding_config(
         state_shardings: dict[str, NamedPlacement] = {
             name: expert_param_placement_sparse() for name in expert_param_layout
         }
-        experts_in_layout = dense_activation_placement(tp=Shard(0))
-        experts_in_grad_layout = dense_activation_placement(tp=Shard(0))
+        experts_in_layout = dense_activation_placement(tp=Shard(1))
+        experts_in_grad_layout = dense_activation_placement(tp=Shard(1))
     else:
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)
