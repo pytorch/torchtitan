@@ -8673,3 +8673,30 @@ Interpretation:
 
 - The inherited `NCCL_CTA_POLICY=2` remains better than NCCL's default CTA policy for the MXFP8 eager path.
 - The communication bucket is real, but this broad CTA-policy removal does not improve overlap or collective latency enough to beat the current peak.
+
+## Experiment 358: MXFP8 NCCL CTA Policy 1
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=136 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run358-mxfp8-nccl-cta-policy1-loss-only-compile-loss-chunks8-sdpa-prefetch-seq128-lbs136-bf16-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,020.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.94 GiB, 94.72%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.33562 at step 1 to 6.42166 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- `NCCL_CTA_POLICY=1` is slower than both policy 2 and the current measured peak.
+- The MXFP8 CTA-policy branch is closed: keep `NCCL_CTA_POLICY=2`.
