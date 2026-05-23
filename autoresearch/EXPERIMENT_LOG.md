@@ -28,6 +28,20 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## residual FillFunctor recon — info-only (xxxxxxx)
+
+- **Idea**: Iter-12 killed 4,061 FillFunctor zero-init kernels. Iter-15 re-profile showed 88 still remain (~22 ms / 1.35%). Find their source.
+- **Result**: discard (pure recon, no implementation).
+- **Categorization of the 88 fill kernels**:
+  - **64 (~20 ms, 91%)**: FlashAttention-internal scratch buffers (softmax_lse, cu_seqlens, etc.) from `_scaled_dot_product_flash_attention` fwd+bwd. Opaque C++ kernel — not addressable from FX.
+  - **2 (~1.8 ms)**: `zeros_like.default` for CE backward grad of shape (8192, 32064) feeding `index_put_`. The zero-init is **semantically required**: `index_put_` only writes target indices, untargeted positions must stay zero for gradient correctness. Restructuring would require rewriting CE backward (out of `passes.py` scope).
+  - **9 (~µs each)**: tiny `aten.full.default` scalars feeding `where`/`index_put_`. Negligible.
+  - **1 (~µs)**: `ones_like` (loss grad seed). Negligible.
+  - **8 (~0.18 ms)**: `masked_fill_kernel` — actual model masking, not zero-init.
+- **Conclusion**: The residual FillFunctor is structural. Iter-12's `disable_uninitialized_memory_fill` was the only `FillFunctor` lever reachable from `passes.py`.
+
+---
+
 ## unblock_inductor_codegen — discard (xxxxxxx)
 
 - **Idea**: Iter-9's compile_fx_inner blocker was `_get_submesh`. Remove it + drain decomp conflicts + call compile_fx_inner. If the whole-graph codegen works, it composes with CUDA graphs for potentially +10-20% TPS.
