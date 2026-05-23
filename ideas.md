@@ -82,6 +82,16 @@
   Planned source/config changes: Keep the run340 MXFP8 source patch.
   Planned command or config overrides: Use run347 command with `--loss.num_chunks=4`.
   Success criteria and expected risk: Success is 10-step completion with finite overall-decreasing loss and tps above 11,202. Risk is OOM from larger loss chunks or lower throughput if larger chunks worsen scheduling.
+  Result: discarded at source state `0a1de54b`; chunks4 completed but entered allocator retry territory at 173.92 GiB, ended at only 560 tps, and loss moved from 12.57298 to 12.63660. Keep chunks8 for batch136.
+
+- Idea: exact rerun of MXFP8Linear batch136 loss chunks 8
+  Current best source commit: 0a1de54b
+  Source: validation follow-up after chunks4 failed and batch136 chunks8 became the best MXFP8 configuration.
+  Expected mechanism: Re-run the exact batch136 chunks8 command to check whether the 11,202 tps result is robust and not a one-off short-run sample.
+  Supporting evidence: Nearby chunks4, batch144, and batch152 probes all hit the memory cliff; the current best is the only MXFP8 shape with high tps, no allocator retries, and overall-decreasing loss.
+  Planned source/config changes: Keep the run340 MXFP8 source patch.
+  Planned command or config overrides: Use the exact run347 command with a fresh dump folder.
+  Success criteria and expected risk: Success is another clean 10-step completion near or above 11,202 tps with finite overall-decreasing loss. Risk is normal short-run variance or a lower but still healthy sample.
 
 - Idea: bootstrap minimal baseline FSDP
   Current best source commit: 7c324f2
