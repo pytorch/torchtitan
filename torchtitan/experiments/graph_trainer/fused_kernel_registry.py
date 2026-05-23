@@ -1170,6 +1170,8 @@ def _write_problem_from_subgraph(
         + f"""
 import torch
 import torch.nn as nn
+from torch import device  # print_readable emits bare device(...) calls
+from math import inf, nan
 
 {model_code}
 
