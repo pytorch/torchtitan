@@ -28,6 +28,43 @@ learn from past experiments and avoid repeating failed approaches.
 
 ---
 
+## collapse_dtype_roundtrips — discard (xxxxxxx)
+
+- **Idea**: Among 842 `_to_copy.default` casts, find bf16→fp32→shape-op→bf16 round-trips where the intermediate ops are dtype-trivial (view/transpose/reshape/etc.). Collapse to a single bf16 path; bitwise identical since shape ops don't compute.
+- **Changes**: Added `collapse_dtype_roundtrips` pass between `apply_inductor_pattern_passes` and `install_cuda_graph`. Whitelisted shape ops; required single-user chains; required matching upcast/downcast dtypes.
+- **Result**: discard. tps=5,567 (≡ iter 8), numerics pass. **0 collapses applied** out of 358 candidates.
+- **Analysis**: Iter 5's `joint_graph_passes` already collapsed the easy round-trips. The remaining 358 candidates fall into two non-collapsible patterns:
+  - **290 (~81%)**: `_to_copy(bf16→fp32) → shape_op → cat.default(...)`. `cat` is dtype-trivial in isolation but the other inputs to `cat` are fp32, so keeping our branch in bf16 would dtype-mismatch.
+  - **64 (~18%)**: `_to_copy(bf16→fp32) → shape_op → view_as_complex.default → ...`. `view_as_complex` needs fp32 input (RoPE precompute); not a round-trip.
+- **Lessons**:
+  - **Joint_graph_passes is thorough at the simple cases** — we don't get to re-do its work.
+  - The remaining `_to_copy` overhead (74 ms / 4.6%) needs a different attack: e.g. `_to_copy + cat` fusion into a typed cat, or restructuring RoPE precompute, or earlier-pipeline elimination before inductor introduces the `cat` consumers.
+
+---
+
+## profile-driven analysis (iter 10) — info-only
+
+- **Idea**: After iter 8 (CUDA graphs) we're at tps=5,566, mfu=32.6%. Profile to find the next bottleneck.
+- **Findings** (steady-state, 8 ranks, FSDP=4 TP=2):
+  - GEMM: 52.8% of kernel time (851 ms / step, mostly irreducible)
+  - FlashAttn fwd+bwd: 23.1% (372 ms, irreducible)
+  - NCCL collectives: 22.6% (365 ms). Of which: **204 ms fp32 ReduceScatter (132 calls)** + 63 ms bf16 RS + 92 ms AllGather + ~5 ms AllReduce. fp32 RS dominates because 3× costlier per call than bf16.
+  - **FillFunctor zero-init: 4,061 kernels / 95 ms (5.9%)** — one stream alone has 592 of these (median 2 µs each).
+  - direct_copy + casts: ~74 ms (4.6%) from 842 `_to_copy.default` nodes.
+  - GEMM/FlashAttn/Collectives total 98%. GPU idle only 1.9%; NCCL stream 70% overlapped with compute, exposed NCCL ~60 ms.
+- **Suggested levers** (ordered by realistic upside without breaking bitwise numerics):
+  1. **bf16 RS**: best lever (~140 ms / +9% TPS) but **blocked — would change numerics.**
+  2. **FillFunctor coalesce**: ~50-95 ms savings if grouped into multi-tensor zero or DCE'd. Most likely 3-6% TPS.
+  3. **`_to_copy + cat` typed-fusion**: ~30-50 ms. Tricky (cat needs same dtype across operands).
+  4. **Regional Inductor compile** on ATen-only subgraphs between collectives: potentially 5-15% TPS if achievable.
+  5. **Async loss/grad_norm**: pure host-time win; GPU at 98% busy so no MFU gain.
+- **Lessons**:
+  - **Bitwise constraint blocks the biggest single lever (bf16 RS).** Worth flagging this to the experimenter — relaxing to loss-equivalent rather than bitwise opens up ~9% TPS.
+  - **GPU is essentially never idle** (1.9%); remaining wins must come from reducing kernel count/size, not from filling bubbles.
+  - **fp32 ReduceScatter (132 calls / 204 ms) is the single largest non-irreducible category**, and `simple_fsdp` uses fp32 for grad reduction even when params/activations are bf16.
+
+---
+
 ## functionalize_collectives_and_compile_fx — discard (xxxxxxx)
 
 - **Idea**: The blocker for Inductor codegen (iter 6) was the in-place `_c10d_functional.all_reduce_.default` collective. Swap all in-place functional collectives for their functional+wait_tensor equivalents, then try `compile_fx_inner` again to unlock Triton kernel codegen.
