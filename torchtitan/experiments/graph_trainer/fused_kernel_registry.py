@@ -57,10 +57,10 @@ _UNFUSABLE_OPS = {
     "aten.mm.default",
     "aten.bmm.default",
     "aten.addmm.default",
-    # Complex-tensor reinterpret views: triton can't handle conjugate views
-    # or change-of-dtype views of complex tensors.
-    "aten.view_as_complex.default",
-    "aten.view_as_real.default",
+    # Conjugate view: sets a "conjugate bit" that breaks any downstream
+    # view-as-different-dtype op ("Cannot view conjugate view tensors").
+    # view_as_complex / view_as_real themselves are safe — they're pure
+    # memory reinterpretation that inductor fuses into pointwise kernels.
     "aten._conj.default",
 }
 
@@ -244,6 +244,9 @@ _VIEW_OPS = frozenset(
         "aten.split.Tensor",
         "aten.chunk.default",
         "aten.unbind.int",
+        # Complex <-> real reinterpretation: pure memory view, fusible.
+        "aten.view_as_complex.default",
+        "aten.view_as_real.default",
         "<built-in function getitem>",
     }
 )
@@ -291,18 +294,6 @@ def _get_tensor_info(node: torch.fx.Node) -> tuple[tuple[int, ...], torch.dtype 
     if isinstance(val, (tuple, list)) and val and isinstance(val[0], torch.Tensor):
         return tuple(val[0].shape), val[0].dtype
     return (), None
-
-
-def _is_complex_node(node: torch.fx.Node) -> bool:
-    """True if the node's val (or any element of a tuple val) is a complex tensor."""
-    val = node.meta.get("val")
-    if isinstance(val, torch.Tensor):
-        return val.dtype.is_complex
-    if isinstance(val, (tuple, list)):
-        return any(
-            isinstance(v, torch.Tensor) and v.dtype.is_complex for v in val
-        )
-    return False
 
 
 def _is_unfusable(node: torch.fx.Node) -> bool:
@@ -891,11 +882,6 @@ class InductorRegionExtractor(RegionExtractor):
             if all(is_view_node(n) or n.op != "call_function" for n in comp):
                 continue
             if any(_is_unfusable(n) for n in comp if n.op == "call_function"):
-                continue
-
-            # Skip complex-tensor regions — triton kernels can't reliably
-            # handle complex dtypes (conjugate views break at runtime).
-            if any(_is_complex_node(n) for n in comp):
                 continue
 
             result = _extract_subgraph(comp, gm)
