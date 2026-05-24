@@ -19,6 +19,10 @@ from torchtitan.models.common.attention import (
     get_fixed_block_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.token_dispatcher import (
+    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
+)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
 
@@ -139,17 +143,19 @@ class Llama4Model(Decoder):
                     layer_cfg.moe.router._debug_force_load_balance = (
                         debug.moe_force_load_balance
                     )
-                    comm_backend = getattr(
-                        layer_cfg.moe.experts.token_dispatcher,
-                        "comm_backend",
-                        "standard",
-                    )
+                    token_dispatcher_cfg = layer_cfg.moe.experts.token_dispatcher
                     if (
-                        comm_backend in ("deepep", "hybridep")
+                        isinstance(
+                            token_dispatcher_cfg,
+                            (
+                                DeepEPTokenDispatcher.Config,
+                                HybridEPTokenDispatcher.Config,
+                            ),
+                        )
                         and parallelism.expert_parallel_degree == 1
                     ):
                         raise ValueError(
-                            f"{comm_backend.upper()} requires expert parallelism "
+                            f"{type(token_dispatcher_cfg).__qualname__} requires expert parallelism "
                             "(expert_parallel_degree > 1)."
                         )
 
