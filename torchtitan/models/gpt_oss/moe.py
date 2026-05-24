@@ -76,7 +76,7 @@ class GptOssGroupedExperts(Module):
 
     def _experts_forward(
         self,
-        x_TD: torch.Tensor,
+        x_ND: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
@@ -105,13 +105,11 @@ class GptOssGroupedExperts(Module):
                 tp_dim_idx = mesh_dim_names.index("tp")
                 tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
 
-        offsets_E = torch.cumsum(
-            num_tokens_per_expert_E, dim=0, dtype=torch.int32
-        )
+        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         # Pad with tail slack so repeat_interleave with output_size
         # produces a static-shaped output without D2H sync.
         tail_slack = (
-            (x_TD.shape[0] - offsets_E[-1])
+            (x_ND.shape[0] - offsets_E[-1])
             .unsqueeze(0)
             .to(num_tokens_per_expert_E.dtype)
         )
@@ -119,57 +117,45 @@ class GptOssGroupedExperts(Module):
             [num_tokens_per_expert_E, tail_slack]
         ).long()
 
-        h_TF = torch._grouped_mm(
-            x_TD.bfloat16(),
+        h_NF = torch._grouped_mm(
+            x_ND.bfloat16(),
             mlp1_weight.transpose(-2, -1).bfloat16(),
             offs=offsets_E,
         )
 
-        b1 = torch.cat(
-            [mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])]
+        b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
+        b1_NF = b1.repeat_interleave(
+            num_tokens_per_expert_long, dim=0, output_size=x_ND.shape[0]
         )
-        b1_TF = b1.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_TD.shape[0]
-        )
-        h_TF = h_TF + b1_TF.to(h_TF.dtype)
+        h_NF = h_NF + b1_NF.to(h_NF.dtype)
 
-        h_TH = swiglu(h_TF, limit=self.swiglu_limit)
-        h_TD = torch._grouped_mm(
-            h_TH, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets_E
+        h_NF = swiglu(h_NF, limit=self.swiglu_limit)
+        h_ND = torch._grouped_mm(
+            h_NF, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets_E
         )
 
-        b2 = torch.cat(
-            [mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])]
+        b2 = torch.cat([mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])])
+        b2_ND = b2.repeat_interleave(
+            num_tokens_per_expert_long, dim=0, output_size=x_ND.shape[0]
         )
-        b2_TD = b2.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_TD.shape[0]
-        )
-        b2_TD = ScaleBiasForward.apply(b2_TD, tp_degree)
-        return h_TD + b2_TD.to(h_TD.dtype)
+        b2_ND = ScaleBiasForward.apply(b2_ND, tp_degree)
+        return h_ND + b2_ND.to(h_ND.dtype)
 
     def forward(
         self,
-        x_BSD: torch.Tensor,
-        top_scores_BSK: torch.Tensor,
-        selected_experts_indices_BSK: torch.Tensor,
+        x_BLD: torch.Tensor,
+        topk_scores_BLK: torch.Tensor,
+        topk_ids_BLK: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
-        x_ND = x_BSD.reshape(-1, x_BSD.size(-1))
-        top_scores_NK = top_scores_BSK.reshape(-1, top_scores_BSK.size(-1))
-        selected_experts_indices_NK = selected_experts_indices_BSK.reshape(
-            -1, selected_experts_indices_BSK.size(-1)
+        x_TD = x_BLD.reshape(-1, x_BLD.size(-1))
+        topk_scores_TK = topk_scores_BLK.reshape(-1, topk_scores_BLK.size(-1))
+        topk_ids_TK = topk_ids_BLK.reshape(-1, topk_ids_BLK.size(-1))
+        routed_input_ND, num_tokens_local_E, metadata = self.token_dispatcher.dispatch(
+            x_TD, topk_scores_TK, topk_ids_TK
         )
-        routed_input_TD, num_tokens_local_E, metadata = (
-            self.token_dispatcher.dispatch(
-                x_ND, top_scores_NK, selected_experts_indices_NK
-            )
-        )
-        routed_output_TD = self._experts_forward(
-            routed_input_TD, num_tokens_local_E
-        )
-        return self.token_dispatcher.combine(
-            routed_output_TD, metadata, x_ND
-        )
+        routed_output_ND = self._experts_forward(routed_input_ND, num_tokens_local_E)
+        return self.token_dispatcher.combine(routed_output_ND, metadata, x_TD)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.

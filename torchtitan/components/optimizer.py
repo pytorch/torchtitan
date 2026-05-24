@@ -467,9 +467,9 @@ def register_moe_load_balancing_hook(
                 if transformer_block.moe.load_balance_coeff is None:
                     return
                 # pyrefly: ignore [missing-attribute]
-                tokens_per_expert = transformer_block.moe.tokens_per_expert
+                tokens_per_expert = transformer_block.moe.tokens_per_expert_E_E
                 if _is_recomputation_enabled(transformer_block):
-                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
+                    # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                     # This does not affect to expert choice, but affects the experts usage metrics.
                     # We divide by 2 to correct for this double-counting due to recomputation
                     # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
@@ -542,7 +542,7 @@ def register_moe_load_balancing_hook(
                     # pyrefly: ignore [missing-attribute]
                     moe.expert_bias.add_(expert_bias_delta)
                     # pyrefly: ignore [missing-attribute]
-                    moe.tokens_per_expert.zero_()
+                    moe.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(

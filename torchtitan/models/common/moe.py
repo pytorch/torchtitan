@@ -20,9 +20,9 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
-#   B = batch, S = sequence length, D = model dimension,
-#   H = hidden (FFN intermediate) dimension, E = num experts,
-#   K = top-k, N = num tokens (B*S flattened), T = routed tokens
+#   B = batch, L = sequence length, D = model dimension,
+#   F = hidden (FFN intermediate) dimension, E = num experts,
+#   K = top-k, T = num tokens (B*L flattened), N = routed tokens (T*K)
 
 
 class GroupedExperts(Module):
@@ -49,46 +49,46 @@ class GroupedExperts(Module):
 
     def _experts_forward(
         self,
-        x_TD: torch.Tensor,
+        x_ND: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_EHD = self.w1.to_local()
+            w1_EFD = self.w1.to_local()
             # pyrefly: ignore [missing-attribute]
-            w2_EDH = self.w2.to_local()
+            w2_EDF = self.w2.to_local()
             # pyrefly: ignore [missing-attribute]
-            w3_EHD = self.w3.to_local()
+            w3_EFD = self.w3.to_local()
         else:
-            w1_EHD = self.w1
-            w2_EDH = self.w2
-            w3_EHD = self.w3
+            w1_EFD = self.w1
+            w2_EDF = self.w2
+            w3_EFD = self.w3
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        h_TH = F.silu(
+        h_NF = F.silu(
             torch._grouped_mm(
-                x_TD.bfloat16(),
-                w1_EHD.bfloat16().transpose(-2, -1),
+                x_ND.bfloat16(),
+                w1_EFD.bfloat16().transpose(-2, -1),
                 offs=offsets_E,
             )
         )
-        h_TH = h_TH * torch._grouped_mm(
-            x_TD.bfloat16(),
-            w3_EHD.bfloat16().transpose(-2, -1),
+        h_NF = h_NF * torch._grouped_mm(
+            x_ND.bfloat16(),
+            w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
         return torch._grouped_mm(
-            h_TH, w2_EDH.bfloat16().transpose(-2, -1), offs=offsets_E
-        ).type_as(x_TD)
+            h_NF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
+        ).type_as(x_ND)
 
     def forward(
         self,
-        x_BSD: torch.Tensor,
-        top_scores_BSK: torch.Tensor,
-        selected_experts_indices_BSK: torch.Tensor,
+        x_BLD: torch.Tensor,
+        topk_scores_BLK: torch.Tensor,
+        topk_ids_BLK: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -99,20 +99,14 @@ class GroupedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
-        x_ND = x_BSD.reshape(-1, x_BSD.size(-1))
-        top_scores_NK = top_scores_BSK.reshape(-1, top_scores_BSK.size(-1))
-        selected_experts_indices_NK = selected_experts_indices_BSK.reshape(
-            -1, selected_experts_indices_BSK.size(-1)
+        x_TD = x_BLD.reshape(-1, x_BLD.size(-1))
+        topk_scores_TK = topk_scores_BLK.reshape(-1, topk_scores_BLK.size(-1))
+        topk_ids_TK = topk_ids_BLK.reshape(-1, topk_ids_BLK.size(-1))
+        routed_input_ND, num_tokens_local_E, metadata = self.token_dispatcher.dispatch(
+            x_TD, topk_scores_TK, topk_ids_TK
         )
-        routed_input_TD, num_tokens_local_E, metadata = (
-            self.token_dispatcher.dispatch(
-                x_ND, top_scores_NK, selected_experts_indices_NK
-            )
-        )
-        routed_output_TD = self._experts_forward(
-            routed_input_TD, num_tokens_local_E
-        )
-        return self.token_dispatcher.combine(routed_output_TD, metadata, x_ND)
+        routed_output_ND = self._experts_forward(routed_input_ND, num_tokens_local_E)
+        return self.token_dispatcher.combine(routed_output_ND, metadata, x_TD)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
@@ -161,25 +155,23 @@ class TokenChoiceTopKRouter(Module):
         self._debug_force_load_balance = config._debug_force_load_balance
 
     def _debug_force_load_balance_routing(
-        self, scores_BSE: torch.Tensor
+        self, scores_BLE: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Balanced round-robin expert assignment."""
-        leading_shape = scores_BSE.shape[:-1]
-        n_tokens = scores_BSE[..., 0].numel()
-        selected_experts_indices_BSK = (
+        leading_shape = scores_BLE.shape[:-1]
+        n_tokens = scores_BLE[..., 0].numel()
+        topk_ids_BLK = (
             torch.arange(
-                n_tokens * self.top_k, device=scores_BSE.device, dtype=torch.int64
+                n_tokens * self.top_k, device=scores_BLE.device, dtype=torch.int64
             ).reshape(*leading_shape, self.top_k)
             % self.num_experts
         )
-        top_scores_BSK = scores_BSE.gather(
-            dim=-1, index=selected_experts_indices_BSK
-        )
-        return selected_experts_indices_BSK, top_scores_BSK
+        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_ids_BLK)
+        return topk_ids_BLK, topk_scores_BLK
 
     def _get_node_limited_routing_scores(
         self,
-        scores_for_choice_BSE: torch.Tensor,
+        scores_for_choice_BLE: torch.Tensor,
     ) -> torch.Tensor:
         """Select num_limited_groups groups based on group scores,
         and set expert scores in non-selected groups as -inf.
@@ -196,7 +188,7 @@ class TokenChoiceTopKRouter(Module):
         experts_per_group = self.num_experts // self.num_expert_groups
         if experts_per_group < 2:
             raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
-        scores_grouped = scores_for_choice_BSE.unflatten(
+        scores_grouped = scores_for_choice_BLE.unflatten(
             -1, (self.num_expert_groups, experts_per_group)
         )
         top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
@@ -206,71 +198,72 @@ class TokenChoiceTopKRouter(Module):
         )
         group_mask = torch.ones_like(group_scores, dtype=torch.bool)
         group_mask.scatter_(-1, group_idx, False)  # False = selected groups (keep)
-        scores_for_choice_BSE = scores_grouped.masked_fill(
+        # Mask out experts from non-selected groups
+        scores_for_choice_BLE = scores_grouped.masked_fill(
             group_mask.unsqueeze(-1), float("-inf")
         ).flatten(-2)
 
-        return scores_for_choice_BSE
+        return scores_for_choice_BLE
 
     def forward(
-        self, x_BSD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
+        self, x_BLD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
-            x_BSD: Input ``(B, S, D)``.
+            x_BLD: Input ``(B, L, D)``.
             expert_bias_E: Optional load-balancing bias ``(E,)``.
 
         Returns:
-            top_scores_BSK: Routing scores ``(B, S, K)``.
-            selected_experts_indices_BSK: Expert indices ``(B, S, K)``.
+            topk_scores_BLK: Routing scores ``(B, L, K)``.
+            topk_ids_BLK: Expert indices ``(B, L, K)``.
             num_tokens_per_expert_E: Token counts per expert ``(E,)``.
         """
-        with torch.autocast(device_type=x_BSD.device.type, dtype=torch.float32):
-            scores_BSE = self.gate(x_BSD)
+        # Compute gate in float32 to help stability of expert load balancing.
+        with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
+            scores_BLE = self.gate(x_BLD)
 
         if self.score_func == "sigmoid":
-            scores_BSE = torch.sigmoid(scores_BSE)
+            scores_BLE = torch.sigmoid(scores_BLE)
         elif self.score_func == "softmax":
-            scores_BSE = F.softmax(scores_BSE, dim=-1)
+            scores_BLE = F.softmax(scores_BLE, dim=-1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice_BSE = (
-            scores_BSE if expert_bias_E is None else scores_BSE + expert_bias_E
+        scores_for_choice_BLE = (
+            scores_BLE if expert_bias_E is None else scores_BLE + expert_bias_E
         )
+        # Apply node-limited routing if configured
         if self.num_expert_groups is not None:
-            scores_for_choice_BSE = self._get_node_limited_routing_scores(
-                scores_for_choice_BSE
+            scores_for_choice_BLE = self._get_node_limited_routing_scores(
+                scores_for_choice_BLE
             )
-        _, selected_experts_indices_BSK = torch.topk(
-            scores_for_choice_BSE, k=self.top_k, dim=-1, sorted=False
+        _, topk_ids_BLK = torch.topk(
+            scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
         )
 
         # expert_bias is only used for routing; gating values come from
         # the original scores.
-        top_scores_BSK = scores_BSE.gather(
-            dim=-1, index=selected_experts_indices_BSK
-        )
+        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_ids_BLK)
 
         if self._debug_force_load_balance:
             (
-                selected_experts_indices_BSK,
-                top_scores_BSK,
-            ) = self._debug_force_load_balance_routing(scores_BSE)
+                topk_ids_BLK,
+                topk_scores_BLK,
+            ) = self._debug_force_load_balance_routing(scores_BLE)
 
         if self.route_norm:
-            denominator = top_scores_BSK.sum(dim=-1, keepdim=True) + 1e-20
-            top_scores_BSK = top_scores_BSK / denominator
-        top_scores_BSK = top_scores_BSK * self.route_scale
+            denominator = topk_scores_BLK.sum(dim=-1, keepdim=True) + 1e-20
+            topk_scores_BLK = topk_scores_BLK / denominator
+        topk_scores_BLK = topk_scores_BLK * self.route_scale
 
         num_tokens_per_expert_E = torch.histc(
-            selected_experts_indices_BSK.view(-1),
+            topk_ids_BLK.view(-1),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
         )
 
-        return top_scores_BSK, selected_experts_indices_BSK, num_tokens_per_expert_E
+        return topk_scores_BLK, topk_ids_BLK, num_tokens_per_expert_E
 
 
 class MoE(Module):
@@ -313,7 +306,7 @@ class MoE(Module):
         )
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
-        # NOTE: tokens_per_expert is accumulated in the model forward pass.
+        # NOTE: tokens_per_expert_E is accumulated in the model forward pass.
         #       expert_bias is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
@@ -326,20 +319,20 @@ class MoE(Module):
             )
         else:
             self.expert_bias = None
-        # tokens_per_expert will be used to track expert usage and to update the expert bias for load balancing
+        # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
-            "tokens_per_expert",
+            "tokens_per_expert_E",
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
 
-    def forward(self, x_BSD: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x_BSD: Input ``(B, S, D)``.
+            x_BLD: Input ``(B, L, D)``.
 
         Returns:
-            Output ``(B, S, D)``.
+            Output ``(B, L, D)``.
 
         Under TP, the MoE wrapper's ``sharding_config`` (set by
         ``set_moe_sharding_config``) handles input/output redistribution:
@@ -348,46 +341,48 @@ class MoE(Module):
         operates on DTensors — the DTensor→local conversion happens at
         the GroupedExperts boundary.
         """
-        bs, slen, dim = x_BSD.shape
+        bs, slen, dim = x_BLD.shape
 
         (
-            top_scores_BSK,
-            selected_experts_indices_BSK,
+            topk_scores_BLK,
+            topk_ids_BLK,
             num_tokens_per_expert_E,
-        ) = self.router(x_BSD, self.expert_bias)
+        ) = self.router(x_BLD, self.expert_bias)
 
-        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
+        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
-            self.tokens_per_expert.add_(num_tokens_per_expert_E)
+            self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
-        out_ND = self.experts(
-            x_BSD, top_scores_BSK, selected_experts_indices_BSK
-        )
+        out_TD = self.experts(x_BLD, topk_scores_BLK, topk_ids_BLK)
 
-        shared_out_BSD = (
-            self.shared_experts(x_BSD) if self.shared_experts is not None else None
+        # shared_experts runs in parallel with deepep combine communication.
+        shared_out_BLD = (
+            self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
 
         if (
             isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
             and self.experts.token_dispatcher.sp_size == 1
         ):
+            # Sync the combine operation before using routed output.
+            # This inserts a CUDA stream wait, ensuring combine is complete
+            # before the subsequent addition or reshape operations.
             from torchtitan.distributed.deepep.deepep import sync_combine
 
             sync_combine()
 
-        out_BSD = out_ND.reshape(bs, slen, dim)
-        if shared_out_BSD is not None:
-            out_BSD = out_BSD + shared_out_BSD
-        return out_BSD
+        out_BLD = out_TD.reshape(bs, slen, dim)
+        if shared_out_BLD is not None:
+            out_BLD = out_BLD + shared_out_BLD
+        return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         assert isinstance(buffer_device, torch.device)
 
         with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
+            self.tokens_per_expert_E = torch.zeros(
                 self.experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
