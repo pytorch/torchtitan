@@ -158,9 +158,9 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             "expert_bias": dense_param_placement(tp=Replicate()),
             "tokens_per_expert": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
-        in_src_shardings={"x": dense_activation_placement(tp=sp_layout)},
+        in_src_shardings={"x_BSD": dense_activation_placement(tp=sp_layout)},
         in_dst_shardings={
-            "x": dense_activation_placement(tp=moe_desired_input_layouts)
+            "x_BSD": dense_activation_placement(tp=moe_desired_input_layouts)
         },
         out_src_shardings=dense_activation_placement(tp=Partial()),
         out_dst_shardings=dense_activation_placement(tp=sp_layout),
@@ -247,9 +247,9 @@ def set_moe_sharding_config(
     moe_cfg.experts.sharding_config = ShardingConfig(
         state_shardings=state_shardings,
         in_dst_shardings={
-            "x": experts_in_layout,
-            "top_scores": experts_in_layout,
-            "selected_experts_indices": experts_in_layout,
+            "x_BSD": experts_in_layout,
+            "top_scores_BSK": experts_in_layout,
+            "selected_experts_indices_BSK": experts_in_layout,
         },
         out_src_shardings=experts_out_layout,
         out_dst_shardings=experts_out_layout,
