@@ -456,7 +456,7 @@ def register_moe_load_balancing_hook(
         loss_mesh = parallel_dims.get_optional_mesh("loss")
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
-        tokens_per_expert_list = []
+        tokens_per_expert_E_list = []
         for model_part in model_parts:
             layers = model_part.get_submodule("layers")
             assert isinstance(layers, nn.ModuleDict)
@@ -467,28 +467,28 @@ def register_moe_load_balancing_hook(
                 if transformer_block.moe.load_balance_coeff is None:
                     return
                 # pyrefly: ignore [missing-attribute]
-                tokens_per_expert = transformer_block.moe.tokens_per_expert_E_E
+                tokens_per_expert_E = transformer_block.moe.tokens_per_expert_E
                 if _is_recomputation_enabled(transformer_block):
                     # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                     # This does not affect to expert choice, but affects the experts usage metrics.
                     # We divide by 2 to correct for this double-counting due to recomputation
                     # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                    tokens_per_expert = tokens_per_expert // 2
-                tokens_per_expert_list.append(tokens_per_expert)
+                    tokens_per_expert_E = tokens_per_expert_E // 2
+                tokens_per_expert_E_list.append(tokens_per_expert_E)
 
-        tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
+        tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
         if parallel_dims.full_dtensor:
             # full_dtensor: DTensor mesh includes all axes (DP/CP/TP/EP).
             # redistribute Partial→Replicate covers everything.
             assert isinstance(
-                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+                tokens_per_expert_E_by_layer, torch.distributed.tensor.DTensor
             )
-            dtensor_mesh = tokens_per_expert_by_layer.device_mesh
+            dtensor_mesh = tokens_per_expert_E_by_layer.device_mesh
             # TODO: This incurs multiple sequential all-reduces, one per
             # SPMD mesh axis. We should provide a utility to do a single all-reduce
             # on the flattened global SPMD mesh.
-            tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
+            tokens_per_expert_E_by_layer = tokens_per_expert_E_by_layer.redistribute(
                 placements=[Replicate()] * dtensor_mesh.ndim
             )
         else:
@@ -496,20 +496,22 @@ def register_moe_load_balancing_hook(
             # full_tensor() reduces on TP/EP, then all-reduce on loss_mesh
             # covers DP/CP separately.
             is_dtensor = isinstance(
-                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+                tokens_per_expert_E_by_layer, torch.distributed.tensor.DTensor
             )
             if is_dtensor:
-                dtensor_mesh = tokens_per_expert_by_layer.device_mesh
-                tokens_per_expert_by_layer = tokens_per_expert_by_layer.full_tensor()
+                dtensor_mesh = tokens_per_expert_E_by_layer.device_mesh
+                tokens_per_expert_E_by_layer = (
+                    tokens_per_expert_E_by_layer.full_tensor()
+                )
             if loss_mesh is not None:
                 torch.distributed.all_reduce(
-                    tokens_per_expert_by_layer,
+                    tokens_per_expert_E_by_layer,
                     group=loss_mesh.get_group(),
                     op=torch.distributed.ReduceOp.SUM,
                 )
             if is_dtensor:
-                tokens_per_expert_by_layer = torch.distributed.tensor.DTensor.from_local(
-                    tokens_per_expert_by_layer,
+                tokens_per_expert_E_by_layer = torch.distributed.tensor.DTensor.from_local(
+                    tokens_per_expert_E_by_layer,
                     # pyrefly: ignore [unbound-name]
                     device_mesh=dtensor_mesh,
                     placements=[Replicate()]
@@ -527,7 +529,7 @@ def register_moe_load_balancing_hook(
                         continue
                     moe = transformer_block.moe
 
-                    tokens_per_expert = tokens_per_expert_by_layer[
+                    tokens_per_expert_E = tokens_per_expert_E_by_layer[
                         moe_layer_idx
                     ].float()
                     moe_layer_idx += 1
@@ -536,7 +538,7 @@ def register_moe_load_balancing_hook(
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                     # pyrefly: ignore [missing-attribute]
                     expert_bias_delta = moe.load_balance_coeff * torch.sign(
-                        tokens_per_expert.mean() - tokens_per_expert
+                        tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
                     expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
                     # pyrefly: ignore [missing-attribute]

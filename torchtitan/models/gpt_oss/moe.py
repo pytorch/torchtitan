@@ -76,7 +76,7 @@ class GptOssGroupedExperts(Module):
 
     def _experts_forward(
         self,
-        x_ND: torch.Tensor,
+        x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
@@ -96,6 +96,7 @@ class GptOssGroupedExperts(Module):
             mlp2_weight = self.mlp2_weight
             mlp2_bias = self.mlp2_bias
 
+        # Determine tp_degree from device mesh if available
         tp_degree = 1
         if isinstance(self.mlp1_weight, DTensor):
             mesh_dim_names = self.mlp1_weight.device_mesh.mesh_dim_names
@@ -106,10 +107,11 @@ class GptOssGroupedExperts(Module):
                 tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-        # Pad with tail slack so repeat_interleave with output_size
-        # produces a static-shaped output without D2H sync.
+        # Pad num_tokens_per_expert_E with tail slack so that repeat_interleave
+        # with output_size=x_RD.shape[0] directly produces a static-shaped output,
+        # avoiding the D2H sync that repeat_interleave incurs without output_size.
         tail_slack = (
-            (x_ND.shape[0] - offsets_E[-1])
+            (x_RD.shape[0] - offsets_E[-1])
             .unsqueeze(0)
             .to(num_tokens_per_expert_E.dtype)
         )
@@ -117,29 +119,30 @@ class GptOssGroupedExperts(Module):
             [num_tokens_per_expert_E, tail_slack]
         ).long()
 
-        h_NF = torch._grouped_mm(
-            x_ND.bfloat16(),
+        h_RF = torch._grouped_mm(
+            x_RD.bfloat16(),
             mlp1_weight.transpose(-2, -1).bfloat16(),
             offs=offsets_E,
         )
 
         b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
-        b1_NF = b1.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_ND.shape[0]
+        b1_RF = b1.repeat_interleave(
+            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
-        h_NF = h_NF + b1_NF.to(h_NF.dtype)
+        h_RF = h_RF + b1_RF.to(h_RF.dtype)
 
-        h_NF = swiglu(h_NF, limit=self.swiglu_limit)
-        h_ND = torch._grouped_mm(
-            h_NF, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets_E
+        h_RF = swiglu(h_RF, limit=self.swiglu_limit)
+        h_RD = torch._grouped_mm(
+            h_RF, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets_E
         )
 
+        # Apply custom autograd function to scale bias in forward but not in backward
         b2 = torch.cat([mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])])
-        b2_ND = b2.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_ND.shape[0]
+        b2_RD = b2.repeat_interleave(
+            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
-        b2_ND = ScaleBiasForward.apply(b2_ND, tp_degree)
-        return h_ND + b2_ND.to(h_ND.dtype)
+        b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree)
+        return h_RD + b2_RD.to(h_RD.dtype)
 
     def forward(
         self,
@@ -151,11 +154,11 @@ class GptOssGroupedExperts(Module):
         x_TD = x_BLD.reshape(-1, x_BLD.size(-1))
         topk_scores_TK = topk_scores_BLK.reshape(-1, topk_scores_BLK.size(-1))
         topk_ids_TK = topk_ids_BLK.reshape(-1, topk_ids_BLK.size(-1))
-        routed_input_ND, num_tokens_local_E, metadata = self.token_dispatcher.dispatch(
+        routed_input_RD, num_tokens_local_E, metadata = self.token_dispatcher.dispatch(
             x_TD, topk_scores_TK, topk_ids_TK
         )
-        routed_output_ND = self._experts_forward(routed_input_ND, num_tokens_local_E)
-        return self.token_dispatcher.combine(routed_output_ND, metadata, x_TD)
+        routed_output_RD = self._experts_forward(routed_input_RD, num_tokens_local_E)
+        return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize experts and wire dispatcher meshes.
