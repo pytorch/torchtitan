@@ -37,13 +37,13 @@ class GroupedExperts(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
-        self.w1 = nn.Parameter(
+        self.w1_EFD = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
-        self.w2 = nn.Parameter(
+        self.w2_EDF = nn.Parameter(
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
         )
-        self.w3 = nn.Parameter(
+        self.w3_EFD = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.token_dispatcher = config.token_dispatcher.build()
@@ -54,18 +54,18 @@ class GroupedExperts(Module):
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine."""
-        if isinstance(self.w1, DTensor):
+        if isinstance(self.w1_EFD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_EFD = self.w1.to_local()
+            w1_EFD = self.w1_EFD.to_local()
             # pyrefly: ignore [missing-attribute]
-            w2_EDF = self.w2.to_local()
+            w2_EDF = self.w2_EDF.to_local()
             # pyrefly: ignore [missing-attribute]
-            w3_EFD = self.w3.to_local()
+            w3_EFD = self.w3_EFD.to_local()
         else:
-            w1_EFD = self.w1
-            w2_EDF = self.w2
-            w3_EFD = self.w3
+            w1_EFD = self.w1_EFD
+            w2_EDF = self.w2_EDF
+            w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
@@ -92,9 +92,6 @@ class GroupedExperts(Module):
         topk_ids_BLK: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
-
-        The flatten to 2-D happens here; the caller (``MoE.forward``)
-        reshapes the routed-expert output back to 3-D.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
