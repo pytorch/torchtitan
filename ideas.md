@@ -3641,3 +3641,13 @@
   Planned command or config overrides: Current MXFP8 batch128 chunks4 command with `--compile.components=loss,inner_attention`.
   Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss. Risk is extra compile overhead or no benefit because attention is a smaller profile bucket.
   Result: discarded at source state `eb44cd2e`; both compile logs fired and the run was valid, but step 10 reached 11,504 tps at the same 164.17 GiB memory. Inner-attention compile is a slight regression/tie-band result, so restore source and keep corrected loss-only compile.
+
+- Idea: convert corrected loss-compile memory headroom into batch132
+  Current best source commit: 1ebeea9a
+  Source: batch-size follow-up after true loss compile reduced peak memory from 166.26 GiB to 164.17 GiB at batch128
+  Expected mechanism: Increase local batch to 132 while keeping true loss compile. If the lower loss memory frees enough headroom and the system benefits from more work per step, batch132 may beat the 11,524 tps batch128 peak without crossing the memory-risk line.
+  Supporting evidence: The accidental no-compile batch132 run reached 11,381 tps but used 170.30 GiB. Correct loss compile at batch128 saved about 2 GiB and improved throughput, so retesting the nearby larger batch is warranted.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current corrected-loss baseline with `--training.local_batch_size=132`.
+  Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss and memory below 95%. Risk is returning to memory pressure or reduced efficiency from a less favorable batch shape.
+  Result: discarded at source state `1ebeea9a`; 11,427 tps, 168.51 GiB peak memory, and finite lower-overall loss. Batch132 now fits below 95%, but batch128 remains faster.
