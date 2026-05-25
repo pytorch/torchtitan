@@ -3671,3 +3671,13 @@
   Planned command or config overrides: Current corrected-loss baseline with `--loss.num_chunks=2`.
   Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss and no allocator retries. Risk is returning to the old loss/lm_head memory cliff.
   Result: kept at source state `78355ca4`; 11,527 tps, 164.52 GiB peak memory, no allocator retry logs, finite lower-overall loss. This is a tiny new measured peak but is within tie-band variance; rerun or profile before declaring it durable.
+
+- Idea: exact chunks2 corrected-loss rerun
+  Current best source commit: dda9686c
+  Source: validation after chunks2 beat chunks4 by only 3 tps
+  Expected mechanism: Repeat the chunks2 corrected-loss command once to distinguish a real chunk-count improvement from short-window variance.
+  Supporting evidence: Run375 was clean and reached 11,527 tps, but the lead over run371 was only 3 tps.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run375 command.
+  Success criteria and expected risk: If step-10 tps again exceeds 11,524 without allocator retries, promote chunks2 as active baseline; otherwise keep chunks4 as the working baseline.
+  Result: kept as validation at source state `dda9686c`; 11,499 tps with the same 164.52 GiB memory and no allocator retries. Chunks2 is safe but not durable enough to replace corrected-loss chunks4 as the working baseline.

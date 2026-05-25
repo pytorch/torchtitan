@@ -9192,3 +9192,31 @@ Interpretation:
 
 - Correct loss compile changes the chunks2 memory behavior: the old malformed-component chunks2 run hit allocator retries at 171.26 GiB, but this run stayed at 164.52 GiB.
 - Chunks2 slightly reduces loss-loop overhead and narrowly beats chunks4, but the margin is tiny. Treat chunks2 as the active peak only after an exact rerun or profile corroborates it.
+
+## Experiment 376: Correct Loss Compile Chunks2 Rerun
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=2 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run376-rerun-mxfp8-correct-loss-compile-loss-chunks2-no-fsdp-forward-input-casts-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as validation.
+- The log confirms true loss compile.
+- Step 10 `tps`: 11,499.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 164.52 GiB, 92.25%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.41084 at step 1 to 9.59622 at step 10; finite and lower overall.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Chunks2 is safe under true loss compile, but the repeat lands below run371 chunks4 and below the first chunks2 sample.
+- Treat chunks2 as tie-band, not a durable improvement. The working baseline remains batch128/chunks4 with corrected `--compile.components=loss`.
