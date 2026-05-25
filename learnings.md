@@ -9025,3 +9025,31 @@ Interpretation:
 
 - The rerun validates the active batch128 chunks4/no-cast shape and memory envelope, but does not beat the 11,386 tps sample from run365.
 - Keep the current best command as the baseline for partial-compile and FSDP-scheduling probes.
+
+## Experiment 370: Inner-Attention Compile With JSON-Style Components
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss","inner_attention"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run370-mxfp8-compile-inner-attention-no-fsdp-forward-input-casts-loss-chunks4-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Added a Qwen3 partial compile hook for `inner_attention` in `parallelize_qwen3`.
+
+Result:
+
+- Status: discard as malformed override/control run.
+- Step 10 `tps`: 11,196.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.26 GiB, 93.22%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.52224 at step 1 to 6.30026 at step 10; finite and overall decreasing.
+- The intended `Compiling Qwen3 inner attention modules with torch.compile` log line did not appear.
+
+Interpretation:
+
+- TorchTitan's custom `list[str]` parser expects comma-separated values. The JSON-style override parsed as `['["loss"', '"inner_attention"]']`, so neither the existing `loss` check nor the new `inner_attention` check matched.
+- This also means future component-isolation runs must use `--compile.components=loss,inner_attention` or `--compile.components=loss`, not JSON list syntax.
+- Rerun the partial compile test with comma-separated components before drawing any conclusion about inner-attention compile performance.

@@ -3611,3 +3611,13 @@
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--compile.components='["loss"]'`, `--loss.num_chunks=4`, local batch size 128, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 11,386, record it as the new measured peak. Risk is only short-window variance.
   Result: kept as validation at source state `bec0696b`; 11,318 tps, N/A MFU, and 166.26 GiB peak memory. This confirms the current best shape remains healthy but did not beat run365.
+
+- Idea: compile Qwen3 inner attention modules only
+  Current best source commit: 4da4a3f0
+  Source: user-requested partial-model compile follow-up after full transformer-block compile crashes through MXFP8 linears and RMSNorm-only compile was slower
+  Expected mechanism: Add a compile component that wraps only each layer's `attention.inner_attention` module. For the active SDPA backend, this tests whether compiling the SDPA transpose/call/transpose boundary reduces Python/launch overhead while excluding qkv, output projection, and feed-forward MXFP8 linears from Inductor.
+  Supporting evidence: Run342 showed full model compile can hit MXFP8 Inductor backward failures, while run362 showed a narrower RMSNorm-only compile is valid but not useful. The run367 profile says attention is not the dominant bucket, so expected upside is low, but this is the cleanest partial compile surface that avoids MXFP8 linear kernels.
+  Planned source/config changes: In `parallelize_qwen3`, when `inner_attention` is present in `compile_config.components`, call `.compile(backend=compile_config.backend, fullgraph=True)` on each layer's `attention.inner_attention`.
+  Planned command or config overrides: First attempted with `--compile.components='["loss","inner_attention"]'` on the batch128 chunks4 MXFP8 baseline.
+  Success criteria and expected risk: Success is step-10 tps above 11,386 with finite overall-decreasing loss and no Inductor crash. Risk is no actual compile benefit because attention is a small profile bucket, or config-list syntax preventing the component from matching.
+  Result: discarded at source state `4da4a3f0` plus the dirty partial-compile hook; the JSON-style override parsed as literal component strings, so the new hook did not execute. Use comma-separated `--compile.components=loss,inner_attention` for the real test.
