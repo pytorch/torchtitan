@@ -3661,3 +3661,13 @@
   Planned command or config overrides: Current corrected-loss baseline with `--training.local_batch_size=130`.
   Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss. Risk is a TorchAO MXFP8 dim1 tile-shape failure if chunk rows are not a multiple of 128.
   Result: crashed at source state `ed7edca0`; `local_batch_size=130`, `seq_len=128`, and `loss.num_chunks=4` produce 4160 rows per loss chunk, not divisible by the 128-row Triton dim1 tile. Close odd/midpoint batch sizes unless the chunking is adjusted to preserve the row multiple.
+
+- Idea: corrected loss compile with loss chunks2
+  Current best source commit: 78355ca4
+  Source: revisit old chunks2 result after discovering JSON-style component syntax disabled real loss compile
+  Expected mechanism: Reduce loss chunks from 4 to 2 while keeping true loss compile. If the compiled loss graph controls memory better than the old accidental no-compile path, chunks2 may reduce repeated lm_head/loss overhead without allocator retries.
+  Supporting evidence: The stale chunks2 run used `--compile.components='["loss"]'`, which now is known to parse as `['["loss"]']`, and hit allocator retries at 171.26 GiB. Correct loss compile at chunks4 saved memory and became the new peak, so chunks2 needed a corrected retest.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current corrected-loss baseline with `--loss.num_chunks=2`.
+  Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss and no allocator retries. Risk is returning to the old loss/lm_head memory cliff.
+  Result: kept at source state `78355ca4`; 11,527 tps, 164.52 GiB peak memory, no allocator retry logs, finite lower-overall loss. This is a tiny new measured peak but is within tie-band variance; rerun or profile before declaring it durable.

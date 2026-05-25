@@ -9164,3 +9164,31 @@ Interpretation:
 - With `seq_len=128`, `local_batch_size=130`, and `loss.num_chunks=4`, each loss chunk has 4160 rows. That is not divisible by the Triton dim1 MXFP8 128-row tile size.
 - Batch128 and batch132 work with chunks4 because their loss chunks have 4096 and 4224 rows respectively, both multiples of 128.
 - Future MXFP8 loss-chunk/batch-size probes must keep `(local_batch_size * seq_len / loss.num_chunks) % 128 == 0` for each chunk.
+
+## Experiment 375: Correct Loss Compile Chunks2
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=2 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run375-mxfp8-correct-loss-compile-loss-chunks2-no-fsdp-forward-input-casts-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as a tiny new peak; needs rerun/profile confirmation because the lead is only 3 tps.
+- The log confirms true loss compile.
+- Step 10 `tps`: 11,527.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 164.52 GiB, 92.25%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.36838 at step 1 to 7.78094 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Correct loss compile changes the chunks2 memory behavior: the old malformed-component chunks2 run hit allocator retries at 171.26 GiB, but this run stayed at 164.52 GiB.
+- Chunks2 slightly reduces loss-loop overhead and narrowly beats chunks4, but the margin is tiny. Treat chunks2 as the active peak only after an exact rerun or profile corroborates it.
