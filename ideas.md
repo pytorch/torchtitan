@@ -3681,3 +3681,13 @@
   Planned command or config overrides: Exact run375 command.
   Success criteria and expected risk: If step-10 tps again exceeds 11,524 without allocator retries, promote chunks2 as active baseline; otherwise keep chunks4 as the working baseline.
   Result: kept as validation at source state `dda9686c`; 11,499 tps with the same 164.52 GiB memory and no allocator retries. Chunks2 is safe but not durable enough to replace corrected-loss chunks4 as the working baseline.
+
+- Idea: profile corrected-loss chunks4 baseline
+  Current best source commit: 3d6c538a
+  Source: trace refresh after the component parser fix changed the actual compile surface and memory behavior
+  Expected mechanism: Capture a profile of the corrected `--compile.components=loss`, batch128, chunks4 baseline to determine whether the bottleneck moved away from MXFP8 GEMMs/casts and FSDP collectives.
+  Supporting evidence: Run371 improved throughput and memory versus the old accidental no-compile command. Run377 can show whether compiled loss is now a meaningful bucket or simply enabled a better memory/graph regime.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current corrected-loss chunks4 baseline plus profiler active on step 10.
+  Success criteria and expected risk: Success is a complete trace with finite loss and no allocator/OOM. Profiled tps is not used for ranking. Risk is profiler overhead and trace size.
+  Result: kept as profile data at source state `3d6c538a`; profiled step 10 reached 11,428 tps and 164.17 GiB. Trace analysis still shows MXFP8 GEMMs/casts/copies and rank-skewed FSDP collectives dominate; compiled loss kernels are only ~7-8 ms.

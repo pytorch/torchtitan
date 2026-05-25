@@ -9220,3 +9220,37 @@ Interpretation:
 
 - Chunks2 is safe under true loss compile, but the repeat lands below run371 chunks4 and below the first chunks2 sample.
 - Treat chunks2 as tie-band, not a durable improvement. The working baseline remains batch128/chunks4 with corrected `--compile.components=loss`.
+
+## Experiment 377: Profile Correct Loss Compile Chunks4
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run377-profile-mxfp8-correct-loss-compile-loss-chunks4-no-fsdp-forward-input-casts-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as profile data; do not compare profiled tps against unprofiled runs.
+- The log confirms true loss compile.
+- Step 10 `tps`: 11,428.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 164.17 GiB, 92.05%.
+- Traces were written under `profiling/traces/iteration_10/`.
+
+Profile notes:
+
+- `ProfilerStep#9` wall time was about 1.43 s on all ranks.
+- Rank0 kernel buckets: MXFP8 nvjet GEMMs ~573 ms, NCCL reduce-scatter ~268 ms, all-gather ~159 ms, MXFP8 dim1 casts ~174 ms, dim0 casts ~56 ms, copy/cast kernels ~444 ms, cat/split/view ~54 ms, compiled loss kernels ~7 ms, and SDPA/attention ~46 ms.
+- Rank-skewed collectives remain: rank6 has ~663 ms reduce-scatter and ~256 ms all-gather; rank7 has ~615 ms reduce-scatter; rank4 has ~433 ms reduce-scatter and ~199 ms all-gather.
+- Kernel event count is about 9,242 per rank, similar to the old no-compile profile.
+
+Interpretation:
+
+- Correct loss compile lowers memory and improves throughput, but the profiled hot path is still MXFP8 GEMM, MXFP8 cast/copy overhead, and FSDP collective imbalance.
+- The compiled loss itself is not a dominant remaining kernel bucket.
+- Next optimizations should target FSDP scheduling/granularity under the lower-memory corrected-loss baseline or MXFP8 cast/GEMM behavior, not more attention/loss compilation.
