@@ -3701,3 +3701,13 @@
   Planned command or config overrides: Current corrected-loss chunks4 baseline.
   Success criteria and expected risk: Success is step-10 tps above 11,524 with finite loss and memory below 95%. Risk is higher residency and worse scheduling from over-prefetching.
   Result: discarded at source state `8ad2b90a` plus the dirty two-module prefetch patch; 11,490 tps and 165.40 GiB. It fits but regresses throughput and memory, so restore the one-module prefetch chain.
+
+- Idea: default NCCL CTA policy after corrected loss compile
+  Current best source commit: 8ec8dbc6
+  Source: runtime-knob recheck after true loss compile changed the baseline memory/scheduling
+  Expected mechanism: Omit `NCCL_CTA_POLICY=2` and let NCCL use its default CTA policy. If the corrected-loss profile changed overlap enough, the default policy might recover versus the earlier accidental no-compile result.
+  Supporting evidence: The old default CTA run was slower under the malformed JSON component syntax. Correct loss compile improved throughput and memory, so the CTA result needed one current-stack check.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current corrected-loss chunks4 baseline with `NCCL_CTA_POLICY` omitted.
+  Success criteria and expected risk: Success is step-10 tps above 11,524 with finite lower-overall loss. Risk is repeating the prior default-policy regression.
+  Result: discarded at source state `8ec8dbc6`; 11,248 tps and unchanged 164.17 GiB memory. Keep `NCCL_CTA_POLICY=2`.
