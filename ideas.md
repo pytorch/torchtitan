@@ -3891,3 +3891,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command with `--compile.components=loss,feed_forward,norms`.
   Success criteria and expected risk: Success is completing 10 steps above 12,115 tps. Risk is no compiled frames or graph breaks due RMSNorm implementation.
   Result: crashed at source state `a43de327` plus dirty source; RMSNorm standalone compile fails before step 1 with `torch.compile with fullgraph=True found no compiled frames` because normalization frames are in Dynamo skipfiles. Remove the component.
+
+- Idea: Inductor max autotune for FFN compile
+  Current best source commit: 8e2327aa
+  Source: user asked about additional compile flags, and FFN compile is the successful partial compile surface.
+  Expected mechanism: `TORCHINDUCTOR_MAX_AUTOTUNE=1` may let Inductor choose faster kernels around the compiled FFN graph.
+  Supporting evidence: Run383 showed FFN compile is valuable; run389 still shows large compiled-region and MXFP8/copy buckets.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile batch168 command with `TORCHINDUCTOR_MAX_AUTOTUNE=1`.
+  Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is extra compile time with no better steady-state.
+  Result: discarded at source state `8e2327aa`; 11,943 tps and 163.69 GiB. Keep default Inductor settings.

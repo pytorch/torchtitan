@@ -9818,3 +9818,30 @@ Interpretation:
 
 - Compiling RMSNorm as a standalone module is not useful with `fullgraph=True`; Dynamo intentionally skips the underlying frames.
 - Remove the experimental `norms` component. FFN-only remains the successful partial compile surface.
+
+## Experiment 398: Inductor Max Autotune
+
+Command:
+
+```bash
+TORCHINDUCTOR_MAX_AUTOTUNE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run398-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-torchinductor-max-autotune-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,943.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.49312 at step 1 to 6.24823 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Enabling Inductor max autotune does not improve the active FFN-compile setup.
+- Keep the default Inductor settings.
