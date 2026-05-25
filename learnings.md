@@ -9477,3 +9477,31 @@ Interpretation:
 - Batch176 is the fastest measured configuration so far, but it crosses the preferred 95% memory line.
 - Because the run is only 10 steps, treat this as a risky throughput upper bound rather than the default active command.
 - Probe an intermediate batch size such as 168 to look for most of the throughput gain while staying below the preferred memory envelope.
+
+## Experiment 386: Feed-Forward Compile With Local Batch 168
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run386-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None relative to run385.
+
+Result:
+
+- Status: keep; new measured peak and current safe best.
+- Step 10 `tps`: 12,115.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.31680 at step 1 to 5.91879 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Batch168 beats the riskier batch176 while using substantially less memory.
+- This is the best default candidate so far: FFN compile, final-layer no-reshard, local batch168, loss chunks4.
+- A narrow batch172 probe can test whether there is a local optimum between 168 and 176.

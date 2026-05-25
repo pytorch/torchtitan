@@ -3771,3 +3771,13 @@
   Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=176`.
   Success criteria and expected risk: Success is step-10 tps above 11,963 with finite loss. Risk is sustained memory above the 95% preferred line or OOM.
   Result: kept as a risky peak at source state `545bc756`; 12,078 tps and 170.39 GiB peak memory. It is fastest so far but sits at 95.54% memory, so probe a safer midpoint before promoting it as the active default.
+
+- Idea: safer FFN compile midpoint local batch168
+  Current best source commit: 86982fb2
+  Source: batch176 improved throughput but crossed the preferred memory ceiling; batch160 was safe but slower.
+  Expected mechanism: Batch168 may preserve most or all of the larger-batch throughput while leaving more memory margin than batch176.
+  Supporting evidence: Batch160 reached 11,963 tps at 156.85 GiB; batch176 reached 12,078 tps at 170.39 GiB. A midpoint should stay comfortably under 95%.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=168`.
+  Success criteria and expected risk: Success is tps near or above batch176 with peak memory below the preferred line. Risk is measurement variance or lower GEMM efficiency.
+  Result: kept at source state `86982fb2`; 12,115 tps and 163.69 GiB. This beats batch176 and is the current safe best.
