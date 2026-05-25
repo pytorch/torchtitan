@@ -3871,3 +3871,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command with `NCCL_CTA_POLICY=1`.
   Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is simply a slower NCCL scheduling policy.
   Result: discarded at source state `1dbd73c6`; 12,071 tps and 163.69 GiB. Keep `NCCL_CTA_POLICY=2`.
+
+- Idea: remove final-layer no-reshard under FFN compile batch168
+  Current best source commit: 04676fd1
+  Source: final-layer no-reshard was found before FFN compile and batch168; validate whether it still helps in the current active stack.
+  Expected mechanism: Restoring normal resharding on the final layer might reduce residency and change FSDP scheduling enough to help, or it may confirm the late-boundary no-reshard is still useful.
+  Supporting evidence: Two-layer no-reshard regressed, so the best suffix policy may be exactly one layer or none.
+  Planned source/config changes: Temporarily remove the final-layer `reshard_after_forward=False` override.
+  Planned command or config overrides: Current FFN-compile batch168 command.
+  Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is losing useful overlap.
+  Result: discarded at source state `04676fd1` plus dirty source; 11,911 tps and 163.22 GiB. Final-layer-only no-reshard remains active.
