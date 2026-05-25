@@ -1,0 +1,860 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --compile.components=loss,feed_forward,norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run397-mxfp8-correct-loss-plus-feed-forward-plus-norms-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder
+W0524 20:22:59.988000 502349 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0524 20:22:59.988000 502349 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0524 20:22:59.988000 502349 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0524 20:22:59.988000 502349 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0524 20:23:05.808000 502571 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-24 20:23:06,488 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-24 20:23:06,496 - root - INFO - Converted modules to use dynamic mxfp8_rceil quantization for grouped_mm and linear ops
+[rank0]:[titan] 2026-05-24 20:23:06,548 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run397-mxfp8-correct-loss-plus-feed-forward-plus-norms-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/structured_logs/training.global_rank_0.20260524-202306-4CTAN8.jsonl
+[rank0]:[titan] 2026-05-24 20:23:06,772 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-24 20:23:06,774 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-24 20:23:06,782 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-24 20:23:06,782 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:[titan] 2026-05-24 20:23:12,727 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[titan] 2026-05-24 20:23:12,732 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[rank0]:W0524 20:23:12.962000 502571 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-24 20:23:12,909 - root - INFO - Building qwen3 14B
+[rank0]:[titan] 2026-05-24 20:23:13,239 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,240 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,240 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,240 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,241 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,242 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,242 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,243 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,243 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,243 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,244 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,245 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,245 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,245 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,246 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,246 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,247 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,247 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,248 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,248 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,248 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,249 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,249 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,250 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,250 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,251 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,251 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,251 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,252 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,252 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,253 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,253 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,254 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,254 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,254 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,255 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,255 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,256 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,256 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,257 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,257 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,257 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,258 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,258 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,258 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,259 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,259 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,260 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,260 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,261 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,261 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,261 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,262 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,262 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,263 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,263 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,264 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,264 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,264 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,265 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,265 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,266 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,266 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,267 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,267 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,267 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,268 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,268 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,269 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,269 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,270 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,270 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,270 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,271 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,271 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,272 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,272 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,273 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,273 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,273 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,274 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,274 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,275 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,275 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,276 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,276 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,276 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,277 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,277 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,278 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,278 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,279 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,279 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,279 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,280 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,280 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,281 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,281 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,282 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,282 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,282 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,282 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,283 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,283 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,284 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,285 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,285 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,285 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,285 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,286 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,286 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,287 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,288 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,288 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,288 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,289 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,289 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,290 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,290 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,291 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,291 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,291 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,292 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,292 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,293 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,293 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,294 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,294 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,294 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,294 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,295 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,295 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,296 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,297 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,297 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,297 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,298 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,298 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,299 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,299 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,300 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,300 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,300 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,301 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,301 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,302 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,302 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,303 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,303 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,303 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,303 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,304 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,304 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,305 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,305 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,306 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,306 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,306 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,307 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,307 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,308 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,308 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,309 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,309 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,309 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,310 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,310 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,311 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,311 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,312 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,312 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,312 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,313 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,313 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,313 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,314 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,315 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,315 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,315 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,316 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,316 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,316 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,317 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,317 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,318 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,318 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,319 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,319 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,319 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,320 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,320 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,321 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,321 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,322 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,322 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,322 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,323 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,323 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,324 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,324 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,325 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,325 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,325 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,326 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,326 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,327 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,327 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,328 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,328 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,328 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,329 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,329 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,330 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,330 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,331 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,331 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,331 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,332 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,332 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,332 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,333 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,333 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,334 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,334 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,335 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,335 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,335 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,336 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,336 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,337 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,337 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,338 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,338 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,338 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,339 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,339 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,340 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,340 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,341 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,341 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,341 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,341 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,342 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,342 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,343 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,343 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,344 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,344 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,344 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,345 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,345 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,346 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,346 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,347 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,347 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,347 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,348 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,348 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,349 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,349 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,350 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,350 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,350 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,351 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,351 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,352 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,352 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,353 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,353 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,353 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,354 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,354 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,355 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,355 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,356 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,356 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,356 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,357 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,357 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,357 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,358 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:23:13,360 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-24 20:23:13,450 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-24 20:23:13,450 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-24 20:23:13,450 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-24 20:23:13,466 - root - INFO - Compiling 40 Qwen3 feed-forward modules with torch.compile
+[rank0]:[titan] 2026-05-24 20:23:13,474 - root - INFO - Compiling 80 Qwen3 layer norm modules with torch.compile
+[rank0]:[titan] 2026-05-24 20:23:13,679 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-24 20:23:14,184 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-24 20:23:14,184 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-24 20:23:14,187 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-24 20:23:14,187 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-24 20:23:14,210 - root - INFO - Trainer is initialized with local batch size 168, global batch size 1344, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-24 20:23:14,210 - root - INFO - Training starts at step 1
+[rank0]:[rank0]: Traceback (most recent call last):
+[rank0]:[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 79, in <module>
+[rank0]:[rank0]:     main()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/train.py", line 65, in main
+[rank0]:[rank0]:     trainer.train()
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+[rank0]:[rank0]:     return f(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+[rank0]:[rank0]:     self.train_step(data_iterator)
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+[rank0]:[rank0]:     loss = self.forward_backward_step(
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+[rank0]:[rank0]:     return func(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+[rank0]:[rank0]:     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+[rank0]:[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+[rank0]:[rank0]:     return inner()
+[rank0]:[rank0]:            ^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+[rank0]:[rank0]:     result = forward_call(*args, **kwargs)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+[rank0]:[rank0]:     h = layer(h, self.freqs_cis, attention_masks, positions)
+[rank0]:[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+[rank0]:[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+[rank0]:[rank0]:     return inner()
+[rank0]:[rank0]:            ^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+[rank0]:[rank0]:     result = forward_call(*args, **kwargs)
+[rank0]:[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+[rank0]:[rank0]:     self.attention_norm(x), freqs_cis, attention_masks, positions
+[rank0]:[rank0]:     ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:[rank0]:     return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+[rank0]:[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:[rank0]:   File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+[rank0]:[rank0]:     raise RuntimeError(msg)
+[rank0]:[rank0]: RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+[rank0]:[rank0]:   - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+[rank0]:[rank0]:   - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+[rank0]:[rank0]:   - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+[rank0]:[rank0]:   - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+W0524 20:23:15.887000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 502571 closing signal SIGTERM
+W0524 20:23:15.888000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 502572 closing signal SIGTERM
+W0524 20:23:15.888000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 502574 closing signal SIGTERM
+W0524 20:23:15.888000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 502576 closing signal SIGTERM
+W0524 20:23:15.888000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 502578 closing signal SIGTERM
+W0524 20:23:15.888000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 502579 closing signal SIGTERM
+W0524 20:23:15.888000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:1014] Sending process 502580 closing signal SIGTERM
+E0524 20:23:17.677000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/api.py:988] failed (exitcode: 1) local_rank: 2 (pid: 502573) of binary: /home/avenkataraman/.conda/envs/pytorch-3.12/bin/python3.12
+E0524 20:23:17.681000 502349 /home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/error_handler.py:145] no error file defined for parent, to copy child error file (/tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/2/error.json)
+Traceback (most recent call last):
+  File "/home/avenkataraman/.conda/envs/pytorch-3.12/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1028, in main
+    run(args)
+  File "/home/avenkataraman/github/pytorch/torch/distributed/run.py", line 1019, in run
+    elastic_launch(
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 194, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/home/avenkataraman/github/pytorch/torch/distributed/launcher/api.py", line 383, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+torchtitan.train FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 0 (local_rank: 0)
+  exitcode  : 1 (pid: 502571) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/0/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+[2]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 502572) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/1/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+[3]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 3 (local_rank: 3)
+  exitcode  : 1 (pid: 502574) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/3/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+[4]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 4 (local_rank: 4)
+  exitcode  : 1 (pid: 502576) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/4/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+[5]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 5 (local_rank: 5)
+  exitcode  : 1 (pid: 502578) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/5/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+[6]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 6 (local_rank: 6)
+  exitcode  : 1 (pid: 502579) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/6/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+[7]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 502580) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/7/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-05-24_20:23:14
+  host      : devgpu020.snb3.facebook.com
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 502573) 
+  error_file: /tmp/torchelastic_d1kbfcnv/none_qp9jue1c/attempt_0/2/error.json
+  traceback : Traceback (most recent call last):
+    File "/home/avenkataraman/github/pytorch/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 367, in wrapper
+      return f(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 831, in train
+      self.train_step(data_iterator)
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 733, in train_step
+      loss = self.forward_backward_step(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/observability/structured_logger/structured_logging.py", line 441, in sync_wrapper
+      return func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/trainer.py", line 686, in forward_backward_step
+      pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/common/decoder.py", line 139, in forward
+      h = layer(h, self.freqs_cis, attention_masks, positions)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1778, in _wrapped_call_impl
+      return self._call_impl(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1884, in _call_impl
+      return inner()
+             ^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1832, in inner
+      result = forward_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/torchtitan/torchtitan/models/qwen3/model.py", line 64, in forward
+      self.attention_norm(x), freqs_cis, attention_masks, positions
+      ^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+      return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/avenkataraman/github/pytorch/torch/_dynamo/eval_frame.py", line 1177, in compile_wrapper
+      raise RuntimeError(msg)
+  RuntimeError: torch.compile with fullgraph=True found no compiled frames. Skipped frames:
+    - _call_impl (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1782): frame is in the Dynamo skipfiles list
+    - forward (/home/avenkataraman/github/pytorch/torch/nn/modules/normalization.py:423): frame is in the Dynamo skipfiles list
+    - __getattr__ (/home/avenkataraman/github/pytorch/torch/nn/modules/module.py:1954): frame is in the Dynamo skipfiles list
+    - rms_norm (/home/avenkataraman/github/pytorch/torch/nn/functional.py:2950): frame is in the Dynamo skipfiles list
+  
+============================================================

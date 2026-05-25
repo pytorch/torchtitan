@@ -9793,3 +9793,28 @@ Interpretation:
 - Final-layer no-reshard remains beneficial after FFN compile and batch168.
 - The all-reshard variant saves only about 0.47 GiB but loses about 204 tps versus run386.
 - Restore final-layer-only no-reshard.
+
+## Experiment 397: Layer Norm Compile With Feed-Forward Compile
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run397-mxfp8-correct-loss-plus-feed-forward-plus-norms-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added a `norms` compile component that compiles each Qwen3 `attention_norm` and `ffn_norm` module with `torch.compile(..., fullgraph=True)`.
+
+Result:
+
+- Status: crash / blocked.
+- The log confirms `Compiling 80 Qwen3 layer norm modules with torch.compile`.
+- The run fails before step 1.
+- Failure signature: `RuntimeError: torch.compile with fullgraph=True found no compiled frames`.
+- Skipped frames include `torch/nn/modules/normalization.py:forward` and `torch/nn/functional.py:rms_norm`, both in Dynamo skipfiles.
+
+Interpretation:
+
+- Compiling RMSNorm as a standalone module is not useful with `fullgraph=True`; Dynamo intentionally skips the underlying frames.
+- Remove the experimental `norms` component. FFN-only remains the successful partial compile surface.

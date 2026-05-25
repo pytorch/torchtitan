@@ -3881,3 +3881,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command.
   Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is losing useful overlap.
   Result: discarded at source state `04676fd1` plus dirty source; 11,911 tps and 163.22 GiB. Final-layer-only no-reshard remains active.
+
+- Idea: compile Qwen3 layer norm modules
+  Current best source commit: a43de327
+  Source: after FFN compile, the remaining eager boundaries around FFN include RMSNorm modules.
+  Expected mechanism: Compile `attention_norm` and `ffn_norm` modules separately to reduce Python/module overhead and potentially fuse RMSNorm work.
+  Supporting evidence: FFN-only compile was successful; a smaller non-attention module surface might also be safe.
+  Planned source/config changes: Temporarily add a `norms` compile component in `parallelize_qwen3`.
+  Planned command or config overrides: Current FFN-compile batch168 command with `--compile.components=loss,feed_forward,norms`.
+  Success criteria and expected risk: Success is completing 10 steps above 12,115 tps. Risk is no compiled frames or graph breaks due RMSNorm implementation.
+  Result: crashed at source state `a43de327` plus dirty source; RMSNorm standalone compile fails before step 1 with `torch.compile with fullgraph=True found no compiled frames` because normalization frames are in Dynamo skipfiles. Remove the component.
