@@ -3751,3 +3751,13 @@
   Planned command or config overrides: Current corrected-loss command with `--compile.components=loss,feed_forward`.
   Success criteria and expected risk: Success is completing 10 steps with tps above the active baseline and finite loss. Risk is the same Inductor recursion or a different MXFP8 tensor-subclass compile failure.
   Result: kept at source state `8ebdfc21` plus dirty source; 11,662 tps and 133.23 GiB peak memory. This is a new measured peak and the first successful model-portion compile result.
+
+- Idea: spend FFN compile memory headroom on local batch160
+  Current best source commit: 064dcc49
+  Source: run383 lowered peak memory to 133.23 GiB, leaving enough room to increase batch size without approaching the 95% memory risk line.
+  Expected mechanism: Larger local batch increases useful work per step and may improve GEMM/collective amortization. `local_batch_size=160` keeps per-loss-chunk rows divisible by 128 for the MXFP8 Triton dim1 path.
+  Supporting evidence: Run383 reached a new peak at only 74.70% memory. Earlier batch132 under loss-only compile was slower, but the FFN-compiled memory/performance regime is materially different.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=160`.
+  Success criteria and expected risk: Success is step-10 tps above 11,662 with finite loss and no allocator retries. Risk is reduced efficiency or returning to memory pressure.
+  Result: kept at source state `064dcc49`; 11,963 tps and 156.85 GiB. Batch160 is a strong new peak and still has memory headroom.

@@ -9421,3 +9421,31 @@ Interpretation:
 - Narrowing model compile to the FFN region avoids the full-block Inductor recursion and improves throughput by 127 tps over run380 and by 167 tps over run381.
 - Peak memory drops by about 30 GiB versus the loss-only/last-layer-no-reshard baseline, likely because compiled FFN reduces saved intermediates and/or allocator fragmentation around MXFP8 linears.
 - This is now the active best source direction. The low memory envelope creates room for follow-up batch-size and suffix-no-reshard experiments, but validate or profile before overfitting to one step-10 measurement.
+
+## Experiment 384: Feed-Forward Compile With Local Batch 160
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=160 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run384-mxfp8-correct-loss-plus-feed-forward-compile-lbs160-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None relative to run383.
+
+Result:
+
+- Status: keep; new measured peak.
+- Step 10 `tps`: 11,963.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 156.85 GiB, 87.95%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.45798 at step 1 to 6.29643 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- The FFN compile memory savings convert cleanly into a larger local batch.
+- Batch160 increases throughput by 301 tps over batch128 FFN compile while remaining well below the 95% memory risk line.
+- The next batch-size probe can go higher as long as loss chunk rows remain divisible by 128; local batches that are multiples of 4 satisfy this for `seq_len=128` and `loss.num_chunks=4`.
