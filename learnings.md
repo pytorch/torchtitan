@@ -9053,3 +9053,33 @@ Interpretation:
 - TorchTitan's custom `list[str]` parser expects comma-separated values. The JSON-style override parsed as `['["loss"', '"inner_attention"]']`, so neither the existing `loss` check nor the new `inner_attention` check matched.
 - This also means future component-isolation runs must use `--compile.components=loss,inner_attention` or `--compile.components=loss`, not JSON list syntax.
 - Rerun the partial compile test with comma-separated components before drawing any conclusion about inner-attention compile performance.
+
+## Experiment 371: Correct Loss Compile Component Syntax
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run371-mxfp8-correct-loss-compile-no-fsdp-forward-input-casts-loss-chunks4-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept inner-attention compile hook, which is inactive for `components=loss`.
+
+Result:
+
+- Status: keep; new measured MXFP8 peak.
+- The log confirms `Compiling the loss function with torch.compile`.
+- Step 10 `tps`: 11,524.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 164.17 GiB, 92.05%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.54780 at step 1 to 4.87168 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+- The same FSDP2 MXFP8 view-output warning appeared.
+
+Interpretation:
+
+- The current best had been accidentally running with no matching compile component because JSON-style component syntax is wrong for TorchTitan's parser.
+- Correct loss compile is both faster and lower-memory than the prior 11,386 tps / 166.26 GiB best.
+- The new baseline for partial compile and batch-size probing is `--compile.components=loss`, local batch 128, chunks4, `NCCL_CTA_POLICY=2`.

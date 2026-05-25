@@ -3621,3 +3621,13 @@
   Planned command or config overrides: First attempted with `--compile.components='["loss","inner_attention"]'` on the batch128 chunks4 MXFP8 baseline.
   Success criteria and expected risk: Success is step-10 tps above 11,386 with finite overall-decreasing loss and no Inductor crash. Risk is no actual compile benefit because attention is a small profile bucket, or config-list syntax preventing the component from matching.
   Result: discarded at source state `4da4a3f0` plus the dirty partial-compile hook; the JSON-style override parsed as literal component strings, so the new hook did not execute. Use comma-separated `--compile.components=loss,inner_attention` for the real test.
+
+- Idea: corrected comma-syntax loss compile on MXFP8 batch128 chunks4
+  Current best source commit: 2378a302
+  Source: parser-root-cause follow-up after run370 showed JSON-style component overrides do not match `loss` or `inner_attention`
+  Expected mechanism: Use the syntax TorchTitan's `list[str]` parser actually expects: `--compile.components=loss`. This should activate the existing `ChunkedCELoss` compile path and test whether the prior "loss-only" MXFP8 runs were leaving loss compilation disabled.
+  Supporting evidence: `python -m torchtitan.config.manager ... --compile.components='["loss"]'` resolves to `components=['["loss"]']`, while `--compile.components=loss,inner_attention` resolves to `components=['loss', 'inner_attention']`. Run370's missing inner-attention compile log confirms the JSON-style form is not usable.
+  Planned source/config changes: None beyond the already committed inner-attention hook, which remains inactive for `components=loss`.
+  Planned command or config overrides: Current MXFP8 batch128 chunks4 baseline with `NCCL_CTA_POLICY=2` and `--compile.components=loss`.
+  Success criteria and expected risk: Success is step-10 tps above 11,386 or lower memory with finite overall-decreasing loss. Risk is long first-step compile or loss-compile memory behavior different from the accidental no-compile baseline.
+  Result: kept at source state `2378a302`; true loss compile logged, reached 11,524 tps, and lowered peak memory to 164.17 GiB. This is the new measured MXFP8 peak and establishes comma-separated component syntax as mandatory for future compile experiments.
