@@ -3761,3 +3761,13 @@
   Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=160`.
   Success criteria and expected risk: Success is step-10 tps above 11,662 with finite loss and no allocator retries. Risk is reduced efficiency or returning to memory pressure.
   Result: kept at source state `064dcc49`; 11,963 tps and 156.85 GiB. Batch160 is a strong new peak and still has memory headroom.
+
+- Idea: push FFN compile batch size to local batch176
+  Current best source commit: 545bc756
+  Source: batch160 reached 11,963 tps at 156.85 GiB, leaving possible headroom for one higher multiple-of-4 batch size.
+  Expected mechanism: Increase useful work per step further while preserving the MXFP8 dim1 row multiple. Based on the batch128-to-160 memory slope, batch176 should land near the preferred ceiling.
+  Supporting evidence: Run384 improved substantially over batch128 and did not show allocator retries.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=176`.
+  Success criteria and expected risk: Success is step-10 tps above 11,963 with finite loss. Risk is sustained memory above the 95% preferred line or OOM.
+  Result: kept as a risky peak at source state `545bc756`; 12,078 tps and 170.39 GiB peak memory. It is fastest so far but sits at 95.54% memory, so probe a safer midpoint before promoting it as the active default.

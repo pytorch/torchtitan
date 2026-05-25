@@ -9449,3 +9449,31 @@ Interpretation:
 - The FFN compile memory savings convert cleanly into a larger local batch.
 - Batch160 increases throughput by 301 tps over batch128 FFN compile while remaining well below the 95% memory risk line.
 - The next batch-size probe can go higher as long as loss chunk rows remain divisible by 128; local batches that are multiples of 4 satisfy this for `seq_len=128` and `loss.num_chunks=4`.
+
+## Experiment 385: Feed-Forward Compile With Local Batch 176
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run385-mxfp8-correct-loss-plus-feed-forward-compile-lbs176-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None relative to run384.
+
+Result:
+
+- Status: keep as a risky peak.
+- Step 10 `tps`: 12,078.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 170.39 GiB, 95.54%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.40702 at step 1 to 6.25780 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Batch176 is the fastest measured configuration so far, but it crosses the preferred 95% memory line.
+- Because the run is only 10 steps, treat this as a risky throughput upper bound rather than the default active command.
+- Probe an intermediate batch size such as 168 to look for most of the throughput gain while staying below the preferred memory envelope.
