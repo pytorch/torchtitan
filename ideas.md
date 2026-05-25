@@ -3801,3 +3801,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command with `--loss.num_chunks=2`.
   Success criteria and expected risk: Success is step-10 tps above 12,115 with memory below 95%. Risk is higher lm_head/loss residency and lower schedule stability.
   Result: discarded at source state `08a0521a`; 12,078 tps and 168.28 GiB. Keep chunks4.
+
+- Idea: profile active FFN compile batch168 safe best
+  Current best source commit: 3ea71eed
+  Source: active best changed materially after FFN compile and batch-size tuning, so the old profile no longer represents the hot path.
+  Expected mechanism: Capture profiler traces for the current safe best to identify whether the next bottleneck is MXFP8 compute/casts, attention, loss, or FSDP collectives.
+  Supporting evidence: Run386 is the current safe best at 12,115 tps and 163.69 GiB. Earlier run377 profile preceded FFN compile and batch168.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile batch168 command plus profiler active on step 10.
+  Success criteria and expected risk: Success is complete traces with finite loss and no allocator/OOM. Profiled tps is not used for ranking.
+  Result: kept as profile data at source state `3ea71eed`; profiled step 10 reached 11,959 tps and 163.69 GiB. Trace shows rank-skewed reduce-scatter is now the most prominent uneven bucket, with rank6 around 1.91 s reduce-scatter time, while MXFP8 GEMMs/casts/copies remain large and attention is smaller but nontrivial.

@@ -9560,3 +9560,41 @@ Interpretation:
 
 - Reducing loss chunks from 4 to 2 at batch168 loses 37 tps versus chunks4 and costs about 4.6 GiB.
 - Keep `--loss.num_chunks=4` for the active batch168 FFN-compile command.
+
+## Experiment 389: Profile Feed-Forward Compile Batch168
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run389-profile-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None relative to run388.
+
+Result:
+
+- Status: keep as profile data.
+- Profiled step 10 `tps`: 11,959. Profiled tps is not used for ranking.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.63777 at step 1 to 7.24293 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Trace notes:
+
+- Profiler step wall time is about 1.80 s per active step, matching the step log.
+- Rank-skewed NCCL reduce-scatter is the largest uneven bucket: rank6 about 1,910 ms, rank4 about 1,645 ms, rank7 about 1,638 ms, rank5 about 1,551 ms, while rank1 is only about 361 ms.
+- NCCL all-gather remains material: about 279-592 ms depending on rank.
+- MXFP8/GEMM work is still large but more uniform: nvjet/GEMM bucket about 837-905 ms per rank.
+- MXFP8 dim1 casts are about 496-517 ms per rank; dim0 casts about 176-186 ms per rank.
+- Copy/cast events remain about 717-743 ms per rank.
+- SDPA/attention bucket is about 480-493 ms per rank.
+- Compiled-region events are about 1.58-1.68 s per rank.
+
+Interpretation:
+
+- FFN compile successfully moved the active best upward, but the remaining bottleneck is still a mix of MXFP8 linear work and FSDP collective imbalance.
+- The new profile makes rank-skewed reduce-scatter more prominent than the pre-FFN-compile profile, especially on ranks 4-7.
+- Next high-value source/config directions are FSDP scheduling/reshard granularity around the larger batch, attention compile only if cheap, and possibly FlexAttention now that dependencies were reinstalled.
