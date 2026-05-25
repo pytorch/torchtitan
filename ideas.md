@@ -3721,3 +3721,13 @@
   Planned command or config overrides: Current corrected-loss chunks4 baseline.
   Success criteria and expected risk: Success is step-10 tps above 11,524 with finite loss and no memory regression above the preferred envelope. Risk is extra parameter residency or no useful overlap change.
   Result: kept at source state `1eed10e5` plus the dirty final-layer no-reshard patch; 11,535 tps, 163.64 GiB, finite lower-overall loss, and no allocator warnings. This is a new measured peak; validate with an exact rerun.
+
+- Idea: exact final-layer no-reshard rerun
+  Current best source commit: 66cdb981
+  Source: validation after run380 produced a new measured peak and lower memory.
+  Expected mechanism: Repeat the exact corrected-loss chunks4 command with only the final transformer layer left unresharded after forward, to separate a real scheduling improvement from step-10 variance.
+  Supporting evidence: Run380 reached 11,535 tps and lowered peak memory to 163.64 GiB. This was a narrow FSDP source change after broad prefetching regressed.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact run380 command.
+  Success criteria and expected risk: Success is another result near or above the corrected-loss 11,524 tps baseline while preserving the 163.64 GiB memory envelope. Risk is confirming the speed gain was variance while keeping a small source complexity cost.
+  Result: kept as validation at source state `66cdb981`; 11,495 tps and 163.64 GiB. The memory improvement is durable, but the throughput peak was not reproduced. Keep the source as a competitive low-memory baseline while continuing with non-rerun experiments.
