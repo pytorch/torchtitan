@@ -3861,3 +3861,13 @@
   Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=164`.
   Success criteria and expected risk: Success is step-10 tps above 12,115 with finite loss. Risk is simply lower throughput from less work per step.
   Result: discarded at source state `73674095`; 11,956 tps and 160.02 GiB. Batch168 remains best among tested neighboring sizes.
+
+- Idea: NCCL CTA policy1 on active FFN compile batch168
+  Current best source commit: 1dbd73c6
+  Source: run389 profile shows rank-skewed NCCL reduce-scatter remains prominent; default CTA and policy2 have been tested on corrected-loss stacks, but policy1 was not tested after FFN compile and batch168.
+  Expected mechanism: Adjust NCCL CTA scheduling to improve collective overlap or reduce rank skew.
+  Supporting evidence: `NCCL_CTA_POLICY=2` remains active because default was slower. A direct policy1 check completes the small CTA policy search.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile batch168 command with `NCCL_CTA_POLICY=1`.
+  Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is simply a slower NCCL scheduling policy.
+  Result: discarded at source state `1dbd73c6`; 12,071 tps and 163.69 GiB. Keep `NCCL_CTA_POLICY=2`.

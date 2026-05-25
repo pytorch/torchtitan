@@ -9738,3 +9738,30 @@ Interpretation:
 
 - Batch164 is slower than batch168 despite lower memory.
 - Among the tested batch-size neighborhood, batch168 remains the active safe best.
+
+## Experiment 395: NCCL CTA Policy 1
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=1 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run395-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-nccl-cta-policy1-last-layer-no-reshard-loss-chunks4-seq128-bf16-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,071.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.34695 at step 1 to 7.28114 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- `NCCL_CTA_POLICY=1` is slower than the active `NCCL_CTA_POLICY=2` despite the profile's collective imbalance.
+- Keep policy 2 for the active command.
