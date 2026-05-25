@@ -9711,3 +9711,30 @@ Interpretation:
 
 - Plain FlexAttention is viable, but it is slower than SDPA for this short-sequence Qwen3 14B setup and uses about 1.4 GiB more memory.
 - Keep SDPA as the active attention backend.
+
+## Experiment 394: Feed-Forward Compile With Local Batch 164
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=164 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run394-mxfp8-correct-loss-plus-feed-forward-compile-lbs164-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,956.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 160.02 GiB, 89.72%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.46621 at step 1 to 6.11658 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Batch164 is slower than batch168 despite lower memory.
+- Among the tested batch-size neighborhood, batch168 remains the active safe best.

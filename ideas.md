@@ -3851,3 +3851,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command.
   Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is FlexAttention autotune overhead, extra memory, or worse kernels for short seq128.
   Result: discarded at source state `3846faf1` plus dirty source; 12,036 tps and 165.10 GiB. FlexAttention is valid but slower than SDPA here; restore SDPA.
+
+- Idea: lower-neighbor batch164 under FFN compile
+  Current best source commit: 73674095
+  Source: batch168 beat batch160, batch172, and batch176, but the curve is nonmonotonic enough to test one lower neighbor.
+  Expected mechanism: Batch164 may hit a better shape or scheduling point with less memory than batch168.
+  Supporting evidence: Batch172 underperformed despite higher memory, so exact shapes matter.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=164`.
+  Success criteria and expected risk: Success is step-10 tps above 12,115 with finite loss. Risk is simply lower throughput from less work per step.
+  Result: discarded at source state `73674095`; 11,956 tps and 160.02 GiB. Batch168 remains best among tested neighboring sizes.
