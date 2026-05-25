@@ -3731,3 +3731,13 @@
   Planned command or config overrides: Exact run380 command.
   Success criteria and expected risk: Success is another result near or above the corrected-loss 11,524 tps baseline while preserving the 163.64 GiB memory envelope. Risk is confirming the speed gain was variance while keeping a small source complexity cost.
   Result: kept as validation at source state `66cdb981`; 11,495 tps and 163.64 GiB. The memory improvement is durable, but the throughput peak was not reproduced. Keep the source as a competitive low-memory baseline while continuing with non-rerun experiments.
+
+- Idea: correct-syntax built-in model compile
+  Current best source commit: 495d6d3b
+  Source: user asked why the model was not being compiled, and the prior model-compile failures predated the corrected compile component syntax and MXFP8 Triton dim1 workaround.
+  Expected mechanism: Use TorchTitan's built-in `apply_compile`, which compiles each `TransformerBlock` rather than the root model. If the old crash was caused by malformed component syntax or the old CUDA dim1 path, the current stack may now compile blocks and fuse MXFP8 cast/elementwise work around GEMMs.
+  Supporting evidence: Correct loss compile improved throughput and memory, and TorchAO MXFP8 documentation recommends model compile for competitive performance.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current corrected-loss command with `--compile.components=loss,model`.
+  Success criteria and expected risk: Success is completing 10 steps with tps above the loss-only baseline. Risk is reproducing an Inductor/TorchAO compile crash before step 1.
+  Result: crashed at source state `495d6d3b`; correct component syntax enters `Compiling each TransformerBlock with torch.compile`, but Inductor fails before step 1 with `RecursionError: maximum recursion depth exceeded` in `torch/_inductor/fx_utils.py:is_fake_tensor_same`. Full block compile remains blocked; move to smaller compiled portions.

@@ -9364,3 +9364,29 @@ Interpretation:
 
 - The final-layer no-reshard patch validates the lower 163.64 GiB memory envelope.
 - The speed benefit is not durable enough to treat 11,535 tps as the steady expected result, but it remains competitive with the corrected-loss baseline and preserves the best memory result so far.
+
+## Experiment 382: Built-In Model Compile With Correct Component Syntax
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,model --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run382-mxfp8-correct-loss-plus-model-compile-last-layer-no-reshard-loss-chunks4-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: crash.
+- The log confirms both `Compiling the loss function with torch.compile` and `Compiling each TransformerBlock with torch.compile`.
+- The run fails before completing step 1.
+- Failure signature: `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded`.
+- The recursion occurs in `torch/_inductor/fx_utils.py:is_fake_tensor_same`, after repeated nested fake-tensor comparisons.
+
+Interpretation:
+
+- Correct comma-separated component syntax does enable the built-in Qwen3 model compile path, but compiling each full `TransformerBlock` is still not viable on this MXFP8 stack.
+- The current failure is different from the earlier CUDA dim1 invalid-argument crash; the Triton dim1 workaround is active, but Inductor still fails during compiled-block handling.
+- Continue with smaller compiled regions that avoid full-block fake-tensor state: feed-forward only, attention-only, or selected suffix layers.
