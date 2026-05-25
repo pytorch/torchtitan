@@ -9254,3 +9254,31 @@ Interpretation:
 - Correct loss compile lowers memory and improves throughput, but the profiled hot path is still MXFP8 GEMM, MXFP8 cast/copy overhead, and FSDP collective imbalance.
 - The compiled loss itself is not a dominant remaining kernel bucket.
 - Next optimizations should target FSDP scheduling/granularity under the lower-memory corrected-loss baseline or MXFP8 cast/GEMM behavior, not more attention/loss compilation.
+
+## Experiment 378: Two-Module FSDP Prefetch
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run378-mxfp8-correct-loss-compile-two-module-fsdp-prefetch-loss-chunks4-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed Qwen3 FSDP scheduling to prefetch up to two future modules in forward and two previous modules in backward.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,490.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 165.40 GiB, 92.74%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.40294 at step 1 to 4.98678 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Two-module prefetch fits under the corrected-loss memory envelope but is slower than the one-module prefetch baseline and costs about 1.2 GiB.
+- The rank-skewed collective issue is not fixed by simply increasing prefetch depth.
+- Restore the one-module prefetch chain.

@@ -3691,3 +3691,13 @@
   Planned command or config overrides: Current corrected-loss chunks4 baseline plus profiler active on step 10.
   Success criteria and expected risk: Success is a complete trace with finite loss and no allocator/OOM. Profiled tps is not used for ranking. Risk is profiler overhead and trace size.
   Result: kept as profile data at source state `3d6c538a`; profiled step 10 reached 11,428 tps and 164.17 GiB. Trace analysis still shows MXFP8 GEMMs/casts/copies and rank-skewed FSDP collectives dominate; compiled loss kernels are only ~7-8 ms.
+
+- Idea: two-module FSDP prefetch on corrected-loss baseline
+  Current best source commit: 8ad2b90a
+  Source: profile follow-up after corrected-loss trace still showed rank-skewed FSDP reduce-scatter/all-gather
+  Expected mechanism: Use the recovered memory headroom to prefetch two modules ahead/behind instead of one. This may hide more all-gather latency behind MXFP8 GEMM work if the one-module chain is too shallow.
+  Supporting evidence: Run377 shows rank6 reduce-scatter around 663 ms and all-gather around 256 ms on the profiled step, with rank7 also high. Correct loss compile lowered memory enough to afford some extra prefetch residency.
+  Planned source/config changes: Temporarily change `parallelize_qwen3` to set two-module forward and backward prefetch lists, preserving immediate-next order.
+  Planned command or config overrides: Current corrected-loss chunks4 baseline.
+  Success criteria and expected risk: Success is step-10 tps above 11,524 with finite loss and memory below 95%. Risk is higher residency and worse scheduling from over-prefetching.
+  Result: discarded at source state `8ad2b90a` plus the dirty two-module prefetch patch; 11,490 tps and 165.40 GiB. It fits but regresses throughput and memory, so restore the one-module prefetch chain.
