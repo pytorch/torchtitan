@@ -3821,3 +3821,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command.
   Success criteria and expected risk: Success is step-10 tps above 12,115 with finite loss and memory below the preferred line. Risk is worse overlap despite similar memory.
   Result: discarded at source state `2ee35177` plus dirty source; 12,042 tps and 163.77 GiB. Restore final-layer-only no-reshard.
+
+- Idea: compile attention modules together with FFN modules
+  Current best source commit: 8d99840e
+  Source: user asked to explore compiling portions of the model, and run389 shows attention is smaller than FFN but still nontrivial.
+  Expected mechanism: Compile each `layer.attention` module separately from the full TransformerBlock, avoiding residual/norm/full-block state while potentially fusing attention projection work around SDPA.
+  Supporting evidence: FFN-only compile succeeded where full-block compile failed, so another narrower module boundary might work.
+  Planned source/config changes: Temporarily add an `attention` compile component in `parallelize_qwen3`.
+  Planned command or config overrides: Current FFN-compile batch168 command with `--compile.components=loss,feed_forward,attention`.
+  Success criteria and expected risk: Success is completing 10 steps with tps above 12,115. Risk is reproducing the Inductor fake-tensor recursion seen in full-block compile.
+  Result: crashed at source state `8d99840e` plus dirty source; attention compile enters the component but fails before step 1 with the same `is_fake_tensor_same` recursion. Remove the experimental component.

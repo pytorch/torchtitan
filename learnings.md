@@ -9626,3 +9626,30 @@ Interpretation:
 - Expanding the no-reshard suffix from one to two layers does not help the batch168 FFN-compile setup.
 - Memory only increases slightly, so this is not a capacity failure; it is likely a worse FSDP scheduling/overlap point.
 - Restore final-layer-only no-reshard.
+
+## Experiment 391: Attention-Module Compile With Feed-Forward Compile
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,attention --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run391-mxfp8-correct-loss-plus-feed-forward-plus-attention-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added a Qwen3-local `attention` compile component that compiles each `layer.attention` module with `torch.compile(..., fullgraph=True)`.
+- Ran it together with the kept `feed_forward` compile component.
+
+Result:
+
+- Status: crash.
+- The log confirms `Compiling 40 Qwen3 attention modules with torch.compile`.
+- The run fails before step 1.
+- Failure signature: `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded`.
+- The recursion is again in `torch/_inductor/fx_utils.py:is_fake_tensor_same`.
+
+Interpretation:
+
+- Attention-module compile is blocked by the same fake-tensor recursion as full TransformerBlock compile.
+- FFN-only remains the only successful model-portion compile path so far.
+- Remove the experimental attention component rather than keeping an active dead option.
