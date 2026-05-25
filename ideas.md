@@ -3791,3 +3791,13 @@
   Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=172`.
   Success criteria and expected risk: Success is step-10 tps above 12,115 with finite loss and memory below 95%. Risk is a bad shape/variance point.
   Result: discarded at source state `f8c3de6f`; 11,880 tps and 166.62 GiB. Batch168 remains the active safe best.
+
+- Idea: loss chunks2 on FFN compile batch168
+  Current best source commit: 08a0521a
+  Source: after finding batch168 as the safe best, revisit the loss chunk count under the new FFN-compiled/larger-batch regime.
+  Expected mechanism: Fewer loss chunks may reduce repeated loss/lm_head overhead if memory remains below the risk line.
+  Supporting evidence: At batch128, chunks2 was valid but only tie-band; batch168 changes the per-step work and memory balance.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile batch168 command with `--loss.num_chunks=2`.
+  Success criteria and expected risk: Success is step-10 tps above 12,115 with memory below 95%. Risk is higher lm_head/loss residency and lower schedule stability.
+  Result: discarded at source state `08a0521a`; 12,078 tps and 168.28 GiB. Keep chunks4.

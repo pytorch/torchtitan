@@ -9533,3 +9533,30 @@ Interpretation:
 - Batch172 is worse than batch168 and batch176 while using more memory than batch168.
 - Keep batch168 as the active safe best among tested batch sizes.
 - The batch-size curve is not monotonic; avoid assuming larger is better without measuring exact shapes.
+
+## Experiment 388: Feed-Forward Compile Batch168 With Loss Chunks2
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=2 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run388-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-loss-chunks2-last-layer-no-reshard-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None relative to run387.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,078.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.28 GiB, 94.35%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.42332 at step 1 to 7.30571 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Reducing loss chunks from 4 to 2 at batch168 loses 37 tps versus chunks4 and costs about 4.6 GiB.
+- Keep `--loss.num_chunks=4` for the active batch168 FFN-compile command.
