@@ -8997,3 +8997,31 @@ Interpretation:
 
 - NCCL's default CTA policy is slower than `NCCL_CTA_POLICY=2` on the active no-cast batch128 chunks4 shape.
 - Keep `NCCL_CTA_POLICY=2`; the CTA-policy axis is now closed for both the old chunks8 and the new chunks4 MXFP8 shapes.
+
+## Experiment 369: Exact MXFP8 No-Cast Batch128 Chunks4 Rerun
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components='["loss"]' --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run369-rerun-mxfp8-no-fsdp-forward-input-casts-loss-only-compile-loss-chunks4-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as validation.
+- Step 10 `tps`: 11,318.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.26 GiB, 93.22%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.26820 at step 1 to 5.79854 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+- The same FSDP2 MXFP8 view-output warning appeared as in the no-cast source.
+
+Interpretation:
+
+- The rerun validates the active batch128 chunks4/no-cast shape and memory envelope, but does not beat the 11,386 tps sample from run365.
+- Keep the current best command as the baseline for partial-compile and FSDP-scheduling probes.

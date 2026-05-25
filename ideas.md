@@ -3601,3 +3601,13 @@
   Planned source/config changes: None.
   Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--loss.num_chunks=6`, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
   Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 10,650, record it as the new measured peak. Risk is only short-window variance.
+
+- Idea: exact MXFP8 no-cast batch128 chunks4 rerun
+  Current best source commit: bec0696b
+  Source: calibration after batch128 chunks4 became the safer MXFP8 peak and default NCCL CTA policy underperformed
+  Expected mechanism: Repeat the exact current-best command to separate short-run variance from the impact of the next source changes. The active best has a narrow lead over batch132 but materially lower memory, so a clean rerun is useful before changing compile granularity.
+  Supporting evidence: Run365 reached 11,386 tps at 166.26 GiB, while run368 showed omitting `NCCL_CTA_POLICY=2` regressed to 11,294 tps with the same memory. Prior exact reruns have sampled meaningful variance.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact current-best command with `NCCL_CTA_POLICY=2`, `--compile.components='["loss"]'`, `--loss.num_chunks=4`, local batch size 128, two persistent DataLoader workers, `--metrics.log_freq=1`, and `--comm.trace_buf_size=0`.
+  Success criteria and expected risk: Keep as calibration if finite, clean, and overall-decreasing. If step-10 tps exceeds 11,386, record it as the new measured peak. Risk is only short-window variance.
+  Result: kept as validation at source state `bec0696b`; 11,318 tps, N/A MFU, and 166.26 GiB peak memory. This confirms the current best shape remains healthy but did not beat run365.
