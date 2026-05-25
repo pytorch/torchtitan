@@ -9505,3 +9505,31 @@ Interpretation:
 - Batch168 beats the riskier batch176 while using substantially less memory.
 - This is the best default candidate so far: FFN compile, final-layer no-reshard, local batch168, loss chunks4.
 - A narrow batch172 probe can test whether there is a local optimum between 168 and 176.
+
+## Experiment 387: Feed-Forward Compile With Local Batch 172
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=172 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run387-mxfp8-correct-loss-plus-feed-forward-compile-lbs172-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None relative to run386.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,880.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.62 GiB, 93.42%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.61879 at step 1 to 6.52881 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Batch172 is worse than batch168 and batch176 while using more memory than batch168.
+- Keep batch168 as the active safe best among tested batch sizes.
+- The batch-size curve is not monotonic; avoid assuming larger is better without measuring exact shapes.

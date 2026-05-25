@@ -3781,3 +3781,13 @@
   Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=168`.
   Success criteria and expected risk: Success is tps near or above batch176 with peak memory below the preferred line. Risk is measurement variance or lower GEMM efficiency.
   Result: kept at source state `86982fb2`; 12,115 tps and 163.69 GiB. This beats batch176 and is the current safe best.
+
+- Idea: narrow FFN compile batch bracket at local batch172
+  Current best source commit: f8c3de6f
+  Source: batch168 beat batch176, but batch176 had a strong step 9 and larger memory occupancy; a midpoint can check whether there is a nearby shape optimum.
+  Expected mechanism: Batch172 increases work and memory modestly over batch168 while staying under the 95% preferred line.
+  Supporting evidence: Batch168 reached 12,115 tps at 163.69 GiB; batch176 reached 12,078 tps at 170.39 GiB.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current FFN-compile command with `--training.local_batch_size=172`.
+  Success criteria and expected risk: Success is step-10 tps above 12,115 with finite loss and memory below 95%. Risk is a bad shape/variance point.
+  Result: discarded at source state `f8c3de6f`; 11,880 tps and 166.62 GiB. Batch168 remains the active safe best.
