@@ -3841,3 +3841,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command.
   Success criteria and expected risk: Success is completing 10 steps with tps above 12,115. Risk is a remaining CUTE/CUTLASS package mismatch or FlexAttention compile failure.
   Result: crashed at source state `4518061b` plus dirty source; FlexAttention reaches the CUTE path but fails before step 1 because `flash_attn.cute.flash_fwd` imports missing `cutlass.utils.ampere_helpers`. Restore SDPA.
+
+- Idea: plain FlexAttention backend after FLASH block
+  Current best source commit: 3846faf1
+  Source: Flex FLASH is blocked by a CUTLASS helper mismatch, but plain FlexAttention does not request the CUTE FLASH backend.
+  Expected mechanism: Use the compiled Triton FlexAttention path and compare against SDPA on the active FFN-compile batch168 setup.
+  Supporting evidence: Run389 shows attention is nontrivial but not dominant; plain Flex may be enough to reduce the attention bucket without the FLASH dependency.
+  Planned source/config changes: Temporarily set `attn_backend="flex"` in `qwen3_14b()`.
+  Planned command or config overrides: Current FFN-compile batch168 command.
+  Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is FlexAttention autotune overhead, extra memory, or worse kernels for short seq128.
+  Result: discarded at source state `3846faf1` plus dirty source; 12,036 tps and 165.10 GiB. FlexAttention is valid but slower than SDPA here; restore SDPA.

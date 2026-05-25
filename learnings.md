@@ -9678,3 +9678,36 @@ Interpretation:
 - The CUTE path is now reached, so the previous missing `flash_attn.cute` block was partially fixed.
 - The remaining blocker is the specific CUTLASS Python helper layout expected by FlashAttention CUTE, not Qwen3 source logic.
 - Restore SDPA until the matching CUTLASS Python package or repo path is installed.
+
+Dependency note:
+
+- Tried upgrading `nvidia-cutlass-dsl` from 4.4.2 to 4.5.1, but it still did not provide `cutlass.utils.ampere_helpers`.
+- PyTorch also warned that 4.5.1 is not known-good for CUTE DSL in this checkout, so the environment was restored to `nvidia-cutlass-dsl==4.4.2` and `nvidia-cutlass-dsl-libs-base==4.4.2`.
+
+## Experiment 393: Plain FlexAttention Backend
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run393-mxfp8-flex-attention-correct-loss-plus-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed `qwen3_14b()` from `attn_backend="sdpa"` to `attn_backend="flex"`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,036.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 165.10 GiB, 92.57%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.39827 at step 1 to 5.71634 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+- FlexAttention autotuned successfully; best forward kernel was `triton_flex_attention_2` at about 0.49 ms and best backward kernel was `triton_flex_attention_backward_12` at about 1.19 ms.
+
+Interpretation:
+
+- Plain FlexAttention is viable, but it is slower than SDPA for this short-sequence Qwen3 14B setup and uses about 1.4 GiB more memory.
+- Keep SDPA as the active attention backend.
