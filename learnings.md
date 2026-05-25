@@ -9653,3 +9653,28 @@ Interpretation:
 - Attention-module compile is blocked by the same fake-tensor recursion as full TransformerBlock compile.
 - FFN-only remains the only successful model-portion compile path so far.
 - Remove the experimental attention component rather than keeping an active dead option.
+
+## Experiment 392: FlexAttention FLASH Backend
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run392-mxfp8-flex-flash-attention-correct-loss-plus-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed `qwen3_14b()` from `attn_backend="sdpa"` to `attn_backend="flex_flash"`.
+
+Result:
+
+- Status: crash / environment block.
+- The run fails before step 1 inside FlexAttention's compiled FLASH/CUTE path.
+- Failure signature: `ModuleNotFoundError: No module named 'cutlass.utils.ampere_helpers'`.
+- `flash_attn`, `flash_attn.cute`, and `cutlass` are importable, but the installed CUTLASS package does not provide the `cutlass.utils.ampere_helpers` module expected by `flash_attn.cute.flash_fwd`.
+
+Interpretation:
+
+- The CUTE path is now reached, so the previous missing `flash_attn.cute` block was partially fixed.
+- The remaining blocker is the specific CUTLASS Python helper layout expected by FlashAttention CUTE, not Qwen3 source logic.
+- Restore SDPA until the matching CUTLASS Python package or repo path is installed.

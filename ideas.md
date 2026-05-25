@@ -3831,3 +3831,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command with `--compile.components=loss,feed_forward,attention`.
   Success criteria and expected risk: Success is completing 10 steps with tps above 12,115. Risk is reproducing the Inductor fake-tensor recursion seen in full-block compile.
   Result: crashed at source state `8d99840e` plus dirty source; attention compile enters the component but fails before step 1 with the same `is_fake_tensor_same` recursion. Remove the experimental component.
+
+- Idea: FlexAttention FLASH backend after dependency reinstall
+  Current best source commit: 4518061b
+  Source: user installed/reinstalled FlashAttention and CUTLASS dependencies, and run389 shows attention remains a nontrivial bucket.
+  Expected mechanism: Switch Qwen3 14B from SDPA to FlexAttention FLASH to use the compiled CUTE/FLASH attention backend and potentially reduce attention time.
+  Supporting evidence: `flash_attn`, `flash_attn.cute`, and `cutlass` are now importable, unlike the earlier dependency state.
+  Planned source/config changes: Temporarily set `attn_backend="flex_flash"` in `qwen3_14b()`.
+  Planned command or config overrides: Current FFN-compile batch168 command.
+  Success criteria and expected risk: Success is completing 10 steps with tps above 12,115. Risk is a remaining CUTE/CUTLASS package mismatch or FlexAttention compile failure.
+  Result: crashed at source state `4518061b` plus dirty source; FlexAttention reaches the CUTE path but fails before step 1 because `flash_attn.cute.flash_fwd` imports missing `cutlass.utils.ampere_helpers`. Restore SDPA.
