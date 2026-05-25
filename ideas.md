@@ -3631,3 +3631,13 @@
   Planned command or config overrides: Current MXFP8 batch128 chunks4 baseline with `NCCL_CTA_POLICY=2` and `--compile.components=loss`.
   Success criteria and expected risk: Success is step-10 tps above 11,386 or lower memory with finite overall-decreasing loss. Risk is long first-step compile or loss-compile memory behavior different from the accidental no-compile baseline.
   Result: kept at source state `2378a302`; true loss compile logged, reached 11,524 tps, and lowered peak memory to 164.17 GiB. This is the new measured MXFP8 peak and establishes comma-separated component syntax as mandatory for future compile experiments.
+
+- Idea: corrected loss plus inner-attention compile
+  Current best source commit: eb44cd2e
+  Source: actual partial-compile test after the JSON-style component syntax failed to activate the new hook
+  Expected mechanism: Compile the loss and each SDPA inner-attention module while still excluding MXFP8 qkv/wo/feed-forward linears from Inductor. If attention Python/transpose overhead is material, this should beat corrected loss-only compile.
+  Supporting evidence: Run371 proved comma-separated `--compile.components=loss` activates loss compile and sets a new 11,524 tps baseline. Run370 proved the hook itself must be tested with comma-separated `loss,inner_attention`.
+  Planned source/config changes: Keep the temporary inner-attention compile hook active for this run.
+  Planned command or config overrides: Current MXFP8 batch128 chunks4 command with `--compile.components=loss,inner_attention`.
+  Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss. Risk is extra compile overhead or no benefit because attention is a smaller profile bucket.
+  Result: discarded at source state `eb44cd2e`; both compile logs fired and the run was valid, but step 10 reached 11,504 tps at the same 164.17 GiB memory. Inner-attention compile is a slight regression/tie-band result, so restore source and keep corrected loss-only compile.

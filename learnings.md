@@ -9083,3 +9083,32 @@ Interpretation:
 - The current best had been accidentally running with no matching compile component because JSON-style component syntax is wrong for TorchTitan's parser.
 - Correct loss compile is both faster and lower-memory than the prior 11,386 tps / 166.26 GiB best.
 - The new baseline for partial compile and batch-size probing is `--compile.components=loss`, local batch 128, chunks4, `NCCL_CTA_POLICY=2`.
+
+## Experiment 372: Correct Loss Plus Inner-Attention Compile
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,inner_attention --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run372-mxfp8-correct-loss-plus-inner-attention-compile-no-fsdp-forward-input-casts-loss-chunks4-sdpa-prefetch-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Used the temporary `inner_attention` compile component hook added in run370.
+
+Result:
+
+- Status: discard.
+- The log confirms both `Compiling the loss function with torch.compile` and `Compiling Qwen3 inner attention modules with torch.compile`.
+- Step 10 `tps`: 11,504.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 164.17 GiB, 92.05%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.29589 at step 1 to 6.10545 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Inner-attention compile is valid and avoids the MXFP8 linear compile crash, but it does not improve the corrected loss-only baseline.
+- This matches the profile: attention is not the dominant bucket after MXFP8; GEMM, casts/copies, and FSDP collectives dominate.
+- Remove the temporary hook from the active source and keep `--compile.components=loss` as the best compile configuration.

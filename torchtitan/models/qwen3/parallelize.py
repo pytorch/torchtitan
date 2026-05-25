@@ -68,13 +68,6 @@ def parallelize_qwen3(
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
-    if compile_config.enable and "inner_attention" in compile_config.components:
-        for layer in model.layers.values():
-            layer.attention.inner_attention.compile(
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
-        logger.info("Compiling Qwen3 inner attention modules with torch.compile")
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(
