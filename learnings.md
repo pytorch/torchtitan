@@ -9140,3 +9140,27 @@ Interpretation:
 
 - Correct loss compile makes batch132 fit under the preferred 95% memory line, but it is slower than batch128.
 - The throughput optimum did not move upward with the recovered memory; batch128 remains the best measured shape.
+
+## Experiment 374: Correct Loss Compile Batch130
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=130 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run374-mxfp8-correct-loss-compile-lbs130-no-fsdp-forward-input-casts-loss-chunks4-sdpa-prefetch-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: crash.
+- The run failed before step 1 in `torchao.prototype.mx_formats.kernels.triton_to_mxfp8_dim1`.
+- Error: `AssertionError: unsupported`, from `assert n_rows % max_row_tile_size == 0`.
+
+Interpretation:
+
+- With `seq_len=128`, `local_batch_size=130`, and `loss.num_chunks=4`, each loss chunk has 4160 rows. That is not divisible by the Triton dim1 MXFP8 128-row tile size.
+- Batch128 and batch132 work with chunks4 because their loss chunks have 4096 and 4224 rows respectively, both multiples of 128.
+- Future MXFP8 loss-chunk/batch-size probes must keep `(local_batch_size * seq_len / loss.num_chunks) % 128 == 0` for each chunk.

@@ -3651,3 +3651,13 @@
   Planned command or config overrides: Current corrected-loss baseline with `--training.local_batch_size=132`.
   Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss and memory below 95%. Risk is returning to memory pressure or reduced efficiency from a less favorable batch shape.
   Result: discarded at source state `1ebeea9a`; 11,427 tps, 168.51 GiB peak memory, and finite lower-overall loss. Batch132 now fits below 95%, but batch128 remains faster.
+
+- Idea: corrected loss compile at midpoint batch130
+  Current best source commit: ed7edca0
+  Source: midpoint batch-size probe after batch132 underperformed but batch128 remained best
+  Expected mechanism: Test whether the recovered loss-compile memory headroom has an optimum between 128 and 132.
+  Supporting evidence: Batch128 reached 11,524 tps at 164.17 GiB; batch132 reached 11,427 tps at 168.51 GiB. Batch130 would sit between them if its loss chunks satisfy MXFP8 shape constraints.
+  Planned source/config changes: None.
+  Planned command or config overrides: Current corrected-loss baseline with `--training.local_batch_size=130`.
+  Success criteria and expected risk: Success is step-10 tps above 11,524 with finite overall-decreasing loss. Risk is a TorchAO MXFP8 dim1 tile-shape failure if chunk rows are not a multiple of 128.
+  Result: crashed at source state `ed7edca0`; `local_batch_size=130`, `seq_len=128`, and `loss.num_chunks=4` produce 4160 rows per loss chunk, not divisible by the 128-row Triton dim1 tile. Close odd/midpoint batch sizes unless the chunking is adjusted to preserve the row multiple.
