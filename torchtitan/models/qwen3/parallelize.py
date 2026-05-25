@@ -30,6 +30,23 @@ from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
 
 
+def _compile_qwen3_feed_forward(
+    model: Qwen3Model, compile_config: CompileConfig
+) -> None:
+    compiled_count = 0
+    for layer in model.layers.values():
+        feed_forward = getattr(layer, "feed_forward", None)
+        if feed_forward is None:
+            continue
+        feed_forward.compile(backend=compile_config.backend, fullgraph=True)
+        compiled_count += 1
+
+    logger.info(
+        "Compiling %s Qwen3 feed-forward modules with torch.compile",
+        compiled_count,
+    )
+
+
 def parallelize_qwen3(
     model: Qwen3Model,
     *,
@@ -68,6 +85,8 @@ def parallelize_qwen3(
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
+    if compile_config.enable and "feed_forward" in compile_config.components:
+        _compile_qwen3_feed_forward(model, compile_config)
 
     fsdp_mesh = parallel_dims.get_mesh("fsdp")
     mp_policy = MixedPrecisionPolicy(

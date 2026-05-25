@@ -3741,3 +3741,13 @@
   Planned command or config overrides: Current corrected-loss command with `--compile.components=loss,model`.
   Success criteria and expected risk: Success is completing 10 steps with tps above the loss-only baseline. Risk is reproducing an Inductor/TorchAO compile crash before step 1.
   Result: crashed at source state `495d6d3b`; correct component syntax enters `Compiling each TransformerBlock with torch.compile`, but Inductor fails before step 1 with `RecursionError: maximum recursion depth exceeded` in `torch/_inductor/fx_utils.py:is_fake_tensor_same`. Full block compile remains blocked; move to smaller compiled portions.
+
+- Idea: compile only dense feed-forward modules
+  Current best source commit: 8ebdfc21
+  Source: follow-up to full TransformerBlock compile crash and user suggestion to compile portions of the model.
+  Expected mechanism: Compile only `layer.feed_forward` modules, which contain the hot MXFP8 MLP linears and SwiGLU elementwise work, while keeping attention, norms, residual adds, and whole-block state eager. This may capture the useful MXFP8 compile benefit without triggering full-block fake-tensor recursion.
+  Supporting evidence: Run382 proves the full-block compile component is blocked in Inductor. Run377's profile showed MXFP8 GEMMs/casts/copies dominate, and FFN is the largest dense linear region.
+  Planned source/config changes: Add a Qwen3-local `feed_forward` compile component in `parallelize_qwen3` that compiles each dense FFN module before FSDP wrapping.
+  Planned command or config overrides: Current corrected-loss command with `--compile.components=loss,feed_forward`.
+  Success criteria and expected risk: Success is completing 10 steps with tps above the active baseline and finite loss. Risk is the same Inductor recursion or a different MXFP8 tensor-subclass compile failure.
+  Result: kept at source state `8ebdfc21` plus dirty source; 11,662 tps and 133.23 GiB peak memory. This is a new measured peak and the first successful model-portion compile result.

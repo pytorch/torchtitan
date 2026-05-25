@@ -9390,3 +9390,34 @@ Interpretation:
 - Correct comma-separated component syntax does enable the built-in Qwen3 model compile path, but compiling each full `TransformerBlock` is still not viable on this MXFP8 stack.
 - The current failure is different from the earlier CUDA dim1 invalid-argument crash; the Triton dim1 workaround is active, but Inductor still fails during compiled-block handling.
 - Continue with smaller compiled regions that avoid full-block fake-tensor state: feed-forward only, attention-only, or selected suffix layers.
+
+## Experiment 383: Feed-Forward-Only Compile
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run383-mxfp8-correct-loss-plus-feed-forward-compile-last-layer-no-reshard-loss-chunks4-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Added Qwen3-local support for `feed_forward` in `--compile.components`.
+- When enabled, compile each dense `layer.feed_forward` module with `torch.compile(..., fullgraph=True)` before FSDP wrapping.
+- The built-in `model` component remains unchanged and still compiles whole TransformerBlocks.
+
+Result:
+
+- Status: keep; new measured peak.
+- Step 10 `tps`: 11,662.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 133.23 GiB, 74.70%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.52171 at step 1 to 5.86774 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+- New warning: `MXFP8TrainingWeightWrapperTensor does not implement _stable_hash_for_caching`; this is a compile-cache stability warning, not a runtime correctness failure.
+
+Interpretation:
+
+- Narrowing model compile to the FFN region avoids the full-block Inductor recursion and improves throughput by 127 tps over run380 and by 167 tps over run381.
+- Peak memory drops by about 30 GiB versus the loss-only/last-layer-no-reshard baseline, likely because compiled FFN reduces saved intermediates and/or allocator fragmentation around MXFP8 linears.
+- This is now the active best source direction. The low memory envelope creates room for follow-up batch-size and suffix-no-reshard experiments, but validate or profile before overfitting to one step-10 measurement.
