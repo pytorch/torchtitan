@@ -9598,3 +9598,31 @@ Interpretation:
 - FFN compile successfully moved the active best upward, but the remaining bottleneck is still a mix of MXFP8 linear work and FSDP collective imbalance.
 - The new profile makes rank-skewed reduce-scatter more prominent than the pre-FFN-compile profile, especially on ranks 4-7.
 - Next high-value source/config directions are FSDP scheduling/reshard granularity around the larger batch, attention compile only if cheap, and possibly FlexAttention now that dependencies were reinstalled.
+
+## Experiment 390: Final Two Transformer Layers No Reshard
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run390-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-last-two-layers-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed the Qwen3 FSDP policy to set `reshard_after_forward=False` for the final two transformer layers instead of only the final layer.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,042.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.77 GiB, 91.82%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.46308 at step 1 to 5.99032 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Expanding the no-reshard suffix from one to two layers does not help the batch168 FFN-compile setup.
+- Memory only increases slightly, so this is not a capacity failure; it is likely a worse FSDP scheduling/overlap point.
+- Restore final-layer-only no-reshard.

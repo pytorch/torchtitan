@@ -1,0 +1,343 @@
++ NGPU=8
++ export LOG_RANK=0
++ LOG_RANK=0
++ MODULE=qwen3
++ CONFIG=qwen3_14b
++ COMM_MODE=
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ '[' -n '' ']'
++ PYTORCH_ALLOC_CONF=expandable_segments:True
++ TORCHFT_LIGHTHOUSE=http://localhost:29510
++ torchrun --nproc_per_node=8 --rdzv_backend c10d --rdzv_endpoint=localhost:0 --local-ranks-filter 0 --role rank --tee 3 -m torchtitan.train --module qwen3 --config qwen3_14b --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run390-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-last-two-layers-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder
+W0524 20:02:57.725000 3241209 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] 
+W0524 20:02:57.725000 3241209 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+W0524 20:02:57.725000 3241209 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0524 20:02:57.725000 3241209 /home/avenkataraman/github/pytorch/torch/distributed/run.py:874] *****************************************
+[rank0]:W0524 20:03:04.172000 3242299 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'KernelPreference'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-24 20:03:04,909 - root - INFO - torchtitan version: 0.0.0+unknown (0.0.0 means __version__ is not defined correctly).
+[rank0]:[titan] 2026-05-24 20:03:04,916 - root - INFO - Converted modules to use dynamic mxfp8_rceil quantization for grouped_mm and linear ops
+[rank0]:[titan] 2026-05-24 20:03:04,969 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /home/avenkataraman/github/torchtitan/outputs/autoresearch/may19-qwen3-14b/run390-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-last-two-layers-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder/structured_logs/training.global_rank_0.20260524-200304-72Y0WT.jsonl
+[rank0]:[titan] 2026-05-24 20:03:06,195 - root - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[rank0]:[titan] 2026-05-24 20:03:06,197 - root - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=8, cp=1, tp=1, ep=1
+[rank0]:[titan] 2026-05-24 20:03:06,204 - root - INFO - Successfully created meshes with active dimensions: ['batch', 'loss', 'fsdp', 'efsdp']
+[rank0]:[titan] 2026-05-24 20:03:06,205 - root - INFO - [GC] Initial GC collection took 0.00 seconds
+[rank0]:NCCL version 2.29.7+cuda13.1
+[rank0]:/home/avenkataraman/.conda/envs/pytorch-3.12/lib/python3.12/site-packages/torchdata/stateful_dataloader/stateful_dataloader.py:379: UserWarning: 'set_vital' is deprecated, please do not call
+[rank0]:  torch.set_vital("Dataloader", "enabled", "True")  # type: ignore[attr-defined]
+[rank0]:[titan] 2026-05-24 20:03:09,564 - root - INFO - Loading tokenizer from tokenizer.json
+[rank0]:[rank0]:W0524 20:03:09.647000 3242299 /home/avenkataraman/github/pytorch/torch/utils/_pytree.py:630] <enum 'ScaleCalculationMode'> is an Enum subclass and is now natively supported by torch.compile as an opaque value type. Calling register_constant() on Enum subclasses is deprecated and will be an error in a future release.
+[rank0]:[titan] 2026-05-24 20:03:09,568 - root - INFO - Preparing c4_test dataset from tests/assets/c4_test
+[rank0]:[titan] 2026-05-24 20:03:09,592 - root - INFO - Building qwen3 14B
+[rank0]:[titan] 2026-05-24 20:03:09,926 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,927 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,927 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,927 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,928 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,929 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,929 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,930 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,930 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,930 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,931 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,931 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,932 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,932 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,933 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,933 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,934 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,934 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,935 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,935 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,935 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,936 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,936 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,937 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,937 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,938 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,938 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,938 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,939 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,939 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,940 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,940 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,941 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,941 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,941 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,942 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,942 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,943 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,943 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,944 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,944 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,944 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,945 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,945 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,946 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,946 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,947 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,947 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,947 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,948 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,948 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,949 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,949 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,950 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,950 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,950 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,951 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,951 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,952 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,952 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,953 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,953 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,953 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,954 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,954 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,955 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,955 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,956 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,956 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,956 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,957 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,957 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,957 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,958 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,959 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,959 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,959 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,960 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,960 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,960 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,961 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,961 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,962 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,962 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,963 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,963 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,963 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,964 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,964 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,965 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,965 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,966 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,966 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,966 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,967 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,967 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,968 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,968 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,969 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,969 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,969 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,970 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,970 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,971 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,971 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,972 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,972 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,972 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,973 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,973 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,974 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,974 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,975 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,975 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,975 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,975 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,976 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,976 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,977 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,978 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,978 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,978 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,978 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,979 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,979 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,980 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,980 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,981 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,981 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,981 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,982 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,982 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,983 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,984 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,984 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,984 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,985 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,985 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,986 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,986 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,987 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,987 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,987 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,988 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,988 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,989 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,989 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,990 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,990 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,990 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,990 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,991 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,991 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,992 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,993 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,993 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,993 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,993 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,994 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,994 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,995 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,995 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,996 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,996 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,996 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,997 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,997 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,998 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,998 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,999 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,999 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:09,999 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,000 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,000 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,001 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,001 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,002 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,002 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,002 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,003 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,003 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,004 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,004 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,005 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,005 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,005 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,006 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,006 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,006 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,007 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,008 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,008 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,008 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,009 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,009 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,010 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,010 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,011 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,011 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,011 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,012 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,012 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,013 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,013 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,014 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,014 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,014 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,015 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,015 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,016 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,017 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,017 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,017 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,017 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,018 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,018 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,019 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,020 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,020 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,020 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,020 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,021 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,021 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,022 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,023 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,023 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,023 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,024 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,024 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,025 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,025 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,026 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,026 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,026 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,027 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,027 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,028 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,028 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,029 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,029 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,029 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,030 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,030 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,031 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,031 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,032 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,032 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,032 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,033 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,033 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,034 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,034 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,035 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,035 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,035 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,036 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,036 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,037 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,037 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,038 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,038 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,038 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,039 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,039 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,040 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,040 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,041 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,041 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,041 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,042 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,042 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,043 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,043 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,044 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,044 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,044 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,045 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,045 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,046 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,046 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,047 - torchao.prototype.moe_training.conversion_utils - INFO - Swapped .weight to MXFP8TrainingWeightWrapperTensor
+[rank0]:[titan] 2026-05-24 20:03:10,048 - root - INFO - CUDA capacity: NVIDIA B200 with 178.35GiB memory
+[rank0]:[titan] 2026-05-24 20:03:10,203 - root - INFO - Total parameter count: dense 14,768,307,200, sparse 0, active 14,768,307,200
+[rank0]:[titan] 2026-05-24 20:03:10,203 - root - INFO - [34mModel qwen3 14B [31msize: 14,768,307,200 total parameters[39m
+[rank0]:[titan] 2026-05-24 20:03:10,203 - root - INFO - Compiling the loss function with torch.compile
+[rank0]:[titan] 2026-05-24 20:03:10,219 - root - INFO - Compiling 40 Qwen3 feed-forward modules with torch.compile
+[rank0]:[titan] 2026-05-24 20:03:10,420 - root - INFO - Applied baseline Qwen3 FSDP with dp_shard=8, reshard_after_forward=True
+[rank0]:[titan] 2026-05-24 20:03:10,908 - root - INFO - Peak FLOPS used for computing MFU: 2.250e+15
+[rank0]:[titan] 2026-05-24 20:03:10,908 - root - INFO - CUDA memory usage for model: 4.18GiB(2.35%)
+[rank0]:[titan] 2026-05-24 20:03:10,911 - root - WARNING - Warmup steps (600) exceed total steps (10). Adjusting warmup steps to 10.
+[rank0]:[titan] 2026-05-24 20:03:10,911 - root - WARNING - model.safetensors.index.json not found at hf_assets_path: ./tests/assets/tokenizer/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format
+[rank0]:[titan] 2026-05-24 20:03:10,933 - root - INFO - Trainer is initialized with local batch size 168, global batch size 1344, gradient accumulation steps 1, sequence length 128, total steps 10 (warmup 600)
+[rank0]:[titan] 2026-05-24 20:03:10,933 - root - INFO - Training starts at step 1
+[rank0]:/home/avenkataraman/github/pytorch/torch/_functorch/_aot_autograd/autograd_cache.py:623: UserWarning: MXFP8TrainingWeightWrapperTensor does not implement _stable_hash_for_caching. For PT2-compatible tensor subclasses, it is recommended to implement _stable_hash_for_caching(self) -> str for stable AOT autograd caching.
+[rank0]:  warn_once(
+[rank0]:/home/avenkataraman/github/pytorch/torch/distributed/fsdp/_fully_shard/_fsdp_state.py:317: UserWarning: FSDP2-wrapped module (FSDPMXFP8Linear) returned a view tensor. An in-place op on this view (e.g., `x += y`) will silently drop the pre-backward hook and skip the all-gather, which can cause backward to fail or produce wrong gradients. Use out-of-place ops (`out = out + y`, not `out += y`) or `.clone()` the output before any in-place op.
+[rank0]:  output = self._register_pre_backward_hook(output)
+[rank0]:[titan] 2026-05-24 20:03:45,621 - root - INFO - [31mstep:  1  [32mloss: 12.46308  [38;2;180;60;0mgrad_norm: 24.5000  [38;2;54;234;195mmemory: 156.85GiB(87.95%)  [34mtps: 607  [36mtflops: 51.15  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:03:45,621 - root - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:01:40
+[rank0]:/home/avenkataraman/github/torchtitan/torchtitan/distributed/utils.py:468: UserWarning: Set timeout is now only supported for either nccl or gloo.
+[rank0]:  torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+[rank0]:[titan] 2026-05-24 20:03:48,345 - root - INFO - [31mstep:  2  [32mloss: 11.31569  [38;2;180;60;0mgrad_norm: 57.0000  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 7,896  [36mtflops: 665.25  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:03:50,213 - root - INFO - [31mstep:  3  [32mloss: 13.49250  [38;2;180;60;0mgrad_norm: 26.6250  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 11,512  [36mtflops: 969.96  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:03:52,039 - root - INFO - [31mstep:  4  [32mloss: 12.35226  [38;2;180;60;0mgrad_norm: 48.5000  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 11,778  [36mtflops: 992.39  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:03:53,866 - root - INFO - [31mstep:  5  [32mloss: 11.01599  [38;2;180;60;0mgrad_norm: 37.7500  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 11,773  [36mtflops: 991.96  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:03:55,658 - root - INFO - [31mstep:  6  [32mloss: 10.24826  [38;2;180;60;0mgrad_norm: 45.5000  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 12,003  [36mtflops: 1,011.37  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:03:57,495 - root - INFO - [31mstep:  7  [32mloss:  7.71050  [38;2;180;60;0mgrad_norm: 36.2500  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 11,708  [36mtflops: 986.44  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:03:59,284 - root - INFO - [31mstep:  8  [32mloss:  6.33886  [38;2;180;60;0mgrad_norm: 28.3750  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 12,020  [36mtflops: 1,012.81  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:04:01,087 - root - INFO - [31mstep:  9  [32mloss:  6.01404  [38;2;180;60;0mgrad_norm: 52.0000  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 11,932  [36mtflops: 1,005.39  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:04:02,873 - root - INFO - [31mstep: 10  [32mloss:  5.99032  [38;2;180;60;0mgrad_norm: 29.5000  [38;2;54;234;195mmemory: 163.77GiB(91.82%)  [34mtps: 12,042  [36mtflops: 1,014.65  [35mmfu: N/A[39m
+[rank0]:[titan] 2026-05-24 20:04:02,873 - root - INFO - Sleeping 2 seconds for other ranks to complete
+[rank0]:[titan] 2026-05-24 20:04:04,874 - root - INFO - Training completed
+[rank0]:[titan] 2026-05-24 20:04:09,011 - root - INFO - Process group destroyed

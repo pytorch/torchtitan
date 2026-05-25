@@ -3811,3 +3811,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command plus profiler active on step 10.
   Success criteria and expected risk: Success is complete traces with finite loss and no allocator/OOM. Profiled tps is not used for ranking.
   Result: kept as profile data at source state `3ea71eed`; profiled step 10 reached 11,959 tps and 163.69 GiB. Trace shows rank-skewed reduce-scatter is now the most prominent uneven bucket, with rank6 around 1.91 s reduce-scatter time, while MXFP8 GEMMs/casts/copies remain large and attention is smaller but nontrivial.
+
+- Idea: final two transformer layers no-reshard under FFN compile batch168
+  Current best source commit: 2ee35177
+  Source: run389 profile shows rank-skewed FSDP reduce-scatter remains a dominant uneven bucket.
+  Expected mechanism: Extending the no-reshard suffix from one to two final layers may reduce late FSDP gather/reshard churn and improve overlap around the `lm_head` boundary.
+  Supporting evidence: Final-layer-only no-reshard improved the earlier corrected-loss baseline and remains part of the current best. Batch168 still has memory margin.
+  Planned source/config changes: Temporarily set `reshard_after_forward=False` for `layers[-2:]` instead of only `layers[-1]`.
+  Planned command or config overrides: Current FFN-compile batch168 command.
+  Success criteria and expected risk: Success is step-10 tps above 12,115 with finite loss and memory below the preferred line. Risk is worse overlap despite similar memory.
+  Result: discarded at source state `2ee35177` plus dirty source; 12,042 tps and 163.77 GiB. Restore final-layer-only no-reshard.
