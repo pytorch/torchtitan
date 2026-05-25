@@ -3901,3 +3901,13 @@
   Planned command or config overrides: Current FFN-compile batch168 command with `TORCHINDUCTOR_MAX_AUTOTUNE=1`.
   Success criteria and expected risk: Success is step-10 tps above 12,115. Risk is extra compile time with no better steady-state.
   Result: discarded at source state `8e2327aa`; 11,943 tps and 163.69 GiB. Keep default Inductor settings.
+
+- Idea: exact active FFN compile batch168 rerun
+  Current best source commit: 5e056bb8
+  Source: validate the current measured peak after many adjacent experiments restored source and environment state.
+  Expected mechanism: Repeat the active command exactly to see whether run386's 12,115 tps is durable.
+  Supporting evidence: Run386 is the best safe result, but several later nearby runs landed between 11,845 and 12,078 tps.
+  Planned source/config changes: None.
+  Planned command or config overrides: Exact active FFN-compile batch168 command.
+  Success criteria and expected risk: Success is reproducing near 12,115 tps with 163.69 GiB memory. Risk is confirming significant step-10 variance.
+  Result: kept as validation at source state `5e056bb8`; 11,845 tps and 163.69 GiB. The source/command is valid, but the measured peak is variance-sensitive.

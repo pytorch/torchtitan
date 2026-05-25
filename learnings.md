@@ -9845,3 +9845,30 @@ Interpretation:
 
 - Enabling Inductor max autotune does not improve the active FFN-compile setup.
 - Keep the default Inductor settings.
+
+## Experiment 399: Active FFN Compile Batch168 Rerun
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run399-rerun-mxfp8-correct-loss-plus-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as validation.
+- Step 10 `tps`: 11,845.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.47335 at step 1 to 6.36463 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- The active FFN-compile batch168 source/command is valid, but the 12,115 tps run386 value is not durably reproduced in this exact rerun.
+- Keep the command as the best measured source/config, but treat the steady expectation as variance-sensitive rather than a guaranteed 12.1k tps result.
