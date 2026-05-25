@@ -86,8 +86,14 @@ def parallelize_qwen3(
     }
 
     layers = list(model.layers.values())
-    for layer in layers:
-        fully_shard(layer, **fsdp_config)
+    for idx, layer in enumerate(layers):
+        layer_fsdp_config = fsdp_config
+        if idx == len(layers) - 1:
+            layer_fsdp_config = {
+                **fsdp_config,
+                "reshard_after_forward": False,
+            }
+        fully_shard(layer, **layer_fsdp_config)
     fully_shard(model.lm_head, **fsdp_config)
     fully_shard(model, **fsdp_config)
     if layers:

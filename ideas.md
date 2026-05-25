@@ -3711,3 +3711,13 @@
   Planned command or config overrides: Current corrected-loss chunks4 baseline with `NCCL_CTA_POLICY` omitted.
   Success criteria and expected risk: Success is step-10 tps above 11,524 with finite lower-overall loss. Risk is repeating the prior default-policy regression.
   Result: discarded at source state `8ec8dbc6`; 11,248 tps and unchanged 164.17 GiB memory. Keep `NCCL_CTA_POLICY=2`.
+
+- Idea: disable final transformer layer reshard after forward
+  Current best source commit: 1eed10e5
+  Source: narrow FSDP scheduling follow-up after corrected-loss profile still showed FSDP collective skew and two-module prefetch regressed
+  Expected mechanism: Keep per-layer FSDP but leave only the final transformer layer unresharded after forward. This may avoid one late all-gather boundary near `lm_head`/loss while adding much less residency than grouping layers or disabling reshard on multiple layers.
+  Supporting evidence: Corrected loss compile lowered the memory envelope, and the profile still shows FSDP collective time. Earlier broad grouping and two-module prefetch were too coarse; a one-layer suffix no-reshard is a narrower probe.
+  Planned source/config changes: In `parallelize_qwen3`, pass `reshard_after_forward=False` only for `layers[-1]`; keep all other FSDP configs unchanged.
+  Planned command or config overrides: Current corrected-loss chunks4 baseline.
+  Success criteria and expected risk: Success is step-10 tps above 11,524 with finite loss and no memory regression above the preferred envelope. Risk is extra parameter residency or no useful overlap change.
+  Result: kept at source state `1eed10e5` plus the dirty final-layer no-reshard patch; 11,535 tps, 163.64 GiB, finite lower-overall loss, and no allocator warnings. This is a new measured peak; validate with an exact rerun.

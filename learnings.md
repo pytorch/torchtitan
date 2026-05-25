@@ -9309,3 +9309,31 @@ Interpretation:
 
 - Omitting `NCCL_CTA_POLICY=2` remains slower after correcting the compile component syntax.
 - Keep `NCCL_CTA_POLICY=2` on the active corrected-loss baseline.
+
+## Experiment 380: Last Transformer Layer No Reshard
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=128 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run380-mxfp8-correct-loss-compile-last-layer-no-reshard-loss-chunks4-seq128-lbs128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- In Qwen3 FSDP setup, set `reshard_after_forward=False` only for the final transformer layer.
+- All other transformer layers, `lm_head`, root FSDP, mixed precision, and one-module prefetch remain unchanged.
+
+Result:
+
+- Status: keep; new measured peak.
+- Step 10 `tps`: 11,535.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.64 GiB, 91.75%.
+- No allocator retry or OOM warnings were logged.
+- Loss moved from 12.36016 at step 1 to 5.87149 at step 10; finite and overall decreasing.
+- `grad_norm` remained nonzero.
+
+Interpretation:
+
+- Disabling final-layer reshard improves throughput and lowers measured peak memory under the corrected-loss baseline.
+- This is the first FSDP scheduling/source change after the parser fix that beats the baseline; keep it and validate with an exact rerun.
