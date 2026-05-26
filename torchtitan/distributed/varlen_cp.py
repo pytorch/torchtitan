@@ -9,10 +9,6 @@
 Houses :class:`CPVarlenMetadata`, the CP-specific extension of
 :class:`~torchtitan.models.common.attention.VarlenMetadata` that adds
 ``k_local_indices`` and the per-rank metadata builder.
-
-Lives under ``torchtitan/distributed/`` because it is model-agnostic CP
-infrastructure; the base :class:`VarlenMetadata` data type stays in
-``models/common/attention.py`` so attention modules don't depend on CP internals.
 """
 
 from __future__ import annotations
@@ -40,11 +36,11 @@ class CPVarlenMetadata(VarlenMetadata):
     ``isinstance`` and applies ``index_select(0, k_local_indices)`` to K (and V) before
     the kernel call; the base type and non-CP callers are unaffected.
 
-    Because CP shards the sequence dim (not the batch), under DTensor Replicate-on-CP
-    the rank-local packed K can have unused gaps between per-segment visible regions
-    when ``B > 1``; ``k_local_indices`` picks out just those regions. When a load
-    balancer is active the indices also compose with the per-batch inverse permutation
-    so the gather hits the correct entries in the rearranged K/V.
+    Because CP shards the sequence dim, after K and V are allgathered the rank-local
+    packed K can have unused gaps between per-segment visible regions when ``B > 1``;
+    ``k_local_indices`` picks out just those regions. When a load balancer is active
+    the indices also compose with the per-batch inverse permutation so the gather hits
+    the correct entries in the rearranged K/V.
     """
 
     k_local_indices: torch.Tensor
@@ -73,7 +69,7 @@ class CPVarlenMetadata(VarlenMetadata):
         Self-attention only (``cu_seq_q == cu_seq_k``); all segment construction is
         vectorized.
 
-        Called from :func:`cp_shard` on every training step. All host-visible syncs
+        This is called on every training step. All host-visible syncs
         are fused into the single ``torch.stack(...).cpu().tolist()`` below; avoid
         adding more.
 
@@ -85,13 +81,13 @@ class CPVarlenMetadata(VarlenMetadata):
               cu_seq_q        = [0, 3, 5]         (segment lengths 3, 2)
               cu_seq_k        = [0, 6, 8]         (visible K per segment 6, 2)
               max_q, max_k    = 3, 6
-              k_local_indices = [7, 8, 9, 10, 11, 12,  13, 14]
+              k_local_indices = [7, 8, 9, 10, 11, 12, 13, 14]
 
         Example (non-contiguous K under ``B > 1``):
             ``B=2, S=20, CP=4, rank 2``, same docs per batch as above. ``K_packed``
             (length ``B*S = 40``) places batch 1 after batch 0, so a rank's visible
             K per segment lives inside one batch's range; consecutive segments
-            straddle the batch boundary. ``k_local_indices`` (length 16) concatenates
+            may belong to different batches. ``k_local_indices`` (length 16) concatenates
             the visible slices [7..13), [13..15), [27..33), [33..35).
         """
         if isinstance(global_metadata, CPVarlenMetadata):
@@ -108,17 +104,6 @@ class CPVarlenMetadata(VarlenMetadata):
                 "cu_seq_q and cu_seq_k must be the same tensor object."
             )
         cu_seq_q_global = global_metadata.cu_seq_q
-        expected_total = batch_size * seq_length
-        if cu_seq_q_global.ndim != 1 or cu_seq_q_global.numel() < 2:
-            raise ValueError(
-                "VarlenMetadata.cu_seq_q must be a 1-D tensor with at least "
-                f"2 entries; got shape {tuple(cu_seq_q_global.shape)}."
-            )
-        if cu_seq_q_global.dtype not in (torch.int32, torch.int64):
-            raise ValueError(
-                "VarlenMetadata.cu_seq_q must be int32 or int64; "
-                f"got {cu_seq_q_global.dtype}."
-            )
 
         if device_mesh.ndim != 1:
             raise ValueError(
@@ -145,53 +130,47 @@ class CPVarlenMetadata(VarlenMetadata):
         device = cu_seq_q_global.device
         dtype = cu_seq_q_global.dtype
 
-        # Per-batch forward / inverse permutation from the load balancer; ``None``
-        # means no rearrangement.
-        rearrange_per_batch: torch.Tensor | None = None
+        # Per-batch token ordering: (B, S) mapping from slot position to
+        # original token index. Without a load balancer this is just arange;
+        # with one, it is the balancer's rearrangement permutation.
+        tok_indices_per_batch: torch.Tensor
         restore_per_batch: torch.Tensor | None = None
-        if load_balancer is not None:
-            rearrange_indices = load_balancer._generate_indices(restore=False)
-            if rearrange_indices is not None:
-                if rearrange_indices.ndim != 2 or rearrange_indices.shape[0] not in (
-                    1,
-                    batch_size,
-                ):
-                    raise ValueError(
-                        "load balancer indices must have shape (1, seq_length) "
-                        "or (batch_size, seq_length); got "
-                        f"{tuple(rearrange_indices.shape)}."
-                    )
-                rearrange_indices = rearrange_indices.to(dtype)
-                # (1, S): same permutation across batches (e.g. headtail);
-                # argsort once and expand both permutations.
-                # (B, S): per-batch permutation (e.g. _VarlenPTRRLoadBalancer);
-                # argsort per row.
-                if rearrange_indices.shape[0] == 1:
-                    rearrange_per_batch = rearrange_indices.expand(batch_size, -1)
-                    restore_per_batch = torch.argsort(rearrange_indices, dim=-1).expand(
-                        batch_size, -1
-                    )
-                else:
-                    rearrange_per_batch = rearrange_indices
-                    restore_per_batch = torch.argsort(rearrange_indices, dim=-1)
-
-        # Per-batch local-to-global seq mapping, (batch_size, shard_len) in
-        # [0, seq_length).
-        if rearrange_per_batch is None:
-            rank_q_indices = (
-                torch.arange(
-                    cp_rank * shard_len,
-                    (cp_rank + 1) * shard_len,
-                    device=device,
-                    dtype=dtype,
-                )
+        if load_balancer is None:
+            tok_indices_per_batch = (
+                torch.arange(seq_length, device=device, dtype=dtype)
                 .unsqueeze(0)
                 .expand(batch_size, -1)
             )
         else:
-            rank_q_indices = rearrange_per_batch[
-                :, cp_rank * shard_len : (cp_rank + 1) * shard_len
-            ]
+            rearrange_indices = load_balancer._generate_indices(restore=False)
+            if rearrange_indices is None:
+                raise ValueError(
+                    "load_balancer._generate_indices() returned None; "
+                    "a load balancer must return a tensor."
+                )
+            if rearrange_indices.ndim != 2 or rearrange_indices.shape[0] not in (
+                1,
+                batch_size,
+            ):
+                raise ValueError(
+                    "load balancer indices must have shape (1, seq_length) "
+                    "or (batch_size, seq_length); got "
+                    f"{tuple(rearrange_indices.shape)}."
+                )
+            rearrange_indices = rearrange_indices.to(dtype)
+            if rearrange_indices.shape[0] == 1:
+                tok_indices_per_batch = rearrange_indices.expand(batch_size, -1)
+                restore_per_batch = torch.argsort(rearrange_indices, dim=-1).expand(
+                    batch_size, -1
+                )
+            else:
+                tok_indices_per_batch = rearrange_indices
+                restore_per_batch = torch.argsort(rearrange_indices, dim=-1)
+
+        # Per-batch local-to-global seq mapping.
+        rank_q_indices = tok_indices_per_batch[
+            :, cp_rank * shard_len : (cp_rank + 1) * shard_len
+        ]
 
         # Per-batch -> packed global positions, row-major across batch (matches the
         # rank's local packed Q layout).
@@ -218,8 +197,6 @@ class CPVarlenMetadata(VarlenMetadata):
         diff_doc = doc_id[1:] != doc_id[:-1]
         diff_global = packed_local_to_global[1:] != packed_local_to_global[:-1] + 1
         is_break = diff_doc | diff_global
-        # nonzero() always returns int64; cast back so downstream arithmetic stays in
-        # cu_seq_q_global.dtype (typically int32).
         seg_starts_inner = (is_break.nonzero(as_tuple=False).squeeze(-1) + 1).to(dtype)
         seg_starts = torch.cat(
             [torch.zeros(1, dtype=dtype, device=device), seg_starts_inner]
@@ -243,29 +220,10 @@ class CPVarlenMetadata(VarlenMetadata):
             [torch.zeros(1, dtype=dtype, device=device), seqlen_k.cumsum(0).to(dtype)]
         )
 
-        # Fuse max_q / max_k / total_k and cu_seq_q endpoint validation into a single
-        # D2H transfer to keep one sync point per forward. The endpoint check below
-        # raises before any wrong values escape the function, so it does not need to
-        # gate the work above.
-        max_q, max_k, total_k, first, last = (
-            torch.stack(
-                [
-                    seqlen_q.max(),
-                    seqlen_k.max(),
-                    seqlen_k.sum(),
-                    cu_seq_q_global[0],
-                    cu_seq_q_global[-1],
-                ]
-            )
-            .cpu()
-            .tolist()
+        # Fuse max_q / max_k / total_k into a single D2H transfer to keep only one D2H.
+        max_q, max_k, total_k = (
+            torch.stack([seqlen_q.max(), seqlen_k.max(), seqlen_k.sum()]).cpu().tolist()
         )
-        if first != 0 or last != expected_total:
-            raise ValueError(
-                "VarlenMetadata.cu_seq_q must start at 0 and end at "
-                f"batch_size * seq_length = {expected_total}; got endpoints "
-                f"({first}, {last})."
-            )
 
         # Flat gather index (length total_k) over original K coords; per segment
         # covers [doc_global_start, last_global], built via repeat_interleave +

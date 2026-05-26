@@ -283,9 +283,8 @@ def cp_shard(
         ),
     )
 
-    # BlockMask path uses the upstream dispatcher (shard Q seq dim only; KV stays
-    # full). VarlenMetadata path uses the local CPVarlenMetadata builder since the
-    # CP-aware varlen logic lives entirely in torchtitan.
+    # BlockMask path uses the PyTorch API to mask sharded Q with rearranged
+    # KV. VarlenMetadata path uses the local CPVarlenMetadata builder.
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None:
         if isinstance(attention_masks, VarlenMetadata):
