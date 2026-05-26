@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import torchstore as ts
 from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -57,7 +58,10 @@ def compute_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Ten
     shift_targets = token_ids[:, 1:]
     B, S = shift_targets.shape
     return -F.cross_entropy(
-        shift_logits.reshape(B * S, -1), shift_targets.reshape(B * S), reduction="none"
+        shift_logits.reshape(B * S, -1),
+        shift_targets.reshape(B * S),
+        reduction="none",
+        ignore_index=IGNORE_INDEX,
     ).reshape(B, S)
 
 
@@ -73,29 +77,29 @@ class PartialLogprobDrift:
 @torch.no_grad()
 @sl.log_trace_span("verify_logprob_identity")
 def verify_logprob_identity(
-    ref_logprobs: torch.Tensor,
+    generator_logprobs: torch.Tensor,
     policy_logprobs: torch.Tensor,
-    response_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
     *,
     num_global_valid_tokens: int,
 ) -> PartialLogprobDrift:
     """Compute per-rank drift between generator and trainer logprobs.
 
     Args:
-        ref_logprobs: [B, L] reference (generator) logprobs from TrainingBatch.
+        generator_logprobs: [B, L] generator logprobs from TrainingBatch.
         policy_logprobs: [B, L] trainer-computed logprobs.
-        response_mask: [B, L] binary mask; 1.0 for response tokens.
+        loss_mask: [B, L] binary mask; 1.0 for response tokens.
         num_global_valid_tokens: Total response tokens across all DP ranks.
 
     Returns:
         PartialLogprobDrift.
     """
-    mask = response_mask.bool()
-    ref_flat = ref_logprobs[mask].float()
+    mask = loss_mask.bool()
+    ref_flat = generator_logprobs[mask].float()
     policy_flat = policy_logprobs[mask].float()
 
     if ref_flat.numel() == 0:
-        zero = torch.zeros((), dtype=torch.float32, device=ref_logprobs.device)
+        zero = torch.zeros((), dtype=torch.float32, device=generator_logprobs.device)
         return PartialLogprobDrift(zero, zero, zero)
 
     denom = max(num_global_valid_tokens, 1)
@@ -398,8 +402,8 @@ class PolicyTrainer(Actor, Configurable):
         device = self.device
         token_ids = local_batch.token_ids.to(device)
         positions = local_batch.positions.to(device)
-        response_mask = local_batch.response_mask.to(device)
-        ref_logprobs = local_batch.ref_logprobs.to(device)
+        loss_mask = local_batch.loss_mask.to(device)
+        generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
         attention_masks = create_varlen_metadata_for_document(positions)
@@ -408,7 +412,7 @@ class PolicyTrainer(Actor, Configurable):
             logits = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-        # compute_logprobs returns [B, L-1]; pad to [B, L] to align with response_mask
+        # compute_logprobs returns [B, L-1]; pad to [B, L] to align with loss_mask
         policy_logprobs = torch.nn.functional.pad(
             compute_logprobs(logits, token_ids), (1, 0), value=0.0
         )
@@ -416,8 +420,8 @@ class PolicyTrainer(Actor, Configurable):
         with sl.log_trace_span("loss_fn"):
             loss, loss_metrics = self.loss_fn(
                 policy_logprobs=policy_logprobs,
-                ref_logprobs=ref_logprobs,
-                response_mask=response_mask,
+                generator_logprobs=generator_logprobs,
+                loss_mask=loss_mask,
                 advantages=advantages,
                 num_global_valid_tokens=num_global_valid_tokens,
             )
@@ -428,9 +432,9 @@ class PolicyTrainer(Actor, Configurable):
 
         # Metrics for bitwise verification of policy logprobs.
         verification: PartialLogprobDrift = verify_logprob_identity(
-            ref_logprobs=ref_logprobs,
+            generator_logprobs=generator_logprobs,
             policy_logprobs=policy_logprobs,
-            response_mask=response_mask,
+            loss_mask=loss_mask,
             num_global_valid_tokens=num_global_valid_tokens,
         )
 

@@ -28,7 +28,7 @@ import os
 import statistics
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # must run before torch import
@@ -39,10 +39,8 @@ import torchstore as ts
 from monarch.actor import this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
-from torchtitan.components.dataloading.utils import pack
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
-    BatchConfig,
     CompileConfig,
     ConfigManager,
     Configurable,
@@ -50,13 +48,9 @@ from torchtitan.config import (
 )
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.batcher import Batcher
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.types import (
-    Completion,
-    Episode,
-    TrainingBatch,
-    Trajectory,
-)
+from torchtitan.experiments.rl.types import Completion, Episode, Trajectory
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -72,9 +66,9 @@ class GRPOLoss(Configurable):
         clipped_t = clamp(ratio_t, 1 - ε, 1 + ε)
         loss_t = -min(ratio_t * A_t, clipped_t * A_t)
 
-    The final scalar loss is the sum of per-token losses over response
-    tokens (where ``response_mask == 1``), divided by
-    ``num_global_valid_tokens`` (total response tokens across all
+    The final scalar loss is the sum of per-token losses over loss
+    positions (where ``loss_mask == 1``), divided by
+    ``num_global_valid_tokens`` (total loss positions across all
     microbatches and DP ranks).  This normalization ensures that
     gradient accumulation across microbatches produces the same
     result as a single large-batch forward pass.
@@ -91,8 +85,8 @@ class GRPOLoss(Configurable):
     def __call__(
         self,
         policy_logprobs: torch.Tensor,
-        ref_logprobs: torch.Tensor,
-        response_mask: torch.Tensor,
+        generator_logprobs: torch.Tensor,
+        loss_mask: torch.Tensor,
         advantages: torch.Tensor,
         num_global_valid_tokens: int,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -100,8 +94,8 @@ class GRPOLoss(Configurable):
 
         Args:
             policy_logprobs: [B, L] log π_θ(a_t | s_t) from the current policy.
-            ref_logprobs: [B, L] log π_old(a_t | s_t) from the sampling policy.
-            response_mask: [B, L] 1.0 for response tokens, 0.0 for prompt/padding.
+            generator_logprobs: [B, L] log π_old(a_t | s_t) from the sampling policy.
+            loss_mask: [B, L] 1.0 for response tokens, 0.0 for prompt/padding.
             advantages: [B, L] per-token advantages (0.0 for prompt/padding).
             num_global_valid_tokens: total response tokens across all microbatches
                 and DP ranks; used as the loss denominator so gradient
@@ -113,24 +107,23 @@ class GRPOLoss(Configurable):
             DP ranks.
         """
         # Per-token importance sampling ratio: π_θ / π_old
-        log_ratio = policy_logprobs - ref_logprobs
+        log_ratio = policy_logprobs - generator_logprobs
         ratio = torch.exp(log_ratio)
 
         clipped_ratio = torch.clamp(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
         token_pg_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
-        # Mask to response tokens and normalize by global token count
-        masked_loss = token_pg_loss * response_mask
+        masked_loss = token_pg_loss * loss_mask
         loss_denominator = max(num_global_valid_tokens, 1)
         loss = masked_loss.sum() / loss_denominator
 
         with torch.no_grad():
-            masked_ratio = ratio * response_mask
+            masked_ratio = ratio * loss_mask
             metrics = {
                 "loss/mean": loss.detach(),
-                "ratio/mean": masked_ratio.sum() / loss_denominator,
-                "ratio/clipped_frac": (
-                    (torch.abs(ratio - clipped_ratio) > 1e-6).float() * response_mask
+                "loss/ratio_mean": masked_ratio.sum() / loss_denominator,
+                "loss/ratio_clipped_frac": (
+                    (torch.abs(ratio - clipped_ratio) > 1e-6).float() * loss_mask
                 ).sum()
                 / loss_denominator,
             }
@@ -221,125 +214,6 @@ def _prepare_reward_metrics(
         m.Metric(f"{prefix}/{name}", m.Mean.from_list(values))
         for name, values in sorted(values_by_name.items())
     ]
-
-
-class Batcher(Configurable):
-    """Packs episodes into ``[B, seq_len]`` batches for the trainer.
-
-    The controller collects rollouts until the total response tokens reach
-    ``num_tokens_target`` (= ``global_batch_size * seq_len``), then
-    packs all collected episodes into fixed-length rows, truncates to
-    ``global_batch_size``, and splits into
-    ``[grad_accum_steps][dp_degree]`` microbatches.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        batch: BatchConfig = field(default_factory=BatchConfig)
-
-    def __init__(self, config: Config, *, pad_id: int):
-        self.local_batch_size = config.batch.local_batch_size
-        self.global_batch_size = config.batch.global_batch_size
-        self.seq_len = config.batch.seq_len
-        self.pad_id = pad_id
-
-    @property
-    def num_tokens_target(self) -> int:
-        return self.global_batch_size * self.seq_len
-
-    def batch(
-        self,
-        episodes: list[Episode],
-        *,
-        dp_degree: int,
-    ) -> tuple[list[list[TrainingBatch]], int, dict[str, float]]:
-        """Pack episodes into ``[B, seq_len]`` microbatches.
-
-        Returns:
-            microbatches: shape ``[gradient_accumulation_steps][dp_degree]``,
-                each entry is a ``TrainingBatch`` with ``local_batch_size`` rows.
-            num_global_valid_tokens: total response tokens across the batch
-                (excludes padding). Used to normalize the loss so that
-                gradient accumulation matches a single large-batch step.
-            packing_metrics: dict of packing efficiency metrics for logging.
-        """
-        packed_rows = list(self._pack_episodes(episodes))
-
-        num_rows_before_truncate = len(packed_rows)
-        if len(packed_rows) > self.global_batch_size:
-            packed_rows = packed_rows[: self.global_batch_size]
-
-        gradient_accumulation_steps = self.global_batch_size // (
-            self.local_batch_size * dp_degree
-        )
-
-        num_global_valid_tokens = sum(
-            int(row["response_mask"].sum().item()) for row in packed_rows
-        )
-
-        microbatches: list[list[TrainingBatch]] = []
-        for step in range(gradient_accumulation_steps):
-            step_batches: list[TrainingBatch] = []
-            for rank in range(dp_degree):
-                start = (step * dp_degree + rank) * self.local_batch_size
-                end = start + self.local_batch_size
-                step_batches.append(self.collate(packed_rows[start:end]))
-            microbatches.append(step_batches)
-
-        # TODO: Optimize rollout collection to reduce wasted episodes.
-        # Currently the controller estimates token counts without padded
-        # tokens, which can overshoot because packing adds prompt tokens
-        # and padding. Track packing metrics to monitor waste.
-        total_token_slots = len(packed_rows) * self.seq_len
-        packing_metrics = {
-            "batcher/packing_efficiency": (
-                num_global_valid_tokens / total_token_slots
-                if total_token_slots > 0
-                else 0.0
-            ),
-            "batcher/num_packed_rows": float(len(packed_rows)),
-            "batcher/num_rows_wasted": float(
-                max(0, num_rows_before_truncate - len(packed_rows))
-            ),
-        }
-
-        return microbatches, num_global_valid_tokens, packing_metrics
-
-    def _pack_episodes(self, episodes: list[Episode]) -> Iterator[dict]:
-        """Pack all episodes into [1, seq_len] rows."""
-
-        def _iterate_samples() -> Iterator[dict]:
-            for ep in episodes:
-                prompt_len = len(ep.prompt_token_ids)
-                response_len = len(ep.token_ids)
-                yield {
-                    "input_ids": ep.prompt_token_ids + ep.token_ids,
-                    "ref_logprobs": [0.0] * prompt_len + ep.token_logprobs,
-                    "response_mask": [0.0] * prompt_len + [1.0] * response_len,
-                    "advantages": [0.0] * prompt_len + [ep.advantage] * response_len,
-                }
-
-        yield from pack(
-            _iterate_samples(),
-            max_seq_length=self.seq_len,
-            pad_values={
-                "input_ids": self.pad_id,
-                "ref_logprobs": 0.0,
-                "response_mask": 0.0,
-                "advantages": 0.0,
-            },
-        )
-
-    @staticmethod
-    def collate(rows: list[dict]) -> TrainingBatch:
-        """Concatenate packed rows into a single [B, L] TrainingBatch."""
-        return TrainingBatch(
-            token_ids=torch.cat([r["input_ids"] for r in rows]),
-            positions=torch.cat([r["positions"] for r in rows]),
-            ref_logprobs=torch.cat([r["ref_logprobs"] for r in rows]),
-            response_mask=torch.cat([r["response_mask"] for r in rows]),
-            advantages=torch.cat([r["advantages"] for r in rows]),
-        )
 
 
 class RLTrainer(Configurable):
@@ -440,6 +314,7 @@ class RLTrainer(Configurable):
         )
         # TODO: Replace this single-turn tokenizer with renderer
         self.tokenizer = HuggingFaceTokenizer(tokenizer_path=config.hf_assets_path)
+        # TODO: Use tokenizer.pad_id when available, falling back to eos_id.
         self.batcher = Batcher(config.batcher, pad_id=self.tokenizer.eos_id)
 
     async def close(self):
@@ -670,7 +545,14 @@ class RLTrainer(Configurable):
         step: int,
         group_offset: int,
     ) -> tuple[list[Trajectory], list[m.Metric]]:
-        """Collect group rollouts and emit completion-shape rollout metrics."""
+        """Collect group rollouts and emit completion-shape rollout metrics.
+
+        Args:
+            num_groups: Number of prompt groups to collect in this round.
+            step: Current training step (passed to env for curriculum).
+            group_offset: Starting group index so that env ``group_idx``
+                values are unique across collection rounds within a step.
+        """
         envs = [
             self.config.env.build(step=step, group_idx=group_offset + i)
             for i in range(num_groups)
@@ -888,7 +770,11 @@ class RLTrainer(Configurable):
             rollout_metrics: list[m.Metric] = []
             collected_tokens = 0
             group_offset = 0
-            while collected_tokens < self.batcher.num_tokens_target:
+            # NOTE: num_tokens_target is a proxy because collected_tokens counts
+            # raw response tokens, while the batcher adds prompt tokens and
+            # padding when packing into fixed-length rows.
+            num_tokens_target = self.batcher.num_tokens_target(self.trainer_dp_degree)
+            while collected_tokens < num_tokens_target:
                 new_trajectories, new_metrics = self._collect_rollouts(
                     num_groups, step=step, group_offset=group_offset
                 )
@@ -914,14 +800,15 @@ class RLTrainer(Configurable):
                     packing_metrics,
                 ) = self.batcher.batch(episodes, dp_degree=self.trainer_dp_degree)
 
-            fwd_bwd_metrics: dict[str, float] = {}
+            all_fwd_bwd_metrics: list[dict[str, float]] = []
             for microbatch in microbatches:
                 with sl.log_trace_span("trainer_forward_backward_call"):
-                    fwd_bwd_metrics = self._get_rank_0_value(
+                    metrics = self._get_rank_0_value(
                         self.trainer.forward_backward.call(
                             microbatch, num_global_valid_tokens
                         ).get()
                     )
+                    all_fwd_bwd_metrics.append(metrics)
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim_output = self._get_rank_0_value(
                     self.trainer.optim_step.call().get()
@@ -942,7 +829,7 @@ class RLTrainer(Configurable):
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
             # --- divergence check before any logging ---
-            if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
+            if any(not math.isfinite(mb["loss/mean"]) for mb in all_fwd_bwd_metrics):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
 
@@ -957,15 +844,17 @@ class RLTrainer(Configurable):
             step_metrics += episode_metrics
 
             # Actor metrics are already globally reduced; NoReduce passes them through.
-            step_metrics += [
-                m.Metric(k, m.NoReduce(v)) for k, v in fwd_bwd_metrics.items()
-            ]
+            # Log each microbatch's metrics separately.
+            for mb_idx, mb_metrics in enumerate(all_fwd_bwd_metrics):
+                suffix = f"/microbatch_{mb_idx}" if len(all_fwd_bwd_metrics) > 1 else ""
+                step_metrics += [
+                    m.Metric(f"{k}{suffix}", m.NoReduce(v))
+                    for k, v in mb_metrics.items()
+                ]
             step_metrics += [
                 m.Metric(k, m.NoReduce(v)) for k, v in optimizer_metrics.items()
             ]
-            step_metrics += [
-                m.Metric(k, m.NoReduce(v)) for k, v in packing_metrics.items()
-            ]
+            step_metrics += packing_metrics
 
             # timing metrics
             for key, value in [

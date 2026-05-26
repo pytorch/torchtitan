@@ -23,7 +23,8 @@ from torchtitan.config import (
 )
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.grpo import Batcher, GRPOLoss, RLTrainer
+from torchtitan.experiments.rl.batcher import Batcher
+from torchtitan.experiments.rl.grpo import GRPOLoss, RLTrainer
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.sum_digits import SumDigitsEnv
 from torchtitan.models.qwen3 import model_registry

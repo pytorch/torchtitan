@@ -4,9 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections.abc import Iterable, Iterator
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def pack(
@@ -70,6 +73,11 @@ def pack(
         sample_length = len(sample[keys[0]])
 
         if sample_length > max_seq_length:
+            logger.warning(
+                "Dropping sample with length %d exceeding max_seq_length %d",
+                sample_length,
+                max_seq_length,
+            )
             continue
 
         if buffer_length > 0 and buffer_length + sample_length > max_seq_length:

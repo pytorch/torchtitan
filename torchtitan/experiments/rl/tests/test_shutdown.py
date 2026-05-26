@@ -10,6 +10,7 @@ import pytest
 
 from torchtitan.experiments.rl import grpo
 from torchtitan.experiments.rl.actors.generator import VLLMGenerator
+from torchtitan.experiments.rl.batcher import Batcher
 
 
 class _FakeRLTrainer:
@@ -70,7 +71,7 @@ def _make_stub_rl_trainer():
     from torchtitan.experiments.rl.observability import metrics as m
 
     class _StubConfig:
-        batcher = grpo.Batcher.Config()
+        batcher = Batcher.Config()
         metrics = m.MetricsProcessor.Config()
         dump_folder = "/tmp/test_rl"
         hf_assets_path = "./tests/assets/tokenizer"

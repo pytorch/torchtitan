@@ -87,10 +87,22 @@ class Episode:
 
 @dataclass(kw_only=True, slots=True)
 class TrainingBatch:
+    """Packed training batch for the RL trainer.
+
+    Per-token fields use "probability of current token" convention:
+    ``logprobs[i] = log p(token_i | context up to i-1)``.
+    Position 0 holds a dummy value (no prior context) and is excluded
+    by ``loss_mask``.
+
+    Cross-document logprobs at pack boundaries are incorrect but
+    harmless: ``loss_mask`` is 0 at prompt positions (every episode
+    has a prompt), so they never contribute to the loss.
+    """
+
     token_ids: torch.Tensor  # [B, L]
     positions: torch.Tensor  # [B, L]
-    ref_logprobs: torch.Tensor  # [B, L] — 0.0 for prompt/padding
-    response_mask: torch.Tensor  # [B, L] — 1.0 for response, 0.0 for prompt/padding
+    generator_logprobs: torch.Tensor  # [B, L] — 0.0 for prompt/padding
+    loss_mask: torch.Tensor  # [B, L] — 1.0 for response, 0.0 for prompt/padding
     advantages: torch.Tensor  # [B, L] — per-token, 0.0 for prompt/padding
 
 
