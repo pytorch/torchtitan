@@ -44,8 +44,8 @@ def _get_save_ops() -> set:
         # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
         torch.ops.aten.linear.default,
-        # topk can be non-deterministic on some backends; save to keep MoE
-        # expert assignments stable between forward and recompute.
+        # topk can be non-deterministic; save to keep MoE expert assignments
+        # stable between forward and recompute.
         torch.ops.aten.topk.default,
         # Inductor compiled code (available when torch.compile is used)
         (torch._higher_order_ops, "inductor_compiled_code"),
