@@ -220,7 +220,6 @@ class TokenChoiceTopKRouter(Module):
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
-        # Gate operates on the last dim, so it handles any number of leading dims.
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             scores = self.gate(x)
@@ -242,7 +241,7 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice, k=self.top_k, dim=-1, sorted=False
         )
 
-        # top scores shape (*, top_k)
+        # top scores shape (bs, slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
         top_scores = scores.gather(dim=-1, index=selected_experts_indices)
