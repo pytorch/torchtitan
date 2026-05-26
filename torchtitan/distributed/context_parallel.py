@@ -117,7 +117,7 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     device: torch.device,
     load_balancer_type: str | None = "headtail",
-    ptrr_block_size: int = 128,
+    ptrr_block_size: int = 1024,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -168,7 +168,7 @@ def cp_shard(
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 1,
-    ptrr_block_size: int = 128,
+    ptrr_block_size: int = 1024,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.

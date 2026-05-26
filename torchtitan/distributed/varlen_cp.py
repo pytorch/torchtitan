@@ -323,7 +323,7 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
         batch_size: int,
         seq_length: int,
         world_size: int,
-        block_size: int = 128,
+        block_size: int = 1024,
     ):
         # cu_seq_q is consumed below by ``torch.searchsorted``, which only
         # requires 1-D and monotonic non-decreasing input. Monotonicity and

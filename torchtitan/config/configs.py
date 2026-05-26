@@ -207,17 +207,18 @@ class ParallelismConfig:
     - None: Disable load balancing
     """
 
-    context_parallel_ptrr_block_size: int = 128
+    context_parallel_ptrr_block_size: int = 1024
     """
     Block size for the varlen PTRR load balancer
     (``_VarlenPTRRLoadBalancer``). Ignored unless
     ``context_parallel_load_balancer='ptrr'`` and varlen attention is in
     use.  Must divide the per-batch sequence length evenly, and
     ``(seq_len / block_size)`` must be divisible by
-    ``context_parallel_degree``.  Default 128 matches FlexAttention's
-    default sparse block size.  Smaller values give finer load balance
-    at the cost of more rearrange overhead; larger values are coarser
-    but cheaper.
+    ``context_parallel_degree``.  Default 1024.  Smaller values give
+    finer load balance at the cost of more K/V gather overhead (each
+    scattered block creates a varlen segment whose K span reaches back
+    to the document start); larger values preserve document locality
+    and reduce the total K gathered.
     """
 
     def __post_init__(self):
