@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Pure-logic CPU tests for ``CPVarlenMetadata.from_global`` and
-``_VarlenPTRRLoadBalancer``.
+``VarlenPTRRLoadBalancer``.
 
 These do not require a real distributed environment; we mock the
 ``DeviceMesh`` with ``_MockMesh`` and iterate over ranks manually.
@@ -15,7 +15,7 @@ import torch
 from torch.distributed.tensor.experimental._attention import _HeadTailLoadBalancer
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.distributed.varlen_cp import _VarlenPTRRLoadBalancer, CPVarlenMetadata
+from torchtitan.distributed.varlen_cp import CPVarlenMetadata, VarlenPTRRLoadBalancer
 from torchtitan.models.common.attention import VarlenMetadata
 
 
@@ -358,7 +358,7 @@ class TestVarlenPTRRLoadBalancer(TestCase):
             )
 
     @staticmethod
-    def _check_restore(lb: _VarlenPTRRLoadBalancer) -> None:
+    def _check_restore(lb: VarlenPTRRLoadBalancer) -> None:
         fwd = lb._generate_indices(restore=False).to(torch.long)
         rev = lb._generate_indices(restore=True).to(torch.long)
         for b in range(fwd.shape[0]):
@@ -373,7 +373,7 @@ class TestVarlenPTRRLoadBalancer(TestCase):
         # 528+3600 and 1552+2576 -- both 4128.
         S, BS, W = 128, 32, 2
         meta = _build_varlen_meta_from_doc_lens([S], B=1, seq_len=S)
-        lb = _VarlenPTRRLoadBalancer(
+        lb = VarlenPTRRLoadBalancer(
             meta.cu_seq_q,
             batch_size=1,
             seq_length=S,
@@ -392,7 +392,7 @@ class TestVarlenPTRRLoadBalancer(TestCase):
         BS, W = 32, 2
         # batch 0: one doc of 128; batch 1: two docs of 64+64.
         cu = torch.tensor([0, 128, 192, 256], dtype=torch.int32)
-        lb = _VarlenPTRRLoadBalancer(
+        lb = VarlenPTRRLoadBalancer(
             cu,
             batch_size=2,
             seq_length=128,
@@ -410,7 +410,7 @@ class TestVarlenPTRRLoadBalancer(TestCase):
         doc_lens = _synthetic_doc_lengths(S, kind="mixture", seed=0)
         meta = _build_varlen_meta_from_doc_lens(doc_lens, B=1, seq_len=S)
 
-        ptrr = _VarlenPTRRLoadBalancer(
+        ptrr = VarlenPTRRLoadBalancer(
             meta.cu_seq_q,
             batch_size=1,
             seq_length=S,
@@ -447,7 +447,7 @@ class TestVarlenPTRRLoadBalancer(TestCase):
     def test_num_blocks_equals_world_size(self) -> None:
         S, BS, W = 64, 32, 2
         meta = _build_varlen_meta_from_doc_lens([S], B=1, seq_len=S)
-        lb = _VarlenPTRRLoadBalancer(
+        lb = VarlenPTRRLoadBalancer(
             meta.cu_seq_q,
             batch_size=1,
             seq_length=S,
@@ -460,7 +460,7 @@ class TestVarlenPTRRLoadBalancer(TestCase):
     def test_block_size_divisibility_error(self) -> None:
         meta = _build_varlen_meta_from_doc_lens([128], B=1, seq_len=128)
         with self.assertRaisesRegex(ValueError, "divisible by block_size"):
-            _VarlenPTRRLoadBalancer(
+            VarlenPTRRLoadBalancer(
                 meta.cu_seq_q,
                 batch_size=1,
                 seq_length=128,
@@ -471,7 +471,7 @@ class TestVarlenPTRRLoadBalancer(TestCase):
     def test_world_size_divisibility_error(self) -> None:
         meta = _build_varlen_meta_from_doc_lens([192], B=1, seq_len=192)
         with self.assertRaisesRegex(ValueError, "must be divisible by world_size"):
-            _VarlenPTRRLoadBalancer(
+            VarlenPTRRLoadBalancer(
                 meta.cu_seq_q,
                 batch_size=1,
                 seq_length=192,
@@ -480,12 +480,12 @@ class TestVarlenPTRRLoadBalancer(TestCase):
             )
 
     def test_through_cpvarlen_metadata_builder(self) -> None:
-        # End-to-end: _VarlenPTRRLoadBalancer returns (B, S) indices,
+        # End-to-end: VarlenPTRRLoadBalancer returns (B, S) indices,
         # which CPVarlenMetadata.from_global must accept (the per-row
         # argsort branch). Guards against the (1, S)-only regression.
         S, BS, W = 64, 32, 2
         meta = _build_varlen_meta_from_doc_lens([S], B=2, seq_len=S)
-        lb = _VarlenPTRRLoadBalancer(
+        lb = VarlenPTRRLoadBalancer(
             meta.cu_seq_q,
             batch_size=2,
             seq_length=S,

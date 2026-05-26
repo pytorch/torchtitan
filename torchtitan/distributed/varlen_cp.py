@@ -17,7 +17,6 @@ import functools
 from dataclasses import dataclass
 
 import torch
-from torch import Tensor
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._context_parallel._load_balancer import (
     _LoadBalancer,
@@ -251,16 +250,16 @@ class CPVarlenMetadata(VarlenMetadata):
         )
 
 
-class _VarlenPTRRLoadBalancer(_LoadBalancer):
+class VarlenPTRRLoadBalancer(_LoadBalancer):
     """Processing-Time based Round-Robin (PTRR) load balancer for
     varlen attention.
 
     Supports causal ``(-1, 0)`` and sliding-window causal ``(W, 0)`` masking.
     Bidirectional or lookahead masks are not supported.
 
-    Estimates per-Q-block work directly from ``cu_seq_q`` (no ``BlockMask``
-    needed). Per-block work is the sum of per-token work over the block.
-    The same scheduling primitive (``_PTRRLoadBalancer.ptrr_scheduling``) is reused.
+    Estimates per-Q-block work directly from ``cu_seq_q`` (no ``BlockMask`` needed).
+    Per-block work is the sum of per-token work over the block. The same scheduling
+    primitive (``_PTRRLoadBalancer.ptrr_scheduling``) is reused.
 
     Outputs a ``(B, S)`` permutation tensor where each batch element is
     rearranged independently -- important when documents differ across the batch.
@@ -268,7 +267,7 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
 
     def __init__(
         self,
-        cu_seq_q: Tensor,
+        cu_seq_q: torch.Tensor,
         *,
         batch_size: int,
         seq_length: int,
@@ -276,16 +275,6 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
         block_size: int = 1024,
         window_size: tuple[int, int] = (-1, 0),
     ):
-        # cu_seq_q is consumed below by ``torch.searchsorted``, which only
-        # requires 1-D and monotonic non-decreasing input. Monotonicity and
-        # the ``cu_seq_q[-1] == batch_size * seq_length`` endpoint are
-        # already enforced by the same tensor's path through
-        # :meth:`CPVarlenMetadata.from_global` (which builds the balancer);
-        # we skip re-checking here to avoid two extra D2H syncs per forward.
-        if cu_seq_q.dim() != 1:
-            raise ValueError(
-                f"cu_seq_q must be 1-D, got shape {tuple(cu_seq_q.shape)}."
-            )
         if seq_length % block_size != 0:
             raise ValueError(
                 f"seq_length {seq_length} must be divisible by block_size {block_size}."
@@ -304,19 +293,19 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
         self.block_size = block_size
         self.window_size = window_size
 
-    def _generate_indices(self, restore: bool = False) -> Tensor:
-        """Compute the per-batch forward or inverse permutation.
+    def _generate_indices(self, restore: bool = False) -> torch.Tensor:
+        """Generate token indices (or inverse) for load balancing.
 
-        Returns a ``(B, S)`` int64 tensor. When ``restore=False`` the
-        result is the forward permutation: ``indices[b, i]`` is the
-        original token position to be placed at slot ``i`` of batch
-        ``b`` after PTRR rebalancing. When ``restore=True`` the result
-        is its inverse (``argsort`` of the forward permutation).
+        Returns a ``(B, S)`` int64 tensor. When ``restore=False`` the result
+        is the forward permutation: ``indices[b, i]`` is the original token
+        position to be placed at slot ``i`` of batch ``b`` after PTRR
+        rebalancing. When ``restore=True`` the result is its inverse
+        (``argsort`` of the forward permutation).
 
         Note the ``(B, S)`` output shape, vs upstream
-        :class:`_LoadBalancer`'s ``(1, S)`` or ``(B, S)`` contract:
-        PTRR rebalances every batch independently because document
-        structure can vary across the batch.
+        :class:`_LoadBalancer`'s ``(1, S)`` or ``(B, S)`` contract: PTRR
+        rebalances every batch independently because document structure can
+        vary across the batch.
         """
         B = self.batch_size
         S = self.seq_length

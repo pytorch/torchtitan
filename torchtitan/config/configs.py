@@ -202,7 +202,7 @@ class ParallelismConfig:
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer (works for SDPA, FlexAttention,
       and varlen attention)
-    - "ptrr": Use PTRRLoadBalancer (FlexAttention) or _VarlenPTRRLoadBalancer (varlen)
+    - "ptrr": Use PTRRLoadBalancer (FlexAttention) or VarlenPTRRLoadBalancer (varlen)
     - None: Disable load balancing
     """
 

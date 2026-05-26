@@ -23,7 +23,7 @@ from torch.distributed.tensor.experimental._context_parallel._attention import (
 )
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.varlen_cp import _VarlenPTRRLoadBalancer, CPVarlenMetadata
+from torchtitan.distributed.varlen_cp import CPVarlenMetadata, VarlenPTRRLoadBalancer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexAttention,
@@ -180,7 +180,7 @@ def cp_shard(
             - "headtail": Use HeadTailLoadBalancer (works for SDPA, varlen,
               and FlexAttention)
             - "ptrr": Use PTRRLoadBalancer (FlexAttention) or
-              _VarlenPTRRLoadBalancer (varlen)
+              VarlenPTRRLoadBalancer (varlen)
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
@@ -205,7 +205,7 @@ def cp_shard(
             input_seq_dim is not 1 (varlen sharding assumes the (B, S, ...) layout).
         ValueError: If load_balancer_type is "ptrr" and attention_masks
             is None or a dict (FlexAttention PTRR requires a BlockMask;
-            VarlenMetadata is routed to _VarlenPTRRLoadBalancer).
+            VarlenMetadata is routed to VarlenPTRRLoadBalancer).
         ValueError: When inputs are inconsistent for varlen sharding
             (cu_seq_q malformed, cross-attention, divisibility,
             double-shard). See CPVarlenMetadata.from_global for the full list.
@@ -220,11 +220,6 @@ def cp_shard(
     seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size()
 
-    # batch_size is only meaningful for VarlenMetadata branches (varlen
-    # PTRR balancer construction and CPVarlenMetadata.from_global), which
-    # both require the (B, S, ...) layout asserted above.
-    batch_size = inputs[0].size(0)
-
     load_balancer = None
     if load_balancer_type:
         match load_balancer_type:
@@ -234,16 +229,14 @@ def cp_shard(
                 )
             case "ptrr":
                 # FlexAttention takes a BlockMask; varlen takes the global cu_seq_q
-                # via _VarlenPTRRLoadBalancer. The varlen balancer assumes
-                # document-causal masking, which is the only varlen path currently in
-                # the codebase (VarlenAttention.forward also rejects non-causal
-                # window_size under CP).
+                # via VarlenPTRRLoadBalancer. The varlen balancer assumes
+                # document-causal masking for now.
                 if isinstance(attention_masks, VarlenMetadata):
                     # TODO: expose block_size to users and get window_size
                     # from VarlenAttention.Config.
-                    load_balancer = _VarlenPTRRLoadBalancer(
+                    load_balancer = VarlenPTRRLoadBalancer(
                         attention_masks.cu_seq_q,
-                        batch_size=batch_size,
+                        batch_size=inputs[0].size(0),
                         seq_length=seq_len,
                         world_size=cp_world_size,
                     )
@@ -283,7 +276,7 @@ def cp_shard(
             attention_masks = CPVarlenMetadata.from_global(
                 attention_masks,
                 device_mesh=cp_mesh,
-                batch_size=batch_size,
+                batch_size=inputs[0].size(0),
                 seq_length=seq_len,
                 load_balancer=load_balancer,
             )
