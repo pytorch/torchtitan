@@ -202,15 +202,13 @@ class ParallelismConfig:
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer (works for SDPA, FlexAttention,
       and varlen attention)
-    - "ptrr": Use PTRRLoadBalancer (FlexAttention) or
-      _VarlenPTRRLoadBalancer (varlen)
+    - "ptrr": Use PTRRLoadBalancer (FlexAttention) or _VarlenPTRRLoadBalancer (varlen)
     - None: Disable load balancing
     """
 
     context_parallel_ptrr_block_size: int = 1024
     """
-    Block size for the varlen PTRR load balancer
-    (``_VarlenPTRRLoadBalancer``). Ignored unless
+    Block size for the varlen PTRR load balancer. Ignored unless
     ``context_parallel_load_balancer='ptrr'`` and varlen attention is in
     use.  Must divide the per-batch sequence length evenly, and
     ``(seq_len / block_size)`` must be divisible by

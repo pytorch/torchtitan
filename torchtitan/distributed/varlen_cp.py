@@ -308,12 +308,10 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
 
     Estimates per-Q-block work directly from ``cu_seq_q`` (no ``BlockMask``
     needed). Per-block work is the sum of per-token work over the block.
-    The same scheduling primitive (``_PTRRLoadBalancer.ptrr_scheduling``)
-    is reused.
+    The same scheduling primitive (``_PTRRLoadBalancer.ptrr_scheduling``) is reused.
 
     Outputs a ``(B, S)`` permutation tensor where each batch element is
-    rearranged independently -- important when documents differ across
-    the batch.
+    rearranged independently -- important when documents differ across the batch.
     """
 
     def __init__(
@@ -397,7 +395,7 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
         indices = block_indices[ptrr_blocks].view(B, -1)  # (B, S)
 
         if restore:
-            # pyrefly: ignore[missing-argument]
+            # pyrefly: ignore[missing-argument]  # vmap supplies the first arg
             indices = torch.vmap(torch.argsort)(indices)
 
         return indices

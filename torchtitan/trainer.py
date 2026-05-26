@@ -623,7 +623,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
-                ptrr_block_size=self.config.parallelism.context_parallel_ptrr_block_size,
+                ptrr_block_size=(
+                    self.config.parallelism.context_parallel_ptrr_block_size
+                ),
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual
