@@ -267,6 +267,10 @@ class HFTransformerModel(BaseModel):
                     attn_implementation
                 ] = _flex_torchtitan_attention_forward
             elif attn_implementation not in AttentionInterface._global_mapping:
+                logger.info(
+                    f"'{attn_implementation}' not in HF AttentionInterface registry, "
+                    "defaulting to sdpa_attention_forward"
+                )
                 AttentionInterface._global_mapping[
                     attn_implementation
                 ] = sdpa_attention_forward
@@ -352,8 +356,13 @@ class HFTransformerModel(BaseModel):
             self.mlp_bias = False
             self.use_cache = False
             self.initializer_range = 1.0  # use as std for normal init in embedding
-            # FlexAttention does not support dropout
-            if hasattr(self, "attention_dropout"):
+            # FlexAttention does not support dropout (not part of PyTorch's
+            # flex_attention API). Override to 0 if the model sets it.
+            if hasattr(self, "attention_dropout") and self.attention_dropout > 0:
+                logger.warning(
+                    f"attention_dropout={self.attention_dropout} is not supported "
+                    "with FlexAttention, setting to 0.0"
+                )
                 self.attention_dropout = 0.0
 
             # When dim is explicitly overridden (e.g. debugmodel), derive the
