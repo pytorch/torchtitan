@@ -123,9 +123,10 @@ class Qwen3Model(Decoder):
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config
             ):
+                # TODO: enable once qwen3 supports parallelism.full_dtensor.
                 raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
+                    "qwen3 does not yet support varlen attention with CP; "
+                    "the required full_dtensor path is not implemented for qwen3."
                 )
 
             if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
