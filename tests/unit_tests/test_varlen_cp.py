@@ -120,7 +120,7 @@ class TestCPVarlenMetadata(TestCase):
         self.assertEqual(self._seg_lens(per_rank[0]), ([8, 8], [8, 32]))
         self.assertEqual(self._seg_lens(per_rank[1]), ([16], [24]))
 
-    def test_multi_doc_straddling(self) -> None:
+    def test_multi_doc_spanning(self) -> None:
         # docs [0,10), [10,50), [50,64). CP=2, no LB.
         # rank 0 has [0..32): doc 0 fully + doc 1 prefix [10..32).
         # rank 1 has [32..64): doc 1 mid [32..50) + doc 2 fully [50..64).
@@ -130,7 +130,7 @@ class TestCPVarlenMetadata(TestCase):
         self.assertEqual(self._seg_lens(per_rank[1]), ([18, 14], [40, 14]))
 
     def test_multi_doc_headtail(self) -> None:
-        # Same docs as test_multi_doc_straddling, with headtail balancer
+        # Same docs as test_multi_doc_spanning, with headtail balancer
         # (chunk=16). Forward permutation is [0..16, 48..64, 16..48].
         meta = _build_varlen_meta([0, 10, 50, 64], B=1, seq_len=64)
         per_rank = self._run(
@@ -170,7 +170,7 @@ class TestCPVarlenMetadata(TestCase):
         self.assertEqual(self._seg_lens(per_rank[0]), ([1, 3], [1, 3]))
         self.assertEqual(self._seg_lens(per_rank[1]), ([4], [7]))
 
-    def test_multi_batch_multi_doc_straddling(self) -> None:
+    def test_multi_batch_multi_doc_spanning(self) -> None:
         # B=2, per-batch docs [10, 22] -> packed cu_seq_q =
         # [0, 10, 32, 42, 64]. CP=2, shard_len=16.
         # Rank 0: per-batch [0..16) -> 4 segments; k_local_indices must
