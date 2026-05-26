@@ -58,6 +58,7 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_detach_pass,
     remove_identity_slice_pass,
     remove_identity_view_pass,
+    remove_inverse_transpose_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
@@ -158,6 +159,7 @@ def compile_time_passes(
     passes: list[Callable] = [
         remove_detach_pass,
         remove_identity_view_pass,
+        remove_inverse_transpose_pass,
         remove_identity_slice_pass,
         normalize_view_ops_as_reshape,
         functools.partial(

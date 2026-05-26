@@ -103,6 +103,42 @@ def remove_identity_view_pass(
     return gm
 
 
+def remove_inverse_transpose_pass(
+    gm: torch.fx.GraphModule, example_inputs=None
+) -> torch.fx.GraphModule:
+    """Remove ``t(t(x))`` pairs where two consecutive transposes cancel out.
+
+    ``aten.t`` on a 2-D tensor swaps the two dimensions.  Applying it
+    twice yields the original tensor, so the pair is a no-op regardless
+    of the shape.  These pairs appear in traced graphs from
+    ``F.linear`` when FSDP redistributes weight tensors.
+    """
+    count = 0
+    for node in list(gm.graph.nodes):
+        if node.op != "call_function" or node.target is not torch.ops.aten.t.default:
+            continue
+        inp = node.args[0]
+        if (
+            isinstance(inp, torch.fx.Node)
+            and inp.op == "call_function"
+            and inp.target is torch.ops.aten.t.default
+        ):
+            original = inp.args[0]
+            node.replace_all_uses_with(original)
+            gm.graph.erase_node(node)
+            if not inp.users:
+                gm.graph.erase_node(inp)
+                count += 1
+            count += 1
+
+    if count > 0:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(f"Removed {count} inverse-transpose node(s) from the graph")
+
+    return gm
+
+
 def remove_identity_slice_pass(
     gm: torch.fx.GraphModule, example_inputs=None
 ) -> torch.fx.GraphModule:
