@@ -104,10 +104,10 @@ class GroupedExperts(Module):
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
         topk_ids_TK = topk_ids_BLK.view(T, K)
-        routed_input_RD, num_tokens_local_E, metadata = self.token_dispatcher.dispatch(
-            x_TD, topk_scores_TK, topk_ids_TK
+        routed_input_RD, num_tokens_per_expert_E, metadata = (
+            self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_ids_TK)
         )
-        routed_output_RD = self._experts_forward(routed_input_RD, num_tokens_local_E)
+        routed_output_RD = self._experts_forward(routed_input_RD, num_tokens_per_expert_E)
         return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
 
     def parallelize(self, parallel_dims) -> None:
@@ -321,18 +321,18 @@ class MoE(Module):
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert_E is accumulated in the model forward pass.
-        #       expert_bias is updated outside the model in an optimizer step pre hook
+        #       expert_bias_E is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
             self.register_buffer(
-                "expert_bias",
+                "expert_bias_E",
                 torch.zeros(num_experts, dtype=torch.float32),
                 persistent=True,
             )
         else:
-            self.expert_bias = None
+            self.expert_bias_E = None
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
             "tokens_per_expert_E",
@@ -363,7 +363,7 @@ class MoE(Module):
             topk_scores_BLK,
             topk_ids_BLK,
             num_tokens_per_expert_E,
-        ) = self.router(x_BLD, self.expert_bias)
+        ) = self.router(x_BLD, self.expert_bias_E)
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
@@ -404,6 +404,6 @@ class MoE(Module):
                 self.experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
-                self.expert_bias = torch.zeros(
+                self.expert_bias_E = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )

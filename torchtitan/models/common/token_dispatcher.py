@@ -16,14 +16,6 @@ from torch.distributed.tensor import DeviceMesh
 from torchtitan.config import Configurable
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
-# Shape suffix legend
-# (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
-#   B = batch, L = sequence length, D = model dimension,
-#   F = hidden (FFN intermediate) dimension, E = num experts,
-#   e = num local experts (E / EP), K = top-k,
-#   T = num tokens (B*L flattened), N = routed tokens (T*K),
-#   R = routed tokens assigned to local experts
-
 
 @dataclass(frozen=True, kw_only=True)
 class LocalDispatchMetadata:
@@ -146,7 +138,8 @@ class LocalTokenDispatcher(Configurable):
             topk_ids_TK: ``(T, K)`` expert indices per token
 
         Returns:
-            routed_input_RD: ``(R, D)`` tokens sorted by expert index
+            routed_input_RD: ``[R = sum(num_tokens_per_expert_E), input_dim(D)]``.
+                Tokens sorted by expert index.
             num_tokens_per_expert_E: ``(E,)`` token counts per expert
             metadata: LocalDispatchMetadata for combine()
         """
@@ -264,8 +257,9 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             topk_ids_TK: ``(T, K)`` expert indices
 
         Returns:
-            routed_input_RD: ``(R, D)`` tokens in expert-major order for local experts
-            num_tokens_per_expert_E: ``(num_local_experts,)`` token counts
+            routed_input_RD: ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
+                Tokens in expert-major order for local experts.
+            num_tokens_per_local_expert_e: ``(num_local_experts,)`` token counts
             metadata: dispatch metadata for combine()
         """
         # EP=1: fall back to local dispatch (no all-to-all needed)
@@ -331,7 +325,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_shape,
             routed_input_RD,
             permuted_indices,
-            num_tokens_per_expert_E,
+            num_tokens_per_local_expert_e,
         ) = self._permute(
             routed_input_RD,
             num_tokens_per_expert_group_E,
@@ -347,7 +341,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             input_splits=input_splits_list,
             output_splits=output_splits_list,
         )
-        return routed_input_RD, num_tokens_per_expert_E, metadata
+        return routed_input_RD, num_tokens_per_local_expert_e, metadata
 
     def _permute(
         self,
@@ -523,7 +517,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             input_shape,
             routed_input_RD,
             permuted_indices,
-            num_tokens_per_expert_group_padded_E,
+            num_tokens_per_expert_group_padded_e,
             _group_offsets,
         ) = permute_and_pad(
             routed_input_RD,
@@ -536,7 +530,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             input_shape,
             routed_input_RD,
             permuted_indices,
-            num_tokens_per_expert_group_padded_E,
+            num_tokens_per_expert_group_padded_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):

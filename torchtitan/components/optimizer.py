@@ -542,7 +542,7 @@ def register_moe_load_balancing_hook(
                     )
                     expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
                     # pyrefly: ignore [missing-attribute]
-                    moe.expert_bias.add_(expert_bias_delta)
+                    moe.expert_bias_E.add_(expert_bias_delta)
                     # pyrefly: ignore [missing-attribute]
                     moe.tokens_per_expert_E.zero_()
 

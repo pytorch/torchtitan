@@ -155,7 +155,7 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
 
     return ShardingConfig(
         state_shardings={
-            "expert_bias": dense_param_placement(tp=Replicate()),
+            "expert_bias_E": dense_param_placement(tp=Replicate()),
             "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
         in_src_shardings={"x_BLD": dense_activation_placement(tp=sp_layout)},
