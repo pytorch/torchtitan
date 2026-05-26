@@ -86,11 +86,11 @@ class GroupedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
-        x = x.reshape(-1, x.size(-1))
-        top_scores = top_scores.reshape(-1, top_scores.size(-1))
-        selected_experts_indices = selected_experts_indices.reshape(
-            -1, selected_experts_indices.size(-1)
-        )
+        bs, slen, dim = x.shape
+        top_k = top_scores.size(-1)
+        x = x.view(bs * slen, dim)
+        top_scores = top_scores.view(bs * slen, top_k)
+        selected_experts_indices = selected_experts_indices.view(bs * slen, top_k)
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
@@ -147,15 +147,14 @@ class TokenChoiceTopKRouter(Module):
         self, scores: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Balanced round-robin expert assignment.
-        Returns (selected_experts_indices [*, K] LongTensor, top_scores [*, K] FloatTensor).
+        Returns (selected_experts_indices (bs, slen, top_k) LongTensor, top_scores (bs, slen, top_k) FloatTensor).
         """
-        leading_shape = scores.shape[:-1]
-        n_tokens = scores[..., 0].numel()
+        bs, slen, _ = scores.shape
         # Round-robin indices with exact balance
         selected_experts_indices = (
             torch.arange(
-                n_tokens * self.top_k, device=scores.device, dtype=torch.int64
-            ).reshape(*leading_shape, self.top_k)
+                bs * slen * self.top_k, device=scores.device, dtype=torch.int64
+            ).reshape(bs, slen, self.top_k)
             % self.num_experts
         )
         top_scores = scores.gather(dim=-1, index=selected_experts_indices)
@@ -169,10 +168,10 @@ class TokenChoiceTopKRouter(Module):
             and set expert scores in non-selected groups as -inf
 
         Args:
-            scores_for_choice: Router scores with expert_bias (if any), shape (bs*slen, num_experts)
+            scores_for_choice: Router scores with expert_bias (if any), shape (bs, slen, num_experts)
 
         Returns:
-            scores_for_choice: shape (bs*slen, num_experts)
+            scores_for_choice: shape (bs, slen, num_experts)
         """
         if self.num_limited_groups is None:
             raise ValueError(
@@ -375,12 +374,12 @@ class MoE(Module):
         ):
             # Sync the combine operation before using routed_output.
             # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or reshape operations read routed output.
+            # the subsequent addition or view operations read routed output.
             from torchtitan.distributed.deepep.deepep import sync_combine
 
             sync_combine()
 
-        out = out.reshape(bs, slen, dim)
+        out = out.view(bs, slen, dim)
         if shared_out is not None:
             out = out + shared_out
         return out
