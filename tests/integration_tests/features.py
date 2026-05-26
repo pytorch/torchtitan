@@ -415,6 +415,19 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.context_parallel_degree=2",
+                    "--parallelism.context_parallel_load_balancer=None",
+                ]
+            ],
+            "Full DTensor CP (Varlen, no load balancer)",
+            "full_dtensor_cp_varlen_no_lb",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module llama3 --config llama3_debugmodel_varlen_attn",
+                    "--parallelism.context_parallel_degree=2",
                 ]
             ],
             "Full DTensor CP (Varlen)",
