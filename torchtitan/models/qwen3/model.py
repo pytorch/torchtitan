@@ -107,19 +107,6 @@ class Qwen3Model(Decoder):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
-
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 
             set_qwen3_sharding_config(

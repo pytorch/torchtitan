@@ -98,9 +98,26 @@ class Decoder(BaseModel):
             """
             from torchtitan.trainer import Trainer
 
+            parallelism = trainer_config.parallelism
+            tp = parallelism.tensor_parallel_degree
+            if tp > 1:
+                n_heads = self.layers[0].attention.n_heads
+                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
+                if n_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide "
+                        f"n_heads ({n_heads})."
+                    )
+                if n_kv_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor_parallel_degree ({tp}) must divide "
+                        f"n_kv_heads ({n_kv_heads})."
+                    )
+
             if isinstance(trainer_config, Trainer.Config):
-                training = trainer_config.training
-                seq_len = training.seq_len
+                debug = trainer_config.debug
+                seq_len = trainer_config.training.seq_len
+
                 if seq_len > self.rope.max_seq_len:
                     raise ValueError(
                         f"Training sequence length {seq_len} exceeds "
@@ -109,13 +126,11 @@ class Decoder(BaseModel):
                     )
                 self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-                debug = getattr(trainer_config, "debug", None)
-                if debug is not None:
-                    for layer_cfg in self.layers:
-                        if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
-                            layer_cfg.moe.router._debug_force_load_balance = (
-                                debug.moe_force_load_balance
-                            )
+                for layer_cfg in self.layers:
+                    if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                        layer_cfg.moe.router._debug_force_load_balance = (
+                            debug.moe_force_load_balance
+                        )
 
     # Set by the trainer when ChunkedCELoss is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

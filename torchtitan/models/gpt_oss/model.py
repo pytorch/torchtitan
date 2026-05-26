@@ -193,19 +193,6 @@ class GptOssModel(Decoder):
             )
             parallelism = trainer_config.parallelism
 
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
-
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
             set_gpt_oss_sharding_config(

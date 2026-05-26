@@ -156,19 +156,6 @@ class Llama4Model(Decoder):
                     "(Llama4 requires FlexAttention, which is not supported with CP)."
                 )
 
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
-
             from torchtitan.models.llama4.sharding import set_llama4_sharding_config
 
             set_llama4_sharding_config(
