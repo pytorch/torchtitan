@@ -10118,3 +10118,92 @@ Interpretation:
 
 - The smallest chunks4 batch step above 168 is slower and memory-riskier.
 - Keep batch168 as the active batch for the shared-cast source path unless a separate memory-reduction mechanism appears.
+
+## Experiment 409: Profile Shared MXFP8 Gate/Up Input Cast
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run409-profile-mxfp8-shared-gate-up-input-cast-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Same committed shared MXFP8 gate/up input-cast patch as run407.
+
+Result:
+
+- Status: keep / diagnostic profile.
+- Step 10 `tps`: 12,182. Profiled tps is not used alone for ranking.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.39073 at step 1 to 7.32939 at step 10.
+
+Trace summary:
+
+- Compared with run389, rank0 MXFP8 cast events fell from 852 to 812 and cast time fell from about 351 ms to 304 ms.
+- Rank0 MX/GEMM bucket fell from about 921 ms to 808 ms.
+- Rank0 NCCL fell sharply in this sample, but worst-rank NCCL remains the dominant tail: rank6 still spends about 2.35 s in NCCL.
+- Worst-rank kernel buckets in run409: NCCL ~2.35 s, MX/GEMM ~0.77 s, copy/cat ~0.30 s, MXFP8 cast ~0.29 s, elementwise ~0.17 s, RMSNorm ~0.11 s, attention ~0.07 s.
+
+Interpretation:
+
+- The shared gate/up source path reduced exactly the duplicated cast bucket it targeted.
+- The next source-side opportunity is communication scheduling/overlap, not attention or RMSNorm.
+- Test a longer FSDP prefetch distance on the shared-cast source path to see if it improves worst-rank NCCL overlap.
+
+## Experiment 410: Shared MXFP8 With Two-Module FSDP Prefetch
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run410-mxfp8-shared-gate-up-input-cast-two-module-fsdp-prefetch-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed FSDP forward and backward prefetch lists from one adjacent module to up to two adjacent modules.
+- Kept the shared MXFP8 gate/up input-cast patch and all other settings unchanged.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,064.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 168.18 GiB, 94.30%.
+- No allocator retries were logged.
+- Loss moved from 12.48902 at step 1 to 5.06448 at step 10.
+
+Interpretation:
+
+- Longer prefetch distance does not improve the NCCL tail enough to pay for the extra memory and scheduling pressure.
+- Restore the one-module bidirectional FSDP prefetch chain.
+
+## Experiment 411: Shared MXFP8 With High-Precision Gate/Up Wgrad
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run411-mxfp8-shared-gate-up-input-cast-hp-wgrad-gate-up-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily forced the shared gate/up custom autograd path to compute only `w1`/`w3` weight gradients in high precision.
+- Other MXFP8 linears still used MXFP8 wgrad.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,549.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 171.05 GiB, 95.91%.
+- No allocator retries were logged, but memory is above the preferred line.
+- Loss moved from 12.40576 at step 1 to 5.06054 at step 10.
+
+Interpretation:
+
+- The targeted high-precision wgrad version avoids some MXFP8 cast work but replaces it with much more expensive high-precision GEMM/memory pressure.
+- This validates the broader run400 conclusion at a narrower scope: keep MXFP8 wgrad for the active recipe.
+- Restore `config.wgrad_with_hp` in the shared gate/up custom path.
