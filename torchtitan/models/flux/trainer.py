@@ -4,15 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.spmd_state import set_current_mesh
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
@@ -159,9 +162,9 @@ class FluxTrainer(Trainer):
             torch.Tensor: The computed loss value for this training step
         """
 
-        assert (
-            global_valid_tokens is None
-        ), "FLUX model don't need to rescale loss by number of global valid tokens"
+        assert global_valid_tokens is None, (
+            "FLUX model don't need to rescale loss by number of global valid tokens"
+        )
 
         # generate t5 and clip embeddings
         input_dict["image"] = labels
@@ -223,12 +226,15 @@ class FluxTrainer(Trainer):
             from torchtitan.distributed.context_parallel import cp_shard
 
             (
-                latents,
-                latent_pos_enc,
-                t5_encodings,
-                text_pos_enc,
-                target,
-            ), _ = cp_shard(
+                (
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                ),
+                _,
+            ) = cp_shard(
                 self.parallel_dims.get_mesh("cp"),
                 (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                 None,  # No attention masks for Flux
@@ -239,19 +245,38 @@ class FluxTrainer(Trainer):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += bsz * self.config.training.seq_len // self.parallel_dims.cp
 
-        with self.train_context():
-            latent_noise_pred = model(
-                img=latents,
-                img_ids=latent_pos_enc,
-                txt=t5_encodings,
-                txt_ids=text_pos_enc,
-                y=clip_encodings,
-                timesteps=timesteps,
-            )
+        model_inputs = {
+            "img": latents,
+            "img_ids": latent_pos_enc,
+            "txt": t5_encodings,
+            "txt_ids": text_pos_enc,
+            "y": clip_encodings,
+            "timesteps": timesteps,
+        }
+        typecheck_scope = (
+            spmd.typecheck(local=True)
+            if self.config.debug.spmd_typechecking
+            else contextlib.nullcontext()
+        )
 
-            # Scale loss as we used SUM reduction for mse loss function
-            # pyrefly: ignore [unsupported-operation]
-            loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
+        with set_current_mesh(self.parallel_dims.get_activated_mesh(["dp", "cp"])):
+            with self.train_context(), typecheck_scope:
+                if self.config.debug.spmd_typechecking:
+                    if isinstance(global_valid_tokens, torch.Tensor):
+                        spmd.assert_type(global_valid_tokens, spmd.R)
+                    self._annotate_inputs_spmd(
+                        latents,
+                        target,
+                        model_inputs,
+                        {},
+                    )
+                latent_noise_pred = model(
+                    **model_inputs,
+                )
+
+                # Scale loss as we used SUM reduction for mse loss function
+                # pyrefly: ignore [unsupported-operation]
+                loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]

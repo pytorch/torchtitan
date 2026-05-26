@@ -6,12 +6,12 @@
 
 # imported from black-forest-labs/FLUX
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from einops import rearrange
 from torch import nn, Tensor
-from torchtitan.models.common.attention import ScaledDotProductAttention
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.module import Module, Sequential
@@ -136,6 +136,9 @@ class SelfAttention(Module):
         qkv: Linear.Config
         proj: Linear.Config
         norm: QKNorm.Config
+        inner_attention: FlexAttention.Config = field(
+            default_factory=FlexAttention.Config
+        )
         num_heads: int = 8
         qkv_bias: bool = False
 
@@ -145,7 +148,7 @@ class SelfAttention(Module):
         self.qkv = config.qkv.build()
         self.norm = config.norm.build()
         self.proj = config.proj.build()
-        self.inner_attention = ScaledDotProductAttention.Config().build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
@@ -201,6 +204,9 @@ class DoubleStreamBlock(Module):
         img_mlp_out: Linear.Config
         txt_mlp_in: Linear.Config
         txt_mlp_out: Linear.Config
+        inner_attention: FlexAttention.Config = field(
+            default_factory=FlexAttention.Config
+        )
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
 
@@ -239,7 +245,7 @@ class DoubleStreamBlock(Module):
             config.txt_mlp_out.build(),
         )
 
-        self.inner_attention = ScaledDotProductAttention.Config().build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
@@ -304,6 +310,9 @@ class SingleStreamBlock(Module):
         linear2: Linear.Config
         modulation: Modulation.Config
         norm: QKNorm.Config
+        inner_attention: FlexAttention.Config = field(
+            default_factory=FlexAttention.Config
+        )
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
 
@@ -329,7 +338,7 @@ class SingleStreamBlock(Module):
 
         self.mlp_act = GELU(approximate="tanh")
         self.modulation = config.modulation.build()
-        self.inner_attention = ScaledDotProductAttention.Config().build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
