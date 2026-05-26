@@ -800,15 +800,25 @@ class RLTrainer(Configurable):
                     packing_metrics,
                 ) = self.batcher.batch(episodes, dp_degree=self.trainer_dp_degree)
 
-            all_fwd_bwd_metrics: list[dict[str, float]] = []
+            # Aggregate metrics across gradient-accumulation microbatches.
+            # "/mean" and "/frac" metrics are pre-normalized by
+            # num_global_valid_tokens, so summing reconstructs the global
+            # value.  "/max" metrics take the max across microbatches.
+            fwd_bwd_metrics: dict[str, float] = {}
             for microbatch in microbatches:
                 with sl.log_trace_span("trainer_forward_backward_call"):
-                    metrics = self._get_rank_0_value(
+                    mb_metrics = self._get_rank_0_value(
                         self.trainer.forward_backward.call(
                             microbatch, num_global_valid_tokens
                         ).get()
                     )
-                    all_fwd_bwd_metrics.append(metrics)
+                    for k, v in mb_metrics.items():
+                        if k not in fwd_bwd_metrics:
+                            fwd_bwd_metrics[k] = v
+                        elif k.endswith("/max"):
+                            fwd_bwd_metrics[k] = max(fwd_bwd_metrics[k], v)
+                        elif k.endswith(("/mean", "/frac")):
+                            fwd_bwd_metrics[k] += v
             with sl.log_trace_span("trainer_optim_step_call"):
                 optim_output = self._get_rank_0_value(
                     self.trainer.optim_step.call().get()
@@ -829,7 +839,7 @@ class RLTrainer(Configurable):
             t_weight_sync_total_s = time.perf_counter() - t_push_start
             t_step_s = time.perf_counter() - t_step_start
             # --- divergence check before any logging ---
-            if any(not math.isfinite(mb["loss/mean"]) for mb in all_fwd_bwd_metrics):
+            if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
                 logger.error("Loss is NaN/Inf; training diverged")
                 break
 
@@ -843,14 +853,11 @@ class RLTrainer(Configurable):
             step_metrics += rollout_metrics
             step_metrics += episode_metrics
 
-            # Actor metrics are already globally reduced; NoReduce passes them through.
-            # Log each microbatch's metrics separately.
-            for mb_idx, mb_metrics in enumerate(all_fwd_bwd_metrics):
-                suffix = f"/microbatch_{mb_idx}" if len(all_fwd_bwd_metrics) > 1 else ""
-                step_metrics += [
-                    m.Metric(f"{k}{suffix}", m.NoReduce(v))
-                    for k, v in mb_metrics.items()
-                ]
+            # Actor metrics are already globally reduced and aggregated
+            # across microbatches; NoReduce passes them through.
+            step_metrics += [
+                m.Metric(k, m.NoReduce(v)) for k, v in fwd_bwd_metrics.items()
+            ]
             step_metrics += [
                 m.Metric(k, m.NoReduce(v)) for k, v in optimizer_metrics.items()
             ]

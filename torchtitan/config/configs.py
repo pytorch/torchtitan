@@ -24,7 +24,13 @@ from typing import Literal
 
 @dataclass(kw_only=True, slots=True)
 class BatchConfig:
-    """Batch shape parameters shared by SFT dataloaders and RL batchers."""
+    """Batch shape parameters shared by SFT dataloaders and RL batchers.
+
+    TODO: Unify batch shape fields across pre-training, SFT, and RL.
+    Either refactor TrainingConfig to embed BatchConfig, or make
+    BatchConfig a dataloader-level config (like the pre-trainer's
+    dataloader accepts batch params).
+    """
 
     local_batch_size: int = 8
     """Per-DP-rank batch size (rows per forward pass)."""
