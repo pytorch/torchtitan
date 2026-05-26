@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 
 
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, Placement] = {
-    "w1": Shard(1),
-    "w2": Shard(2),
-    "w3": Shard(1),
+    "w1_EFD": Shard(1),
+    "w2_EDF": Shard(2),
+    "w3_EFD": Shard(1),
 }
 
 
