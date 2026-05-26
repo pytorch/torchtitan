@@ -30,7 +30,6 @@ from collections.abc import Callable
 
 import torch
 from torch._logging import trace_structured
-
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -148,12 +147,11 @@ def compile_time_passes(
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
-    from torchtitan.models.common.attention import FlexAttention
-
     from torchtitan.experiments.graph_trainer.fused_kernel_registry import (
         fused_kernel_pass,
         tag_fusible_nodes_pass,
     )
+    from torchtitan.models.common.attention import FlexAttention
 
     n_layers = len(config.model_spec.model.layers)
     passes: list[Callable] = [
@@ -161,7 +159,7 @@ def compile_time_passes(
         remove_identity_view_pass,
         remove_inverse_transpose_pass,
         remove_identity_slice_pass,
-        normalize_view_ops_as_reshape,
+        # normalize_view_ops_as_reshape,
         functools.partial(
             tag_with_memory_policy_pass,
             config=config,

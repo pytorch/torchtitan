@@ -47,7 +47,10 @@ def generate_one(name: str) -> dict:
     problem_text = problem_file.read_text()
     log_dir = str(problem_dir / "logs")
 
-    from torchtitan.experiments.graph_trainer.kernel_gen.kernelagent_bridge import generate_kernel
+    from torchtitan.experiments.graph_trainer.kernel_gen.kernelagent_bridge import (
+        _DEFAULT_MODEL,
+        generate_kernel,
+    )
 
     print(f"[{name}] Generating kernel...", flush=True)
     try:
@@ -55,6 +58,7 @@ def generate_one(name: str) -> dict:
             problem_text,
             num_workers=4,
             max_rounds=10,
+            model_name=_DEFAULT_MODEL,
             output_dir=log_dir,
         )
     except Exception as e:

@@ -169,7 +169,7 @@ def generate_kernel(
         agent.cleanup()
 
 
-_DEFAULT_MODEL = "claude-opus-4-6"
+_DEFAULT_MODEL = "claude-opus-4-7"
 
 # GPU names recognized by KernelAgent's spec database.
 _GPU_NAME_MAP = {
