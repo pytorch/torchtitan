@@ -66,7 +66,7 @@ def _shared_expert_colwise_config(enable_ep: bool, enable_sp: bool) -> ShardingC
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
     to Replicate for the column-sharded matmul; output is Shard(2)
-    (feature dim of for 3-D activations from MoE).
+    (feature dim for 3-D activations from MoE).
     """
     sp_layout = Shard(1) if enable_sp else Replicate()
     input_layout = Replicate() if not enable_ep else sp_layout

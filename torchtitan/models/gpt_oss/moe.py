@@ -151,9 +151,12 @@ class GptOssGroupedExperts(Module):
         topk_ids_BLK: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add."""
-        x_TD = x_BLD.reshape(-1, x_BLD.size(-1))
-        topk_scores_TK = topk_scores_BLK.reshape(-1, topk_scores_BLK.size(-1))
-        topk_ids_TK = topk_ids_BLK.reshape(-1, topk_ids_BLK.size(-1))
+        B, L, D = x_BLD.shape
+        K = topk_scores_BLK.size(-1)
+        T = B * L
+        x_TD = x_BLD.view(T, D)
+        topk_scores_TK = topk_scores_BLK.view(T, K)
+        topk_ids_TK = topk_ids_BLK.view(T, K)
         routed_input_RD, num_tokens_local_E, metadata = self.token_dispatcher.dispatch(
             x_TD, topk_scores_TK, topk_ids_TK
         )

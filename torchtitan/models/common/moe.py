@@ -97,9 +97,12 @@ class GroupedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
-        x_TD = x_BLD.reshape(-1, x_BLD.size(-1))
-        topk_scores_TK = topk_scores_BLK.reshape(-1, topk_scores_BLK.size(-1))
-        topk_ids_TK = topk_ids_BLK.reshape(-1, topk_ids_BLK.size(-1))
+        B, L, D = x_BLD.shape
+        K = topk_scores_BLK.size(-1)
+        T = B * L
+        x_TD = x_BLD.view(T, D)
+        topk_scores_TK = topk_scores_BLK.view(T, K)
+        topk_ids_TK = topk_ids_BLK.view(T, K)
         routed_input_RD, num_tokens_local_E, metadata = self.token_dispatcher.dispatch(
             x_TD, topk_scores_TK, topk_ids_TK
         )
@@ -156,15 +159,14 @@ class TokenChoiceTopKRouter(Module):
         self, scores_BLE: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Balanced round-robin expert assignment.
-        Returns (topk_ids_BLK [*, K] LongTensor, topk_scores_BLK [*, K] FloatTensor).
+        Returns (topk_ids_BLK ``(B, L, K)`` LongTensor, topk_scores_BLK ``(B, L, K)`` FloatTensor).
         """
-        leading_shape = scores_BLE.shape[:-1]
-        n_tokens = scores_BLE[..., 0].numel()
+        bs, slen, _ = scores_BLE.shape
         # Round-robin indices with exact balance
         topk_ids_BLK = (
             torch.arange(
-                n_tokens * self.top_k, device=scores_BLE.device, dtype=torch.int64
-            ).reshape(*leading_shape, self.top_k)
+                bs * slen * self.top_k, device=scores_BLE.device, dtype=torch.int64
+            ).reshape(bs, slen, self.top_k)
             % self.num_experts
         )
         topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_ids_BLK)
@@ -385,12 +387,12 @@ class MoE(Module):
         ):
             # Sync the combine operation before using routed_output.
             # This inserts a CUDA stream wait, ensuring combine is complete before
-            # the subsequent addition or reshape operations read routed output.
+            # the subsequent addition or view operations read routed output.
             from torchtitan.distributed.deepep.deepep import sync_combine
 
             sync_combine()
 
-        out_BLD = out_TD.reshape(bs, slen, dim)
+        out_BLD = out_TD.view(bs, slen, dim)
         if shared_out_BLD is not None:
             out_BLD = out_BLD + shared_out_BLD
         return out_BLD
