@@ -16,6 +16,14 @@ from torch.distributed.tensor import DeviceMesh
 from torchtitan.config import Configurable
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
+# Shape suffix legend
+# (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
+#   B = batch, L = sequence length, D = model dimension,
+#   F = hidden (FFN intermediate) dimension, E = num experts,
+#   e = num local experts (E / EP), K = top-k,
+#   T = num tokens (B*L flattened), N = routed tokens (T*K),
+#   R = routed tokens assigned to local experts
+
 
 @dataclass(frozen=True, kw_only=True)
 class LocalDispatchMetadata:
@@ -380,13 +388,12 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             - output_starts[seg_ids]
         )
 
-        # num_tokens_per_local_expert_E shape is (num_local_experts,), not (num_experts,)
-        num_tokens_per_local_expert_E = t_mat.sum(0)
+        num_tokens_per_local_expert_e = t_mat.sum(0)
         return (
             routed_input_RD.shape,
             routed_input_RD[permuted_indices, :],
             permuted_indices,
-            num_tokens_per_local_expert_E,
+            num_tokens_per_local_expert_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):

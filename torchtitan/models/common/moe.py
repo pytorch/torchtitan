@@ -22,7 +22,8 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
 #   B = batch, L = sequence length, D = model dimension,
 #   F = hidden (FFN intermediate) dimension, E = num experts,
-#   K = top-k, T = num tokens (B*L flattened), N = routed tokens (T*K),
+#   e = num local experts (E / EP), K = top-k,
+#   T = num tokens (B*L flattened), N = routed tokens (T*K),
 #   R = routed tokens assigned to local experts
 
 
@@ -227,7 +228,6 @@ class TokenChoiceTopKRouter(Module):
             topk_ids_BLK: Expert indices ``(B, L, K)``.
             num_tokens_per_expert_E: Token counts per expert ``(E,)``.
         """
-        # Gate operates on the last dim, so it handles any number of leading dims.
         # Compute gate in float32 to help stability of expert load balancing.
         with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
             scores_BLE = self.gate(x_BLD)
@@ -253,7 +253,6 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
         )
 
-        # topk_scores_BLK shape (*, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       topk_scores_BLK is still derived from the original scores.
         topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_ids_BLK)

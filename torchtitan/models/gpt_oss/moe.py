@@ -119,19 +119,19 @@ class GptOssGroupedExperts(Module):
             [num_tokens_per_expert_E, tail_slack]
         ).long()
 
-        h_RF = torch._grouped_mm(
+        h_R2F = torch._grouped_mm(
             x_RD.bfloat16(),
             mlp1_weight.transpose(-2, -1).bfloat16(),
             offs=offsets_E,
         )
 
         b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
-        b1_RF = b1.repeat_interleave(
+        b1_R2F = b1.repeat_interleave(
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
-        h_RF = h_RF + b1_RF.to(h_RF.dtype)
+        h_R2F = h_R2F + b1_R2F.to(h_R2F.dtype)
 
-        h_RF = swiglu(h_RF, limit=self.swiglu_limit)
+        h_RF = swiglu(h_R2F, limit=self.swiglu_limit)
         h_RD = torch._grouped_mm(
             h_RF, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets_E
         )
