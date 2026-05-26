@@ -173,8 +173,7 @@ def cp_shard(
 
     Args:
         cp_mesh: Device mesh for context parallel dimension
-        inputs: Tuple of input tensors to be sharded along the sequence
-            dimension
+        inputs: Tuple of input tensors to be sharded along the sequence dimension
         attention_masks: Attention masks to be sharded. Supports None,
             BlockMask, dict[str, BlockMask], or VarlenMetadata.
         load_balancer_type: Type of load balancer to use. Options:
@@ -203,15 +202,13 @@ def cp_shard(
 
         ValueError: If ``cp_mesh.ndim != 1``.
         ValueError: If attention_masks is a VarlenMetadata and
-            input_seq_dim is not 1 (varlen sharding assumes the
-            (B, S, ...) layout).
+            input_seq_dim is not 1 (varlen sharding assumes the (B, S, ...) layout).
         ValueError: If load_balancer_type is "ptrr" and attention_masks
             is None, a dict, or a VarlenMetadata (PTRR + varlen is not
             yet supported).
         ValueError: When inputs are inconsistent for varlen sharding
             (cu_seq_q malformed, cross-attention, divisibility,
-            double-shard). See CPVarlenMetadata.from_global for the
-            full list.
+            double-shard). See CPVarlenMetadata.from_global for the full list.
     """
     if cp_mesh.ndim != 1:
         raise ValueError(f"cp_shard expects a 1-D CP mesh, got ndim={cp_mesh.ndim}.")
