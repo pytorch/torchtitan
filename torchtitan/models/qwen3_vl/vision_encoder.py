@@ -13,11 +13,9 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList
-
-LayerNorm = Module.from_nn_module(nn.LayerNorm)
-GELU = Module.from_nn_module(nn.GELU)
 
 _compiled_create_block_mask = torch.compile(create_block_mask)
 
@@ -319,9 +317,12 @@ class PatchMerger(Module):
         self.use_postshuffle_norm = use_postshuffle_norm
 
         norm_dim = self.merged_hidden_size if use_postshuffle_norm else hidden_size
-        self.norm = LayerNorm(norm_dim, eps=1e-6)
+        self.norm = LayerNorm.Config(
+            normalized_shape=norm_dim,
+            eps=1e-6,
+        ).build()
         self.linear_fc1 = fc1.build()
-        self.act_fn = GELU(approximate="tanh")
+        self.act_fn = GELU.Config(approximate="tanh").build()
         self.linear_fc2 = fc2.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -407,7 +408,7 @@ class VisionMLP(Module):
         super().__init__()
         self.linear_fc1 = fc1.build()
         self.linear_fc2 = fc2.build()
-        self.act_fn = GELU(approximate="tanh")
+        self.act_fn = GELU.Config(approximate="tanh").build()
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
         return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
@@ -428,8 +429,14 @@ class VisionTransformerBlock(Module):
         mlp_fc2: Linear.Config,
     ):
         super().__init__()
-        self.norm1 = LayerNorm(dim, eps=layer_norm_eps)
-        self.norm2 = LayerNorm(dim, eps=layer_norm_eps)
+        self.norm1 = LayerNorm.Config(
+            normalized_shape=dim,
+            eps=layer_norm_eps,
+        ).build()
+        self.norm2 = LayerNorm.Config(
+            normalized_shape=dim,
+            eps=layer_norm_eps,
+        ).build()
         self.attn = VisionAttention(dim, n_heads, qkv=attn_qkv, proj=attn_proj)
         self.mlp = VisionMLP(fc1=mlp_fc1, fc2=mlp_fc2)
 
