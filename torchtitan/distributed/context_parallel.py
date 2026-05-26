@@ -117,7 +117,6 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     device: torch.device,
     load_balancer_type: str | None = "headtail",
-    ptrr_block_size: int = 1024,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -135,9 +134,6 @@ def prepare_context_parallel_input(
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
             Options: "headtail", "ptrr", or None. Defaults to "headtail".
-        ptrr_block_size: Block size used by the varlen PTRR load balancer
-            (only consulted when ``load_balancer_type='ptrr'`` and
-            ``attention_masks`` is a ``VarlenMetadata``).
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -153,7 +149,6 @@ def prepare_context_parallel_input(
         (inputs, labels, positions),
         attention_masks,
         load_balancer_type,
-        ptrr_block_size=ptrr_block_size,
     )
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
@@ -168,7 +163,6 @@ def cp_shard(
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 1,
-    ptrr_block_size: int = 1024,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -194,9 +188,6 @@ def cp_shard(
             [batch_size, seq_len]. Can be changed by passing a
             different value if your tensors use a different sequence
             dimension layout.
-        ptrr_block_size: Block size used by the varlen PTRR load balancer
-            (only consulted when ``load_balancer_type='ptrr'`` and
-            ``attention_masks`` is a ``VarlenMetadata``).
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -248,12 +239,13 @@ def cp_shard(
                 # the codebase (VarlenAttention.forward also rejects non-causal
                 # window_size under CP).
                 if isinstance(attention_masks, VarlenMetadata):
+                    # TODO: expose block_size to users and get window_size
+                    # from VarlenAttention.Config.
                     load_balancer = _VarlenPTRRLoadBalancer(
                         attention_masks.cu_seq_q,
                         batch_size=batch_size,
                         seq_length=seq_len,
                         world_size=cp_world_size,
-                        block_size=ptrr_block_size,
                     )
                 else:
                     if attention_masks is None or isinstance(attention_masks, dict):

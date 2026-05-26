@@ -117,8 +117,7 @@ class CPVarlenMetadata(VarlenMetadata):
         )
         if seq_length % required_divisor != 0:
             reason = (
-                "2 * cp world size (extra divisibility required when a load "
-                "balancer is used)"
+                "2 * cp world size (load balancers chunk each shard into 2 halves)"
                 if load_balancer is not None
                 else "cp world size"
             )
@@ -254,15 +253,10 @@ class CPVarlenMetadata(VarlenMetadata):
 
 class _VarlenPTRRLoadBalancer(_LoadBalancer):
     """Processing-Time based Round-Robin (PTRR) load balancer for
-    **document-causal** varlen attention.
+    varlen attention.
 
-    .. warning::
-        This balancer assumes per-document causal masking. The per-Q-block
-        work estimate is ``t - doc_start[t] + 1`` summed over the block,
-        which is only the correct work estimate under causal masking.
-        Using this balancer with a non-causal varlen mask will produce a
-        valid permutation but a meaningless load balance -- callers are
-        responsible for ensuring the attention mask is causal.
+    Supports causal ``(-1, 0)`` and sliding-window causal ``(W, 0)`` masking.
+    Bidirectional or lookahead masks are not supported.
 
     Estimates per-Q-block work directly from ``cu_seq_q`` (no ``BlockMask``
     needed). Per-block work is the sum of per-token work over the block.
@@ -280,6 +274,7 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
         seq_length: int,
         world_size: int,
         block_size: int = 1024,
+        window_size: tuple[int, int] = (-1, 0),
     ):
         # cu_seq_q is consumed below by ``torch.searchsorted``, which only
         # requires 1-D and monotonic non-decreasing input. Monotonicity and
@@ -307,6 +302,7 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
         self.seq_length = seq_length
         self.world_size = world_size
         self.block_size = block_size
+        self.window_size = window_size
 
     def _generate_indices(self, restore: bool = False) -> Tensor:
         """Compute the per-batch forward or inverse permutation.
@@ -331,10 +327,15 @@ class _VarlenPTRRLoadBalancer(_LoadBalancer):
         device = self.cu_seq_q.device
         cu = self.cu_seq_q.to(torch.long)
 
-        # Per-token causal work = (token's offset within its doc) + 1.
+        # Per-token work = number of visible K positions for this token.
+        # Causal (-1, 0): offset_in_doc + 1.
+        # Sliding window (W, 0): min(W, offset + 1).
         positions = torch.arange(B * S, device=device, dtype=torch.long)
         doc_id = torch.searchsorted(cu, positions, right=True) - 1
         work_per_token = positions - cu[doc_id] + 1  # (B*S,)
+        left = self.window_size[0]
+        if left >= 0:
+            work_per_token = work_per_token.clamp(max=left)
 
         # Per-block work: sum of token work within each block, per batch.
         work_per_block = work_per_token.view(B, num_blocks, block_size).sum(dim=-1)
