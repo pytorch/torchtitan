@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
+    _make_full_memory_policy,
     tag_sac_policy,
 )
 from torchtitan.experiments.graph_trainer.passes import (
@@ -565,6 +566,106 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(len(recomputed_nodes), 1)
         self.assertTrue(recomputed_nodes[0].meta["autograd_backward"])
+
+
+class TestFullMemoryPolicy(TestCase):
+    """Unit tests for the full recompute memory policy."""
+
+    def _build_gm(self, op_targets, layer_fqns=None):
+        """Build a GraphModule with call_function nodes and optional layer FQNs."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        y = graph.placeholder("y")
+        last = x
+        nodes = []
+        for target in op_targets:
+            last = graph.call_function(target, args=(last, y))
+            nodes.append(last)
+        graph.output(last)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        if layer_fqns:
+            for node, fqn in zip(nodes, layer_fqns):
+                if fqn is not None:
+                    node.meta["custom"] = {_MODULE_FQN: fqn}
+        return gm
+
+    def _get_call_function_nodes(self, gm):
+        return [n for n in gm.graph.nodes if n.op == "call_function"]
+
+    def test_all_ops_marked_recompute(self):
+        """All ops should be marked MUST_RECOMPUTE with full policy."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.mm.default,
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(
+                node.meta["recompute"],
+                CheckpointPolicy.MUST_RECOMPUTE,
+                f"node {node.name} should be MUST_RECOMPUTE",
+            )
+
+    def test_save_ops_also_recomputed(self):
+        """Even compute-intensive ops (SDPA, linear) are recomputed under full."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.linear.default,
+                torch.ops.aten.max.default,
+            ]
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(
+                node.meta["recompute"],
+                CheckpointPolicy.MUST_RECOMPUTE,
+            )
+
+    def test_layer_boundary_forced_to_must_save(self):
+        """Nodes at layer boundaries should still be forced to MUST_SAVE."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ],
+            layer_fqns=[
+                "layers.0.feed_forward",
+                "layers.1.attention",
+            ],
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        nodes = self._get_call_function_nodes(gm)
+        # add crosses from layer 0 to layer 1 — forced to MUST_SAVE
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        # relu has no higher-layer consumer — stays MUST_RECOMPUTE
+        self.assertEqual(nodes[1].meta["recompute"], CheckpointPolicy.MUST_RECOMPUTE)
+
+    def test_same_layer_nodes_all_recomputed(self):
+        """Within a single layer, all ops should be recomputed."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.mm.default,
+                torch.ops.aten.linear.default,
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ],
+            layer_fqns=[
+                "layers.0.attention",
+                "layers.0.attention",
+                "layers.0.feed_forward",
+                "layers.0.feed_forward",
+            ],
+        )
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(
+                node.meta["recompute"],
+                CheckpointPolicy.MUST_RECOMPUTE,
+                f"node {node.name} in single layer should be MUST_RECOMPUTE",
+            )
 
 
 class TestBucketingPrefetchOrder(FSDPTest):

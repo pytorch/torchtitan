@@ -62,6 +62,32 @@ def _make_default_memory_policy(
     return policy_fn
 
 
+def _make_full_memory_policy() -> Callable:
+    """Full recompute policy: mark everything as MUST_RECOMPUTE.
+
+    The layer boundary pass in tag_sac_policy will force MUST_SAVE on nodes
+    whose output crosses a layer boundary, so only layer outputs are saved.
+    This mirrors eager's full AC (checkpoint_wrapper with no context_fn).
+
+    Two classes of ops are always saved:
+    - RNG ops (dropout etc.): remat pass cannot replay their random state.
+    - Higher-order ops (flex_attention, inductor_compiled_code): they carry
+      GraphModule subgraph arguments that node_copy cannot duplicate.
+    """
+    from torch._ops import HigherOrderOperator
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
+            return CheckpointPolicy.MUST_SAVE
+        # TODO: node_copy should support HOPs with subgraph arguments,
+        # removing the need for this workaround.
+        if isinstance(node.target, HigherOrderOperator):
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.MUST_RECOMPUTE
+
+    return policy_fn
+
+
 def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     """Eager-compatible SAC policy that alternates mm ops between save/recompute.
 
@@ -227,6 +253,17 @@ def _default_memory_policy_pass(
     return gm
 
 
+@register_memory_policy("full")
+def _full_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Full recompute: only layer outputs are saved."""
+    tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+    return gm
+
+
 @register_memory_policy("eager")
 def _eager_memory_policy_pass(
     gm: torch.fx.GraphModule,
@@ -262,6 +299,7 @@ def tag_with_memory_policy_pass(
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
+        full: full recompute — only layer outputs are saved.
         eager: SAC alternating mm ops between save/recompute.
         sac_and_offload: SAC + CPU offload within budget.
 
