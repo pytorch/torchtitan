@@ -200,9 +200,24 @@ class ParallelismConfig:
     context_parallel_load_balancer: str | None = "headtail"
     """
     Load balancer type for context parallelism. Options:
-    - "headtail": Use HeadTailLoadBalancer for SDPA
-    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - "headtail": Use HeadTailLoadBalancer (works for SDPA, FlexAttention,
+      and varlen attention)
+    - "ptrr": Use PTRRLoadBalancer (FlexAttention) or
+      _VarlenPTRRLoadBalancer (varlen)
     - None: Disable load balancing
+    """
+
+    context_parallel_ptrr_block_size: int = 128
+    """
+    Block size for the varlen PTRR load balancer
+    (``_VarlenPTRRLoadBalancer``). Ignored unless
+    ``context_parallel_load_balancer='ptrr'`` and varlen attention is in
+    use.  Must divide the per-batch sequence length evenly, and
+    ``(seq_len / block_size)`` must be divisible by
+    ``context_parallel_degree``.  Default 128 matches FlexAttention's
+    default sparse block size.  Smaller values give finer load balance
+    at the cost of more rearrange overhead; larger values are coarser
+    but cheaper.
     """
 
     def __post_init__(self):

@@ -17,12 +17,15 @@ infrastructure; the base :class:`VarlenMetadata` data type stays in
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 import torch
+from torch import Tensor
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._context_parallel._load_balancer import (
     _LoadBalancer,
+    _PTRRLoadBalancer,
 )
 
 from torchtitan.models.common.attention import VarlenMetadata
@@ -129,7 +132,8 @@ class CPVarlenMetadata(VarlenMetadata):
         )
         if seq_length % required_divisor != 0:
             reason = (
-                "2 * cp world size (load balancers chunk each shard into 2 halves)"
+                "2 * cp world size (extra divisibility required when a load "
+                "balancer is used)"
                 if load_balancer is not None
                 else "cp world size"
             )
@@ -148,20 +152,28 @@ class CPVarlenMetadata(VarlenMetadata):
         if load_balancer is not None:
             rearrange_indices = load_balancer._generate_indices(restore=False)
             if rearrange_indices is not None:
-                # Only same-across-batch indices are reachable today: PTRR (the lone
-                # balancer that can vary per-batch) is rejected upfront for varlen+CP.
-                # Argsort the (1, S) tensor once then expand both permutations to
-                # (batch_size, S).
-                if rearrange_indices.ndim != 2 or rearrange_indices.shape[0] != 1:
+                if rearrange_indices.ndim != 2 or rearrange_indices.shape[0] not in (
+                    1,
+                    batch_size,
+                ):
                     raise ValueError(
-                        "load balancer indices must have shape "
-                        f"(1, seq_length); got {tuple(rearrange_indices.shape)}."
+                        "load balancer indices must have shape (1, seq_length) "
+                        "or (batch_size, seq_length); got "
+                        f"{tuple(rearrange_indices.shape)}."
                     )
-                # (1, S) forward perm -> (B, S) views of forward and inverse perms.
-                rearrange_1xS = rearrange_indices.to(dtype)
-                restore_1xS = torch.argsort(rearrange_1xS, dim=-1)
-                rearrange_per_batch = rearrange_1xS.expand(batch_size, -1)
-                restore_per_batch = restore_1xS.expand(batch_size, -1)
+                rearrange_indices = rearrange_indices.to(dtype)
+                # (1, S): same permutation across batches (e.g. headtail);
+                # argsort once and expand both permutations.
+                # (B, S): per-batch permutation (e.g. _VarlenPTRRLoadBalancer);
+                # argsort per row.
+                if rearrange_indices.shape[0] == 1:
+                    rearrange_per_batch = rearrange_indices.expand(batch_size, -1)
+                    restore_per_batch = torch.argsort(rearrange_indices, dim=-1).expand(
+                        batch_size, -1
+                    )
+                else:
+                    rearrange_per_batch = rearrange_indices
+                    restore_per_batch = torch.argsort(rearrange_indices, dim=-1)
 
         # Per-batch local-to-global seq mapping, (batch_size, shard_len) in
         # [0, seq_length).
@@ -280,3 +292,112 @@ class CPVarlenMetadata(VarlenMetadata):
             max_k=max_k,
             k_local_indices=k_local_indices.to(torch.long),
         )
+
+
+class _VarlenPTRRLoadBalancer(_LoadBalancer):
+    """Processing-Time based Round-Robin (PTRR) load balancer for
+    **document-causal** varlen attention.
+
+    .. warning::
+        This balancer assumes per-document causal masking. The per-Q-block
+        work estimate is ``t - doc_start[t] + 1`` summed over the block,
+        which is only the correct work estimate under causal masking.
+        Using this balancer with a non-causal varlen mask will produce a
+        valid permutation but a meaningless load balance -- callers are
+        responsible for ensuring the attention mask is causal.
+
+    Estimates per-Q-block work directly from ``cu_seq_q`` (no ``BlockMask``
+    needed). Per-block work is the sum of per-token work over the block.
+    The same scheduling primitive (``_PTRRLoadBalancer.ptrr_scheduling``)
+    is reused.
+
+    Outputs a ``(B, S)`` permutation tensor where each batch element is
+    rearranged independently -- important when documents differ across
+    the batch.
+    """
+
+    def __init__(
+        self,
+        cu_seq_q: Tensor,
+        *,
+        batch_size: int,
+        seq_length: int,
+        world_size: int,
+        block_size: int = 128,
+    ):
+        # cu_seq_q is consumed below by ``torch.searchsorted``, which only
+        # requires 1-D and monotonic non-decreasing input. Monotonicity and
+        # the ``cu_seq_q[-1] == batch_size * seq_length`` endpoint are
+        # already enforced by the same tensor's path through
+        # :meth:`CPVarlenMetadata.from_global` (which builds the balancer);
+        # we skip re-checking here to avoid two extra D2H syncs per forward.
+        if cu_seq_q.dim() != 1:
+            raise ValueError(
+                f"cu_seq_q must be 1-D, got shape {tuple(cu_seq_q.shape)}."
+            )
+        if seq_length % block_size != 0:
+            raise ValueError(
+                f"seq_length {seq_length} must be divisible by block_size {block_size}."
+            )
+        num_blocks = seq_length // block_size
+        if num_blocks % world_size != 0:
+            raise ValueError(
+                f"num_blocks (seq_length / block_size = {num_blocks}) "
+                f"must be divisible by world_size {world_size}."
+            )
+
+        self.cu_seq_q = cu_seq_q
+        self.batch_size = batch_size
+        self.seq_length = seq_length
+        self.world_size = world_size
+        self.block_size = block_size
+
+    def _generate_indices(self, restore: bool = False) -> Tensor:
+        """Compute the per-batch forward or inverse permutation.
+
+        Returns a ``(B, S)`` int64 tensor. When ``restore=False`` the
+        result is the forward permutation: ``indices[b, i]`` is the
+        original token position to be placed at slot ``i`` of batch
+        ``b`` after PTRR rebalancing. When ``restore=True`` the result
+        is its inverse (``argsort`` of the forward permutation).
+
+        Note the ``(B, S)`` output shape, vs upstream
+        :class:`_LoadBalancer`'s ``(1, S)`` or ``(B, S)`` contract:
+        PTRR rebalances every batch independently because document
+        structure can vary across the batch.
+        """
+        B = self.batch_size
+        S = self.seq_length
+        W = self.world_size
+        block_size = self.block_size
+        num_blocks = S // block_size
+
+        device = self.cu_seq_q.device
+        cu = self.cu_seq_q.to(torch.long)
+
+        # Per-token causal work = (token's offset within its doc) + 1.
+        positions = torch.arange(B * S, device=device, dtype=torch.long)
+        doc_id = torch.searchsorted(cu, positions, right=True) - 1
+        work_per_token = positions - cu[doc_id] + 1  # (B*S,)
+
+        # Per-block work: sum of token work within each block, per batch.
+        work_per_block = work_per_token.view(B, num_blocks, block_size).sum(dim=-1)
+        # (B, num_blocks)
+
+        batch_ptrr = torch.vmap(
+            functools.partial(_PTRRLoadBalancer.ptrr_scheduling, group_size=W)
+        )
+        ptrr_blocks = batch_ptrr(work_per_block)  # (B, W, num_blocks_per_rank)
+        ptrr_blocks = ptrr_blocks.reshape(B, -1)  # (B, num_blocks)
+
+        # Expand block indices to token indices.
+        block_indices = torch.arange(num_blocks * block_size, device=device).view(
+            num_blocks, block_size
+        )  # (num_blocks, block_size)
+        indices = block_indices[ptrr_blocks].view(B, -1)  # (B, S)
+
+        if restore:
+            # pyrefly: ignore[missing-argument]
+            indices = torch.vmap(torch.argsort)(indices)
+
+        return indices
