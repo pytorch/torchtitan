@@ -9872,3 +9872,162 @@ Interpretation:
 
 - The active FFN-compile batch168 source/command is valid, but the 12,115 tps run386 value is not durably reproduced in this exact rerun.
 - Keep the command as the best measured source/config, but treat the steady expectation as variance-sensitive rather than a guaranteed 12.1k tps result.
+
+## Experiment 400: MXFP8 Weight Gradients In High Precision
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run400-mxfp8-wgrad-with-hp-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily exposed `wgrad_with_hp` through `MXFP8LinearConverter.Config`.
+- Set `wgrad_with_hp=True` for `qwen3_14b()`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 2,480.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 173.90 GiB, 97.51%.
+- TorchTitan reported 18 CUDA allocation retries by step 10.
+- Loss moved from 12.32935 at step 1 to 7.26003 at step 10, but the run spent most steps in allocator retry territory.
+
+Interpretation:
+
+- Avoiding MXFP8 casts for the wgrad matmul is not a useful tradeoff at this shape.
+- The high-precision wgrad path dramatically increases memory pressure and destroys throughput.
+- Restore the default MXFP8 wgrad path.
+
+## Experiment 401: Batch184 With Loss Chunks 8
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=184 --loss.num_chunks=8 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run401-mxfp8-feed-forward-compile-lbs184-loss-chunks8-last-layer-no-reshard-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard / manually stopped.
+- Step 5 `tps`: 1,782.
+- Peak memory by step 5: 173.89 GiB, 97.50%.
+- CUDA allocation retries began by step 2.
+- Loss moved from 12.29063 at step 1 to 11.12516 at step 5.
+
+Interpretation:
+
+- More loss chunks do not make batch184 viable.
+- The run crosses the allocator cliff despite chunking and should not be continued.
+- Do not pursue larger batches above 176 on this MXFP8 FFN-compile shape without a new memory-reduction mechanism.
+
+## Experiment 402: TORCH_NCCL_HIGH_PRIORITY On MXFP8 FFN Compile
+
+Command:
+
+```bash
+TORCH_NCCL_HIGH_PRIORITY=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run402-mxfp8-feed-forward-compile-lbs168-torch-nccl-high-priority-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,931.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retries were logged.
+- Loss moved from 12.32665 at step 1 to 6.16288 at step 10.
+
+Interpretation:
+
+- High-priority NCCL streams are valid and clean, but they do not beat the active measured peak.
+- Keep the default stream priority for the final recipe.
+
+## Experiment 403: Forward-Only FSDP Prefetch
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run403-mxfp8-feed-forward-compile-lbs168-forward-prefetch-only-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily removed all backward FSDP prefetch calls while keeping the forward layer-to-layer and last-layer-to-`lm_head` prefetch chain.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,686.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retries were logged.
+- Loss moved from 12.36767 at step 1 to 15.06223 at step 10.
+
+Interpretation:
+
+- Removing backward prefetch is slower and produces a bad short-run loss trend.
+- The bidirectional one-module prefetch chain remains better for the active MXFP8 FFN-compile setup.
+- Restore the backward prefetch chain.
+
+## Experiment 404: NCCL CGA Cluster Size 4
+
+Command:
+
+```bash
+NCCL_CGA_CLUSTER_SIZE=4 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run404-mxfp8-feed-forward-compile-lbs168-nccl-cga-cluster-size4-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,074.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retries were logged.
+- Loss moved from 12.29305 at step 1 to 6.48044 at step 10.
+
+Interpretation:
+
+- `NCCL_CGA_CLUSTER_SIZE=4` is clean and in the high band, but below the run386 measured peak.
+- It is not a replacement for the default final recipe.
+
+## Experiment 405: NCCL CGA Cluster Size 2
+
+Command:
+
+```bash
+NCCL_CGA_CLUSTER_SIZE=2 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run405-mxfp8-feed-forward-compile-lbs168-nccl-cga-cluster-size2-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,077.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retries were logged.
+- Loss moved from 12.33056 at step 1 to 5.93815 at step 10.
+
+Interpretation:
+
+- `NCCL_CGA_CLUSTER_SIZE=2` is marginally above size 4 but still below run386.
+- Close the immediate CGA cluster-size bracket. It can produce clean high-band samples, but there is no evidence it beats the default peak.
