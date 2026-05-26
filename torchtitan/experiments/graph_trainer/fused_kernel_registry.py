@@ -1101,29 +1101,62 @@ def _prewarm_callable(fn: Callable, region: Region, hash_str: str) -> None:
         logger.warning(f"Prewarm failed for region {hash_str}: {e}")
 
 
-def _make_compile_callable(
-    region: Region, mode: str | None
-) -> Callable | None:
-    """Build a torch.compile'd wrapper around ``region.subgraph_gm``.
+def _make_inductor_callable(region: Region) -> Callable | None:
+    """Compile ``region.subgraph_gm`` with ``compile_fx_inner`` (inductor).
 
-    Wrapped in a plain Python function so FX/inductor see a normal
-    callable (``OptimizedModule`` has no ``__name__``).
+    Unlike ``torch.compile``, this produces a **static** compiled callable
+    with no dynamo guards or lazy recompilation paths. After one warmup
+    call (to allocate workspace buffers), it is fully cudagraph-safe.
+
+    Uses the region's external_inputs' FakeTensor meta as example_inputs,
+    so compilation happens at pass time (no real tensors needed).
     """
-    if region.subgraph_gm is None:
+    from torch._inductor.compile_fx import compile_fx_inner
+    from torch._inductor.decomposition import select_decomp_table
+    from torch._subclasses.fake_tensor import FakeTensor
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    gm = region.subgraph_gm
+    if gm is None:
         return None
+
+    example_inputs = []
+    for inp_node in region.external_inputs:
+        val = inp_node.meta.get("val")
+        if val is None:
+            logger.debug(
+                f"Region input {inp_node.name} has no fake meta; "
+                "skipping inductor compilation."
+            )
+            return None
+        example_inputs.append(val)
+    example_inputs = tuple(example_inputs)
+
     try:
-        kwargs: dict = {"fullgraph": True}
-        if mode is not None:
-            kwargs["mode"] = mode
-        compiled = torch.compile(region.subgraph_gm, **kwargs)
+        decomp_table = select_decomp_table()
+        fake_mode = None
+        for inp in example_inputs:
+            if isinstance(inp, FakeTensor):
+                fake_mode = inp.fake_mode
+                break
 
-        def _wrapper(*args):
-            return compiled(*args)
+        if fake_mode is not None:
+            with fake_mode:
+                gm = make_fx(
+                    gm,
+                    decomposition_table=decomp_table,
+                    _allow_non_fake_inputs=True,
+                )(*example_inputs)
 
-        _wrapper.__name__ = f"compiled_{mode or 'default'}"
-        return _wrapper
+        output_code = compile_fx_inner(gm, example_inputs)
+
+        def _compiled(*args):
+            return output_code(list(args))
+
+        _compiled.__name__ = "inductor_compiled"
+        return _compiled
     except Exception as e:
-        logger.debug(f"torch.compile(mode={mode!r}) failed for region: {e}")
+        logger.warning(f"compile_fx_inner failed for region: {e}")
         return None
 
 
@@ -1183,18 +1216,19 @@ def _select_best_backend(
         ),
     ]
     if not skip_compile:
-        candidates.extend([
-            (
-                _passing_time("torch_compile"),
-                "compile",
-                lambda: _make_compile_callable(region, mode=None),
-            ),
-            (
-                _passing_time("torch_compile_max_autotune"),
-                "compile_max_autotune",
-                lambda: _make_compile_callable(region, mode="max-autotune"),
-            ),
-        ])
+        # Both compile benchmarks map to the same inductor-compiled
+        # callable at runtime (compile_fx_inner doesn't have a
+        # "max-autotune" mode — it always uses inductor's default
+        # config). We use the faster benchmark time as the key.
+        compile_t = min(
+            _passing_time("torch_compile"),
+            _passing_time("torch_compile_max_autotune"),
+        )
+        candidates.append((
+            compile_t,
+            "compile",
+            lambda: _make_inductor_callable(region),
+        ))
     candidates.sort(key=lambda x: x[0])
 
     for t, name, loader in candidates:
