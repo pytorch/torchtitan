@@ -4,8 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import pytest
+import torch
 
-from torchtitan.components.quantization import Float8Linear
+from torchtitan.components.quantization import Float8BlockwiseLinear, Float8Linear
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
 from torchtitan.components.quantization.utils import has_quantization
@@ -13,6 +14,7 @@ from torchtitan.config import ConfigManager
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.nn_modules import Linear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
+from torchtitan.tools.utils import has_cuda_capability
 
 
 def test_no_float8_by_default():
@@ -43,6 +45,60 @@ def test_float8_applied_by_model_registry():
         if isinstance(lc, Float8Linear.Config)
     ]
     assert len(converted) > 0
+
+
+@pytest.mark.parametrize(
+    ("config_name", "local_batch_size"),
+    [
+        ("deepseek_v3_debugmodel_fp8_blockwise_bs1", 1),
+        ("deepseek_v3_debugmodel_fp8_blockwise_bs4", 4),
+        ("deepseek_v3_debugmodel_fp8_blockwise_bs8", 8),
+        ("deepseek_v3_671b_fp8_blockwise", 4),
+    ],
+)
+def test_deepseek_v3_blockwise_float8_applied_by_model_registry(
+    config_name,
+    local_batch_size,
+):
+    pytest.importorskip("torchao.prototype.blockwise_fp8_training.linear")
+    if Float8BlockwiseLinear is None:
+        pytest.skip("torchao blockwise FP8 training linear is unavailable")
+    if not has_cuda_capability(9, 0):
+        pytest.skip("blockwise FP8 training requires SM90 or later")
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args(
+        [
+            "--module",
+            "deepseek_v3",
+            "--config",
+            config_name,
+        ]
+    )
+    model_config = config.model_spec.model
+    assert has_quantization(model_config)
+    assert config.training.local_batch_size == local_batch_size
+
+    converted = [
+        lc
+        for _fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
+        if isinstance(lc, Float8BlockwiseLinear.Config)
+    ]
+    assert len(converted) > 0
+    assert all(lc.in_features % 128 == 0 for lc in converted)
+    assert all(lc.out_features % 128 == 0 for lc in converted)
+    assert all(not lc.bias for lc in converted)
+    lm_heads = [
+        lc
+        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
+        if fqn == "lm_head"
+    ]
+    assert len(lm_heads) == 1
+    assert not isinstance(lm_heads[0], Float8BlockwiseLinear.Config)
+
+    with torch.device("meta"):
+        layer = converted[0].build()
+    assert isinstance(layer, Float8BlockwiseLinear)
 
 
 def test_quantized_grouped_experts():

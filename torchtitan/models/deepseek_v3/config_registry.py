@@ -75,6 +75,41 @@ def deepseek_v3_debugmodel_flex_attn_ep() -> Trainer.Config:
     return config
 
 
+def _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size: int) -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.training.local_batch_size = local_batch_size
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            Float8LinearConverter.Config(
+                recipe_name="blockwise",
+                filter_fqns=["lm_head", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
+def deepseek_v3_debugmodel_fp8_blockwise() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=8)
+
+
+def deepseek_v3_debugmodel_fp8_blockwise_bs1() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=1)
+
+
+def deepseek_v3_debugmodel_fp8_blockwise_bs4() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=4)
+
+
+def deepseek_v3_debugmodel_fp8_blockwise_bs8() -> Trainer.Config:
+    return _deepseek_v3_debugmodel_fp8_blockwise(local_batch_size=8)
+
+
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
@@ -106,27 +141,46 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
 
 
-def deepseek_v3_671b() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True, components=["loss"])
+def _deepseek_v3_16b_fp8_blockwise(
+    local_batch_size: int | None = None,
+) -> Trainer.Config:
+    config = deepseek_v3_16b()
+    if local_batch_size is not None:
+        config.training.local_batch_size = local_batch_size
     model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
+        config.compile.enable and "model" in config.compile.components
     )
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        converters=[
+            Float8LinearConverter.Config(
+                recipe_name="blockwise",
+                filter_fqns=["lm_head", "output", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
+def deepseek_v3_16b_fp8_blockwise() -> Trainer.Config:
+    return _deepseek_v3_16b_fp8_blockwise()
+
+
+def deepseek_v3_16b_fp8_blockwise_bs1() -> Trainer.Config:
+    return _deepseek_v3_16b_fp8_blockwise(local_batch_size=1)
+
+
+def _deepseek_v3_671b_config(
+    *,
+    model_spec,
+    compile_config: CompileConfig,
+) -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedCELoss.Config(),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_registry(
-            "671B",
-            attn_backend="flex",
-            converters=[
-                Float8LinearConverter.Config(
-                    filter_fqns=["output", "router.gate"],
-                    model_compile_enabled=model_compile_enabled,
-                ),
-                Float8GroupedExpertsConverter.Config(
-                    model_compile_enabled=model_compile_enabled
-                ),
-            ],
-        ),
+        model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
         ),
@@ -151,4 +205,60 @@ def deepseek_v3_671b() -> Trainer.Config:
             mode="selective",
         ),
         compile=compile_config,
+    )
+
+
+def _deepseek_v3_671b_fp8_blockwise(
+    local_batch_size: int | None = None,
+) -> Trainer.Config:
+    compile_config = CompileConfig(enable=True, components=["loss"])
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
+    config = _deepseek_v3_671b_config(
+        model_spec=model_registry(
+            "671B",
+            attn_backend="flex",
+            converters=[
+                Float8LinearConverter.Config(
+                    recipe_name="blockwise",
+                    filter_fqns=["lm_head", "output", "router.gate"],
+                    model_compile_enabled=model_compile_enabled,
+                ),
+                Float8GroupedExpertsConverter.Config(
+                    model_compile_enabled=model_compile_enabled
+                ),
+            ],
+        ),
+        compile_config=compile_config,
+    )
+    if local_batch_size is not None:
+        config.training.local_batch_size = local_batch_size
+    return config
+
+
+def deepseek_v3_671b_fp8_blockwise() -> Trainer.Config:
+    return _deepseek_v3_671b_fp8_blockwise()
+
+
+def deepseek_v3_671b() -> Trainer.Config:
+    compile_config = CompileConfig(enable=True, components=["loss"])
+    model_compile_enabled = (
+        compile_config.enable and "model" in compile_config.components
+    )
+    return _deepseek_v3_671b_config(
+        model_spec=model_registry(
+            "671B",
+            attn_backend="flex",
+            converters=[
+                Float8LinearConverter.Config(
+                    filter_fqns=["output", "router.gate"],
+                    model_compile_enabled=model_compile_enabled,
+                ),
+                Float8GroupedExpertsConverter.Config(
+                    model_compile_enabled=model_compile_enabled
+                ),
+            ],
+        ),
+        compile_config=compile_config,
     )
