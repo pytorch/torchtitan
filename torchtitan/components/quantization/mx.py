@@ -8,6 +8,8 @@ from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
 from typing import Literal
 
+import torch
+
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
@@ -18,8 +20,6 @@ from .utils import swap_token_dispatcher
 
 
 def _enable_triton_dim1_for_mxfp8_linear() -> None:
-    import torch
-
     from torchao.prototype.moe_training import tensor as mxfp8_tensor
     from torchao.prototype.mx_formats.config import (
         MXFP8Dim0CastKernelChoice,
@@ -53,6 +53,180 @@ def _enable_triton_dim1_for_mxfp8_linear() -> None:
 
     mxfp8_tensor._to_mxfp8_then_scaled_mm = _to_mxfp8_then_scaled_mm_triton_dim1
     mxfp8_tensor._torchtitan_triton_dim1_enabled = True
+
+
+@torch._dynamo.allow_in_graph
+class _MXFP8SharedInputGateUp(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        input_hp: torch.Tensor,
+        w1_hp: torch.Tensor,
+        w3_hp: torch.Tensor,
+        kernel_preference,
+        scale_calculation_mode,
+        wgrad_with_hp: bool,
+    ):
+        from torchao.prototype.mx_formats.config import MXFP8Dim0CastKernelChoice
+        from torchao.prototype.mx_formats.mx_tensor import MXTensor
+
+        ctx.save_for_backward(input_hp, w1_hp, w3_hp)
+        ctx.kernel_preference = kernel_preference
+        ctx.scale_calculation_mode = scale_calculation_mode
+        ctx.wgrad_with_hp = wgrad_with_hp
+
+        input_orig_shape = input_hp.shape
+        input_hp_r = input_hp.reshape(-1, input_orig_shape[-1])
+        input_mx_r_dim0 = MXTensor.to_mx(
+            input_hp_r,
+            torch.float8_e4m3fn,
+            32,
+            scale_calculation_mode,
+            kernel_preference,
+            mxfp8_dim0_cast_kernel_choice=MXFP8Dim0CastKernelChoice.TRITON,
+        )
+        w1_mx_dim0 = MXTensor.to_mx(
+            w1_hp,
+            torch.float8_e4m3fn,
+            32,
+            scale_calculation_mode,
+            kernel_preference,
+            mxfp8_dim0_cast_kernel_choice=MXFP8Dim0CastKernelChoice.TRITON,
+        )
+        w3_mx_dim0 = MXTensor.to_mx(
+            w3_hp,
+            torch.float8_e4m3fn,
+            32,
+            scale_calculation_mode,
+            kernel_preference,
+            mxfp8_dim0_cast_kernel_choice=MXFP8Dim0CastKernelChoice.TRITON,
+        )
+        w1_out = torch.mm(input_mx_r_dim0, w1_mx_dim0.t())
+        w3_out = torch.mm(input_mx_r_dim0, w3_mx_dim0.t())
+        return (
+            w1_out.reshape(*input_orig_shape[:-1], w1_out.shape[-1]),
+            w3_out.reshape(*input_orig_shape[:-1], w3_out.shape[-1]),
+        )
+
+    @staticmethod
+    def backward(ctx, grad_w1_out_hp: torch.Tensor, grad_w3_out_hp: torch.Tensor):
+        from torchao.prototype.mx_formats.config import (
+            MXFP8Dim0CastKernelChoice,
+            MXFP8Dim1CastKernelChoice,
+        )
+        from torchao.prototype.mx_formats.mx_tensor import MXTensor
+        from torchao.prototype.mx_formats.utils import _to_mxfp8_dim1_kernel_wrapper
+
+        input_hp, w1_hp, w3_hp = ctx.saved_tensors
+        kernel_preference = ctx.kernel_preference
+        scale_calculation_mode = ctx.scale_calculation_mode
+
+        input_orig_shape = input_hp.shape
+        input_hp_r = input_hp.reshape(-1, input_orig_shape[-1])
+        grad_w1_orig_shape = grad_w1_out_hp.shape
+        grad_w3_orig_shape = grad_w3_out_hp.shape
+        grad_w1_out_hp_r = grad_w1_out_hp.reshape(-1, grad_w1_orig_shape[-1])
+        grad_w3_out_hp_r = grad_w3_out_hp.reshape(-1, grad_w3_orig_shape[-1])
+
+        grad_w1_out_mx_dim0 = MXTensor.to_mx(
+            grad_w1_out_hp_r,
+            torch.float8_e4m3fn,
+            32,
+            scale_calculation_mode,
+            kernel_preference,
+            mxfp8_dim0_cast_kernel_choice=MXFP8Dim0CastKernelChoice.TRITON,
+        )
+        grad_w3_out_mx_dim0 = MXTensor.to_mx(
+            grad_w3_out_hp_r,
+            torch.float8_e4m3fn,
+            32,
+            scale_calculation_mode,
+            kernel_preference,
+            mxfp8_dim0_cast_kernel_choice=MXFP8Dim0CastKernelChoice.TRITON,
+        )
+        w1_mx_dim1 = _to_mxfp8_dim1_kernel_wrapper(
+            w1_hp,
+            32,
+            torch.float8_e4m3fn,
+            w1_hp.dtype,
+            kernel_preference,
+            MXFP8Dim1CastKernelChoice.TRITON,
+            scale_calculation_mode,
+        )
+        w3_mx_dim1 = _to_mxfp8_dim1_kernel_wrapper(
+            w3_hp,
+            32,
+            torch.float8_e4m3fn,
+            w3_hp.dtype,
+            kernel_preference,
+            MXFP8Dim1CastKernelChoice.TRITON,
+            scale_calculation_mode,
+        )
+        grad_input = torch.mm(grad_w1_out_mx_dim0, w1_mx_dim1.t()) + torch.mm(
+            grad_w3_out_mx_dim0, w3_mx_dim1.t()
+        )
+        grad_input = grad_input.reshape(*grad_w1_orig_shape[:-1], grad_input.shape[-1])
+
+        if ctx.wgrad_with_hp:
+            grad_w1 = torch.mm(grad_w1_out_hp_r.t(), input_hp_r)
+            grad_w3 = torch.mm(grad_w3_out_hp_r.t(), input_hp_r)
+        else:
+            input_t_mx_dim0_tmp = _to_mxfp8_dim1_kernel_wrapper(
+                input_hp_r,
+                32,
+                torch.float8_e4m3fn,
+                input_hp_r.dtype,
+                kernel_preference,
+                MXFP8Dim1CastKernelChoice.TRITON,
+                scale_calculation_mode,
+            )
+            input_t_mx_dim0 = input_t_mx_dim0_tmp.t()
+            grad_w1_out_mx_dim1 = _to_mxfp8_dim1_kernel_wrapper(
+                grad_w1_out_hp_r,
+                32,
+                torch.float8_e4m3fn,
+                grad_w1_out_hp_r.dtype,
+                kernel_preference,
+                MXFP8Dim1CastKernelChoice.TRITON,
+                scale_calculation_mode,
+            )
+            grad_w3_out_mx_dim1 = _to_mxfp8_dim1_kernel_wrapper(
+                grad_w3_out_hp_r,
+                32,
+                torch.float8_e4m3fn,
+                grad_w3_out_hp_r.dtype,
+                kernel_preference,
+                MXFP8Dim1CastKernelChoice.TRITON,
+                scale_calculation_mode,
+            )
+            grad_w1 = torch.mm(grad_w1_out_mx_dim1, input_t_mx_dim0)
+            grad_w3 = torch.mm(grad_w3_out_mx_dim1, input_t_mx_dim0)
+
+        return grad_input, grad_w1, grad_w3, None, None, None
+
+
+def mxfp8_shared_input_gate_up(
+    input_hp: torch.Tensor,
+    w1_wrapper: torch.Tensor,
+    w3_wrapper: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from torchao.prototype.moe_training.config import MXFP8TrainingOpConfig
+    from torchao.prototype.moe_training.utils import unwrap_weight
+
+    config = w1_wrapper.config
+    if config != w3_wrapper.config:
+        raise ValueError("MXFP8 w1 and w3 weights must use the same config")
+    if not isinstance(config, MXFP8TrainingOpConfig):
+        raise ValueError("shared gate/up MXFP8 path requires MXFP8TrainingOpConfig")
+
+    return _MXFP8SharedInputGateUp.apply(
+        input_hp,
+        unwrap_weight(w1_wrapper),
+        unwrap_weight(w3_wrapper),
+        config.kernel_preference,
+        config.scale_calculation_mode,
+        config.wgrad_with_hp,
+    )
 
 
 class MXFP8Linear(Linear):

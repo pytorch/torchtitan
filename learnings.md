@@ -10031,3 +10031,90 @@ Interpretation:
 
 - `NCCL_CGA_CLUSTER_SIZE=2` is marginally above size 4 but still below run386.
 - Close the immediate CGA cluster-size bracket. It can produce clean high-band samples, but there is no evidence it beats the default peak.
+
+## Experiment 406: NCCL Minimum CTAs 32
+
+Command:
+
+```bash
+NCCL_MIN_CTAS=32 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run406-mxfp8-feed-forward-compile-lbs168-nccl-min-ctas32-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,038.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.69 GiB, 91.78%.
+- No allocator retries were logged.
+- Loss moved from 12.52324 at step 1 to 5.94922 at step 10.
+
+Interpretation:
+
+- Forcing a higher NCCL CTA floor is valid but does not beat the measured run386 peak.
+- Together with `NCCL_CGA_CLUSTER_SIZE={2,4}`, `TORCH_NCCL_HIGH_PRIORITY=1`, and earlier CTA cap tests, the current best does not appear to be missing an easy NCCL occupancy knob.
+
+## Experiment 407: Shared MXFP8 Gate/Up Input Cast
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run407-mxfp8-shared-gate-up-input-cast-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Added a narrow custom autograd path for the Qwen3 dense FFN gate/up pair.
+- The path computes `w1(x)` and `w3(x)` together, sharing the forward MXFP8 input cast.
+- In backward it also shares the input dim1 MXFP8 cast used by the two gate/up weight-gradient GEMMs.
+- `w2`, attention, loss, FSDP wrapping, and the bidirectional prefetch schedule are unchanged.
+
+Pre-run checks:
+
+- A direct CUDA smoke test passed forward and backward with MXFP8 wrapper weights.
+- A `torch.compile(..., fullgraph=True)` smoke test passed on the same custom path.
+
+Result:
+
+- Status: keep / new measured peak.
+- Step 10 `tps`: 12,151.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.10606 at step 1 to 6.50984 at step 10.
+
+Interpretation:
+
+- The profiler-guided source change worked: duplicate MXFP8 input casting across the FFN gate/up linears was measurable enough to beat run386.
+- The change increases peak memory by about 3.26 GiB versus run386 but remains below the preferred 95% ceiling.
+- Next useful axis is to see whether the remaining memory can support a slightly larger batch, without jumping back to the known batch184 allocator cliff.
+
+## Experiment 408: Shared MXFP8 Gate/Up Input Cast Batch172
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=172 --loss.num_chunks=4 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run408-mxfp8-shared-gate-up-input-cast-feed-forward-compile-lbs172-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Same shared MXFP8 gate/up input-cast patch as run407.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,072.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 169.82 GiB, 95.22%.
+- No allocator retries were logged, but memory is above the preferred 95% line.
+- Loss moved from 12.39558 at step 1 to 6.46337 at step 10.
+
+Interpretation:
+
+- The smallest chunks4 batch step above 168 is slower and memory-riskier.
+- Keep batch168 as the active batch for the shared-cast source path unless a separate memory-reduction mechanism appears.

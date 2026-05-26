@@ -12,6 +12,7 @@ command, model flavor, and cluster/system it is optimizing for.
 """
 
 import torch
+import torch.nn.functional as F
 from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
 from torchtitan.config import (
@@ -26,8 +27,40 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.components.quantization.mx import mxfp8_shared_input_gate_up
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
+
+
+def _enable_shared_mxfp8_gate_up_input_cast(model: Qwen3Model) -> None:
+    patched_count = 0
+
+    def _shared_mxfp8_feed_forward(x: torch.Tensor, *, feed_forward):
+        w1_out, w3_out = mxfp8_shared_input_gate_up(
+            x,
+            feed_forward.w1.weight,
+            feed_forward.w3.weight,
+        )
+        return feed_forward.w2(F.silu(w1_out) * w3_out)
+
+    for layer in model.layers.values():
+        feed_forward = getattr(layer, "feed_forward", None)
+        if feed_forward is None:
+            continue
+        if not (
+            hasattr(feed_forward.w1.weight, "config")
+            and hasattr(feed_forward.w3.weight, "config")
+        ):
+            continue
+        feed_forward.forward = lambda x, feed_forward=feed_forward: (
+            _shared_mxfp8_feed_forward(x, feed_forward=feed_forward)
+        )
+        patched_count += 1
+
+    logger.info(
+        "Enabled shared MXFP8 input casts for %s Qwen3 feed-forward modules",
+        patched_count,
+    )
 
 
 def _compile_qwen3_feed_forward(
@@ -85,6 +118,7 @@ def parallelize_qwen3(
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
+    _enable_shared_mxfp8_gate_up_input_cast(model)
     if compile_config.enable and "feed_forward" in compile_config.components:
         _compile_qwen3_feed_forward(model, compile_config)
 
