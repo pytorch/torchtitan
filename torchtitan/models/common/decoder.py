@@ -114,6 +114,32 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            for layer_cfg in self.layers:
+                if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
+                    from torchtitan.models.common.token_dispatcher import (
+                        DeepEPTokenDispatcher,
+                        HybridEPTokenDispatcher,
+                    )
+
+                    token_dispatcher_cfg = (
+                        layer_cfg.moe.experts.token_dispatcher
+                    )
+                    if (
+                        isinstance(
+                            token_dispatcher_cfg,
+                            (
+                                DeepEPTokenDispatcher.Config,
+                                HybridEPTokenDispatcher.Config,
+                            ),
+                        )
+                        and parallelism.expert_parallel_degree == 1
+                    ):
+                        raise ValueError(
+                            f"{type(token_dispatcher_cfg).__qualname__} "
+                            "requires expert parallelism "
+                            "(expert_parallel_degree > 1)."
+                        )
+
             if isinstance(trainer_config, Trainer.Config):
                 debug = trainer_config.debug
                 seq_len = trainer_config.training.seq_len
