@@ -300,6 +300,11 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # === aot_fx_trace mode tests ===
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
         # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
+        #
+        # TODO: aot_fx_trace MoE tests are disabled due to an upstream PyTorch
+        # regression: histc's meta kernel doesn't support int64 inputs,
+        # breaking tracing for all MoE models. Re-enable once the histc
+        # meta kernel is fixed upstream.
         OverrideDefinitions(
             [
                 [
@@ -315,6 +320,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+CP+EP",
             "aot_fx_trace_deepseek_v3_fsdp_tp_cp_ep",
             ngpu=8,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -330,6 +336,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+FlexAttn",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_flexattn",
             ngpu=8,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -346,6 +353,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+EP+full_inductor",
             "aot_fx_trace_deepseek_v3_fsdp_tp_ep_full_inductor",
             ngpu=8,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -361,6 +369,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace deepseek_v3 FSDP+TP+HybridEP",
             "aot_fx_trace_deepseek_v3_hybridep",
             ngpu=4,
+            disabled=True,
         ),
     ]
 
@@ -383,6 +392,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_qwen3_fsdp_tp_cp",
             ngpu=8,
         ),
+        # TODO: disabled due to upstream histc int64 regression (see DSv3 comment)
         OverrideDefinitions(
             [
                 [
@@ -397,6 +407,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 MoE FSDP+TP+EP",
             "aot_fx_trace_qwen3_moe_fsdp_tp_ep",
             ngpu=8,
+            disabled=True,
         ),
     ]
 
