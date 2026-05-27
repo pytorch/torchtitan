@@ -4371,3 +4371,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_CGA_CLUSTER_SIZE=2` while keeping `TORCH_NCCL_CUDA_EVENT_CACHE=0`.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse NCCL/GEMM overlap.
   Result: discarded at source state `6205c762`; 12,273 tps and 163.95 GiB. Keep default CGA clustering.
+
+- Idea: patch vendored Flex FLASH SM100 empty-tile `gO` guard
+  Current best source commit: c49a164d
+  Source: run487 showed vendored Flex FLASH reached the SM100 CUTE path but crashed because `handle_block_sparse_empty_tile_correction_sm100()` indexed `gO[None, None, stage]` even when `gO` was `None`.
+  Expected mechanism: Mirror the existing guarded `gO_stage` behavior from the normal correction path inside the empty-tile helper so Flex FLASH can run packed-document block-sparse masks on SM100.
+  Supporting evidence: The traceback was a specific `NoneType` indexing crash, not an unsupported-kernel or import failure.
+  Planned source/config changes: Patch the vendored flash-attention helper in the local PyTorch checkout; temporarily set Qwen3 14B `attn_backend="flex_flash"`.
+  Planned command or config overrides: Active event-cache-disabled command with vendored flash-attention on `PYTHONPATH`.
+  Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is a later CUTE runtime failure or slower attention kernels.
+  Result: discarded at source state `c49a164d`; patched Flex FLASH completes 10 steps but reaches only 12,006 tps at 163.95 GiB. Keep SDPA active; the patch is useful diagnostically because it converts Flex FLASH from crash to valid-but-slower.

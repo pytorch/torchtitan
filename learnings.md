@@ -12430,3 +12430,34 @@ Interpretation:
 
 - Smaller CGA clustering is valid on the event-cache-disabled compiled-Q/K/V recipe but remains below the active peak.
 - Do not continue nearby CGA size probes without new trace evidence; size 4 had already lost on close explicit-NVLS stacks.
+
+## Experiment 497: Patched Vendored Flex FLASH
+
+Setup:
+
+- Patched `/home/avenkataraman/github/pytorch/third_party/flash-attention/flash_attn/cute/block_sparse_utils.py` so the SM100 empty-tile correction helper only indexes `gO` when `gO is not None`.
+- This mirrors the existing guarded `gO_stage = ... if gO is not None else None` behavior in the normal SM100 correction path and unblocks the previous `NoneType` crash.
+
+Command:
+
+```bash
+PYTHONPATH=/home/avenkataraman/github/pytorch/third_party/flash-attention:$PYTHONPATH TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run497-flex-flash-vendored-gO-guard-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run497-flex-flash-vendored-gO-guard-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily set Qwen3 14B `attn_backend="flex_flash"`.
+- Restored `attn_backend="sdpa"` after the run.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,006.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.26660 at step 1 to 7.35273 at step 10.
+
+Interpretation:
+
+- The local vendored Flex FLASH path is now functional for this packed-document SM100 run after the `gO` guard.
+- It is still slower than SDPA on the active event-cache-disabled compiled-Q/K/V recipe, so SDPA remains the active attention backend.
