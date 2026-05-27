@@ -11892,3 +11892,29 @@ Interpretation:
 
 - Batch164 is valid and saves about 3.18 GiB, but it remains below the active batch168 throughput.
 - With batch164, batch168, batch170, and batch172 now checked on the compiled-Q/K/V stack, batch168 remains the local optimum.
+
+## Experiment 476: Batch176 On Compiled-QKV Stack
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run476-batch176-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run476-batch176-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,248.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 170.24 GiB, 95.45%.
+- No allocator retries were logged.
+- Loss moved from 12.47504 at step 1 to 6.99835 at step 10.
+
+Interpretation:
+
+- Batch176 is valid but slower and memory-riskier than the active batch168 recipe.
+- Batch-size tuning on the compiled-Q/K/V stack is closed: 164 and 176 are slower, 170 is tile-incompatible, and 172 was already slower.

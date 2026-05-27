@@ -4171,3 +4171,13 @@
   Planned command or config overrides: Active command with `--training.local_batch_size=164`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is lower arithmetic occupancy.
   Result: discarded at source state `d959c7b9`; 12,339 tps and 160.77 GiB peak memory. Lower memory does not compensate for smaller batch; keep batch168.
+
+- Idea: local batch size 176 on compiled-Q/K/V active recipe
+  Current best source commit: 36a44c0f
+  Source: batch172 was slower but valid; batch176 is the next tile-compatible larger point and had not been isolated after Q/K/V compile.
+  Expected mechanism: Larger batch may improve arithmetic occupancy enough to offset extra memory and communication.
+  Supporting evidence: Batch168 active memory is 163.95 GiB, leaving some room for one larger probe.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--training.local_batch_size=176`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is allocator pressure or communication tail growth.
+  Result: discarded at source state `36a44c0f`; 12,248 tps and 170.24 GiB peak memory. Close local-batch tuning around the active compiled-Q/K/V recipe.
