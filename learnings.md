@@ -12786,3 +12786,29 @@ Interpretation:
 - Combining Q and K into one Triton launch is valid but slower than the simpler separate custom RoPE calls from run506.
 - The likely issue is that the combined kernel's pointer selection and mixed Q/K head counts add enough overhead to erase launch-count savings.
 - Keep the separate Q and K custom RoPE implementation.
+
+## Experiment 509: Batch176 With Triton RoPE Active Source
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run509-triton-rope-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run509-triton-rope-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep.
+- Step 10 `tps`: 13,659.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- No allocator retries were logged.
+- Loss moved from 12.35807 at step 1 to 6.43838 at step 10.
+
+Interpretation:
+
+- The Triton RoPE source recovered enough memory to make batch176 acceptable under the 95% memory guideline.
+- Batch176 is only a small throughput win over batch168 (+37 tps), but it is now the measured peak.
+- The active command now uses local batch 176. Do not push much higher without a specific memory-saving source change; this is already close to the preferred memory ceiling.

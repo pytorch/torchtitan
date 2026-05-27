@@ -4491,3 +4491,13 @@
   Planned command or config overrides: Active event-cache-disabled command.
   Success criteria and expected risk: Success is step-10 tps above 13,622. Risk is slower pointer-selection math from mixed Q/K shapes.
   Result: discarded at source state `1f152213+dirty`; 13,351 tps and 163.15 GiB. The combined kernel is valid but slower, so keep the separate Q and K custom RoPE calls.
+
+- Idea: batch176 with Triton RoPE active source
+  Current best source commit: 85d91bab
+  Source: run506 lowered batch168 peak memory from 163.95 GiB to 162.66 GiB, so the old memory-risky batch176 point should now sit just below the preferred ceiling.
+  Expected mechanism: convert the custom RoPE memory headroom into more tokens per step and better collective/GEMM amortization.
+  Supporting evidence: pre-RoPE batch176 reached 170.24 GiB and 12,248 tps; subtracting the run506 memory savings puts the expected peak near 168.9 GiB.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active Triton RoPE command with `--training.local_batch_size=176`.
+  Success criteria and expected risk: Success is step-10 tps above 13,622 with peak memory below about 95%. Risk is the prior batch176 shape slowdown persists.
+  Result: kept at source state `85d91bab`; 13,659 tps and 168.91 GiB. This is a small new peak and becomes the active command.
