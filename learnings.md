@@ -12488,3 +12488,36 @@ Interpretation:
 - Plain FlexAttention is a near miss on the final event-cache-disabled compiled-Q/K/V recipe, but still does not beat the SDPA peak.
 - It is faster than the patched Flex FLASH path for this seq128 packed-document workload, so the CUTE FLASH backend is not the useful direction here.
 - Keep SDPA active.
+
+## Experiment 499: Profile Plain FlexAttention Near Miss
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run499-profile-flex-event-cache0-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run499-profile-flex-event-cache0-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily set Qwen3 14B `attn_backend="flex"`.
+- Restored `attn_backend="sdpa"` after the profile.
+
+Result:
+
+- Status: keep as diagnostic.
+- Profiled step 10 `tps`: 12,202. This is not used for ranking.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+
+Trace comparison against SDPA run481:
+
+- Attention bucket: SDPA-like bucket about 291 ms/rank in run481 vs FlexAttention about 95 ms/rank in run499.
+- GEMM bucket: about 1,066 -> 1,111 ms/rank.
+- MXFP8 cast bucket: about 410 -> 489 ms/rank.
+- NCCL all-gather bucket: about 499 -> 529 ms/rank.
+- NCCL reduce-scatter bucket: about 1,156 -> 1,087 ms/rank.
+
+Interpretation:
+
+- FlexAttention does reduce the attention bucket, but the surrounding compiled/MXFP8 and communication buckets shift enough to erase the win.
+- Attention backend work is not the next best path unless a backend can reduce attention without increasing MXFP8/GEMM/cast or FSDP overlap costs.

@@ -4391,3 +4391,13 @@
   Planned command or config overrides: Active event-cache-disabled command.
   Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is slower generic FlexAttention kernels or worse short-run loss behavior.
   Result: discarded at source state `977e095e`; 12,409 tps and 163.95 GiB. This is close, and faster than patched Flex FLASH, but still below the SDPA event-cache peak. Keep SDPA active.
+
+- Idea: profile plain FlexAttention near miss
+  Current best source commit: 1e7be560
+  Source: run498 was close enough to need attribution rather than another blind attention rerun.
+  Expected mechanism: Compare Flex trace buckets against the SDPA event-cache profile to see whether Flex loses in attention itself or in shifted overlap/neighboring compute.
+  Supporting evidence: run498 reached 12,409 tps, only 45 tps below the active SDPA peak.
+  Planned source/config changes: Temporarily set Qwen3 14B `attn_backend="flex"`.
+  Planned command or config overrides: Active event-cache-disabled command with profiler enabled for iteration 10.
+  Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used for ranking.
+  Result: kept as diagnostic at source state `1e7be560`; profiled step-10 tps 12,202 and 163.95 GiB. Compared to SDPA run481, Flex reduces the attention bucket from about 291 ms/rank to 95 ms/rank, but GEMM rises about 1,066 -> 1,111 ms/rank, MXFP8 casts rise 410 -> 489 ms/rank, and all-gather rises 499 -> 529 ms/rank. The net result explains why Flex is a near miss rather than a win.
