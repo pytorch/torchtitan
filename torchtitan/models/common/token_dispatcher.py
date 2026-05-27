@@ -69,7 +69,7 @@ class LocalTokenDispatcher(Configurable):
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
-        topk_ids_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Reorder tokens by expert assignment for local expert computation.
 
@@ -79,7 +79,7 @@ class LocalTokenDispatcher(Configurable):
         Args:
             x_TD: ``(T, D)`` input tokens
             topk_scores_TK: ``(T, K)`` routing scores
-            topk_ids_TK: ``(T, K)`` expert indices
+            topk_expert_ids_TK: ``(T, K)`` expert indices
 
         Returns:
             routed_input_RD: ``(R, D)`` tokens in expert-sorted
@@ -90,7 +90,7 @@ class LocalTokenDispatcher(Configurable):
         """
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert_E = torch.histc(
-            topk_ids_TK.view(-1),
+            topk_expert_ids_TK.view(-1),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
@@ -99,7 +99,7 @@ class LocalTokenDispatcher(Configurable):
         # Reorder the token indices to match the order of the experts
         # shape (N,) where N = T*K
         token_indices_experts_sorted_N = torch.argsort(
-            topk_ids_TK.view(-1), stable=True
+            topk_expert_ids_TK.view(-1), stable=True
         )
 
         topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
@@ -128,14 +128,14 @@ class LocalTokenDispatcher(Configurable):
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
-        topk_ids_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
         """Reorder tokens by expert assignment for local expert computation.
 
         Args:
             x_TD: ``(T, D)`` all input tokens
             topk_scores_TK: ``(T, K)`` routing scores
-            topk_ids_TK: ``(T, K)`` expert indices per token
+            topk_expert_ids_TK: ``(T, K)`` expert indices per token
 
         Returns:
             routed_input_RD: ``[R = sum(num_tokens_per_expert_E), input_dim(D)]``.
@@ -148,7 +148,7 @@ class LocalTokenDispatcher(Configurable):
             num_tokens_per_expert_E,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-        ) = self._local_reorder(x_TD, topk_scores_TK, topk_ids_TK)
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
@@ -239,7 +239,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
-        topk_ids_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[
         torch.Tensor, torch.Tensor, AllToAllDispatchMetadata | LocalDispatchMetadata
     ]:
@@ -248,13 +248,13 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         When ep_mesh is None (EP=1), falls back to local dispatch — no
         all-to-all communication, just local token reordering with padding.
 
-        With SP, x_TD/topk_scores_TK/topk_ids_TK are already
+        With SP, x_TD/topk_scores_TK/topk_expert_ids_TK are already
         the local SP shard (from DTensor Shard to_local via LocalMapConfig).
 
         Args:
             x_TD: ``(T, D)`` local token shard
             topk_scores_TK: ``(T, K)`` routing scores
-            topk_ids_TK: ``(T, K)`` expert indices
+            topk_expert_ids_TK: ``(T, K)`` expert indices
 
         Returns:
             routed_input_RD: ``[R = sum(num_tokens_per_local_expert_e), input_dim(D)]``.
@@ -264,7 +264,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
         """
         # EP=1: fall back to local dispatch (no all-to-all needed)
         if self.ep_mesh is None:
-            return super().dispatch(x_TD, topk_scores_TK, topk_ids_TK)
+            return super().dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         ep_size = self.ep_mesh.size()
 
@@ -273,7 +273,7 @@ class AllToAllTokenDispatcher(LocalTokenDispatcher):
             num_tokens_per_expert_E,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-        ) = self._local_reorder(x_TD, topk_scores_TK, topk_ids_TK)
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
@@ -490,13 +490,13 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         super().__init__(config)
         self.pad_multiple = config.pad_multiple
 
-    def dispatch(self, x_TD, topk_scores_TK, topk_ids_TK):
+    def dispatch(self, x_TD, topk_scores_TK, topk_expert_ids_TK):
         if self.ep_mesh is None:
             raise ValueError(
                 "TorchAOTokenDispatcher requires expert parallelism (ep_mesh must be set). "
                 "Quantized grouped GEMMs need padded token groups, which requires EP>1. "
             )
-        return super().dispatch(x_TD, topk_scores_TK, topk_ids_TK)
+        return super().dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
     def _permute(
         self,
@@ -588,7 +588,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
-        topk_ids_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         assert self.ep_mesh is not None, (
             "ep_mesh must be set before dispatch. "
@@ -601,7 +601,7 @@ class DeepEPTokenDispatcher(LocalTokenDispatcher):
 
         hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
             x_TD,
-            topk_ids_TK,
+            topk_expert_ids_TK,
             topk_scores_TK,
             num_local_experts,
             self.num_experts,
@@ -723,7 +723,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
-        topk_ids_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         assert self.ep_mesh is not None, (
             "ep_mesh must be set before dispatch. "
@@ -736,7 +736,7 @@ class HybridEPTokenDispatcher(LocalTokenDispatcher):
 
         hidden_states_RD, tokens_per_expert_E, state = dispatch_tokens(
             x_TD,
-            topk_ids_TK,
+            topk_expert_ids_TK,
             topk_scores_TK,
             num_local_experts,
             self.num_experts,

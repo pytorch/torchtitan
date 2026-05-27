@@ -537,12 +537,12 @@ def register_moe_load_balancing_hook(
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
                     # pyrefly: ignore [missing-attribute]
-                    expert_bias_delta = moe.load_balance_coeff * torch.sign(
+                    expert_bias_delta_E = moe.load_balance_coeff * torch.sign(
                         tokens_per_expert_E.mean() - tokens_per_expert_E
                     )
-                    expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                    expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
                     # pyrefly: ignore [missing-attribute]
-                    moe.expert_bias_E.add_(expert_bias_delta)
+                    moe.expert_bias_E.add_(expert_bias_delta_E)
                     # pyrefly: ignore [missing-attribute]
                     moe.tokens_per_expert_E.zero_()
 

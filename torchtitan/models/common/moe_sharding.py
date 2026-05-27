@@ -249,7 +249,7 @@ def set_moe_sharding_config(
         in_dst_shardings={
             "x_BLD": experts_in_layout,
             "topk_scores_BLK": experts_in_layout,
-            "topk_ids_BLK": experts_in_layout,
+            "topk_expert_ids_BLK": experts_in_layout,
         },
         out_src_shardings=experts_out_layout,
         out_dst_shardings=experts_out_layout,

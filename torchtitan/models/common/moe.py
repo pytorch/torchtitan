@@ -90,7 +90,7 @@ class GroupedExperts(Module):
         self,
         x_BLD: torch.Tensor,
         topk_scores_BLK: torch.Tensor,
-        topk_ids_BLK: torch.Tensor,
+        topk_expert_ids_BLK: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -103,9 +103,9 @@ class GroupedExperts(Module):
         T = B * L
         x_TD = x_BLD.view(T, D)
         topk_scores_TK = topk_scores_BLK.view(T, K)
-        topk_ids_TK = topk_ids_BLK.view(T, K)
+        topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
         routed_input_RD, num_tokens_per_expert_E, metadata = (
-            self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_ids_TK)
+            self.token_dispatcher.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
         )
         routed_output_RD = self._experts_forward(routed_input_RD, num_tokens_per_expert_E)
         return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
@@ -160,18 +160,18 @@ class TokenChoiceTopKRouter(Module):
         self, scores_BLE: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Balanced round-robin expert assignment.
-        Returns (topk_ids_BLK ``(B, L, K)`` LongTensor, topk_scores_BLK ``(B, L, K)`` FloatTensor).
+        Returns (topk_expert_ids_BLK ``(B, L, K)`` LongTensor, topk_scores_BLK ``(B, L, K)`` FloatTensor).
         """
         bs, slen, _ = scores_BLE.shape
         # Round-robin indices with exact balance
-        topk_ids_BLK = (
+        topk_expert_ids_BLK = (
             torch.arange(
                 bs * slen * self.top_k, device=scores_BLE.device, dtype=torch.int64
             ).reshape(bs, slen, self.top_k)
             % self.num_experts
         )
-        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_ids_BLK)
-        return topk_ids_BLK, topk_scores_BLK
+        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_expert_ids_BLK)
+        return topk_expert_ids_BLK, topk_scores_BLK
 
     def _get_node_limited_routing_scores(
         self,
@@ -225,7 +225,7 @@ class TokenChoiceTopKRouter(Module):
 
         Returns:
             topk_scores_BLK: Routing scores ``(B, L, K)``.
-            topk_ids_BLK: Expert indices ``(B, L, K)``.
+            topk_expert_ids_BLK: Expert indices ``(B, L, K)``.
             num_tokens_per_expert_E: Token counts per expert ``(E,)``.
         """
         # Compute gate in float32 to help stability of expert load balancing.
@@ -249,18 +249,18 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice_BLE = self._get_node_limited_routing_scores(
                 scores_for_choice_BLE
             )
-        _, topk_ids_BLK = torch.topk(
+        _, topk_expert_ids_BLK = torch.topk(
             scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
         )
 
         # NOTE: The expert_bias is only used for routing. The gating value
         #       topk_scores_BLK is still derived from the original scores.
-        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_ids_BLK)
+        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_expert_ids_BLK)
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
             (
-                topk_ids_BLK,
+                topk_expert_ids_BLK,
                 topk_scores_BLK,
             ) = self._debug_force_load_balance_routing(scores_BLE)
 
@@ -271,13 +271,13 @@ class TokenChoiceTopKRouter(Module):
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
         num_tokens_per_expert_E = torch.histc(
-            topk_ids_BLK.view(-1),
+            topk_expert_ids_BLK.view(-1),
             bins=self.num_experts,
             min=0,
             max=self.num_experts,
         )
 
-        return topk_scores_BLK, topk_ids_BLK, num_tokens_per_expert_E
+        return topk_scores_BLK, topk_expert_ids_BLK, num_tokens_per_expert_E
 
 
 class MoE(Module):
@@ -357,11 +357,11 @@ class MoE(Module):
         """
         bs, slen, dim = x_BLD.shape
 
-        # topk_scores_BLK and topk_ids_BLK shape (B, L, K)
+        # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # num_tokens_per_expert_E shape (E,)
         (
             topk_scores_BLK,
-            topk_ids_BLK,
+            topk_expert_ids_BLK,
             num_tokens_per_expert_E,
         ) = self.router(x_BLD, self.expert_bias_E)
 
@@ -373,7 +373,7 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
-        out_TD = self.experts(x_BLD, topk_scores_BLK, topk_ids_BLK)
+        out_TD = self.experts(x_BLD, topk_scores_BLK, topk_expert_ids_BLK)
 
         # shared_experts runs in parallel with deepep combine communication.
         shared_out_BLD = (
