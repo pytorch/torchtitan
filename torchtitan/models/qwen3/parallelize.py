@@ -285,8 +285,8 @@ def _enable_triton_sequential_rope(model: Qwen3Model) -> None:
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
-        output = output.view(bs, seqlen, -1)
+        )
+        output = output.reshape(bs, seqlen, -1)
         return self.wo(output)
 
     for layer in model.layers.values():

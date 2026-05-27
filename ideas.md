@@ -4541,3 +4541,13 @@
   Planned command or config overrides: Active Triton RoPE command with `--training.local_batch_size=172`.
   Success criteria and expected risk: Success is step-10 tps above 13,659 or a clearly better memory/performance tradeoff. Risk is lower useful work per step.
   Result: discarded at source state `a92cebb4`; 13,399 tps and 166.24 GiB. Keep batch176 active.
+
+- Idea: attention output reshape instead of explicit contiguous/view
+  Current best source commit: 3665b43b
+  Source: run510 still shows a meaningful copy/slice/reshape bucket after the custom RoPE kernel. The Qwen3 attention monkeypatch explicitly calls `.contiguous().view(...)` after SDPA before the output projection.
+  Expected mechanism: Replacing the explicit contiguous/view pair with `reshape` lets PyTorch avoid a forced copy when the SDPA output layout is already compatible, while still preserving correctness by copying only if needed.
+  Supporting evidence: This is a narrow source change inside the existing Qwen3 attention monkeypatch and targets the remaining copy/reshape bucket directly.
+  Planned source/config changes: Change attention output flattening in `parallelize.py` from `.contiguous().view(bs, seqlen, -1)` to `.reshape(bs, seqlen, -1)`.
+  Planned command or config overrides: Active batch176 Triton RoPE command.
+  Success criteria and expected risk: Success is step-10 tps above 13,659. Risk is no change if SDPA output already forced the same copy internally.
+  Result: kept at source state `3665b43b+dirty`; 13,734 tps and 168.91 GiB. This is the new active non-profile peak.
