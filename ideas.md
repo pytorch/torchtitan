@@ -4621,3 +4621,13 @@
   Planned command or config overrides: Active command with `--training.local_batch_size=184 --loss.num_chunks=8`.
   Success criteria and expected risk: Success is tps above 13,734 with no allocator retries and memory near or below batch176. Risk is crossing the allocator cliff despite valid tiling.
   Result: discarded at source state `4211d5ee`; 13,521 tps at 173.86 GiB (97.48%) with allocator retries from step 2 onward. Larger-batch loss-chunk tuning is closed until source memory drops materially.
+
+- Idea: last two transformer layers without FSDP reshard
+  Current best source commit: 3705d821
+  Source: run515 profile shows worst-rank FSDP collectives remain a major bucket, especially reduce-scatter/all-gather skew around the final layers and lm_head handoff.
+  Expected mechanism: Keeping one more late layer unresharded may reduce an all-gather boundary near the end of the forward/backward pipeline and improve overlap with the lm_head transition.
+  Supporting evidence: The active source already keeps the final layer unresharded and explicitly prefetches final layer to lm_head; the next granularity point is a narrow one-line FSDP policy change.
+  Planned source/config changes: Change the layer no-reshard condition from only the last layer to the last two layers.
+  Planned command or config overrides: Active batch176 reshape command.
+  Success criteria and expected risk: Success is step-10 tps above 13,734 without crossing the memory risk line. Risk is higher live parameter memory and worse overlap.
+  Result: discarded at source state `3705d821+dirty`; 13,563 tps at 169.52 GiB (95.05%). The source was restored to last-layer-only no-reshard.

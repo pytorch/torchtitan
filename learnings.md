@@ -13136,3 +13136,27 @@ Interpretation:
 
 - Batch184/chunks8 is tile-valid but above the memory cliff on the current source.
 - The extra chunking does not compensate for the larger batch; close larger-batch loss-chunk probing until a real source memory reduction appears.
+
+## Experiment 522: Last Two Layers Without FSDP Reshard
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run522-last-two-layers-no-reshard-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run522-last-two-layers-no-reshard-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed Qwen3 FSDP wrapping to set `reshard_after_forward=False` on the last two transformer layers instead of only the last layer.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,563.
+- Step 10 peak memory: 169.52 GiB, 95.05%.
+- Loss moved from 12.40302 at step 1 to 6.91650 at step 10, finite but not better than the accepted recipe.
+
+Interpretation:
+
+- Extending no-reshard to two layers does not reduce the observed NCCL bottleneck enough to compensate for the extra live parameter memory.
+- Restore the accepted last-layer-only no-reshard policy and close this FSDP granularity variant.
