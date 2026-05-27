@@ -11087,3 +11087,32 @@ Interpretation:
 
 - The in-place accumulation is valid, but it does not produce a measured throughput win.
 - The extra allocation/add in this `grad_input` expression is not the limiting cost relative to the two MXFP8 GEMMs and FSDP collectives.
+
+## Experiment 446: Shared MXFP8 Attention Q/K/V Input Casts
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run446-shared-qkv-input-cast-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Added a Qwen3-specific shared MXFP8 Q/K/V custom autograd path for the separate attention projections.
+- The forward casts the attention input to MXFP8 once, then computes Q, K, and V projections from that shared MX tensor.
+- The backward shares the input dim1 MXFP8 cast for Q/K/V weight gradients.
+- The existing shared FFN gate/up path, feed-forward compile, FSDP policy, and command knobs remain active.
+
+Result:
+
+- Status: keep / new measured peak.
+- Step 10 `tps`: 12,265.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.97 GiB, 93.62%.
+- No allocator retries were logged.
+- Loss moved from 12.59478 at step 1 to 5.35877 at step 10.
+
+Interpretation:
+
+- The same profiler-guided input-cast sharing that helped FFN also helps Qwen3's separate attention Q/K/V projections.
+- This is a small but real peak over run421 (12,249 tps), with essentially unchanged memory.

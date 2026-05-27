@@ -27,7 +27,10 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     get_fsdp_reshard_after_forward_policy,
 )
-from torchtitan.components.quantization.mx import mxfp8_shared_input_gate_up
+from torchtitan.components.quantization.mx import (
+    mxfp8_shared_input_gate_up,
+    mxfp8_shared_input_qkv,
+)
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.tools.logging import logger
 
@@ -59,6 +62,44 @@ def _enable_shared_mxfp8_gate_up_input_cast(model: Qwen3Model) -> None:
 
     logger.info(
         "Enabled shared MXFP8 input casts for %s Qwen3 feed-forward modules",
+        patched_count,
+    )
+
+
+def _enable_shared_mxfp8_qkv_input_cast(model: Qwen3Model) -> None:
+    patched_count = 0
+
+    def _shared_mxfp8_qkv(x: torch.Tensor, *, qkv_linear):
+        bs, seqlen, _ = x.shape
+        xq, xk, xv = mxfp8_shared_input_qkv(
+            x,
+            qkv_linear.wq.weight,
+            qkv_linear.wk.weight,
+            qkv_linear.wv.weight,
+        )
+        xq = xq.view(bs, seqlen, -1, qkv_linear.head_dim)
+        xk = xk.view(bs, seqlen, -1, qkv_linear.head_dim)
+        xv = xv.view(bs, seqlen, -1, qkv_linear.head_dim)
+        return xq, xk, xv
+
+    for layer in model.layers.values():
+        attention = getattr(layer, "attention", None)
+        qkv_linear = getattr(attention, "qkv_linear", None)
+        if qkv_linear is None:
+            continue
+        if not all(
+            hasattr(proj.weight, "config")
+            for proj in (qkv_linear.wq, qkv_linear.wk, qkv_linear.wv)
+        ):
+            continue
+        qkv_linear.forward = lambda x, qkv_linear=qkv_linear: _shared_mxfp8_qkv(
+            x,
+            qkv_linear=qkv_linear,
+        )
+        patched_count += 1
+
+    logger.info(
+        "Enabled shared MXFP8 input casts for %s Qwen3 attention Q/K/V modules",
         patched_count,
     )
 
@@ -118,6 +159,7 @@ def parallelize_qwen3(
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
+    _enable_shared_mxfp8_qkv_input_cast(model)
     _enable_shared_mxfp8_gate_up_input_cast(model)
     if compile_config.enable and "feed_forward" in compile_config.components:
         _compile_qwen3_feed_forward(model, compile_config)
