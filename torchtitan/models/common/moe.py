@@ -13,7 +13,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import Linear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
@@ -22,9 +22,9 @@ from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
 #   B = batch, L = sequence length, D = model dimension,
 #   F = hidden (FFN intermediate) dimension, E = num experts,
-#   e = num local experts (E / EP), EP = expert-parallel ranks,
-#   K = top-k, T = num tokens (B*L flattened),
-#   N = routed tokens (T*K), R = routed tokens assigned to local experts
+#   e = num local experts (E / EP), K = top-k,
+#   T = num tokens (B*L flattened), N = routed tokens (T*K),
+#   R = routed tokens assigned to local experts
 
 
 class GroupedExperts(Module):

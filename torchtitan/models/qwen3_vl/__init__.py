@@ -18,8 +18,8 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_router_config,
 )
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
-from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.models.utils import validate_converter_order
 
