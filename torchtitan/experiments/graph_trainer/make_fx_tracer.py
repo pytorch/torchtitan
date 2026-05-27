@@ -565,6 +565,8 @@ def minimal_fx_tracer(
         _copy_fwd_metadata_to_bw_nodes(traced)
 
         _remove_cpu_shadow_chains(traced)
+        traced.graph.eliminate_dead_code()
+        traced.recompile()
         if _insert_runtime_asserts:
             _insert_runtime_asserts_pass(traced, fake_mode)
 
