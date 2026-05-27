@@ -4601,3 +4601,23 @@
   Planned command or config overrides: Active reshape command with `--training.local_batch_size=180` and `--training.steps=20`.
   Success criteria and expected risk: Success is sustained throughput above 13,734 with stable loss and no collapses. Risk is spending another run on a memory-risky point; this is a branch-closing run, not a new tuning loop.
   Result: discarded at source state `dc3d482e`; step 20 was 13,711 tps, but steps 11-20 averaged 13,586 tps at 172.47 GiB (96.70%). Loss was finite and overall decreasing, so the point is runnable, but not better than batch176 on sustained throughput or memory.
+
+- Idea: batch180 with loss chunks5
+  Current best source commit: 4211d5ee
+  Source: batch180 runs but sits above the memory-risk line; reducing loss/lm_head chunk size might reduce peak memory without changing transformer work.
+  Expected mechanism: More loss chunks reduce per-chunk output-projection/loss memory while preserving the larger local batch.
+  Supporting evidence: The 20-step batch180 run was throughput-valid enough to justify one branch-closing memory probe.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch180 command with `--loss.num_chunks=5`.
+  Success criteria and expected risk: Success is valid completion with lower memory and step-10 tps above 13,734. Risk is MXFP8 dim1 row tiling failure if the loss chunks produce unsupported row counts.
+  Result: crashed at source state `4211d5ee`; seq128 split into uneven 26/25-token chunks, producing row counts such as `180 * 26 = 4680`, which violates the 128-row Triton dim1 tile. Loss chunks5 is invalid for this shape.
+
+- Idea: batch184 with loss chunks8
+  Current best source commit: 4211d5ee
+  Source: batch184/chunks8 is the next larger tile-valid point because `184 * 16 = 2944 = 23 * 128` rows per loss chunk.
+  Expected mechanism: Smaller loss chunks may offset the additional batch memory and improve GEMM/collective amortization.
+  Supporting evidence: The current Triton RoPE source has lower memory than the older stack where batch184/chunks8 was tried.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--training.local_batch_size=184 --loss.num_chunks=8`.
+  Success criteria and expected risk: Success is tps above 13,734 with no allocator retries and memory near or below batch176. Risk is crossing the allocator cliff despite valid tiling.
+  Result: discarded at source state `4211d5ee`; 13,521 tps at 173.86 GiB (97.48%) with allocator retries from step 2 onward. Larger-batch loss-chunk tuning is closed until source memory drops materially.

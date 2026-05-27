@@ -13089,3 +13089,50 @@ Interpretation:
 
 - Batch180 is viable for short stability, but its sustained average is below the accepted batch176 run514 peak while using materially more memory.
 - Close the pure batch180 branch. Re-open only if a future source change saves enough memory or improves per-step compute enough to make the larger batch throughput-dominant.
+
+## Experiment 520: Batch180 With Loss Chunks5
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=180 --loss.num_chunks=5 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run520-batch180-loss-chunks5-reshape-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run520-batch180-loss-chunks5-reshape-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: TorchAO `triton_to_mxfp8_dim1` asserted `n_rows % max_row_tile_size == 0`.
+
+Interpretation:
+
+- Loss chunks5 is not a valid way to reduce batch180 loss memory under seq128.
+- The loss path splits sequence positions into uneven 26/25-token chunks, so the MXFP8 dim1 cast sees row counts such as `180 * 26 = 4680`, which is not divisible by the 128-row Triton tile.
+
+## Experiment 521: Batch184 With Loss Chunks8
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=184 --loss.num_chunks=8 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run521-batch184-loss-chunks8-reshape-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run521-batch184-loss-chunks8-reshape-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,521.
+- Step 10 peak memory: 173.86 GiB, 97.48%.
+- CUDA memory allocation retries started at step 2 and reached 3 retries by step 4.
+- Loss moved from 12.39575 at step 1 to 7.88620 at step 10, but the early trajectory was poor: step 4 loss reached 21.69616.
+
+Interpretation:
+
+- Batch184/chunks8 is tile-valid but above the memory cliff on the current source.
+- The extra chunking does not compensate for the larger batch; close larger-batch loss-chunk probing until a real source memory reduction appears.
