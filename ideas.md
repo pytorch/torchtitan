@@ -4741,3 +4741,13 @@
   Planned command or config overrides: Active `block_norms` command at batch176.
   Success criteria and expected risk: Success is sustained steps 11-20 above 14,070 with sane loss, or a clear memory/throughput Pareto improvement. Risk is extra autograd overhead or lower-quality generated code versus Inductor/native RMSNorm.
   Result: discarded at source state `eb2b4938+dirty`; short run538 reached 14,146 tps at 170.14 GiB, but run539 sustained only 13,959 tps over steps 11-20 at 170.14 GiB. Remove the fused source patch.
+
+- Idea: split compiled outer block RMSNorm by attention side versus FFN side
+  Current best source commit: dc962bb9
+  Source: combined `block_norms` is the throughput branch but raises peak memory, and run535 suggests the win is not a direct RMSNorm kernel-time reduction.
+  Expected mechanism: Compiling only one outer norm may preserve some scheduling/launch benefit while shortening activation lifetime enough to avoid the combined memory cliff.
+  Supporting evidence: The combined source is narrow and valid, and its memory increase could plausibly come from compiling both block norms.
+  Planned source/config changes: Add temporary `attention_norm` and `ffn_norm` compile components that reuse the compiled RMSNorm helper for only one side.
+  Planned command or config overrides: Active batch176 command with either `attention_norm` or `ffn_norm` replacing `block_norms`.
+  Success criteria and expected risk: Success is tps above 14,003 with memory below 172.88 GiB, or a short sample exceeding the combined `block_norms` peak. Risk is the block-forward monkeypatch itself, not the number of compiled norms, causing the memory increase.
+  Result: discarded at source state `dc962bb9+dirty`; attention-only reached 14,083 tps and FFN-only reached 14,075 tps, both at 172.88 GiB. The memory cliff follows the block-forward compiled helper shape, not just compiling both norm calls.

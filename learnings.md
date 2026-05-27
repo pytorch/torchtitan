@@ -13572,3 +13572,31 @@ Interpretation:
 - The fused forward reduces peak memory versus the compiled outer block RMSNorm throughput branch, but it does not improve sustained throughput.
 - This path likely trades native/Inductor RMSNorm scheduling for a small custom-kernel win that is not large enough to overcome extra autograd/compiler overhead.
 - Restore the committed Q/K RMSNorm plus Triton RoPE source.
+
+## Experiments 540-541: Split Compiled Outer Block RMSNorms
+
+Commands:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,attention_norm --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run540-attention-norm-only-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run540-attention-norm-only-batch176-event-cache0.run.log 2>&1
+
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,ffn_norm --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run541-ffn-norm-only-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run541-ffn-norm-only-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily split the `block_norms` helper into `attention_norm` and `ffn_norm` components.
+- Kept the original `block_norms` behavior as compiling both outer block norm calls.
+
+Result:
+
+- Status: discard.
+- Run540 attention-only step 10 `tps`: 14,083.
+- Run541 FFN-only step 10 `tps`: 14,075.
+- Peak memory for both: 172.88 GiB, 96.93%.
+
+Interpretation:
+
+- Splitting the two outer block norm calls does not recover memory.
+- The memory increase appears tied to the patched block-forward/compiled-helper boundary itself, not simply to compiling both norms.
+- Neither split beats the combined `block_norms` short-run peak, so remove the split-only source change.
