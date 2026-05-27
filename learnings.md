@@ -11428,3 +11428,29 @@ Interpretation:
 
 - Structured logs for run449 showed `collect_dist_metrics` around 302 ms on logged steps, but changing `metrics.log_freq` to 10 does not improve the reported objective.
 - The throughput accounting and log interval make this a lower reported tps result, so keep `metrics.log_freq=1` for ranking consistency.
+
+## Experiment 458: Metrics Log Frequency 2
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=2 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run458-metrics-log-freq-2 > outputs/autoresearch/may19-qwen3-14b/run458-metrics-log-freq-2.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,257.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Steps 1, 2, 4, 6, 8, and 10 were logged.
+
+Interpretation:
+
+- A shorter two-step reporting interval avoids the long warmup average from `log_freq=10`, but still does not beat the active `log_freq=1` result.
+- Keep `metrics.log_freq=1`; the metric-frequency branch is closed unless the objective changes away from reported step tps.

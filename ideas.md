@@ -3991,3 +3991,13 @@
   Planned command or config overrides: Active command with `--metrics.log_freq=10`.
   Success criteria and expected risk: Success is reported step-10 tps above 12,387. Risk is throughput accounting becoming less favorable or less comparable.
   Result: discarded at source state `ab4a53c3`; only steps 1 and 10 were logged, and step-10 reported tps dropped to 10,956. Keep `metrics.log_freq=1`.
+
+- Idea: metrics log frequency 2 on active recipe
+  Current best source commit: deaf2282
+  Source: `metrics.log_freq=10` used a long interval that averaged in slower warmup steps, but metric collection is still visible in structured logs.
+  Expected mechanism: `--metrics.log_freq=2` logs step 10 over a shorter steady-state interval while halving metric collection frequency.
+  Supporting evidence: Step 10 remains logged because 10 is divisible by 2.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--metrics.log_freq=2`.
+  Success criteria and expected risk: Success is reported step-10 tps above 12,387. Risk is no practical reduction in the measured interval.
+  Result: discarded at source state `deaf2282`; step-10 tps was 12,257 at 163.95 GiB. Keep `metrics.log_freq=1`.
