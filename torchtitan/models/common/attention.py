@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -55,10 +55,16 @@ __all__ = [
 ]
 
 
-class VarlenMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
+@dataclass(frozen=True, eq=False)
+class VarlenMetadata:
+    """Metadata for variable-length attention (``varlen_attn``).
 
+    The four fields are the standard varlen kernel arguments describing document
+    boundaries within a packed sequence.
+
+    Kept as a frozen dataclass with ``eq=False`` because the default dataclass
+    ``__eq__`` would compare tensor fields elementwise and raise on multi-element
+    tensors.
     """
 
     cu_seq_q: torch.Tensor
@@ -106,25 +112,48 @@ class VarlenAttention(Module):
         scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(
-            attention_masks, VarlenMetadata
-        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+        if not isinstance(attention_masks, VarlenMetadata):
+            raise ValueError(
+                f"attention_masks must be a VarlenMetadata, "
+                f"got {type(attention_masks).__name__}"
+            )
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        batch_size, seq_len, _, head_dim = q.shape
+        # Q and K may have different seq lengths under CP: K/V are
+        # all-gathered across the CP dim while Q stays sharded, so K's seq
+        # equals the global seq while Q's is the local shard.
+        batch_size, q_seq_len, _, head_dim = q.shape
+        k_seq_len = k.shape[1]
 
         # varlen attention expects (bs*seqlen, n_heads, head_dim)
-        xq_packed = q.reshape(batch_size * seq_len, -1, head_dim)
-        xk_packed = k.reshape(batch_size * seq_len, -1, head_dim)
-        xv_packed = v.reshape(batch_size * seq_len, -1, head_dim)
+        xq_packed = q.reshape(batch_size * q_seq_len, -1, head_dim)
+        xk_packed = k.reshape(batch_size * k_seq_len, -1, head_dim)
+        xv_packed = v.reshape(batch_size * k_seq_len, -1, head_dim)
+
+        # Function-local import to avoid cyclic dep with varlen_cp.py.
+        from torchtitan.distributed.varlen_cp import CPVarlenMetadata
+
+        if isinstance(attention_masks, CPVarlenMetadata):
+            # CP metadata's right-aligned causal trick only works for causal masks.
+            if self.window_size != (-1, 0):
+                raise ValueError(
+                    "Varlen attention under CP only supports causal masking "
+                    f"(window_size=(-1, 0)); got window_size={self.window_size}."
+                )
+            xk_packed = xk_packed.index_select(
+                0, attention_masks.k_global_gather_indices
+            )
+            xv_packed = xv_packed.index_select(
+                0, attention_masks.k_global_gather_indices
+            )
 
         # Some operators can upcast under AMP, but varlen attention currently only
-        # supports bf16/fp16 inputs. If this changes, or fp16 training support
-        # is added, this may need to be revisited.
+        # supports bf16/fp16 inputs. If this changes, or fp16 training support is
+        # added, this may need to be revisited.
         xq_packed = xq_packed.to(torch.bfloat16)
         xk_packed = xk_packed.to(torch.bfloat16)
         xv_packed = xv_packed.to(torch.bfloat16)
@@ -159,7 +188,7 @@ class VarlenAttention(Module):
         )
         assert isinstance(out_packed, torch.Tensor)
         # Reshape back to the format expected by GQAttention.forward()
-        out = out_packed.view(batch_size, seq_len, -1, head_dim)
+        out = out_packed.view(batch_size, q_seq_len, -1, head_dim)
 
         return out.to(q.dtype)
 
