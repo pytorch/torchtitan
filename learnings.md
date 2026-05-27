@@ -11059,3 +11059,31 @@ Interpretation:
 
 - TorchAO's MXFP8 `addmm` dispatch routes to scaled-mm with bias semantics that require a vector bias, not a full matrix accumulator.
 - The direct `addmm` replacement cannot be used for the gate/up `grad_input` accumulation.
+
+## Experiment 445: Shared Gate/Up grad_input With In-Place Add
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run445-shared-gate-up-grad-input-inplace-add-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed the shared gate/up custom autograd backward to compute the first `grad_input` GEMM and then add the second GEMM result in-place.
+- This kept TorchAO's supported MXFP8 `mm` path while avoiding one explicit output allocation for the sum expression.
+- Restored the original expression after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,131.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.41228 at step 1 to 6.87684 at step 10.
+
+Interpretation:
+
+- The in-place accumulation is valid, but it does not produce a measured throughput win.
+- The extra allocation/add in this `grad_input` expression is not the limiting cost relative to the two MXFP8 GEMMs and FSDP collectives.
