@@ -11866,3 +11866,29 @@ Interpretation:
 
 - With `seq_len=128`, batch170 gives 21,760 rows, which is not divisible by the 512-row tile required by this Triton path.
 - Viable neighboring batch sizes must move in increments of 4 at this sequence length.
+
+## Experiment 475: Batch164 On Compiled-QKV Stack
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=164 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run475-batch164-compiled-qkv > outputs/autoresearch/may19-qwen3-14b/run475-batch164-compiled-qkv.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,339.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 160.77 GiB, 90.14%.
+- No allocator retries were logged.
+- Loss moved from 12.38539 at step 1 to 6.83828 at step 10.
+
+Interpretation:
+
+- Batch164 is valid and saves about 3.18 GiB, but it remains below the active batch168 throughput.
+- With batch164, batch168, batch170, and batch172 now checked on the compiled-Q/K/V stack, batch168 remains the local optimum.

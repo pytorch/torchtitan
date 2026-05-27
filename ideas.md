@@ -4161,3 +4161,13 @@
   Planned command or config overrides: Active command with `--training.local_batch_size=170`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is MXFP8 tile-shape incompatibility.
   Result: crashed before step 1 at source state `24487c30`; `local_batch_size * seq_len = 21760` is not divisible by the Triton MXFP8 dim1 512-row tile, triggering `AssertionError: unsupported`.
+
+- Idea: local batch size 164 on compiled-Q/K/V active recipe
+  Current best source commit: d959c7b9
+  Source: batch170 is tile-incompatible and batch172 is slower; batch164 is the lower tile-compatible neighbor around active batch168.
+  Expected mechanism: Slightly smaller batch may lower memory and reduce collective/cast pressure enough to improve measured tps despite fewer tokens per step.
+  Supporting evidence: Active batch168 has 163.95 GiB peak; batch164 should create about 3 GiB more headroom.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active command with `--training.local_batch_size=164`.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is lower arithmetic occupancy.
+  Result: discarded at source state `d959c7b9`; 12,339 tps and 160.77 GiB peak memory. Lower memory does not compensate for smaller batch; keep batch168.
