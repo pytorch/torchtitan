@@ -4141,3 +4141,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is CUDA graph capture overhead and higher memory.
   Result: stopped early at source state `575b5cc9` plus dirty source after step 4 because tps remained only 651, 1,160, 679, and 1,263 while memory rose to 165.05 GiB. Restore default FFN compile mode.
+
+- Idea: root FSDP no-reshard on compiled-Q/K/V active recipe
+  Current best source commit: 4a61fefd
+  Source: root no-reshard was tested before the final Q/K/V compile boundary reduced memory and changed communication exposure.
+  Expected mechanism: Keeping root-owned parameters such as embeddings and final norm resident after forward could reduce root-wrapper all-gather exposure in backward.
+  Supporting evidence: run450 still shows FSDP collectives as a large rank-skewed bucket, while current memory has more headroom than several earlier stacks.
+  Planned source/config changes: Temporarily set the root `fully_shard(model, ...)` config to `reshard_after_forward=False`, leaving layers and `lm_head` unchanged.
+  Planned command or config overrides: Active compiled-Q/K/V command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is higher peak memory and no overlap win.
+  Result: discarded at source state `4a61fefd` plus dirty source; 12,160 tps and 167.60 GiB peak memory. Restore root resharding.
