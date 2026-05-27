@@ -4501,3 +4501,23 @@
   Planned command or config overrides: Active Triton RoPE command with `--training.local_batch_size=176`.
   Success criteria and expected risk: Success is step-10 tps above 13,622 with peak memory below about 95%. Risk is the prior batch176 shape slowdown persists.
   Result: kept at source state `85d91bab`; 13,659 tps and 168.91 GiB. This is a small new peak and becomes the active command.
+
+- Idea: profile Triton RoPE batch176 active recipe
+  Current best source commit: 5d140d03
+  Source: batch176 became the measured active command after the custom RoPE memory saving, but the only post-RoPE trace was still batch168.
+  Expected mechanism: Profile step 10 at the active shape to see whether the larger batch worsens NCCL skew, improves collective amortization, or shifts pressure back to GEMM/MXFP8 kernels.
+  Supporting evidence: run509 is only a small win over run506, so a trace is needed before spending more runs on batch or source changes.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 Triton RoPE command with profiler enabled for iteration 10.
+  Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used for ranking.
+  Result: kept as diagnostic at source state `5d140d03`; profiled step-10 tps was 13,733. Compared with batch168, NCCL bucket improved materially while GEMM/MXFP8 rose modestly. The batch176 win is primarily collective amortization.
+
+- Idea: Triton RoPE BLOCK=512
+  Current best source commit: 5d140d03
+  Source: run510 shows the custom RoPE kernels are no longer dominant but still cost about 56 ms/rank, and the active kernel uses a conservative 256-element Triton block.
+  Expected mechanism: Increasing the Triton block to 512 reduces program count in the forward and backward RoPE kernels without changing math or adding the Q/K pointer-selection overhead that hurt the combined-kernel experiment.
+  Supporting evidence: The RoPE kernels are pure elementwise pair rotation over contiguous Q/K tensors, so block-size tuning is a cheap source-level custom-op probe.
+  Planned source/config changes: Temporarily change `_SequentialRoPE` forward/backward launch `BLOCK` from 256 to 512 in `parallelize.py`.
+  Planned command or config overrides: Active batch176 Triton RoPE command.
+  Success criteria and expected risk: Success is step-10 tps above 13,659. Risk is lower occupancy or worse register pressure from the larger block.
+  Result: discarded at source state `5d140d03+dirty`; 13,594 tps and 168.91 GiB. Keep `BLOCK=256`.

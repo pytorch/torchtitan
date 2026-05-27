@@ -12812,3 +12812,64 @@ Interpretation:
 - The Triton RoPE source recovered enough memory to make batch176 acceptable under the 95% memory guideline.
 - Batch176 is only a small throughput win over batch168 (+37 tps), but it is now the measured peak.
 - The active command now uses local batch 176. Do not push much higher without a specific memory-saving source change; this is already close to the preferred memory ceiling.
+
+## Experiment 510: Profile Triton RoPE Batch176 Active Recipe
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run510-profile-triton-rope-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run510-profile-triton-rope-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: keep as profile data.
+- Profiled step 10 `tps`: 13,733.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- No allocator retries were logged.
+- Loss moved from 12.33179 at step 1 to 6.26702 at step 10.
+- Traces were written under `outputs/autoresearch/may19-qwen3-14b/run510-profile-triton-rope-batch176-event-cache0/profiling/traces/iteration_10`.
+
+Trace comparison against run507:
+
+- Batch176 lowered the broad NCCL bucket from about 1,976 ms/rank to 1,662 ms/rank, with the worst rank moving from about 2,699 ms to 2,593 ms.
+- Broad scaled-mm/GEMM work rose modestly from about 1,360 ms/rank to 1,406 ms/rank as expected from the larger batch.
+- MXFP8 cast/quant work rose from about 714 ms/rank to 730 ms/rank.
+- RoPE stayed small and stable: exact custom RoPE kernels were about 14.5 ms/rank forward and 15.5 ms/rank backward.
+- SDPA/Flash attention remained about 33 ms/rank in the broad bucket.
+
+Interpretation:
+
+- The batch176 win is mostly better collective amortization, not a new compute-kernel win.
+- The command is close enough to the 95% memory line that further batch-size increases need a preceding memory-saving source change.
+- Remaining likely targets are broad GEMM/MXFP8 work, NCCL skew, and small attention-block overhead around RMSNorm/RoPE; pure attention backend changes are not promising from this trace.
+
+## Experiment 511: Triton RoPE Block512
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run511-triton-rope-block512-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run511-triton-rope-block512-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed `_SequentialRoPE` forward and backward Triton launch `BLOCK` from 256 to 512.
+- Restored `BLOCK=256` after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,594.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- No allocator retries were logged.
+- Loss moved from 12.37695 at step 1 to 6.40169 at step 10.
+
+Interpretation:
+
+- A larger RoPE block is valid, and it briefly sampled 13,868 tps at step 9, but the objective step-10 throughput is below the active block256 source.
+- Keep the current `BLOCK=256` custom RoPE kernel.
