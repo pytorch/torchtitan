@@ -10356,3 +10356,30 @@ Interpretation:
 
 - Chunks6 is not valid for the current compiled MXFP8 Triton dim1 loss path.
 - Close the loss-chunk axis for batch168: chunks4 is the fastest valid setting; chunks8 is valid but slower; chunks3 and chunks6 crash.
+
+## Experiment 418: Shared MXFP8 Weight Decay 0 With LM Head No-Reshard
+
+Command:
+
+```bash
+NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run418-mxfp8-shared-gate-up-input-cast-weight-decay0-lm-head-no-reshard-feed-forward-compile-lbs168-last-layer-no-reshard-loss-chunks4-seq128-bf16-nccl-zero-cta-dataloader-worker2-prefetch2-metrics-logfreq1-no-flight-recorder > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily wrapped `model.lm_head` with `reshard_after_forward=False`.
+- Kept final transformer layer no-reshard, shared MXFP8 gate/up input casting, and one-module bidirectional prefetch unchanged.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,093.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.95 GiB, 93.61%.
+- No allocator retries were logged.
+- Loss moved from 12.39739 at step 1 to 5.92559 at step 10.
+
+Interpretation:
+
+- Keeping `lm_head` unresharded does not reduce the reported step time enough to beat the current best.
+- Restore normal `lm_head` resharding.
