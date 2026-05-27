@@ -1,1 +1,2 @@
 timestamp	commit	tps	memory_gib	status	mfu_pct	wall_time_s	description
+2026-05-27T15:50:43	2ffbabc5	7162	47.5	baseline	41.94	84	Run 3 baseline: production passes (cleanup + FSDP bucketing/reorder + regional Inductor + cudagraph), no SAC, no extra custom passes
