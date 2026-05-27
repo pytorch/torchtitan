@@ -42,7 +42,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.spmd_state import set_current_mesh
 
@@ -635,6 +635,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
+        if self.config.parallelism.full_dtensor:
+            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
+                self.parallel_dims, inputs, labels, extra_kwargs
+            )
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")
@@ -700,6 +705,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     if (
                         isinstance(pred, DTensor)
+                        and not self.config.parallelism.full_dtensor
                         and self.config.parallelism.disable_loss_parallel
                     ):
                         pred = pred.to_local()
