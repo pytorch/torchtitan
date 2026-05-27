@@ -10822,3 +10822,31 @@ Interpretation:
 
 - Narrowing MXFP8 to FFN plus `lm_head` saves a small amount of memory but loses about 480 tps versus the explicit-NVLS active recipe.
 - Attention MXFP8 coverage is useful for this workload; keep full converter coverage.
+
+## Experiment 436: Compile-Friendly lm_head Wrapper
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,lm_head --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run436-compile-lm-head-wrapper-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily wrapped `model.lm_head` in a tiny non-skipfile module and compiled that wrapper with `fullgraph=True`.
+- This was a narrower follow-up to the older direct `lm_head.compile()` failure where Dynamo found no compiled frames for `nn.Linear.forward`.
+- Restored the active source after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,123.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 169.02 GiB, 94.77%.
+- No allocator retries were logged.
+- Loss moved from 12.38457 at step 1 to 7.27890 at step 10.
+
+Interpretation:
+
+- The wrapper proves `lm_head` can be compiled if Dynamo is given a local frame, but it raises peak memory by about 2 GiB and remains below the explicit-NVLS active recipe.
+- Do not keep `lm_head` compilation in the current stack.
