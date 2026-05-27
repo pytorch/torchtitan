@@ -88,15 +88,9 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen3VLVisionEncoder.Config") -> None:
     ve_cfg.merger_fc1.sharding_config = colwise_config()
     ve_cfg.merger_fc2.sharding_config = rowwise_config()
 
-    # local_map on VisionInnerAttention: fused qkv arrives as
-    # DTensor(Shard(-1)) on TP from attn.qkv. local_map unwraps to a plain
-    # local with shape (N, L, dim*3/TP); the reshape + permute + unbind +
-    # rope + flex_attention all run on local heads-parallel tensors. Output
-    # (N, L, n_heads, head_dim) re-wraps to DTensor(Shard(2)) which the
-    # caller reshapes into Shard(-1) for the rowwise self.proj.
-    # qkv arrives as ``DTensor(Shard(2))`` from attn.qkv (colwise on the last
-    # dim of a 3D activation -- use explicit ``Shard(2)`` to match local_map's
-    # strict placement-equality check).
+    # qkv is a 3D activation from colwise attn.qkv: Shard(-1) resolves
+    # to Shard(2). Use explicit Shard(2) to match local_map's strict
+    # placement-equality check.
     qkv_placements = dense_activation_placement(tp=Shard(2))
     out_placements = dense_activation_placement(tp=Shard(2))
     ve_cfg.attn_inner_attention.sharding_config = ShardingConfig(
