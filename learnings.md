@@ -13160,3 +13160,27 @@ Interpretation:
 
 - Extending no-reshard to two layers does not reduce the observed NCCL bottleneck enough to compensate for the extra live parameter memory.
 - Restore the accepted last-layer-only no-reshard policy and close this FSDP granularity variant.
+
+## Experiment 523: In-Place Triton RoPE
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run523-inplace-triton-rope-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run523-inplace-triton-rope-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed the custom Triton RoPE autograd function to write the forward result back into the contiguous Q/K activation tensor and return that tensor with `ctx.mark_dirty(...)`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,593.
+- Step 10 peak memory: 168.91 GiB, 94.71%.
+- Loss moved from 12.31439 at step 1 to 7.06778 at step 10.
+
+Interpretation:
+
+- The in-place RoPE variant is autograd-valid, but the reported peak memory is unchanged and throughput is below the accepted out-of-place RoPE run514 peak.
+- Restore the out-of-place Triton RoPE source. The remaining memory cliff is not explained by RoPE output allocation.

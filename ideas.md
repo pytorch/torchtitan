@@ -4631,3 +4631,13 @@
   Planned command or config overrides: Active batch176 reshape command.
   Success criteria and expected risk: Success is step-10 tps above 13,734 without crossing the memory risk line. Risk is higher live parameter memory and worse overlap.
   Result: discarded at source state `3705d821+dirty`; 13,563 tps at 169.52 GiB (95.05%). The source was restored to last-layer-only no-reshard.
+
+- Idea: in-place Triton RoPE
+  Current best source commit: ea5891f2
+  Source: the active custom Triton RoPE still allocates fresh Q and K output tensors per layer; if those temporaries contribute to the memory cliff, removing them could create room for larger batches or less allocator pressure.
+  Expected mechanism: Write RoPE results directly into the contiguous Q/K activation tensors and mark them dirty in the autograd function, preserving the same backward formula while avoiding a separate output allocation.
+  Supporting evidence: A small CUDA comparison showed the in-place forward matched the out-of-place Triton RoPE and backward completed.
+  Planned source/config changes: Temporarily replace `_sequential_rope` with an in-place autograd variant that calls the same Triton kernel with `out_ptr == x_ptr`.
+  Planned command or config overrides: Active batch176 reshape command.
+  Success criteria and expected risk: Success is step-10 tps above 13,734 or a meaningful peak-memory drop that justifies reopening batch180. Risk is autograd version-counter failure or no effect if RoPE outputs are not peak-live.
+  Result: discarded at source state `ea5891f2+dirty`; 13,593 tps at the same 168.91 GiB peak. Restore out-of-place Triton RoPE and do not reopen batch180 on this basis.
