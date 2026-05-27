@@ -80,10 +80,14 @@ def _detect_tolerance(problem_path: Path) -> tuple[dict, str]:
 
 def _load_module(path: Path, module_name: str):
     """Load a Python module from path; strip any header comments before
-    'import torch' so @triton.jit's inspect.getsourcelines() works."""
+    the first import so @triton.jit's inspect.getsourcelines() works."""
     import tempfile
     content = path.read_text()
-    idx = content.find("import torch")
+    # Find the first 'import' statement (could be 'import triton' or 'import torch').
+    idx = min(
+        (content.find(s) for s in ("import triton", "import torch") if content.find(s) >= 0),
+        default=-1,
+    )
     if idx > 0:
         clean = content[idx:]
         tmp = Path(tempfile.gettempdir()) / f"_bench_{module_name}_{path.parent.name}.py"
