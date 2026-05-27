@@ -112,7 +112,7 @@ def build_trainer_model(
     # so each Module is constructed with its ShardingConfig / LocalMapConfig.
     # Without this the trainer side would run un-parallelized while the vLLM
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
-    model_spec.model.update_from_config(trainer_config=config.trainer)
+    model_spec.model.update_from_config(config=config.trainer)
 
     # Build on meta device, parallelize, then materialize
     with torch.device("meta"):

@@ -150,11 +150,10 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
     """update_from_config must reject seq_len > rope.max_seq_len."""
 
     def _make_trainer_config(self, seq_len):
-        from types import SimpleNamespace
-
         from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+        from torchtitan.trainer import Trainer
 
-        return SimpleNamespace(
+        return Trainer.Config(
             training=dataclasses.replace(TrainingConfig(), seq_len=seq_len),
             parallelism=ParallelismConfig(),
             debug=DebugConfig(),
@@ -170,14 +169,12 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         cfg = self._make_config()
         rope_max = cfg.rope.max_seq_len
         with self.assertRaises(ValueError):
-            cfg.update_from_config(
-                trainer_config=self._make_trainer_config(rope_max + 1)
-            )
+            cfg.update_from_config(config=self._make_trainer_config(rope_max + 1))
 
     def test_accepts_valid_seq_len(self):
         cfg = self._make_config()
         rope_max = cfg.rope.max_seq_len
-        cfg.update_from_config(trainer_config=self._make_trainer_config(rope_max))
+        cfg.update_from_config(config=self._make_trainer_config(rope_max))
         self.assertEqual(cfg.rope.max_seq_len, rope_max)
 
     def test_vllm_max_model_len_as_seq_len(self):
@@ -188,7 +185,7 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         """
         cfg = self._make_config()
         original_max = cfg.rope.max_seq_len
-        cfg.update_from_config(trainer_config=self._make_trainer_config(original_max))
+        cfg.update_from_config(config=self._make_trainer_config(original_max))
         self.assertEqual(cfg.rope.max_seq_len, original_max)
 
 

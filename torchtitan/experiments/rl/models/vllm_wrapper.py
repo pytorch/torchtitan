@@ -185,14 +185,14 @@ class VLLMModelWrapper(Module):
         # is constructed with its ShardingConfig attached (required by the
         # declarative model.parallelize() API). Need to be called after Attention
         # module replacement.
-        # Matches the shape of trainer_config (has .parallelism) so
+        # Provides the generic config shape (has .parallelism) so
         # update_from_config can extract parallelism uniformly.
         @dataclass(kw_only=True, slots=True)
         class _InferenceConfig:
             parallelism: ParallelismConfig
 
         self.config.update_from_config(
-            trainer_config=_InferenceConfig(parallelism=parallelism)
+            config=_InferenceConfig(parallelism=parallelism)
         )
 
         # TODO: Check if it's possible to apply meta init

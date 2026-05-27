@@ -185,13 +185,13 @@ class GptOssModel(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(
-                self, trainer_config=trainer_config, **kwargs
+                self, config=config, **kwargs
             )
-            parallelism = trainer_config.parallelism
+            parallelism = config.parallelism
 
             from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 

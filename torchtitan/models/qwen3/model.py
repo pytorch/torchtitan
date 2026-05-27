@@ -86,13 +86,13 @@ class Qwen3Model(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(
-                self, trainer_config=trainer_config, **kwargs
+                self, config=config, **kwargs
             )
-            parallelism = trainer_config.parallelism
+            parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config

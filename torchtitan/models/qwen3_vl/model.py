@@ -60,13 +60,13 @@ class Qwen3VLModel(Qwen3Model):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(
-                self, trainer_config=trainer_config, **kwargs
+                self, config=config, **kwargs
             )
-            parallelism = trainer_config.parallelism
+            parallelism = config.parallelism
 
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
 

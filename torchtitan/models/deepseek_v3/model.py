@@ -185,19 +185,19 @@ class DeepSeekV3Model(Decoder):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
             Decoder.Config.update_from_config(
-                self, trainer_config=trainer_config, **kwargs
+                self, config=config, **kwargs
             )
-            parallelism = trainer_config.parallelism
+            parallelism = config.parallelism
 
             from torchtitan.trainer import Trainer
 
             # Sync rope fields to attention for all layers.
-            if isinstance(trainer_config, Trainer.Config):
-                seq_len = trainer_config.training.seq_len
+            if isinstance(config, Trainer.Config):
+                seq_len = config.training.seq_len
                 for layer_cfg in self.layers:
                     assert isinstance(layer_cfg.attention, Attention.Config)
                     layer_cfg.attention.rope_max_seq_len = seq_len

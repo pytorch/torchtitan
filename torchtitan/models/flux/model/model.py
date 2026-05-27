@@ -53,7 +53,7 @@ class FluxModel(BaseModel):
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
 
-        def update_from_config(self, *, trainer_config, **kwargs) -> None:
+        def update_from_config(self, *, config, **kwargs) -> None:
             pass
 
         def get_nparams_and_flops(

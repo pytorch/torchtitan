@@ -278,7 +278,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         class GoodModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, trainer_config, **kwargs):
+                def update_from_config(self, *, config, **kwargs):
                     pass
 
                 def get_nparams_and_flops(self, model, seq_len):
@@ -299,7 +299,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         class BadModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, trainer_config, **kwargs):
+                def update_from_config(self, *, config, **kwargs):
                     pass
 
                 def get_nparams_and_flops(self, model, seq_len):
@@ -320,7 +320,7 @@ class TestVerifyModuleProtocol(unittest.TestCase):
         class ThirdPartyModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, trainer_config, **kwargs):
+                def update_from_config(self, *, config, **kwargs):
                     pass
 
                 def get_nparams_and_flops(self, model, seq_len):

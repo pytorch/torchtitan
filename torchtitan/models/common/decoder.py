@@ -84,21 +84,31 @@ class Decoder(BaseModel):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-            """Apply trainer config to model config.
+            """Apply runtime config to model config.
 
-            When *trainer_config* is a ``Trainer.Config``, validates
+            When *config* is a ``Trainer.Config``, validates
             ``training.seq_len`` against the model's intrinsic
             ``rope.max_seq_len``, resizes the RoPE cache, and propagates
-            debug flags.  Non-trainer callers (e.g. the vLLM inference
-            wrapper) may pass a ``ParallelismConfig`` directly; in that
-            case the training/debug setup is skipped.
+            debug flags. Non-trainer callers may pass any config-like
+            object with a ``ParallelismConfig`` in its ``parallelism``
+            field; in that case the training/debug setup is skipped.
             """
+            from torchtitan.config import ParallelismConfig
             from torchtitan.trainer import Trainer
 
-            parallelism = trainer_config.parallelism
+            assert hasattr(config, "parallelism"), (
+                "config passed to update_from_config must provide "
+                "a parallelism field."
+            )
+            parallelism = config.parallelism
+            assert isinstance(parallelism, ParallelismConfig), (
+                "config.parallelism must be a ParallelismConfig, got "
+                f"{type(parallelism).__name__}."
+            )
+
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 n_heads = self.layers[0].attention.n_heads
@@ -140,9 +150,12 @@ class Decoder(BaseModel):
                             "(expert_parallel_degree > 1)."
                         )
 
-            if isinstance(trainer_config, Trainer.Config):
-                debug = trainer_config.debug
-                seq_len = trainer_config.training.seq_len
+            # NOTE: Inference-only callers such as the RL generator skip
+            # training.seq_len sync. Generated sequence length is not known
+            # ahead of time, so keep the RoPE cache at the model's max_seq_len.
+            if isinstance(config, Trainer.Config):
+                debug = config.debug
+                seq_len = config.training.seq_len
 
                 if seq_len > self.rope.max_seq_len:
                     raise ValueError(
