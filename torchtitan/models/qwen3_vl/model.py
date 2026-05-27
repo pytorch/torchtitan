@@ -89,6 +89,12 @@ class Qwen3VLModel(Qwen3Model):
             from torchtitan.models.qwen3_vl.sharding import set_qwen3_vl_sharding_config
             from torchtitan.components.loss import ChunkedCELoss
 
+            if parallelism.enable_sequence_parallel:
+                raise ValueError(
+                    "Qwen3-VL does not support sequence parallelism. Set "
+                    "--parallelism.enable_sequence_parallel=False."
+                )
+
             chunked_loss = isinstance(trainer_config.loss, ChunkedCELoss.Config)
             set_qwen3_vl_sharding_config(
                 self,
@@ -135,7 +141,7 @@ class Qwen3VLModel(Qwen3Model):
         # Number of early LLM layers that receive DeepStack visual features
         self.num_deepstack_layers = len(config.vision_encoder.deepstack_visual_indices)
 
-    @spmd.no_typecheck()
+    @spmd.no_typecheck()  # freqs_cis: S(0)@DP, R@TP
     def _compute_mrope_freqs(
         self,
         tokens: torch.Tensor,
@@ -437,7 +443,6 @@ class Qwen3VLModel(Qwen3Model):
             )
         return inputs_embeds
 
-    @spmd.no_typecheck()
     def _deepstack_process(
         self,
         hidden_states: torch.Tensor,
@@ -573,12 +578,14 @@ class Qwen3VLModel(Qwen3Model):
         Returns:
             Output logits (batch_size, seq_len, vocab_size)
         """
-        local_spmd_context = (
-            spmd.typecheck(local=True)
-            if spmd.is_type_checking()
-            else contextlib.nullcontext()
-        )
-        with local_spmd_context:
+        def local_spmd_context():
+            return (
+                spmd.typecheck(local=True)
+                if spmd.is_type_checking()
+                else contextlib.nullcontext()
+            )
+
+        with local_spmd_context():
             (
                 inputs_embeds,
                 image_positions,
@@ -626,30 +633,28 @@ class Qwen3VLModel(Qwen3Model):
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)
             if layer_idx_int < self.num_deepstack_layers:
-                if (
-                    deepstack_image_features is not None
-                    and image_positions
-                    and layer_idx_int < len(deepstack_image_features)
-                ):
-                    hidden_states_type_source = hidden_states
-                    hidden_states = self._deepstack_process(
-                        hidden_states,
-                        vision_positions=image_positions,
-                        deepstack_embeds=deepstack_image_features[layer_idx_int],
-                    )
-                    spmd.assert_type_like(hidden_states, hidden_states_type_source)
-                if (
-                    deepstack_video_features is not None
-                    and video_positions
-                    and layer_idx_int < len(deepstack_video_features)
-                ):
-                    hidden_states_type_source = hidden_states
-                    hidden_states = self._deepstack_process(
-                        hidden_states,
-                        vision_positions=video_positions,
-                        deepstack_embeds=deepstack_video_features[layer_idx_int],
-                    )
-                    spmd.assert_type_like(hidden_states, hidden_states_type_source)
+                with local_spmd_context():
+                    if (
+                        deepstack_image_features is not None
+                        and image_positions
+                        and layer_idx_int < len(deepstack_image_features)
+                    ):
+                        hidden_states = self._deepstack_process(
+                            hidden_states,
+                            vision_positions=image_positions,
+                            deepstack_embeds=deepstack_image_features[layer_idx_int],
+                        )
+                    if (
+                        deepstack_video_features is not None
+                        and video_positions
+                        and layer_idx_int < len(deepstack_video_features)
+                    ):
+                        hidden_states = self._deepstack_process(
+                            hidden_states,
+                            vision_positions=video_positions,
+                            deepstack_embeds=deepstack_video_features[layer_idx_int],
+                        )
+                spmd.assert_type_like(hidden_states, inputs_embeds)
 
         hidden_states = (
             self.norm(hidden_states) if self.norm is not None else hidden_states

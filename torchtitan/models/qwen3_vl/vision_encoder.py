@@ -21,7 +21,7 @@ from torchtitan.protocols.sharding import ShardingConfig
 LayerNorm = Module.from_nn_module(nn.LayerNorm)
 GELU = Module.from_nn_module(nn.GELU)
 
-_compiled_create_block_mask = torch.compile(create_block_mask)
+_compiled_create_block_mask = spmd.no_typecheck()(torch.compile(create_block_mask))
 
 
 def get_vision_block_mask_mod(num_patch: torch.Tensor, max_num_patch: int):
@@ -601,14 +601,6 @@ class Qwen3VLVisionEncoder(Module):
             self.spatial_merge_size,
             head_dim,
         )
-        mesh_names = spmd.current_mesh_names() if spmd.is_type_checking() else None
-        if mesh_names is not None and "tp" in mesh_names:
-            rope_cache = spmd.mutate_type(
-                rope_cache,
-                "tp",
-                src=spmd.R,
-                dst=spmd.R,
-            )
 
         return learned_pos, rope_cache
 
@@ -642,15 +634,14 @@ class Qwen3VLVisionEncoder(Module):
         hidden_states = hidden_states + learned_pos
 
         mask_mod = get_vision_block_mask_mod(num_patch, max_num_patch)
-        with spmd.no_typecheck():
-            attention_mask = _compiled_create_block_mask(
-                mask_mod,
-                num_vision,
-                None,
-                max_num_patch,
-                max_num_patch,
-                device=hidden_states.device,
-            )
+        attention_mask = _compiled_create_block_mask(
+            mask_mod,
+            num_vision,
+            None,
+            max_num_patch,
+            max_num_patch,
+            device=hidden_states.device,
+        )
         deepstack_features = []
 
         for layer_idx, layer in self.layers.items():

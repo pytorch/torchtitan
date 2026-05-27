@@ -28,6 +28,14 @@ if TYPE_CHECKING:
     )
 
 
+# Routed-expert layout for the shared ``GroupedExperts`` (w1/w2/w3).
+_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "w1": spmd.S(1),
+    "w2": spmd.S(2),
+    "w3": spmd.S(1),
+}
+
+
 def set_deepseek_v3_sharding_config(
     config: "DeepSeekV3Model.Config",
     *,
@@ -37,7 +45,16 @@ def set_deepseek_v3_sharding_config(
     enable_ep: bool,
     chunked_loss: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all DeepSeek V3 sub-configs."""
+    """Fill ``sharding_config`` on all DeepSeek V3 sub-configs.
+
+    Dense sub-configs (attention, norms, dense FFN) are populated
+    unconditionally — ``Module.parallelize`` filters disabled axes
+    at runtime.
+
+    MoE sub-configs (router, shared experts, routed experts) are
+    populated unconditionally — ``resolve_mesh`` filters disabled
+    axes at runtime.
+    """
 
     set_decoder_sharding_config(
         config,
@@ -65,6 +82,7 @@ def _set_deepseek_v3_layer_sharding(
 
     MLA attention: low-rank projections (wkv_a, wq_a, kv_norm, q_norm)
     stay replicated. Up-projections (wkv_b, wq_b, wq) are colwise.
+    MoE FFN is routed through ``set_moe_sharding_config``.
     """
     attention = layer_cfg.attention
     assert isinstance(attention, Attention.Config)
@@ -120,6 +138,7 @@ def _set_deepseek_v3_layer_sharding(
         attention.q_norm.sharding_config = replicate_weight
         attention.wq_b.sharding_config = colwise_config()
 
+    # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
@@ -127,10 +146,12 @@ def _set_deepseek_v3_layer_sharding(
             enable_sp=enable_sp,
         )
 
+    # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_tp=enable_tp,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
+            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )

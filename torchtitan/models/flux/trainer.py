@@ -29,6 +29,8 @@ from torchtitan.models.flux.utils import (
     PATCH_WIDTH,
     preprocess_data,
 )
+from torchtitan.models.flux.sharding import flux_sequence_placement
+from torchtitan.protocols.module import named_placement_to_assert_type
 from torchtitan.trainer import Trainer
 
 
@@ -254,7 +256,7 @@ class FluxTrainer(Trainer):
             "timesteps": timesteps,
         }
         typecheck_scope = (
-            spmd.typecheck(local=True)
+            spmd.typecheck(local=False)
             if self.config.debug.spmd_typechecking
             else contextlib.nullcontext()
         )
@@ -264,11 +266,14 @@ class FluxTrainer(Trainer):
                 if self.config.debug.spmd_typechecking:
                     if isinstance(global_valid_tokens, torch.Tensor):
                         spmd.assert_type(global_valid_tokens, spmd.R)
-                    self._annotate_inputs_spmd(
-                        latents,
+                    target_type, target_partition_spec = named_placement_to_assert_type(
+                        flux_sequence_placement(),
+                        target.ndim,
+                    )
+                    spmd.assert_type(
                         target,
-                        model_inputs,
-                        {},
+                        target_type,
+                        partition_spec=target_partition_spec,
                     )
                 latent_noise_pred = model(
                     **model_inputs,

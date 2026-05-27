@@ -49,44 +49,28 @@ def qwen3_vl_spmd_input_config():
 # ---------------------------------------------------------------------------
 
 
-def vision_activation_placement(
-    *, tp: spmd.PerMeshAxisSpmdType = spmd.I
-) -> NamedPlacement:
+def activation_placement(*, tp: spmd.PerMeshAxisSpmdType = spmd.I) -> NamedPlacement:
     return {DP: spmd.V, TP: tp}
 
 
-def vision_param_placement() -> NamedPlacement:
+def param_placement() -> NamedPlacement:
     return {DP: spmd.R, TP: spmd.I}
 
 
-def vision_buffer_placement() -> NamedPlacement:
+def buffer_placement() -> NamedPlacement:
     return {DP: spmd.R, TP: spmd.R}
 
 
 def vision_state_config(*, has_bias: bool = True) -> ShardingConfig:
-    state = {"weight": vision_param_placement()}
+    state = {"weight": param_placement()}
     if has_bias:
-        state["bias"] = vision_param_placement()
+        state["bias"] = param_placement()
     return ShardingConfig(state_shardings=state)
 
 
 # ---------------------------------------------------------------------------
 # Vision TP configs
 # ---------------------------------------------------------------------------
-
-
-def vision_rowwise_config(*, has_bias: bool) -> ShardingConfig:
-    config = rowwise_config()
-    if has_bias:
-        config.state_tp_ir = {"bias"}
-    return config
-
-
-def vision_colwise_input_config() -> ShardingConfig:
-    config = colwise_config()
-    config.in_src_shardings = {"input": vision_activation_placement()}
-    config.in_dst_shardings = {"input": vision_activation_placement(tp=spmd.R)}
-    return config
 
 
 def set_qwen3_vl_vision_sharding_config(
@@ -101,40 +85,47 @@ def set_qwen3_vl_vision_sharding_config(
     merger_configs = (vision.merger, vision.deepstack_merger)
 
     vision.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": vision_param_placement()},
+        state_shardings={"pos_embed": param_placement()},
     )
     norm = vision_state_config()
     block.norm_sharding_config = norm
     for merger in merger_configs:
         merger.norm_sharding_config = norm
     vision.rotary_pos_emb.sharding_config = ShardingConfig(
-        state_shardings={"inv_freq": vision_buffer_placement()},
+        state_shardings={"inv_freq": buffer_placement()},
     )
 
     if enable_tp:
-        vision_tp_in = {"hidden_states": vision_activation_placement()}
-        vision_tp_dst = {"hidden_states": vision_activation_placement(tp=spmd.R)}
+        vision_tp_in = {"hidden_states": activation_placement()}
+        vision_tp_dst = {"hidden_states": activation_placement(tp=spmd.R)}
         attn.sharding_config = ShardingConfig(
             in_src_shardings=vision_tp_in,
             in_dst_shardings=vision_tp_dst,
         )
         mlp.sharding_config = ShardingConfig(
-            in_src_shardings={"hidden_state": vision_activation_placement()},
-            in_dst_shardings={"hidden_state": vision_activation_placement(tp=spmd.R)},
+            in_src_shardings={"hidden_state": activation_placement()},
+            in_dst_shardings={"hidden_state": activation_placement(tp=spmd.R)},
         )
         attn.qkv.sharding_config = colwise_config()
-        attn.proj.sharding_config = vision_rowwise_config(
-            has_bias=attn.proj.bias,
-        )
         mlp.fc1.sharding_config = colwise_config()
-        mlp.fc2.sharding_config = vision_rowwise_config(
-            has_bias=mlp.fc2.bias,
-        )
+        for linear_cfg in (attn.proj, mlp.fc2):
+            config = rowwise_config()
+            if linear_cfg.bias:
+                config.state_tp_ir = {"bias"}
+            linear_cfg.sharding_config = config
+
         for merger in merger_configs:
-            merger.fc1.sharding_config = vision_colwise_input_config()
-            merger.fc2.sharding_config = vision_rowwise_config(
-                has_bias=merger.fc2.bias,
-            )
+            # Merger fc1 is colwise, but its input comes from local vision
+            # activations rather than the decoder's dense activation layout.
+            fc1_config = colwise_config()
+            fc1_config.in_src_shardings = {"input": activation_placement()}
+            fc1_config.in_dst_shardings = {"input": activation_placement(tp=spmd.R)}
+            merger.fc1.sharding_config = fc1_config
+
+            fc2_config = rowwise_config()
+            if merger.fc2.bias:
+                fc2_config.state_tp_ir = {"bias"}
+            merger.fc2.sharding_config = fc2_config
     else:
         for linear_cfg in (
             attn.qkv,
@@ -152,11 +143,11 @@ def set_qwen3_vl_vision_sharding_config(
 
     vision.patch_embed.proj.sharding_config = ShardingConfig(
         state_shardings={
-            "weight": vision_param_placement(),
-            "bias": vision_param_placement(),
+            "weight": param_placement(),
+            "bias": param_placement(),
         },
-        in_dst_shardings={"input": vision_activation_placement()},
-        out_src_shardings=vision_activation_placement(),
+        in_dst_shardings={"input": activation_placement()},
+        out_src_shardings=activation_placement(),
         local_spmd=LocalSpmdConfig(),
     )
 

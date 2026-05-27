@@ -80,7 +80,6 @@ class GroupedExperts(Module):
         x: torch.Tensor,
         top_scores: torch.Tensor,
         selected_experts_indices: torch.Tensor,
-        shared_experts: nn.Module | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -89,21 +88,13 @@ class GroupedExperts(Module):
         routed_input, num_tokens_local, metadata = self.token_dispatcher.dispatch(
             x, top_scores, selected_experts_indices
         )
-        sparse_mesh = getattr(self.token_dispatcher, "sparse_mesh", None)
-        with set_current_mesh(sparse_mesh):
+        with set_current_mesh(self.token_dispatcher.sparse_mesh):
             routed_output = self._experts_forward(routed_input, num_tokens_local)
-        return self.token_dispatcher.combine(
-            routed_output, metadata, x, shared_experts=shared_experts
-        )
+        return self.token_dispatcher.combine(routed_output, metadata, x)
 
     def parallelize(self, parallel_dims) -> None:
-        """Parallelize expert weights, then wire EP/TP meshes on the dispatcher
-        so dispatch/combine see the right meshes at runtime."""
+        """Parallelize expert weights, then install the sparse runtime mesh."""
         super().parallelize(parallel_dims)
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            tp_mesh=parallel_dims.get_optional_mesh("tp"),
-        )
         if parallel_dims.ep_enabled:
             self.token_dispatcher.sparse_mesh = parallel_dims.get_activated_mesh(
                 ["dp_replicate", "efsdp", "ep"]
@@ -364,15 +355,10 @@ class MoE(Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        if self.shared_experts is not None:
-            out = self.experts(
-                x,
-                top_scores,
-                selected_experts_indices,
-                shared_experts=self.shared_experts,
-            )
-        else:
-            out = self.experts(x, top_scores, selected_experts_indices)
+        out = self.experts(x, top_scores, selected_experts_indices)
+
+        # shared_experts runs in parallel with deepep combine communication.
+        shared_out = self.shared_experts(x) if self.shared_experts is not None else None
 
         if (
             isinstance(self.experts.token_dispatcher, DeepEPTokenDispatcher)
@@ -385,6 +371,8 @@ class MoE(Module):
 
             sync_combine()
 
+        if shared_out is not None:
+            out = out + shared_out
         return out.reshape(bs, slen, dim)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

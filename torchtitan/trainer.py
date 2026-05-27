@@ -52,11 +52,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import (
-    named_placement_to_assert_type,
-    named_placement_to_spmd,
-    preserve_buffer_spmd,
-)
+from torchtitan.protocols.module import named_placement_to_assert_type, preserve_buffer_spmd
 from torchtitan.protocols.types import MeshAxisName
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -478,11 +474,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_train_context(False)
 
         if isinstance(self.loss_fn, ChunkedCELoss):
-            tok_embeddings_config = getattr(model_config, "tok_embeddings", None)
             self.loss_fn.enable_sp = (
-                parallel_dims.tp_enabled
-                and tok_embeddings_config is not None
-                and tok_embeddings_config.enable_sp
+                parallel_dims.tp_enabled and config.parallelism.enable_sequence_parallel
             )
             self.loss_fn.loss_parallel = (
                 parallel_dims.tp_enabled

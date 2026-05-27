@@ -20,8 +20,6 @@ from torchtitan.models.flux.model.layers import (
 )
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.module import ModuleList
-from torchtitan.protocols.sharding import SpmdInputConfig
-from torchtitan.models.flux.sharding import flux_spmd_input_config
 
 
 class FluxModel(BaseModel):
@@ -54,9 +52,6 @@ class FluxModel(BaseModel):
         final_layer_config: LastLayer.Config
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
-        spmd_input_config: SpmdInputConfig = field(
-            default_factory=flux_spmd_input_config
-        )
 
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
             from torchtitan.models.flux.sharding import set_flux_sharding_config
