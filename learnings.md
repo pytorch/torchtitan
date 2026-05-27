@@ -11143,3 +11143,37 @@ Interpretation:
 
 - In-place Q/K/V `grad_input` accumulation is valid, but it does not improve the measured final step.
 - Keep the simpler run446 shared-Q/K/V implementation.
+
+## Experiment 448: Profile Shared-QKV-Cast Active Recipe
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run448-profile-shared-qkv-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the committed shared FFN gate/up and attention Q/K/V MXFP8 input-cast source.
+
+Result:
+
+- Status: keep as profile data; profiled tps is diagnostic.
+- Step 10 `tps`: 12,034.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.97 GiB, 93.62%.
+- No allocator retries were logged.
+- Traces were written under `outputs/autoresearch/may19-qwen3-14b/run448-profile-shared-qkv-nvls-active/profiling/traces/iteration_10`.
+
+Parsed trace notes:
+
+- Compared with run426, average MXFP8 cast events dropped from about 2,264 to 2,104 per rank.
+- Rank0 `to_mxfp8_dim1_kernel` calls dropped from 812 to 732 and time dropped from about 203 ms to 190 ms.
+- Average parsed MXFP8 cast bucket dropped from about 299 ms to 283 ms per rank.
+- The profiled step is still dominated by FSDP collectives plus GEMM: average reduce-scatter about 569 ms, all-gather about 270 ms, and GEMM/matmul about 804 ms per rank.
+- Worst communication rank remains rank6, with about 949 ms reduce-scatter and 363 ms all-gather.
+
+Interpretation:
+
+- The shared Q/K/V source change reduces the intended MXFP8 cast count, but the next bottleneck remains rank-skewed FSDP reduce-scatter plus GEMM.
+- Further progress likely needs another source change that reduces GEMM/cast work materially or changes FSDP collective exposure; simple compiler and NCCL knobs have mostly been exhausted on this stack.
