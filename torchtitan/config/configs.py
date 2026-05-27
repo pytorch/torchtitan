@@ -200,8 +200,9 @@ class ParallelismConfig:
     context_parallel_load_balancer: str | None = "headtail"
     """
     Load balancer type for context parallelism. Options:
-    - "headtail": Use HeadTailLoadBalancer for SDPA
-    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - "headtail": Use HeadTailLoadBalancer (works for SDPA, FlexAttention,
+      and varlen attention)
+    - "ptrr": Use PTRRLoadBalancer (FlexAttention) or VarlenPTRRLoadBalancer (varlen)
     - None: Disable load balancing
     """
 

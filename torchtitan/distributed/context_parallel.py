@@ -23,7 +23,7 @@ from torch.distributed.tensor.experimental._context_parallel._attention import (
 )
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.varlen_cp import CPVarlenMetadata
+from torchtitan.distributed.varlen_cp import CPVarlenMetadata, VarlenPTRRLoadBalancer
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexAttention,
@@ -179,8 +179,8 @@ def cp_shard(
         load_balancer_type: Type of load balancer to use. Options:
             - "headtail": Use HeadTailLoadBalancer (works for SDPA, varlen,
               and FlexAttention)
-            - "ptrr": Use PTRRLoadBalancer (FlexAttention only; not yet
-              supported for varlen)
+            - "ptrr": Use PTRRLoadBalancer (FlexAttention) or
+              VarlenPTRRLoadBalancer (varlen)
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
@@ -204,8 +204,8 @@ def cp_shard(
         ValueError: If attention_masks is a VarlenMetadata and
             input_seq_dim is not 1 (varlen sharding assumes the (B, S, ...) layout).
         ValueError: If load_balancer_type is "ptrr" and attention_masks
-            is None, a dict, or a VarlenMetadata (PTRR + varlen is not
-            yet supported).
+            is None or a dict (FlexAttention PTRR requires a BlockMask;
+            VarlenMetadata is routed to VarlenPTRRLoadBalancer).
         ValueError: When inputs are inconsistent for varlen sharding
             (cu_seq_q malformed, cross-attention, divisibility,
             double-shard). See CPVarlenMetadata.from_global for the full list.
@@ -228,25 +228,30 @@ def cp_shard(
                     seq_len, cp_world_size, cp_mesh.device_type
                 )
             case "ptrr":
-                # _PTRRLoadBalancer is FlexAttention-only today: it needs a BlockMask
-                # to compute per-block work. The varlen variant would share the
-                # algorithm but read work from cu_seq_q, and is not yet implemented.
+                # FlexAttention takes a BlockMask; varlen takes the global cu_seq_q
+                # via VarlenPTRRLoadBalancer. The varlen balancer assumes
+                # document-causal masking for now.
                 if isinstance(attention_masks, VarlenMetadata):
-                    raise ValueError(
-                        "PTRR load balancer is not yet implemented for "
-                        "varlen attention; use 'headtail' or None."
+                    # TODO: expose block_size to users and get window_size
+                    # from VarlenAttention.Config.
+                    load_balancer = VarlenPTRRLoadBalancer(
+                        attention_masks.cu_seq_q,
+                        batch_size=inputs[0].size(0),
+                        seq_length=seq_len,
+                        world_size=cp_world_size,
                     )
-                if attention_masks is None or isinstance(attention_masks, dict):
-                    raise ValueError(
-                        "PTRRLoadBalancer requires attention_masks to be a "
-                        "BlockMask, but got None or dict[str, BlockMask]"
-                    )
-                if not isinstance(attention_masks, BlockMask):
-                    raise ValueError(
-                        f"PTRRLoadBalancer requires attention_masks to be a "
-                        f"BlockMask, but got {type(attention_masks)}"
-                    )
-                load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+                else:
+                    if attention_masks is None or isinstance(attention_masks, dict):
+                        raise ValueError(
+                            "PTRRLoadBalancer requires attention_masks to be a "
+                            "BlockMask, but got None or dict[str, BlockMask]"
+                        )
+                    if not isinstance(attention_masks, BlockMask):
+                        raise ValueError(
+                            f"PTRRLoadBalancer requires attention_masks to be a "
+                            f"BlockMask, but got {type(attention_masks)}"
+                        )
+                    load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
             case _:
                 raise ValueError(
                     f"Invalid load_balancer_type '{load_balancer_type}'. "
