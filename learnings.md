@@ -12627,3 +12627,30 @@ Interpretation:
 - Decoder-layer compile is not blocked solely by residual in-place/view consumption; cloning the residual branch outputs did not move the failure.
 - The blocker is deeper in the MXFP8/FSDP wrapper and Inductor fake-tensor metadata path.
 - Keep the narrower `loss,feed_forward,qkv_linear` compile granularity and stop spending runs on whole-layer compile variants unless the MXFP8/FSDP view issue is fixed upstream or isolated in a smaller reproducer.
+
+## Experiment 504: Metrics Log Frequency 10 On Event-Cache-Disabled Stack
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=10 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run504-event-cache0-metrics-logfreq10 > outputs/autoresearch/may19-qwen3-14b/run504-event-cache0-metrics-logfreq10.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 1 `tps`: 803.
+- Step 10 `tps`: 12,018.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.46787 at step 1 to 5.20183 at step 10.
+
+Interpretation:
+
+- The run504 trace hypothesis was that avoiding per-step `loss.item()`/`grad_norm.item()` synchronizations would reduce visible `aten::_local_scalar_dense` overhead.
+- In the real 10-step throughput metric, `metrics.log_freq=10` is much slower than the active per-step logging recipe.
+- Do not lower metrics logging frequency for this benchmark; the active `--metrics.log_freq=1` remains part of the winning command.

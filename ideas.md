@@ -4441,3 +4441,13 @@
   Planned command or config overrides: Active event-cache-disabled command with `--compile.components=loss,layer_clones`.
   Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is the same Inductor recursion or clone overhead.
   Result: crashed at source state `8afc3687+dirty`; cloning residual branch outputs did not unblock layer compile. The run still logged the FSDP2 `FSDPMXFP8Linear` view warning and hit the same `torch._inductor.exc.InductorError: RecursionError: maximum recursion depth exceeded` before step 1. Stop retrying layer compile without a deeper MXFP8/FSDP/Inductor fix.
+
+- Idea: metrics log frequency 10 on final compiled-Q/K/V stack
+  Current best source commit: 125d00d5
+  Source: run481 trace shows large `aten::_local_scalar_dense` time from per-step metric scalar extraction.
+  Expected mechanism: `MetricsProcessor.should_log()` logs step 1 and every `log_freq` steps, so `--metrics.log_freq=10` should still report step 1 and step 10 while skipping scalar syncs on steps 2-9.
+  Supporting evidence: rank0 profile had about 597 ms in `aten::_local_scalar_dense`; avoiding intermediate metrics could reduce synchronization overhead.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active event-cache-disabled command with `--metrics.log_freq=10`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454 with finite loss at steps 1 and 10. Risk is a non-comparable or slower averaged measurement window.
+  Result: discarded at source state `125d00d5`; step-10 tps fell to 12,018 with 163.95 GiB peak memory and finite decreasing loss. Keep `--metrics.log_freq=1`.
