@@ -254,16 +254,15 @@ class TestCPVarlenMetadata(TestCase):
             )
 
     def test_seq_len_divisibility_with_load_balancer(self) -> None:
-        # With a load balancer, seq_length must be divisible by
-        # 2 * cp_world_size (the extra divisibility comes from the way
-        # CP load balancers chunk each shard). seq_length=6, CP=2
-        # satisfies CP but not 2*CP. The LB itself is never invoked
-        # because divisibility fires first.
+        # With a load balancer, each shard is split into 2 halves, so
+        # seq_length must be divisible by 2 * cp_world_size, not just
+        # cp_world_size. seq_length=6, CP=2 satisfies CP but not 2*CP.
+        # The LB itself is never invoked because divisibility fires first.
         meta = _build_varlen_meta([0, 6], B=1, seq_len=6)
         lb = _HeadTailLoadBalancer(
             seq_length=8, world_size=2, device=torch.device("cpu")
         )
-        with self.assertRaisesRegex(ValueError, "extra divisibility"):
+        with self.assertRaisesRegex(ValueError, "load balancers chunk"):
             CPVarlenMetadata.from_global(
                 meta,
                 device_mesh=_MockMesh(2, 0),
