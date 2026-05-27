@@ -211,12 +211,14 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     # Route normalization: some models (Mixtral, Qwen3.5) always normalize
     # but don't have a config flag. Detect by checking if norm_topk_prob is
     # absent (meaning the router hardcodes normalization).
+    # Sigmoid models (Llama4) without explicit norm_topk_prob default to
+    # False — sigmoid outputs are used directly as scores without normalization.
     if hasattr(config, "norm_topk_prob"):
         route_norm = config.norm_topk_prob
     elif hasattr(gate, "norm_topk_prob"):
         route_norm = gate.norm_topk_prob
     else:
-        route_norm = True
+        route_norm = score_func != "sigmoid"
 
     # Route scaling factor (DeepSeek V2/V3)
     route_scale = getattr(config, "routed_scaling_factor", 1.0)

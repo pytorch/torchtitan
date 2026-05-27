@@ -7,7 +7,7 @@
 import copy
 import importlib
 import math
-from dataclasses import dataclass, fields, MISSING
+from dataclasses import dataclass, field, fields, MISSING
 
 import torch
 from torch import nn
@@ -89,6 +89,18 @@ _TT_SPECIFIC_ATTRIBUTES = [
 _REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v3"})
 
 
+def _get_moe_attr_name(layer: nn.Module) -> str | None:
+    """Return the attribute name holding the MoE block on a decoder layer.
+
+    Most models use ``mlp``; Llama4 uses ``feed_forward``.  Returns ``None``
+    if neither is present.
+    """
+    for name in ("mlp", "feed_forward"):
+        if hasattr(layer, name):
+            return name
+    return None
+
+
 class HFTransformerModel(BaseModel):
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
     _skip_lm_head: bool = False
@@ -100,6 +112,21 @@ class HFTransformerModel(BaseModel):
         Uses properties to provide TorchTitan-style access while maintaining
         HuggingFace compatibility.
         """
+
+        # Redeclare PretrainedConfig dataclass fields as init=False so
+        # ``Configurable.__init_subclass__`` kw_only check passes.  These
+        # fields are set dynamically in ``__init__`` via
+        # ``PretrainedConfig.__init__``, not through the generated __init__.
+        transformers_version: str = field(init=False, default="")
+        architectures: list | None = field(init=False, default=None)
+        output_hidden_states: bool = field(init=False, default=False)
+        return_dict: bool = field(init=False, default=True)
+        dtype: str | None = field(init=False, default=None)
+        chunk_size_feed_forward: int = field(init=False, default=0)
+        is_encoder_decoder: bool = field(init=False, default=False)
+        id2label: dict | None = field(init=False, default=None)
+        label2id: dict | None = field(init=False, default=None)
+        problem_type: str | None = field(init=False, default=None)
 
         def __init__(
             self,
@@ -183,14 +210,14 @@ class HFTransformerModel(BaseModel):
             """
             # Determine which fields were explicitly set (not defaults)
             explicit_overrides = {}
-            for field in fields(model_config):
-                value = getattr(model_config, field.name)
-                default = field.default
+            for f in fields(model_config):
+                value = getattr(model_config, f.name)
+                default = f.default
                 if default is MISSING:
                     # No default — always explicit
-                    explicit_overrides[field.name] = value
+                    explicit_overrides[f.name] = value
                 elif value != default:
-                    explicit_overrides[field.name] = value
+                    explicit_overrides[f.name] = value
 
             # Set mapped attributes (TorchTitan -> HuggingFace)
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
@@ -280,6 +307,22 @@ class HFTransformerModel(BaseModel):
                 attn_implementation=self.attn_implementation,
                 trust_remote_code=trust_remote_code,
             )
+
+            # For composite (VL) models, use the nested text config so we
+            # build the text-only CausalLM instead of the conditional model.
+            if hasattr(hf_model_config, "text_config"):
+                hf_model_config = hf_model_config.text_config
+                hf_model_config.attn_implementation = self.attn_implementation
+                # Ensure the text config has architectures for model class lookup
+                if not getattr(hf_model_config, "architectures", None):
+                    from transformers.models.auto.modeling_auto import (
+                        MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+                    )
+
+                    model_type = getattr(hf_model_config, "model_type", "")
+                    cls_name = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type)
+                    if cls_name:
+                        hf_model_config.architectures = [cls_name]
 
             # Explicitly update attributes based on mappings
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
@@ -440,10 +483,23 @@ class HFTransformerModel(BaseModel):
         # Override via TitanMoeModelConfig.experts_implementation. Works
         # transparently with hook-based EP/TP because all hooks preserve
         # the standard (hidden_states, top_k_index, top_k_weights) interface.
+        # Some models (Llama4) do not support setting experts implementation;
+        # skip silently for those.
         if config.is_moe and hasattr(config, "_experts_implementation"):
             config._experts_implementation = config.experts_implementation
 
-        self.model = model_cls(config=config)
+        try:
+            self.model = model_cls(config=config)
+        except ValueError as e:
+            if "does not support setting experts implementation" in str(e):
+                logger.warning(
+                    f"{model_class_name} does not support grouped_mm; "
+                    "falling back to native expert implementation."
+                )
+                config._experts_implementation = None
+                self.model = model_cls(config=config)
+            else:
+                raise
         self.max_seq_len = config.max_seq_len
         self.cp_mesh = None
 
@@ -455,9 +511,15 @@ class HFTransformerModel(BaseModel):
             )
 
         for layer in self.model.model.layers.values():
-            # Detect MoE layers by checking for gate/router and experts sub-modules
-            has_gate = hasattr(layer.mlp, "gate") or hasattr(layer.mlp, "router")
-            layer.moe_enabled = has_gate and hasattr(layer.mlp, "experts")
+            # Detect MoE layers by checking for gate/router and experts sub-modules.
+            # Some models (Llama4) use ``feed_forward`` instead of ``mlp``.
+            moe_attr = _get_moe_attr_name(layer)
+            moe_module = getattr(layer, moe_attr, None) if moe_attr else None
+            if moe_module is not None:
+                has_gate = hasattr(moe_module, "gate") or hasattr(moe_module, "router")
+                layer.moe_enabled = has_gate and hasattr(moe_module, "experts")
+            else:
+                layer.moe_enabled = False
 
         if config.is_moe:
             from .moe_replacement import prepare_native_moe_configs

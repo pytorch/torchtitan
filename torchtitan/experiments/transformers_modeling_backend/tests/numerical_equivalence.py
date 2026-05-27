@@ -188,11 +188,31 @@ _MODEL_CONFIGS = {
         attn_implementation="sdpa",
         use_cache=False,
     ),
+    "llama4_text": dict(
+        model_type="llama4_text",
+        hidden_size=5120,
+        intermediate_size=8192,
+        num_local_experts=8,
+        num_experts_per_tok=1,
+        num_hidden_layers=1,
+        num_attention_heads=40,
+        num_key_value_heads=8,
+        vocab_size=256,
+        max_position_embeddings=64,
+        interleave_moe_layer_step=1,
+        use_qk_norm=True,
+        attn_implementation="sdpa",
+        use_cache=False,
+    ),
 }
 
 # Models that require AutoConfig.from_pretrained (remote config).
 # Keys are overrides applied after loading the pretrained config.
 _PRETRAINED_MODEL_CONFIGS = {}
+
+# Models whose HF experts class does not support ``grouped_mm``.
+# These use their native kernel (e.g. bmm) for the HF-side forward.
+_NO_GROUPED_MM_MODELS = frozenset({"llama4_text"})
 
 
 def _create_hf_model(model_type: str):
@@ -217,7 +237,8 @@ def _create_hf_model(model_type: str):
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
-    config._experts_implementation = "grouped_mm"
+    if model_type not in _NO_GROUPED_MM_MODELS:
+        config._experts_implementation = "grouped_mm"
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     return model, config
 
@@ -305,12 +326,18 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     model, config = _create_hf_model(model_type)
     model = model.to(device=device, dtype=torch.bfloat16).eval()
 
-    # Find first MoE layer
+    # Find first MoE layer (most models use ``mlp``, Llama4 uses ``feed_forward``)
     hf_moe_block = None
     for layer in model.model.layers:
-        has_gate = hasattr(layer.mlp, "gate") or hasattr(layer.mlp, "router")
-        if has_gate and hasattr(layer.mlp, "experts"):
-            hf_moe_block = layer.mlp
+        for attr_name in ("mlp", "feed_forward"):
+            moe_module = getattr(layer, attr_name, None)
+            if moe_module is None:
+                continue
+            has_gate = hasattr(moe_module, "gate") or hasattr(moe_module, "router")
+            if has_gate and hasattr(moe_module, "experts"):
+                hf_moe_block = moe_module
+                break
+        if hf_moe_block is not None:
             break
 
     if hf_moe_block is None:
@@ -321,8 +348,18 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     # the gate linear in the model dtype (bf16) while titan uses float32.
     # Casting the full gate module (weights + inputs via pre-hook) removes
     # that precision difference so the test isolates routing/dispatch logic.
+    #
+    # Skip for score_before_experts models (Llama4): the router output is
+    # multiplied into the expert input before the expert forward. Casting
+    # the router to float32 would make the expert input float32, causing a
+    # dtype mismatch with expert weights (bf16).
+    from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
+        _resolve_score_before_experts,
+    )
+
+    score_before = _resolve_score_before_experts(hf_moe_block)
     gate = getattr(hf_moe_block, "gate", None) or getattr(hf_moe_block, "router", None)
-    if gate is not None:
+    if gate is not None and not score_before:
         gate.float()
         gate.register_forward_pre_hook(
             lambda mod, args: tuple(
@@ -360,7 +397,11 @@ def test_model(model_type: str, device: torch.device, seed: int = 42) -> dict:
     # 5. Forward through titan MoE
     tt_out = titan_moe(x)
 
-    # 6. Compare
+    # 6. Compare — reshape to common shape if needed (HF MoE may flatten
+    # batch and sequence dims while titan preserves them)
+    if hf_out.shape != tt_out.shape:
+        hf_out = hf_out.reshape(tt_out.shape)
+
     return _compare_outputs(hf_out, tt_out, model_type)
 
 

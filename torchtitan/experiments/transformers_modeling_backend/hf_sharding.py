@@ -156,23 +156,25 @@ def _apply_layer_tp(layer: nn.Module, tp_mesh, *, enable_sp: bool) -> None:
         plan["self_attn.indexer"] = NoParallel(use_local_output=True)
 
     # Dense MLP (non-MoE layers only)
+    # Most models use ``mlp``; Llama4 uses ``feed_forward``.
     if not getattr(layer, "moe_enabled", False):
-        mlp = layer.mlp
+        mlp_attr = "mlp" if hasattr(layer, "mlp") else "feed_forward"
+        mlp = getattr(layer, mlp_attr)
         mlp_plan = {
-            "mlp": PrepareModuleInput(
+            mlp_attr: PrepareModuleInput(
                 input_layouts=(Shard(1),),
                 desired_input_layouts=(Replicate(),),
             ),
         }
 
         gate_name = "gate_proj" if hasattr(mlp, "gate_proj") else "fc1"
-        mlp_plan[f"mlp.{gate_name}"] = ColwiseParallel()
+        mlp_plan[f"{mlp_attr}.{gate_name}"] = ColwiseParallel()
 
         if hasattr(mlp, "up_proj"):
-            mlp_plan["mlp.up_proj"] = ColwiseParallel()
+            mlp_plan[f"{mlp_attr}.up_proj"] = ColwiseParallel()
 
         down_name = "down_proj" if hasattr(mlp, "down_proj") else "fc2"
-        mlp_plan[f"mlp.{down_name}"] = RowwiseParallel(output_layouts=Shard(1))
+        mlp_plan[f"{mlp_attr}.{down_name}"] = RowwiseParallel(output_layouts=Shard(1))
         plan.update(mlp_plan)
 
     # Some models don't have post_attention_layernorm
