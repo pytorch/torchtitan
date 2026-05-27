@@ -12521,3 +12521,30 @@ Interpretation:
 
 - FlexAttention does reduce the attention bucket, but the surrounding compiled/MXFP8 and communication buckets shift enough to erase the win.
 - Attention backend work is not the next best path unless a backend can reduce attention without increasing MXFP8/GEMM/cast or FSDP overlap costs.
+
+## Experiment 500: Concatenated Q/K/V Backward Grad-Input GEMM
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run500-qkv-backward-concat-grad-input-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run500-qkv-backward-concat-grad-input-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed the shared Q/K/V MXFP8 custom autograd backward to concatenate Q/K/V grad outputs and Q/K/V weights, then compute `grad_input` with one larger MXFP8 matmul.
+- Restored the prior three-matmul implementation after the run.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 12,379.
+- Step 10 peak memory: 163.98 GiB, 91.94%.
+- No allocator retries were logged.
+- Loss moved from 12.42217 at step 1 to 7.41304 at step 10.
+
+Interpretation:
+
+- The fused-backward shape is valid, but it is slower than the active separate-Q/K/V backward path.
+- The likely reason is that concatenating the large Q/K/V weight and grad-output tensors adds enough bandwidth and allocation overhead to erase the reduced number of MXFP8 casts and GEMM launches.
+- Do not pursue larger gate/up concatenated backward GEMMs without new evidence; that variant would copy much larger FFN tensors and is likely to amplify the same overhead.

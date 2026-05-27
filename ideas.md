@@ -4401,3 +4401,13 @@
   Planned command or config overrides: Active event-cache-disabled command with profiler enabled for iteration 10.
   Success criteria and expected risk: Success is a clean profile trace. Profiled tps is diagnostic and not used for ranking.
   Result: kept as diagnostic at source state `1e7be560`; profiled step-10 tps 12,202 and 163.95 GiB. Compared to SDPA run481, Flex reduces the attention bucket from about 291 ms/rank to 95 ms/rank, but GEMM rises about 1,066 -> 1,111 ms/rank, MXFP8 casts rise 410 -> 489 ms/rank, and all-gather rises 499 -> 529 ms/rank. The net result explains why Flex is a near miss rather than a win.
+
+- Idea: concatenate Q/K/V backward grad-input GEMM
+  Current best source commit: 16f4dddf
+  Source: run481/run499 profiles still show MXFP8 cast plus GEMM as dominant local work, and the shared Q/K/V backward path still computes `grad_input` with three separate MXFP8 casts and GEMMs.
+  Expected mechanism: Concatenate Q/K/V grad outputs and Q/K/V weights in backward so the input gradient uses one larger MXFP8 matmul instead of three smaller matmuls.
+  Supporting evidence: The existing shared Q/K/V forward and weight-gradient path already wins by reducing duplicated input casts; applying the same idea to backward grad-input might reduce cast count and launch overhead.
+  Planned source/config changes: Temporarily change `_MXFP8SharedInputQKV.backward()` in `torchtitan/components/quantization/mx.py` to build concatenated grad-output and weight tensors for `grad_input` only.
+  Planned command or config overrides: Active event-cache-disabled command.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is extra allocation/copy overhead and higher peak memory from the concatenated tensors.
+  Result: discarded at source state `16f4dddf+dirty`; 12,379 tps and 163.98 GiB. The fused backward is valid but slower, so restore the prior three-GEMM Q/K/V backward path.
