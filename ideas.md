@@ -4021,3 +4021,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_MAX_CTAS=16`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is starving collectives and lowering throughput.
   Result: discarded at source state `873bc788`; 12,216 tps and 163.95 GiB. Keep active CTA behavior.
+
+- Idea: exclude attention output projection from MXFP8
+  Current best source commit: 448b5b45
+  Source: compiling `attention.wo` was slower and higher-memory, so test whether the projection itself should remain MXFP8.
+  Expected mechanism: Leaving `attention.wo` BF16 could remove MXFP8 cast/wrapper overhead around that projection while keeping MXFP8 on Q/K/V, FFN, and `lm_head`.
+  Supporting evidence: Converter FQN filtering can isolate this without changing model structure or the successful Q/K/V shared-cast path.
+  Planned source/config changes: Temporarily set `MXFP8LinearConverter.Config(fqns=["lm_head", "feed_forward", "qkv_linear"])` for Qwen3 14B.
+  Planned command or config overrides: Active compiled-Q/K/V command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is BF16 GEMM losing more than MXFP8 overhead saves.
+  Result: discarded at source state `448b5b45` plus dirty source; 11,922 tps and 163.95 GiB. Restore full MXFP8 conversion.

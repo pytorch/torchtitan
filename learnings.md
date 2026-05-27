@@ -11506,3 +11506,30 @@ Interpretation:
 
 - Capping NCCL CTAs to 16 is valid, but it slows the active recipe rather than improving compute/collective overlap.
 - Keep the active NCCL CTA behavior.
+
+## Experiment 461: Exclude Attention Output Projection From MXFP8
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run461-mxfp8-exclude-attention-wo > outputs/autoresearch/may19-qwen3-14b/run461-mxfp8-exclude-attention-wo.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily restricted `MXFP8LinearConverter` to `["lm_head", "feed_forward", "qkv_linear"]`, leaving `attention.wo` as BF16.
+- Restored full MXFP8 conversion after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,922.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.38721 at step 1 to 5.50581 at step 10.
+
+Interpretation:
+
+- Attention output projection should remain MXFP8. Excluding it gives up too much GEMM speed and does not reduce the reported memory envelope.
+- This explains why compiling `attention.wo` was the wrong lever: keep its MXFP8 compute path, but do not add a compiled wrapper around it.
