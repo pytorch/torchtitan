@@ -4211,3 +4211,13 @@
   Planned command or config overrides: Prefix active command with `TORCH_NCCL_CUDA_EVENT_CACHE=0`.
   Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is extra event allocation overhead.
   Result: kept at source state `d689d576`; 12,454 tps and 163.95 GiB peak memory. This is a new measured peak, so make `TORCH_NCCL_CUDA_EVENT_CACHE=0` part of the active command.
+
+- Idea: TORCH_NCCL_CUDA_EVENT_CACHE=0 plus NCCL_MAX_CTAS=64
+  Current best source commit: a71c658c
+  Source: event-cache disable is the new active peak, and `NCCL_MAX_CTAS=64` was the closest old NCCL occupancy probe.
+  Expected mechanism: Event-cache behavior and NCCL CTA budget may interact by changing collective launch/synchronization and SM occupancy.
+  Supporting evidence: run462 was close to the old peak, and run479 changed the NCCL/PyTorch synchronization path.
+  Planned source/config changes: None.
+  Planned command or config overrides: Prefix active command with `TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_MAX_CTAS=64`.
+  Success criteria and expected risk: Success is step-10 tps above 12,454. Risk is worse overlap from too much collective occupancy.
+  Result: discarded at source state `a71c658c`; 12,270 tps and 163.95 GiB peak memory. Keep default max-CTA behavior with event-cache disabled.
