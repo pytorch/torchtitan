@@ -4121,3 +4121,13 @@
   Planned command or config overrides: Prefix active command with `NCCL_MIN_CTAS=16`.
   Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is no effect or worse overlap.
   Result: discarded at source state `ba6cfd3c`; 12,328 tps and 163.95 GiB. Close min-CTA tuning.
+
+- Idea: MXFP8 backward grad_input accumulation with addmm
+  Current best source commit: 1d6827a0
+  Source: run450 still shows visible elementwise binary add kernels in the MXFP8 backward path after the shared gate/up and Q/K/V source changes.
+  Expected mechanism: Use TorchAO's `MXTensor` `aten.addmm` support to fold gate/up and Q/K/V grad-input accumulation into the following MXFP8 scaled GEMM, removing standalone full-matrix add kernels.
+  Supporting evidence: The profile shows roughly 85-92 ms/rank in binary elementwise kernels, and TorchAO registers `aten.addmm.default` for `MXTensor`.
+  Planned source/config changes: Temporarily replace `mm(...) + mm(...)` and Q/K/V loop accumulation in `torchtitan/components/quantization/mx.py` with `torch.addmm(...)`.
+  Planned command or config overrides: Active compiled-Q/K/V command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is that TorchAO only supports vector bias for MXFP8 `addmm`.
+  Result: crashed at source state `1d6827a0` plus dirty source before step 1. TorchAO lowers MXFP8 `addmm` to `_scaled_mm` with `bias=`, and `_scaled_mm` rejects the full `(M, N)` accumulated gradient matrix as `Bias must be size 5120 but got 110100480`. Restore source and close this form of addmm accumulation.

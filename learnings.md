@@ -11769,3 +11769,27 @@ Interpretation:
 
 - `NCCL_MIN_CTAS=16` is valid but below the active recipe.
 - Min-CTA tuning does not beat defaults for this workload.
+
+## Experiment 471: MXFP8 Backward Addmm Accumulation
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run471-mxfp8-backward-addmm-accum > outputs/autoresearch/may19-qwen3-14b/run471-mxfp8-backward-addmm-accum.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily replaced the MXFP8 shared gate/up and Q/K/V backward grad-input accumulation with `torch.addmm(...)`.
+- Restored the original source after the crash.
+
+Result:
+
+- Status: crash before step 1.
+- Failure: `_scaled_mm` rejected the full-matrix accumulated gradient as a bias: `Bias must be size 5120 but got 110100480`.
+
+Interpretation:
+
+- TorchAO has an `MXTensor` `addmm` dispatch, but for the real MXFP8 path it lowers to `_scaled_mm(..., bias=...)`.
+- That bias path is only suitable for a vector bias, not the full matrix needed to accumulate Q/K/V or gate/up input-gradient GEMMs.
+- A custom kernel could still target this bucket, but it cannot be expressed through TorchAO `addmm` as currently implemented.
