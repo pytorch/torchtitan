@@ -10795,3 +10795,30 @@ Interpretation:
 
 - Disabling direct P2P does not help the final explicit-NVLS MXFP8 recipe.
 - Keep NCCL's default P2P direct behavior.
+
+## Experiment 435: MXFP8 Only On FFN And lm_head
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run435-mxfp8-ffn-lmhead-only-nvls-active > run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily restricted the Qwen3 14B MXFP8 converter to `fqns=["lm_head", "feed_forward"]`, leaving attention projections in BF16.
+- Restored the default full MXFP8 converter after the result.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 11,769.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 166.52 GiB, 93.37%.
+- No allocator retries were logged.
+- Loss moved from 12.36651 at step 1 to 6.76360 at step 10.
+
+Interpretation:
+
+- Narrowing MXFP8 to FFN plus `lm_head` saves a small amount of memory but loses about 480 tps versus the explicit-NVLS active recipe.
+- Attention MXFP8 coverage is useful for this workload; keep full converter coverage.
