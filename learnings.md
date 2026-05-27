@@ -13861,3 +13861,30 @@ Interpretation:
 
 - Combining the two activation-checkpoint overhead knobs regresses versus either single knob.
 - The checkpoint toggle axis is closed for the current source; neither RNG preservation, early-stop, nor their combination beats the kept `norm_modules` branch.
+
+## Experiment 555: Direct ATen RMSNorm At Module Boundary
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,aten_norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run555-aten-norm-modules-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run555-aten-norm-modules-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added an `aten_norm_modules` component.
+- The hook method-patched each outer `attention_norm` and `ffn_norm` module to call `torch.ops.aten._fused_rms_norm.default` directly.
+- Unlike the earlier direct-ATen block-norm test, this left the original Qwen3 block forward intact.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,145.
+- Peak memory reported by TorchTitan: 168.91 GiB, 94.71%.
+- Loss moved from 12.42825 at step 1 to 7.91761 at step 10.
+
+Interpretation:
+
+- Direct ATen RMSNorm at the module boundary is valid and avoids the block-forward memory cliff.
+- It is still slower than the compiled `norm_modules` helper, so the kept module-level compiled helper remains the best outer-RMSNorm implementation.
+- Restore the source and keep direct ATen RMSNorm closed for this stack.

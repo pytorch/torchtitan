@@ -4841,3 +4841,13 @@
   Planned command or config overrides: Active batch176 `norm_modules` command with both `--activation-checkpoint.early-stop` and `--activation-checkpoint.no-preserve-rng-state`.
   Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with unchanged memory. Risk is interaction overhead or no useful early-stop opportunity.
   Result: discarded at source state `844c3750`; run554 reached only 14,077 tps at the same 168.91 GiB peak. Close checkpoint-wrapper toggles on the current source.
+
+- Idea: direct aten RMSNorm at the module-forward boundary
+  Current best source commit: 0deafe33
+  Source: direct `aten._fused_rms_norm` previously lost when used inside the patched block-forward helper, but that test inherited the block-forward memory cliff.
+  Expected mechanism: Patch only `attention_norm.forward` and `ffn_norm.forward` to call `aten._fused_rms_norm`, leaving the original block forward intact like `norm_modules` while avoiding compiled-helper overhead.
+  Supporting evidence: A CUDA smoke check confirmed the direct op works for bf16 inputs, and `norm_modules` showed that the module-forward boundary avoids the block-level memory cliff.
+  Planned source/config changes: Temporarily add an `aten_norm_modules` component that method-patches the 80 outer RMSNorm modules to call `torch.ops.aten._fused_rms_norm.default`.
+  Planned command or config overrides: Active batch176 command with `aten_norm_modules` replacing `norm_modules`.
+  Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample with similar memory. Risk is losing the compiled helper's scheduling benefit or exposing native RMSNorm backward overhead.
+  Result: discarded at source state `0deafe33+dirty`; run555 completed with the same logged 168.91 GiB peak but reached only 14,145 tps. Restore source; keep the compiled `norm_modules` helper as the best module-level RMSNorm path.
