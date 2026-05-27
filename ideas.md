@@ -3911,3 +3911,13 @@
   Planned command or config overrides: Exact active FFN-compile batch168 command.
   Success criteria and expected risk: Success is reproducing near 12,115 tps with 163.69 GiB memory. Risk is confirming significant step-10 variance.
   Result: kept as validation at source state `5e056bb8`; 11,845 tps and 163.69 GiB. The source/command is valid, but the measured peak is variance-sensitive.
+
+- Idea: compile shared Q/K/V projection wrapper boundary
+  Current best source commit: 2c394b5f
+  Source: run448 shows GEMM and MXFP8 cast work remain large, while broader attention and block compile surfaces crash under the MXFP8 stack.
+  Expected mechanism: Compile only the patched `qkv_linear` projection wrapper after shared Q/K/V input casting, avoiding the full attention SDPA/norm/residual boundary while reducing eager/autograd overhead around the three projection GEMMs.
+  Supporting evidence: FFN compile works when the compile boundary is narrow; attention compile and block compile are too broad and hit Inductor fake-tensor recursion.
+  Planned source/config changes: Add a `qkv_linear` compile component in `parallelize_qwen3()` and compile each layer's `attention.qkv_linear` with `fullgraph=True`.
+  Planned command or config overrides: Active shared-QKV command with `--compile.components=loss,feed_forward,qkv_linear`.
+  Success criteria and expected risk: Success is step-10 tps above 12,265 with finite loss and memory below the risk line. Risk is reproducing the broader compile recursion or adding compile overhead with no kernel win.
+  Result: kept at source state `2c394b5f` plus dirty source; 12,387 tps and 163.95 GiB. This is a new measured peak and becomes the active recipe.

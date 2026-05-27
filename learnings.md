@@ -11177,3 +11177,32 @@ Interpretation:
 
 - The shared Q/K/V source change reduces the intended MXFP8 cast count, but the next bottleneck remains rank-skewed FSDP reduce-scatter plus GEMM.
 - Further progress likely needs another source change that reduces GEMM/cast work materially or changes FSDP collective exposure; simple compiler and NCCL knobs have mostly been exhausted on this stack.
+
+## Experiment 449: Compile Shared-QKV Projection Boundary
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run449-compile-qkv-linear-shared-qkv-nvls-active > outputs/autoresearch/may19-qwen3-14b/run449-compile-qkv-linear-shared-qkv-nvls-active.run.log 2>&1
+```
+
+Source changes:
+
+- Added a `qkv_linear` compile component that compiles each attention `qkv_linear` projection wrapper with `fullgraph=True`.
+- Kept the shared MXFP8 Q/K/V input-cast custom autograd path, shared FFN gate/up path, FFN compile, explicit NVLS command, final-layer no-reshard, and one-module FSDP prefetch schedule active.
+
+Result:
+
+- Status: keep / new measured peak.
+- Step 10 `tps`: 12,387.
+- Step 10 MFU: N/A.
+- Step 10 peak memory: 163.95 GiB, 91.93%.
+- No allocator retries were logged.
+- Loss moved from 12.38256 at step 1 to 6.41400 at step 10.
+
+Interpretation:
+
+- Compiling the narrower shared-Q/K/V projection wrapper succeeds even though full attention compile and block compile hit Inductor recursion.
+- This is the first additional model-portion compile boundary after FFN compile that improves the active stack.
+- The memory drop versus run446 suggests the compiled wrapper removes some transient eager/autograd overhead around the Q/K/V projection path, not just Python dispatch.
+- New active recipe is shared FFN gate/up MXFP8 casts, shared attention Q/K/V MXFP8 casts, compiled FFN modules, compiled Q/K/V projection wrappers, explicit NVLS, batch168, seq128, loss chunks4, and weight decay 0.
