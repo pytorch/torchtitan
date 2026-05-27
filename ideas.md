@@ -4281,3 +4281,13 @@
   Planned command or config overrides: Active command with `--compile.components=feed_forward,qkv_linear`.
   Success criteria and expected risk: Success is step-10 tps above 12,454 or a lower-memory tie. Risk is higher memory or slower loss/lm_head handling.
   Result: discarded at source state `0248af0e`; 11,976 tps and 171.82 GiB, above the preferred memory risk line. Keep `loss` in the active compile components.
+
+- Idea: Flex FLASH with vendored flash-attention CUTE API
+  Current best source commit: c28e46ba
+  Source: run477 was blocked by PyPI `flash-attn==2.8.3` missing `flash_attn.cute.block_sparsity`, but the local PyTorch checkout vendors a newer `third_party/flash-attention` package with that API.
+  Expected mechanism: Put the vendored flash-attention package on `PYTHONPATH` and use `attn_backend="flex_flash"` so Inductor's CUTE FlexAttention lowering can run instead of SDPA.
+  Supporting evidence: direct import probing with `PYTHONPATH=/home/avenkataraman/github/pytorch/third_party/flash-attention` succeeds for `flash_attn.cute.block_sparsity` and `flash_attn.cute.interface`.
+  Planned source/config changes: Temporarily set Qwen3 14B `attn_backend="flex_flash"`.
+  Planned command or config overrides: Active event-cache-disabled command with vendored flash-attention prepended to `PYTHONPATH`.
+  Success criteria and expected risk: Success is a valid 10-step run above 12,454. Risk is a newer CUTE kernel/runtime incompatibility.
+  Result: crashed at source state `c28e46ba`; vendored flash-attention gets past the missing module/API blocker, but CUTE compilation fails in `flash_fwd_sm100.py` block-sparse correction with `TypeError: 'NoneType' object is not subscriptable` from `block_sparse_utils.py`. Restore SDPA; Flex FLASH remains blocked for block-causal masks on this local SM100 CUTE path.

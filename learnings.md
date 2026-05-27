@@ -12180,3 +12180,27 @@ Interpretation:
 
 - The `loss` compile component remains important on the final FFN/Q/K/V compiled stack.
 - Removing it both slows the run and raises peak memory above the preferred risk line, so the active compile components remain `loss,feed_forward,qkv_linear`.
+
+## Experiment 487: Flex FLASH With Vendored FlashAttention CUTE API
+
+Command:
+
+```bash
+PYTHONPATH=/home/avenkataraman/github/pytorch/third_party/flash-attention:$PYTHONPATH TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run487-flex-flash-vendored-fa-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run487-flex-flash-vendored-fa-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily set Qwen3 14B `attn_backend="flex_flash"`.
+- Restored `attn_backend="sdpa"` after the crash.
+
+Result:
+
+- Status: crash before step 1.
+- The vendored PyTorch `third_party/flash-attention` package resolves the earlier missing `flash_attn.cute.block_sparsity` API.
+- New failure: CUTE compilation enters the SM100 block-sparse correction path and crashes with `TypeError: 'NoneType' object is not subscriptable` at `flash_fwd_sm100.py` calling `handle_block_sparse_empty_tile_correction_sm100`, which then indexes `gO[None, None, stage]`.
+
+Interpretation:
+
+- Flex FLASH is no longer just a missing dependency problem; using the vendored flash-attention source exposes a CUTE/SM100 block-sparse kernel incompatibility for the block-causal mask path used by packed-document training.
+- SDPA remains the active attention backend.
