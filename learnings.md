@@ -11793,3 +11793,27 @@ Interpretation:
 - TorchAO has an `MXTensor` `addmm` dispatch, but for the real MXFP8 path it lowers to `_scaled_mm(..., bias=...)`.
 - That bias path is only suitable for a vector bias, not the full matrix needed to accumulate Q/K/V or gate/up input-gradient GEMMs.
 - A custom kernel could still target this bucket, but it cannot be expressed through TorchAO `addmm` as currently implemented.
+
+## Experiment 472: Feed-Forward Compile Reduce-Overhead Mode
+
+Command:
+
+```bash
+NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=168 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run472-feed-forward-compile-reduce-overhead > outputs/autoresearch/may19-qwen3-14b/run472-feed-forward-compile-reduce-overhead.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily added `mode="reduce-overhead"` only to `feed_forward.compile(...)`.
+- Restored the default compile call after stopping the run.
+
+Result:
+
+- Status: stopped early at step 4.
+- Step tps: 651, 1,160, 679, 1,263.
+- Peak logged memory by step 4: 165.05 GiB, 92.54%.
+
+Interpretation:
+
+- `reduce-overhead` mode on the FFN graph is pathological for this short-run objective and likely dominated by CUDA graph capture/overhead.
+- Keep the default FFN compile mode.

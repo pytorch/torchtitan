@@ -4131,3 +4131,13 @@
   Planned command or config overrides: Active compiled-Q/K/V command.
   Success criteria and expected risk: Success is step-10 tps above 12,387 with finite loss. Risk is that TorchAO only supports vector bias for MXFP8 `addmm`.
   Result: crashed at source state `1d6827a0` plus dirty source before step 1. TorchAO lowers MXFP8 `addmm` to `_scaled_mm` with `bias=`, and `_scaled_mm` rejects the full `(M, N)` accumulated gradient matrix as `Bias must be size 5120 but got 110100480`. Restore source and close this form of addmm accumulation.
+
+- Idea: feed_forward compile mode reduce-overhead
+  Current best source commit: 575b5cc9
+  Source: run449 showed compile granularity can matter, and `reduce-overhead` had only been tried on the smaller Q/K/V wrapper, not the GEMM-heavy FFN graph.
+  Expected mechanism: Reduce runtime wrapper or launch overhead around the repeated FFN compiled region.
+  Supporting evidence: run450 still shows large compiled graph wrapper time and command-buffer pressure.
+  Planned source/config changes: Temporarily pass `mode="reduce-overhead"` only to `feed_forward.compile(...)`.
+  Planned command or config overrides: Active compiled-Q/K/V command.
+  Success criteria and expected risk: Success is step-10 tps above 12,387. Risk is CUDA graph capture overhead and higher memory.
+  Result: stopped early at source state `575b5cc9` plus dirty source after step 4 because tps remained only 651, 1,160, 679, and 1,263 while memory rose to 165.05 GiB. Restore default FFN compile mode.
