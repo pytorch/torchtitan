@@ -370,21 +370,25 @@ class ParallelDims:
     def resolve_mesh(self, axes: Iterable[MeshAxisName | str]) -> DeviceMesh | None:
         """Resolve the device mesh for a set of mesh axis names.
 
+        Given the axes, query ``parallel_dims`` for the corresponding SPMD
+        mesh (dense or sparse).
+
         Returns ``None`` when none of the requested axes are enabled.
         """
-        if not self._global_meshes:
-            self.build_mesh()
-        axis_names = {
+        axes_list = [
             axis.value if hasattr(axis, "value") else str(axis) for axis in axes
-        }
-        for global_mesh in self._global_meshes.values():
-            mesh_dim_names = global_mesh.mesh_dim_names
-            if mesh_dim_names is None or not axis_names.issubset(mesh_dim_names):
-                continue
-            return self.get_activated_mesh(
-                [axis for axis in mesh_dim_names if axis in axis_names]
+        ]
+        mesh = self.get_activated_mesh(axes_list)
+        if mesh is None:
+            return None
+        assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
+        if mesh not in self.spmd_meshes():
+            raise ValueError(
+                f"Resolved mesh {list(mesh.mesh_dim_names)} does not match any "
+                f"SPMD mesh. Valid meshes: "
+                f"{[list(m.mesh_dim_names or ()) for m in self.spmd_meshes()]}."
             )
-        return self.get_activated_mesh(list(axis_names))
+        return mesh
 
     def resolve_shared_mesh(
         self, placements: Iterable["PlacementLike | None"]
@@ -401,27 +405,20 @@ class ParallelDims:
         filters every axis out; callers should treat this as a no-op for the
         corresponding boundary.
         """
-        def placement_axes(placement: "PlacementLike") -> set:
-            if hasattr(placement, "placement"):
-                axes = set(placement.placement.keys())
-                for entry in placement.partition_spec:
-                    if entry is None:
-                        continue
-                    axes.update(entry if isinstance(entry, tuple) else (entry,))
-                return axes
-            return set(placement.keys())
+
+        def placement_dict(placement: "PlacementLike") -> "NamedPlacement":
+            return placement.placement if hasattr(placement, "placement") else placement
 
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None
-        axes = placement_axes(non_none[0])
-        axis_name = lambda axis: axis.value if hasattr(axis, "value") else str(axis)
+        axes = placement_dict(non_none[0]).keys()
         for p in non_none[1:]:
-            other_axes = placement_axes(p)
+            other_axes = placement_dict(p).keys()
             assert other_axes == axes, (
                 f"Inconsistent mesh axes within a boundary: "
-                f"{sorted(axis_name(k) for k in axes)} vs "
-                f"{sorted(axis_name(k) for k in other_axes)}"
+                f"{sorted(k.value for k in axes)} vs "
+                f"{sorted(k.value for k in other_axes)}"
             )
         return self.resolve_mesh(axes)
 

@@ -108,9 +108,9 @@ class VarlenAttention(Module):
         scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(attention_masks, VarlenMetadata), (
-            f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
-        )
+        assert isinstance(
+            attention_masks, VarlenMetadata
+        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
 
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -209,31 +209,17 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
-    def forward(
+    def compiled_flex_attn(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        attention_masks: BlockMask | None = None,
-        score_mod: _score_mod_signature | None = None,
-        scale: float | None = None,
-        return_lse: bool = False,
-        enable_gqa: bool = False,
-        **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(attention_masks, (BlockMask, type(None))), (
-            f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
-        )
-
-        # Transpose to (bs, heads, seq, dim) for flex_attention
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-
-        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
-        #    be multiple compiled flex_attention instances, which can be slow.
-        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
-        #    as the first argument, which will cause an error.
-        #    `FlexAttention._compiled_flex_attn` is correct.
+        attention_masks: BlockMask | None,
+        scale: float | None,
+        return_lse: bool,
+        enable_gqa: bool,
+    ):
         with spmd.no_typecheck():
             out, aux = FlexAttention._compiled_flex_attn(
                 q,
@@ -250,6 +236,42 @@ class FlexAttention(Module):
             spmd.assert_type(out, out_type)
             if return_lse:
                 spmd.assert_type(aux.lse, out_type)
+        return out, aux
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        attention_masks: BlockMask | None = None,
+        score_mod: _score_mod_signature | None = None,
+        scale: float | None = None,
+        return_lse: bool = False,
+        enable_gqa: bool = False,
+        **kwargs,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(
+            attention_masks, (BlockMask, type(None))
+        ), f"attention_masks must be instance of BlockMask or None, got {type(attention_masks)}"
+
+        # Transpose to (bs, heads, seq, dim) for flex_attention
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
+        #    be multiple compiled flex_attention instances, which can be slow.
+        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
+        #    as the first argument, which will cause an error.
+        #    `FlexAttention._compiled_flex_attn` is correct.
+        out, aux = self.compiled_flex_attn(
+            q,
+            k,
+            v,
+            attention_masks=attention_masks,
+            scale=scale,
+            return_lse=return_lse,
+            enable_gqa=enable_gqa,
+        )
         # Transpose back to (bs, seq, heads, dim)
         if return_lse:
             return out.transpose(1, 2), aux.lse.transpose(1, 2)
@@ -479,9 +501,7 @@ class BaseAttention(Module):
             assert self.mask_type in [
                 "causal",
                 "block_causal",
-            ], (
-                f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
-            )
+            ], f"mask_type must be one of ['causal', 'block_causal'], got {self.mask_type}"
             if (
                 isinstance(self.inner_attention, ScaledDotProductAttention.Config)
                 and self.mask_type == "block_causal"
@@ -538,6 +558,7 @@ class QKVLinear(BaseQKVLinear):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        # TODO(pianpwk): this goes away if user can declare even sharding
         def view_projection(y: torch.Tensor) -> torch.Tensor:
             out_type = spmd.type_like(y)
             if spmd.has_local_type(y):
