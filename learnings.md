@@ -13762,3 +13762,28 @@ Interpretation:
 - The narrow SDPA module compile is valid and memory-neutral, but it is slower than the kept `norm_modules` branch.
 - The SDPA transpose/call/transpose boundary is not a useful remaining compile target on the current stack.
 - Remove the temporary hook and keep attention/backend work closed unless it also changes the MXFP8/GEMM or FSDP overlap picture.
+
+## Experiment 550: CUTE DSL GEMM Autotune On Current Norm Modules Stack
+
+Command:
+
+```bash
+CUTEDSL_ENABLE_AUTOTUNING=1 TORCHINDUCTOR_MAX_AUTOTUNE=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1 TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=CUTEDSL,TRITON,ATEN TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,norm_modules --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run550-cutedsl-gemm-autotune-norm-modules-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run550-cutedsl-gemm-autotune-norm-modules-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 14,088.
+- Peak memory: 173.27 GiB, 97.15%.
+- Loss was noisy but moved from 12.29753 at step 1 to 6.64286 at step 10.
+
+Interpretation:
+
+- CUTE DSL GEMM autotune is runnable with the current `qkv_linear` + `qk_norm_rope` + `norm_modules` stack.
+- It still does not improve throughput and it raises memory above both kept batch176 branches.
+- Close the CUTE DSL/autotune combination for this stack; default Inductor GEMM selection remains better.

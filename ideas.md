@@ -4801,3 +4801,13 @@
   Planned command or config overrides: Active batch176 `norm_modules` command with `inner_attention` added to `--compile.components`.
   Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample without memory growth. Risk is compile overhead around an already efficient SDPA kernel.
   Result: discarded at source state `4e6834c6+dirty`; run549 executed the hook for 40 inner-attention modules and completed with falling loss, but reached only 13,942 tps at 168.91 GiB. Restore the source and keep inner-attention compile closed.
+
+- Idea: CUTE DSL GEMM autotune on the current norm_modules stack
+  Current best source commit: 3bcc3fd0
+  Source: previous CUTE DSL GEMM autotune tests were before the current `qkv_linear`, `qk_norm_rope`, and `norm_modules` compile stack.
+  Expected mechanism: Let Inductor select CUTE DSL, Triton, or ATen GEMM implementations for the compiled QKV/FFN regions, directly targeting the remaining GEMM bucket.
+  Supporting evidence: CUTE DSL is installed and runnable, and the current profile still has MXFP8/GEMM as the largest compute bucket.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active batch176 `norm_modules` command with `CUTEDSL_ENABLE_AUTOTUNING=1`, `TORCHINDUCTOR_MAX_AUTOTUNE=1`, `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=1`, and `TORCHINDUCTOR_MAX_AUTOTUNE_GEMM_BACKENDS=CUTEDSL,TRITON,ATEN`.
+  Success criteria and expected risk: Success is step-10 throughput above the kept norm_modules short sample without memory growth. Risk is compile/autotune overhead, less favorable selected kernels, or extra memory.
+  Result: discarded at source state `3bcc3fd0`; run550 completed but reached only 14,088 tps at 173.27 GiB. CUTE DSL is valid on the current stack but remains slower and memory-riskier than default Inductor GEMM selection.
