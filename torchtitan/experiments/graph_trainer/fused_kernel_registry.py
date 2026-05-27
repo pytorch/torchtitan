@@ -864,6 +864,12 @@ class InductorRegionExtractor(RegionExtractor):
             list(p.nodes.keys()) for p in partitions
         ]
 
+        # Tag every node with its partition ID so downstream code
+        # (region extraction, problem.py, tlparse) can trace provenance.
+        for pid, p in enumerate(partitions):
+            for node in p.nodes:
+                node.meta.setdefault("custom", {})["partition_id"] = pid
+
         n_before = len(components)
         components = _merge_shared_input_reductions(components)
         merged_msg = (
