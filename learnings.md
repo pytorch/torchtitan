@@ -13462,3 +13462,59 @@ Interpretation:
 
 - This is the new highest sustained non-profile throughput point, but it is not a safe-memory point.
 - The previous batch176 fullgraph Q/K norm plus RoPE source remains the safer 168.91 GiB point; this source is the throughput-focused branch.
+
+## Experiment 535: Profile Compiled Outer Block RMSNorm Helpers
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --profiler.enable_profiling --profiler.profile_freq=10 --profiler.profiler_warmup=2 --profiler.profiler_active=1 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run535-profile-outer-rmsnorms-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run535-profile-outer-rmsnorms-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None beyond the kept compiled outer `block_norms` source.
+
+Result:
+
+- Status: keep as diagnostic.
+- Profiled step 10 `tps`: 13,999.
+- Step 10 peak memory: 172.88 GiB, 96.93%.
+- Loss moved from 12.45110 at step 1 to 6.19079 at step 10.
+
+Profiler comparison versus run527:
+
+- RMSNorm kernel time did not materially improve: about 43.0 -> 45.7 ms/rank.
+- NCCL kernel time increased in this profile: about 768 -> 873 ms/rank, mostly all-gather.
+- MXFP8 cast/copy/quant is flat: about 339 -> 341 ms/rank.
+- Large MXFP8/GEMM-like `nvjet` kernels remain about 831 -> 842 ms/rank in the top kernel bucket.
+- RoPE remains about 30 ms/rank.
+
+Interpretation:
+
+- The `block_norms` win is not a clear GPU RMSNorm reduction; it is more likely launch/CPU graph overhead or scheduling variance.
+- The memory increase is real, and the remaining profile target is still NCCL plus MXFP8/cast/GEMM, not more attention backend work.
+
+## Experiment 536: Direct `aten._fused_rms_norm` For Outer Block Norms
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=10 --compile.enable --compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=176 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run536-fused-aten-outer-rmsnorms-batch176-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run536-fused-aten-outer-rmsnorms-batch176-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- Temporarily changed `block_norms` from a compiled `F.rms_norm` helper to direct calls to `torch.ops.aten._fused_rms_norm.default`.
+
+Result:
+
+- Status: discard.
+- Step 10 `tps`: 13,955.
+- Step 10 peak memory: 172.88 GiB, 96.93%.
+- Loss moved from 12.20432 at step 1 to 5.98176 at step 10.
+
+Interpretation:
+
+- Direct `aten._fused_rms_norm` does not remove the memory increase and is slower than the compiled outer RMSNorm helper.
+- Restore the committed compiled outer RMSNorm source.

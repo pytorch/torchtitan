@@ -4711,3 +4711,13 @@
   Planned command or config overrides: Active qk_norm_rope command with `--compile.components=loss,feed_forward,qkv_linear,qk_norm_rope,block_norms`.
   Success criteria and expected risk: Success is sustained throughput above 14,003. Risk is extra activation lifetime from compiled region outputs and higher HBM.
   Result: kept as memory-risky at source state `116d305d+dirty`; compiling residual+RMSNorm sustained 14,059 tps at 172.88 GiB, while compiling only the outer RMSNorm calls sustained 14,070 tps at the same 172.88 GiB. Keep the outer-RMSNorm-only source as the throughput branch, but the safer point remains the previous 168.91 GiB source.
+
+- Idea: direct `aten._fused_rms_norm` for outer block norms
+  Current best source commit: bf4f67bc
+  Source: the compiled outer RMSNorm helper improves scalar throughput but raises peak memory and the profile does not show lower RMSNorm GPU time.
+  Expected mechanism: Calling the native fused RMSNorm op directly may bypass `nn.RMSNorm`/Dynamo overhead without Inductor's compiled-region activation lifetime.
+  Supporting evidence: A small CUDA check showed `aten._fused_rms_norm` matches `F.rms_norm` and has working backward.
+  Planned source/config changes: Change the `block_norms` helper from compiled `F.rms_norm` to direct `torch.ops.aten._fused_rms_norm.default`.
+  Planned command or config overrides: Active block_norms command.
+  Success criteria and expected risk: Success is memory back near 168.91 GiB with tps near or above 14,070. Risk is no benefit because the native RMSNorm path is already used under autograd.
+  Result: discarded at source state `bf4f67bc+dirty`; 13,955 tps at the same 172.88 GiB peak. Restore compiled outer RMSNorm helpers.
