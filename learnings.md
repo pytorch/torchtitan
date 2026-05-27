@@ -13062,3 +13062,30 @@ Interpretation:
 
 - Batch180 can sample above the batch176 peak, but it is above the preferred memory ceiling and not clearly stable over 10 steps.
 - Keep batch176 as the active command unless a source change saves memory or a longer stability run is explicitly needed for this risky point.
+
+## Experiment 519: Batch180 20-Step Stability Run
+
+Command:
+
+```bash
+TORCH_NCCL_CUDA_EVENT_CACHE=0 NCCL_NVLS_ENABLE=1 NCCL_CTA_POLICY=2 NGPU=8 LOG_RANK=0 MODULE=qwen3 CONFIG=qwen3_14b ./run_train.sh --training.steps=20 --compile.enable --compile.components=loss,feed_forward,qkv_linear --training.dtype=bfloat16 --training.seq_len=128 --training.local_batch_size=180 --loss.num_chunks=4 --optimizer.weight_decay=0.0 --dataloader.num_workers=2 --dataloader.persistent_workers --dataloader.prefetch_factor=2 --metrics.log_freq=1 --comm.trace_buf_size=0 --dump_folder=outputs/autoresearch/may19-qwen3-14b/run519-batch180-20step-stability-reshape-event-cache0 > outputs/autoresearch/may19-qwen3-14b/run519-batch180-20step-stability-reshape-event-cache0.run.log 2>&1
+```
+
+Source changes:
+
+- None.
+
+Result:
+
+- Status: discard.
+- Step 20 `tps`: 13,711.
+- Average `tps` over steps 11-20: 13,586.
+- Step 20 peak memory: 172.47 GiB, 96.70%.
+- No allocator retries were logged.
+- Loss moved from 12.42204 at step 1 to 3.52361 at step 20, finite and overall decreasing.
+- Unlike run518, there were no severe mid-run throughput collapses after step 1 compile/warmup.
+
+Interpretation:
+
+- Batch180 is viable for short stability, but its sustained average is below the accepted batch176 run514 peak while using materially more memory.
+- Close the pure batch180 branch. Re-open only if a future source change saves enough memory or improves per-step compute enough to make the larger batch throughput-dominant.

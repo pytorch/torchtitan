@@ -4591,3 +4591,13 @@
   Planned command or config overrides: Active reshape command with `--training.local_batch_size=180`.
   Success criteria and expected risk: Success is a material step-10 tps win with stable steps and acceptable memory. Risk is crossing the memory-risk line or hitting allocator/step-time instability.
   Result: discarded at source state `fb18bcd3`; step-10 tps sampled 13,767, but peak memory was 172.47 GiB (96.70%) and steps 5-7 collapsed to 6,385 / 3,497 / 4,087 tps. Keep batch176 active.
+
+- Idea: batch180 20-step stability run
+  Current best source commit: dc3d482e
+  Source: run518 sampled above the active batch176 peak at step 10, but the run was above the memory-risk line and had severe mid-run throughput collapses.
+  Expected mechanism: A longer run distinguishes a real high-batch throughput point from compile/warmup noise or allocator instability.
+  Supporting evidence: The active source has enough memory to execute batch180, but not enough headroom to treat it as automatically acceptable.
+  Planned source/config changes: None.
+  Planned command or config overrides: Active reshape command with `--training.local_batch_size=180` and `--training.steps=20`.
+  Success criteria and expected risk: Success is sustained throughput above 13,734 with stable loss and no collapses. Risk is spending another run on a memory-risky point; this is a branch-closing run, not a new tuning loop.
+  Result: discarded at source state `dc3d482e`; step 20 was 13,711 tps, but steps 11-20 averaged 13,586 tps at 172.47 GiB (96.70%). Loss was finite and overall decreasing, so the point is runnable, but not better than batch176 on sustained throughput or memory.
