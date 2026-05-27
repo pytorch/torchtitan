@@ -529,6 +529,7 @@ class QKVLinear(BaseQKVLinear):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        # TODO(pianpwk): this goes away if user can declare even sharding
         def view_projection(y: torch.Tensor) -> torch.Tensor:
             out_type = spmd.type_like(y)
             if spmd.has_local_type(y):

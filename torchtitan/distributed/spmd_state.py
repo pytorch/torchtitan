@@ -17,7 +17,7 @@ from torch.distributed.device_mesh import DeviceMesh
 _TLS = local()
 
 
-def _mesh_stack() -> list[DeviceMesh]:
+def _mesh_stack() -> list[DeviceMesh | None]:
     stack = getattr(_TLS, "mesh_stack", None)
     if stack is None:
         stack = []
@@ -41,12 +41,16 @@ def current_mesh() -> DeviceMesh | None:
 @contextmanager
 def set_current_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set Torchtitan and spmd_types current mesh state for one runtime region."""
-    if mesh is None or current_mesh() is mesh:
-        yield
-        return
-
     stack = _mesh_stack()
     stack.append(mesh)
+    if mesh is None:
+        try:
+            yield
+        finally:
+            popped = stack.pop()
+            assert popped is mesh
+        return
+
     with spmd.set_current_mesh(mesh):
         try:
             yield

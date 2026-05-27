@@ -19,29 +19,31 @@ from torch.utils._pytree import tree_map_only
 from torchtitan.protocols.types import MeshAxisName
 
 
+__all__ = [
+    "NamedPartitionSpec",
+    "NamedPartitionSpecEntry",
+    "NamedPlacement",
+    "PlacementLike",
+    "PlacementSpec",
+    "ShardingConfig",
+    "SpmdInputConfig",
+    "is_placement_like",
+]
+
 # Per-axis SPMD type, keyed by mesh axis name. ``MeshAxisName`` is a StrEnum,
 # so these keys can be passed directly to spmd_types APIs that accept strings.
 NamedPlacement = dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
 NamedPartitionSpecEntry = MeshAxisName | tuple[MeshAxisName, ...] | None
 NamedPartitionSpec = tuple[NamedPartitionSpecEntry, ...]
-_MESH_AXIS_NAMES = {axis.value for axis in MeshAxisName}
-
-
-def _mesh_axis_name(axis_name: object) -> str:
-    return axis_name.value if hasattr(axis_name, "value") else str(axis_name)
-
-
-def _is_mesh_axis_key(key: object) -> bool:
-    return _mesh_axis_name(key) in _MESH_AXIS_NAMES
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class PlacementSpec:
     """Placement with explicit global partition spec ordering.
 
-    Use this only when multiple mesh axes shard the same tensor dimension. The
-    ``placement`` field must use local SPMD types (``R``, ``I``, ``V``, ``P``)
-    and put ``V`` on every axis named by ``partition_spec``.
+    Use this only when multiple mesh axes shard the same tensor dimension.
+    ``placement`` is the per-axis runtime placement; ``partition_spec`` only
+    disambiguates ordering for type assertions.
     """
 
     placement: NamedPlacement
@@ -49,6 +51,12 @@ class PlacementSpec:
 
 
 PlacementLike = NamedPlacement | PlacementSpec
+
+
+def is_placement_like(value: object) -> bool:
+    return isinstance(value, PlacementSpec) or (
+        isinstance(value, dict) and all(MeshAxisName.has_axis(key) for key in value)
+    )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -97,36 +105,20 @@ class ShardingConfig:
         """Return mesh axes referenced by this sharding config."""
         axes: set[str] = set()
 
-        def is_placement(value: object) -> bool:
-            return (
-                isinstance(value, PlacementSpec)
-                or (
-                    isinstance(value, dict)
-                    and len(value) > 0
-                    and all(_is_mesh_axis_key(key) for key in value)
-                )
-            )
-
         def collect_axes(placement: PlacementLike) -> PlacementLike:
             named = (
                 placement.placement
                 if isinstance(placement, PlacementSpec)
                 else placement
             )
-            axes.update(_mesh_axis_name(axis_name) for axis_name in named)
-            if isinstance(placement, PlacementSpec):
-                for entry in placement.partition_spec:
-                    if entry is None:
-                        continue
-                    entry_axes = entry if isinstance(entry, tuple) else (entry,)
-                    axes.update(_mesh_axis_name(axis_name) for axis_name in entry_axes)
+            axes.update(MeshAxisName.normalize(axis_name) for axis_name in named)
             return placement
 
         tree_map_only(
-            is_placement,
+            is_placement_like,
             collect_axes,
             tuple(getattr(self, field.name) for field in fields(self)),
-            is_leaf=is_placement,
+            is_leaf=is_placement_like,
         )
         return axes
 
